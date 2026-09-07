@@ -41,6 +41,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public sealed class AgentRunReattachFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
+    private readonly Dictionary<Guid, AgentRunReattachReservation> _reservations = new();
     private readonly List<int> _pidsToKill = new();
     private readonly List<string> _spoolDirs = new();
 
@@ -103,7 +104,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         var capture = new RecordingLogCaptureBridge();
@@ -186,7 +188,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ScriptedHarness());
@@ -259,7 +262,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ScriptedHarness());
@@ -304,7 +308,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ScriptedHarness());
@@ -357,7 +362,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ScriptedHarness());
@@ -402,7 +408,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY"));
@@ -455,7 +462,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         {
             // The original observer has stopped; advance the persisted lease into the expired state.
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            _reservations[runId].ShouldNotBeNull();
         }
 
         await ReattachAsync(runId, new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY"));
@@ -584,6 +592,120 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     /// <summary>Marks a deliberately-injected observer crash in a flush/checkpoint callback — distinct from any real failure so the test's Should.ThrowAsync can't be fooled.</summary>
     private sealed class CrashSimulation : Exception { }
 
+    [Fact]
+    public async Task Legacy_job_is_no_adopt_and_normal_reconciler_dispatches_a_serializable_one_time_job_for_the_historical_process()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var gateDirectory = NewSpoolDir();
+        var gate = Path.Combine(gateDirectory, "release");
+        SandboxHandle handle;
+        using (var setup = _fixture.BeginScope())
+        {
+            var runs = setup.Resolve<IAgentRunService>();
+            await runs.MarkRunningAsync(runId, CancellationToken.None);
+            var runner = (ISandboxDurableRunner)setup.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+            handle = await runner.LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = ["-c", "echo started; while [ ! -f \"$1\" ]; do sleep 0.1; done; echo recovered", "ownership", gate], TimeoutSeconds = 30 }, runId.ToString("N"), CancellationToken.None);
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+            await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+            await BuildExecutor(setup, new ScriptedHarness()).ReattachAsync(runId, CancellationToken.None);
+            (await runs.GetAsync(runId, CancellationToken.None)).OwnerId.ShouldBeNull();
+        }
+        await LapseLeaseAsync(runId);
+        using var dispatcher = _fixture.BeginScope();
+        var jobs = dispatcher.Resolve<InMemoryBackgroundJobClient>();
+        var autoExecute = jobs.AutoExecute;
+        try
+        {
+            jobs.AutoExecute = false;
+            await dispatcher.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+            var call = jobs.Calls.Last(c => c.MethodName == nameof(IAgentRunExecutor.ReattachAsync) && c.RunId == runId);
+            var reserved = call.FirstArgument.ShouldBeOfType<AgentRunReattachReservation>();
+            var serialized = global::Hangfire.Storage.InvocationData.SerializeJob(global::Hangfire.Common.Job.FromExpression<IAgentRunExecutor>(e => e.ReattachAsync(reserved, CancellationToken.None)));
+            var payload = serialized.DeserializeJob().Args[0].ShouldBeOfType<AgentRunReattachReservation>();
+            payload.ShouldBe(reserved);
+            _reservations[runId] = payload;
+            var before = await dispatcher.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            await BuildExecutor(dispatcher, new ScriptedHarness()).ReattachAsync(runId, CancellationToken.None);
+            var afterLegacy = await dispatcher.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            afterLegacy.OwnerId.ShouldBeNull();
+            afterLegacy.ReattachReservationId.ShouldBe(before.ReattachReservationId);
+            afterLegacy.LeaseExpiresAt.ShouldBe(before.LeaseExpiresAt);
+            await File.WriteAllTextAsync(gate, "release the existing physical process");
+            var captures = new RecordingLogCaptureBridge();
+            await Task.WhenAll(ReattachAsync(runId, new ScriptedHarness(), captures), ReattachAsync(runId, new ScriptedHarness(), captures));
+            captures.OpenRequests.Count.ShouldBe(1, "only the activated reservation may open the physical process for observation");
+            var finished = await dispatcher.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            finished.Status.ShouldBe(AgentRunStatus.Succeeded);
+            finished.FenceEpoch.ShouldBe(payload.Epoch);
+            JsonSerializer.Deserialize<SandboxHandle>(finished.RunnerHandleJson!, AgentJson.Options)!.ProcessId.ShouldBe(handle.ProcessId);
+            var rows = await dispatcher.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId).ToListAsync();
+            rows.Count(e => e.WriterKind == "worker" && e.Text == "recovered").ShouldBe(1);
+            rows.Where(e => e.WriterKind == "worker").All(e => e.WriterOwnerId == finished.OwnerId && e.WriterEpoch == payload.Epoch).ShouldBeTrue();
+            rows.ShouldContain(e => e.WriterKind == "system");
+        }
+        finally { jobs.AutoExecute = autoExecute; }
+    }
+
+    [Fact]
+    public async Task Revived_original_observer_cannot_append_or_kill_successors_process_or_delete_its_workspace()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var gate = Path.Combine(NewSpoolDir(), "release");
+        var harness = new ScriptedHarness($"echo started; while [ ! -f '{gate}' ]; do sleep 0.1; done; echo recovered");
+        using var originalScope = _fixture.BeginScope();
+        var reached = new TaskCompletionSource<AgentRunOwnerToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var instrumented = new InstrumentedAgentRunService(originalScope.Resolve<IAgentRunService>()) { BeforeOwnedAppendAsync = async owner => { reached.TrySetResult(owner); await resume.Task; } };
+        using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var original = BuildExecutor(originalScope, harness, runs: instrumented).ExecuteAsync(runId, bounded.Token);
+        Task? successor = null;
+        try
+        {
+            var stale = await reached.Task.WaitAsync(bounded.Token);
+            using var reclaim = _fixture.BeginScope();
+            var runs = reclaim.Resolve<IAgentRunService>();
+            var launched = await runs.GetAsync(runId, bounded.Token);
+            var handle = JsonSerializer.Deserialize<SandboxHandle>(launched.RunnerHandleJson!, AgentJson.Options)!;
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+            await LapseLeaseAsync(runId);
+            _reservations[runId] = (await runs.ReserveReattachAsync(runId, bounded.Token))!;
+            successor = ReattachAsync(runId, new ScriptedHarness());
+            AgentRun current;
+            do
+            {
+                current = await runs.GetAsync(runId, bounded.Token);
+                if (current.OwnerId is null) await Task.Delay(20, bounded.Token);
+            } while (current.OwnerId is null);
+            current.OwnerId.ShouldNotBe(stale.OwnerId);
+            resume.SetResult();
+            await Should.ThrowAsync<CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException>(() => original);
+            Directory.Exists(harness.ObservedWorkspace).ShouldBeTrue("the losing observer cannot delete the shared workspace");
+            var durable = (ISandboxDurableRunner)reclaim.Resolve<ISandboxRunnerRegistry>().Resolve(handle.Kind);
+            (await durable.ProbeAsync(handle, bounded.Token)).State.ShouldBe(SandboxRunState.Running, "losing observation must not terminate the shared process");
+            await File.WriteAllTextAsync(gate, "release", bounded.Token);
+            await successor.WaitAsync(bounded.Token);
+            var completed = await runs.GetAsync(runId, bounded.Token);
+            completed.Status.ShouldBe(AgentRunStatus.Succeeded);
+            completed.OwnerId.ShouldBe(current.OwnerId);
+            var events = await reclaim.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId).ToListAsync();
+            events.ShouldNotContain(e => e.WriterOwnerId == stale.OwnerId);
+            events.Count(e => e.Text == "recovered").ShouldBe(1);
+        }
+        finally
+        {
+            resume.TrySetResult();
+            await File.WriteAllTextAsync(gate, "release");
+            bounded.Cancel();
+            try { await original; } catch { }
+            if (successor != null) try { await successor.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+            if (harness.ObservedWorkspace is { } workspace && Directory.Exists(workspace)) Directory.Delete(workspace, true);
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────
 
     private async Task LaunchAliveSupervisorAsync(Guid runId)
@@ -610,8 +732,13 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null)
     {
         using var scope = _fixture.BeginScope();
-        var executor = new AgentRunExecutor(
-            scope.Resolve<IAgentRunService>(),
+        await BuildExecutor(scope, harness, logCapture).ReattachAsync(_reservations[runId], CancellationToken.None);
+    }
+
+    private static AgentRunExecutor BuildExecutor(ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunService? runs = null)
+    {
+        return new AgentRunExecutor(
+            runs ?? scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
             scope.Resolve<ISandboxRunnerRegistry>(),
@@ -628,8 +755,6 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance,
             logCapture);
-
-        await executor.ReattachAsync(runId, CancellationToken.None);
     }
 
     private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge
@@ -729,13 +854,18 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     }
 
     /// <summary>CLI-less harness whose ParseEvent wraps each stdout line as an assistant message — for re-attach, only ParseEvent + BuildResult are exercised (no launch).</summary>
-    private sealed class ScriptedHarness : IAgentHarness
+    private sealed class ScriptedHarness(string script = "true") : IAgentHarness
     {
         public string Kind => "scripted";
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
-        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", "true" }, TimeoutSeconds = task.TimeoutSeconds };
+        public string? ObservedWorkspace { get; private set; }
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            ObservedWorkspace = task.WorkspaceDirectory;
+            return new() { Command = "/bin/sh", Args = ["-c", script], WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+        }
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };

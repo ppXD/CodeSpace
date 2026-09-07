@@ -181,7 +181,7 @@ public sealed class HarnessExecutionCompletenessFlowTests
         using (var reclaimer = _fixture.BeginScope())
         {
             await reclaimer.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {run.AgentRunId}");
-            (await reclaimer.Resolve<IAgentRunService>().ReclaimForReattachAsync(run.AgentRunId, CancellationToken.None)).ShouldBeTrue();
+            (await reclaimer.Resolve<IAgentRunService>().ReserveReattachAsync(run.AgentRunId, CancellationToken.None)).ShouldNotBeNull();
         }
 
         await Should.ThrowAsync<DbUpdateException>(() => OpenRawAsync(plane, run, run.FenceEpoch, Locator));

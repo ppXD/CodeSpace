@@ -35,6 +35,7 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
 
     /// <summary>When &gt; 0, the Nth (1-based) AppendEventsAsync call throws <see cref="AppendEventsFaultMessage"/>. 0 = never throw.</summary>
     public int ThrowOnAppendEventsCall { get; set; }
+    public Func<AgentRunOwnerToken, Task>? BeforeOwnedAppendAsync { get; set; }
 
     /// <summary>How many times the BATCHED append path was invoked (one per flush — checkpoint, cap, or final).</summary>
     public int BatchedCalls => Volatile.Read(ref _batchedCalls);
@@ -66,6 +67,31 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
 
     // ── pure delegation ───────────────────────────────────────────────────────
     public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => _inner.CreateAsync(task, teamId, workflowRunId, nodeId, iterationKey, cancellationToken);
+
+    public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => _inner.RejectQueuedAsync(runId, result, cancellationToken);
+    public Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken) => _inner.ReserveReattachAsync(candidate, cancellationToken);
+    public Task<AgentRunOwnerToken?> ClaimOwnershipAsync(Guid runId, CancellationToken cancellationToken) => _inner.ClaimOwnershipAsync(runId, cancellationToken);
+    public Task<AgentRunReattachReservation?> ReserveReattachAsync(Guid runId, CancellationToken cancellationToken) => _inner.ReserveReattachAsync(runId, cancellationToken);
+    public Task<AgentRunOwnerToken?> ActivateReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken) => _inner.ActivateReattachAsync(reservation, cancellationToken);
+    public Task AssertOwnershipAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken) => _inner.AssertOwnershipAsync(owner, cancellationToken);
+    public Task HeartbeatAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken) => _inner.HeartbeatAsync(owner, cancellationToken);
+    public Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken) => _inner.SetRunnerHandleAsync(owner, handleJson, cancellationToken);
+    public Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken) => _inner.SetSandboxConfinementAsync(owner, confinementJson, cancellationToken);
+    public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _perEventCalls);
+        return _inner.AppendEventAsync(owner, @event, cancellationToken);
+    }
+    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
+    {
+        if (BeforeOwnedAppendAsync is not null) await BeforeOwnedAppendAsync(owner);
+        var call = Interlocked.Increment(ref _batchedCalls);
+        if (ThrowOnAppendEventsCall > 0 && call == ThrowOnAppendEventsCall) throw new InvalidOperationException(AppendEventsFaultMessage);
+        Interlocked.Add(ref _totalEvents, events.Count);
+        await _inner.AppendEventsAsync(owner, events, cancellationToken);
+    }
+    public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => _inner.AppendSystemEventAsync(runId, @event, cancellationToken);
+    public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => _inner.CompleteAsync(owner, result, cancellationToken);
 
     public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => _inner.MarkRunningAsync(runId, cancellationToken);
 

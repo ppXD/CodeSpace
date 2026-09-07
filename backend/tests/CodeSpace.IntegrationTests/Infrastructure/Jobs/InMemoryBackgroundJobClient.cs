@@ -206,6 +206,7 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
                 RunId = runId,
                 EnqueuedAt = DateTimeOffset.UtcNow,
                 Queue = queue,
+                FirstArgument = body is MethodCallExpression call && call.Arguments.Count > 0 ? Expression.Lambda(call.Arguments[0]).Compile().DynamicInvoke() : null,
             });
         }
 
@@ -230,6 +231,7 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
             {
                 var firstArg = Expression.Lambda(call.Arguments[0]).Compile().DynamicInvoke();
                 if (firstArg is Guid guid) runId = guid;
+                if (firstArg is CodeSpace.Messages.Agents.AgentRunReattachReservation reservation) runId = reservation.RunId;
             }
             catch
             {
@@ -247,6 +249,7 @@ public sealed record EnqueuedCall
     public required Type ServiceType { get; init; }
     public required string MethodName { get; init; }
     public required Guid? RunId { get; init; }
+    public object? FirstArgument { get; init; }
     public required DateTimeOffset EnqueuedAt { get; init; }
     /// <summary>The Hangfire queue the job was routed to — DefaultQueue unless an overload passed one (e.g. agent.run executor jobs → AgentQueue).</summary>
     public required string Queue { get; init; }

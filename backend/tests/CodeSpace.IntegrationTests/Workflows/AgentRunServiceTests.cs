@@ -283,8 +283,10 @@ public class AgentRunServiceTests
         {
             var db = failed.Resolve<CodeSpaceDbContext>();
             await using var transaction = await db.Database.BeginTransactionAsync();
-            await Should.ThrowAsync<DbUpdateException>(() => failed.Resolve<IAgentRunService>().AppendEventAsync(runId,
+            var failure = await Should.ThrowAsync<Npgsql.PostgresException>(() => failed.Resolve<IAgentRunService>().AppendEventAsync(runId,
                 new AgentEvent { Kind = AgentEventKind.ToolCall, Text = null!, Data = payload }, CancellationToken.None));
+            failure.SqlState.ShouldBe(Npgsql.PostgresErrorCodes.NotNullViolation);
+            failure.ColumnName.ShouldBe("text");
             await transaction.RollbackAsync();
         }
 
@@ -1572,7 +1574,7 @@ public class AgentRunServiceTests
         {
             var svc = scope.Resolve<IAgentRunService>();
 
-            await Should.ThrowAsync<AgentRunTransitionException>(() =>
+            await Should.ThrowAsync<CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException>(() =>
                 svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, originalEpoch, CancellationToken.None));
 
             (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running, "the original worker lost the epoch-fenced CAS; the run stays Running for the re-attacher");

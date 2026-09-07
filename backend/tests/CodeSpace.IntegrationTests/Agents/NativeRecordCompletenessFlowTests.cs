@@ -251,7 +251,8 @@ public sealed class NativeRecordCompletenessFlowTests
         using (var scope = _fixture.BeginScope())
         {
             var runs = scope.Resolve<IAgentRunService>();
-            (await runs.ReclaimForReattachAsync(run.AgentRunId, CancellationToken.None)).ShouldBeTrue();
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {run.AgentRunId}");
+            (await runs.ReserveReattachAsync(run.AgentRunId, CancellationToken.None)).ShouldNotBeNull();
             reattachFence = (await runs.GetAsync(run.AgentRunId, CancellationToken.None)).FenceEpoch;
         }
         reattachFence.ShouldBeGreaterThan(launched.WorkerFenceEpoch);

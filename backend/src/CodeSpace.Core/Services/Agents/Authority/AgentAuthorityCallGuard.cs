@@ -46,7 +46,7 @@ public sealed class AgentAuthorityCallGuard : IAgentAuthorityCallGuard, IScopedD
         _logger.LogWarning("Agent tool authority refused. AgentRunId={AgentRunId} TeamId={TeamId} Tool={Tool} Code={Code} Reason={Reason}", runId, teamId, toolKind, failure.Code, failure.Reason);
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = failure.Message, Data = JsonSerializer.SerializeToElement(new { kind = "authority.denied", toolKind, failure.Code, failure.Reason, failure.Retryable }, AgentJson.Options) }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendSystemEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = failure.Message, Data = JsonSerializer.SerializeToElement(new { kind = "authority.denied", toolKind, failure.Code, failure.Reason, failure.Retryable }, AgentJson.Options) }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

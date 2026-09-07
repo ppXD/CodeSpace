@@ -55,6 +55,7 @@ public sealed class HarnessReductionReattachFlowTests
     private const string StepThenDiagnosticsThenFail = "printf 'step1\\n'; printf 'boom one\\nboom two\\n' >&2; exit 3";
 
     private readonly PostgresFixture _fixture;
+    private readonly Dictionary<Guid, AgentRunReattachReservation> _reservations = new();
 
     public HarnessReductionReattachFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
@@ -496,7 +497,8 @@ public sealed class HarnessReductionReattachFlowTests
         var runs = scope.Resolve<IAgentRunService>();
         var handle = JsonSerializer.Deserialize<SandboxHandle>((await runs.GetAsync(runId, CancellationToken.None)).RunnerHandleJson!, AgentJson.Options)!;
 
-        await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = 0 }, AgentJson.Options), CancellationToken.None);
+        // Fixture fault injection recreates a crash gap; a new observer must not borrow the dead worker's token.
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET runner_handle = CAST({JsonSerializer.Serialize(handle with { StdoutOffset = 0 }, AgentJson.Options)} AS jsonb) WHERE id = {runId}");
     }
 
     private async Task<long> ResumeOffsetAsync(Guid runId)
@@ -536,7 +538,7 @@ public sealed class HarnessReductionReattachFlowTests
 
         var sourceHead = new FileInfo(stdoutPath).Length;
         using (var scope = _fixture.BeginScope())
-            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = sourceHead }, AgentJson.Options), CancellationToken.None);
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET runner_handle = CAST({JsonSerializer.Serialize(handle with { StdoutOffset = sourceHead }, AgentJson.Options)} AS jsonb) WHERE id = {runId}");
 
         return sourceHead;
     }
@@ -580,7 +582,8 @@ public sealed class HarnessReductionReattachFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
-        (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+        _reservations[runId].ShouldNotBeNull();
     }
 
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness, CancellationToken cancellationToken = default) =>
@@ -597,7 +600,7 @@ public sealed class HarnessReductionReattachFlowTests
     {
         using var scope = _fixture.BeginScope();
 
-        await Executor(scope, new SteppingHarness(SixSteps), inner => inner).ReattachAsync(runId, CancellationToken.None);
+        await Executor(scope, new SteppingHarness(SixSteps), inner => inner).ReattachAsync(_reservations[runId], CancellationToken.None);
     }
 
     private async Task<CheckpointObservingRunner> ReattachWithRunnerAsync(Guid runId, bool cancelAfterFirstCheckpoint)
@@ -605,7 +608,7 @@ public sealed class HarnessReductionReattachFlowTests
         using var scope = _fixture.BeginScope();
         var inner = scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
         var runner = new CheckpointObservingRunner(inner, cancelAfterFirstCheckpoint);
-        var reattach = () => Executor(scope, new SteppingHarness(SixSteps), plane => plane, new SingleRunnerRegistry(runner)).ReattachAsync(runId, CancellationToken.None);
+        var reattach = () => Executor(scope, new SteppingHarness(SixSteps), plane => plane, new SingleRunnerRegistry(runner)).ReattachAsync(_reservations[runId], CancellationToken.None);
         if (cancelAfterFirstCheckpoint)
             await Should.ThrowAsync<OperationCanceledException>(reattach);
         else

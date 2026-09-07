@@ -669,11 +669,16 @@ public class AgentMcpEndpointFlowTests
         // 3. RECLAIM (the reconciler's atomic step) then a FRESH executor's ReattachAsync — it re-opens the endpoint on
         //    the SAME socket+token the handle recorded at launch, bounded to the re-tail span (the supervisor is still
         //    sleeping). Run it on a background task so we can drive JSON-RPC against the re-bound socket.
+        AgentRunReattachReservation reservation;
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        {
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+            reservation = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            reservation.ShouldNotBeNull();
+        }
 
         using var reattachCts = new CancellationTokenSource();
-        var reattach = Task.Run(() => ReattachAsync(runId, new DeclaringScriptedHarness("sleep 120"), cancellationToken: reattachCts.Token));
+        var reattach = Task.Run(() => ReattachAsync(reservation, new DeclaringScriptedHarness("sleep 120"), cancellationToken: reattachCts.Token));
 
         var reConnect = await WaitForConnectAsync(connects, runId, reattach);
         reConnect.Token.ShouldBe(persistedToken, "the re-attach re-binds the SAME token the agent's declaration already holds — survived worker death via the persisted handle");
@@ -1050,7 +1055,7 @@ public class AgentMcpEndpointFlowTests
     }
 
     /// <summary>Drive a FRESH executor's ReattachAsync with the endpoint flag (+ proxy path) ON — the cross-worker-death re-open path.</summary>
-    private async Task ReattachAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, CancellationToken cancellationToken = default)
+    private async Task ReattachAsync(AgentRunReattachReservation reservation, IAgentHarness harness, bool proxyPresent = true, CancellationToken cancellationToken = default)
     {
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
         Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? StandInProxyPath() : null);
@@ -1058,7 +1063,7 @@ public class AgentMcpEndpointFlowTests
         try
         {
             using var scope = _fixture.BeginScope();
-            await NewExecutor(scope, harness).ReattachAsync(runId, cancellationToken);
+            await NewExecutor(scope, harness).ReattachAsync(reservation, cancellationToken);
         }
         finally
         {

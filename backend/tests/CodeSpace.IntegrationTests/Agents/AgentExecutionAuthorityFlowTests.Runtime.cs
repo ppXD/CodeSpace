@@ -163,7 +163,12 @@ public sealed partial class AgentExecutionAuthorityFlowTests
         using (var execute = _fixture.BeginScope())
         {
             var executor = execute.Resolve<IAgentRunExecutor>();
-            if (reattach) await executor.ReattachAsync(agentRunId, CancellationToken.None);
+            if (reattach)
+            {
+                await execute.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {agentRunId}");
+                var reservation = (await execute.Resolve<IAgentRunService>().ReserveReattachAsync(agentRunId, CancellationToken.None))!;
+                await executor.ReattachAsync(reservation, CancellationToken.None);
+            }
             else await executor.ExecuteAsync(agentRunId, CancellationToken.None);
             // Duplicate job delivery exits normally; it neither starts a harness nor retries forever.
             await executor.ExecuteAsync(agentRunId, CancellationToken.None);
@@ -180,7 +185,7 @@ public sealed partial class AgentExecutionAuthorityFlowTests
     }
 
     [Fact]
-    public async Task A_revoked_reattach_terminates_the_actual_detached_process_before_landing_terminal()
+    public async Task A_revoked_reattach_terminates_the_actual_detached_process_after_winning_the_terminal_cas()
     {
         var seed = await SeedAsync();
         using var scope = _fixture.BeginScopeAs(seed.UserId, seed.TeamId);
@@ -196,7 +201,9 @@ public sealed partial class AgentExecutionAuthorityFlowTests
             await RevokeAsync(seed);
 
             using var worker = _fixture.BeginScope();
-            await worker.Resolve<IAgentRunExecutor>().ReattachAsync(runId, CancellationToken.None);
+            await worker.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+            var reservation = (await worker.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+            await worker.Resolve<IAgentRunExecutor>().ReattachAsync(reservation, CancellationToken.None);
 
             using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             while ((await runner.ProbeAsync(handle, bound.Token)).State == SandboxRunState.Running) await System.Threading.Tasks.Task.Delay(25, bound.Token);
