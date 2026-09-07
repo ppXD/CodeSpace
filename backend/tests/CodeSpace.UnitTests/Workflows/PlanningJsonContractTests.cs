@@ -19,7 +19,7 @@ public sealed class PlanningJsonContractTests
         var serialized = JsonSerializer.SerializeToElement(FullPlan(), AgentJson.Options);
         var schema = PlannerSchema.ResponseSchema;
 
-        AssertProperties(serialized, schema, "authoredByModel", "injectedLessonIds", "lessonArm");
+        AssertProperties(serialized, schema, "authoredByModel", "droppedAcceptances", "injectedLessonIds", "lessonArm");
         AssertRequired<PlannedWorkflow>(schema, AgentJson.Options);
 
         var serializedSubtask = serialized.GetProperty("subtasks")[0];
@@ -89,6 +89,9 @@ public sealed class PlanningJsonContractTests
         SuccessCriteria = new[] { "done" },
         Risks = new[] { "risk" },
         AuthoredByModel = "model-row",
+        // A server-stamped DEFECT report, deliberately outside the model schema: the planner records which acceptance
+        // it could not bind an oracle from, and the model must never be able to author that field itself.
+        DroppedAcceptances = new[] { new DroppedAcceptance { SubtaskId = "s1", Kind = BenchmarkGradingKind.TestsPass, Reason = "no argv" } },
         LessonArm = "injected",
         InjectedLessonIds = new[] { Guid.NewGuid() },
         RecommendedWorkflowKind = "coding",

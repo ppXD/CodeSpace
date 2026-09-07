@@ -9,6 +9,13 @@ internal static class StructuredResponseValidation
     {
         var errors = JsonSchemaValidator.Validate(response, request.JsonSchema);
         if (errors.Count > 0 || request.ResponseValidator is null) return errors;
-        return request.ResponseValidator(response).Take(12).Select(error => error.Length > 512 ? error[..512] : error).ToArray();
+        return Bound(request.ResponseValidator(response));
     }
+
+    /// <summary>The re-ask-only half of the consumer contract (<see cref="StructuredLLMCompletionRequest.ResponseAdvisor"/>). Asked only of a response that is otherwise valid, so an already-failing reply is corrected on its fatal faults alone.</summary>
+    public static IReadOnlyList<string> Advise(JsonElement response, StructuredLLMCompletionRequest request) =>
+        request.ResponseAdvisor is null ? Array.Empty<string>() : Bound(request.ResponseAdvisor(response));
+
+    private static IReadOnlyList<string> Bound(IReadOnlyList<string> reported) =>
+        reported.Take(12).Select(error => error.Length > 512 ? error[..512] : error).ToArray();
 }

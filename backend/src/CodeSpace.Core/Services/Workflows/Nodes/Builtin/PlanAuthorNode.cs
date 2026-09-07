@@ -172,6 +172,12 @@ public sealed class PlanAuthorNode : INodeRuntime
             plan = plan with { Subtasks = plan.Subtasks.Select(t => t with { DependsOn = null }).ToList() };
         }
 
+        // A model-quality miss the bounded re-ask already spent its chance on. The item keeps its work and loses only
+        // its oracle, so it must be visible to an operator as a named defect rather than as a plan that silently
+        // grades nothing.
+        foreach (var drop in plan.DroppedAcceptances ?? Array.Empty<DroppedAcceptance>())
+            context.Logger.LogWarning("plan.author dropped the acceptance authored for subtask {SubtaskId} (kind {Kind}) — it will not be graded: {Reason}", drop.SubtaskId, drop.Kind, drop.Reason);
+
         var items = plan.Subtasks.Select(WorkPlanItem.From).ToList();
 
         // Fail CLOSED on a structurally contradictory DAG (dup ids / dangling dependsOn / cycle) — the
@@ -300,6 +306,12 @@ public sealed class PlanAuthorNode : INodeRuntime
 
         // Conditional, never a null value: an unstamped plan's outputs must stay byte-identical to before.
         if (plan.AuthoredByModel is { Length: > 0 } authoredBy) outputs["authoredByModel"] = JsonSerializer.SerializeToElement(authoredBy);
+
+        // The acceptances the planner could not bind an oracle from — its own small key for the SAME reason the
+        // authoring model has one: a fact that lives only inside `json` becomes unreadable exactly when the plan is
+        // big enough to be offloaded. An operator reading "Unverified — no check ran" needs to see WHICH items lost
+        // their oracle and why, without opening an artifact.
+        if (plan.DroppedAcceptances is { Count: > 0 } dropped) outputs["droppedAcceptances"] = JsonSerializer.SerializeToElement(dropped, AgentJson.Options);
 
         // The D2 A/B arm gets the SAME treatment as the authoring model above, and for the same reason: it lives
         // inside `json` too, and `json` is offloaded to the artifact store once a plan is large — so a rollup that

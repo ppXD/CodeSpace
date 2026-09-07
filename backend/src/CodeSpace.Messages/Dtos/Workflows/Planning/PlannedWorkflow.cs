@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Plans;
 
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
@@ -81,6 +82,35 @@ public sealed record PlannedWorkflow
     /// <summary>Optional operator questions (each with 2-4 options + a recommended default) — the plan-confirmation form's fodder. Null-omitted; absent ⇒ the plan needs no operator input.</summary>
     [JsonPropertyName("questions"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<WorkPlanQuestion>? Questions { get; init; }
+
+    /// <summary>
+    /// The subtasks whose authored acceptance could not be turned into an oracle and was therefore DROPPED — stamped
+    /// server-side like <see cref="AuthoredByModel"/>, never model input. Null-omitted, so a clean plan's bytes are
+    /// unchanged.
+    ///
+    /// <para>It exists because a model that names an oracle kind and authors no payload for it is a model-quality
+    /// miss, not an engine fault: the plan keeps the subtask with no oracle (graded as unverified downstream) instead
+    /// of the whole plan dying at planning. The drop is only honest if it is NAMED — an acceptance that silently
+    /// evaporates looks exactly like one the planner never wrote.</para>
+    /// </summary>
+    [JsonPropertyName("droppedAcceptances"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<DroppedAcceptance>? DroppedAcceptances { get; init; }
+}
+
+/// <summary>One subtask's acceptance the plan could not bind an oracle from (a data noun — Rule 18.1). Server-stamped onto <see cref="PlannedWorkflow.DroppedAcceptances"/>; it is a defect report, never an executable contract.</summary>
+public sealed record DroppedAcceptance
+{
+    /// <summary>The plan-local id of the subtask that keeps its work but loses its oracle.</summary>
+    [JsonPropertyName("subtaskId")]
+    public required string SubtaskId { get; init; }
+
+    /// <summary>The oracle the model chose but did not equip — the kind bound fine; only its payload never did.</summary>
+    [JsonPropertyName("kind")]
+    public required BenchmarkGradingKind Kind { get; init; }
+
+    /// <summary>Why the payload did not bind, in the acceptance contract's own words.</summary>
+    [JsonPropertyName("reason")]
+    public required string Reason { get; init; }
 }
 
 /// <summary>One unit of work in a <see cref="PlannedWorkflow"/>. A data noun (Rule 18.1).</summary>

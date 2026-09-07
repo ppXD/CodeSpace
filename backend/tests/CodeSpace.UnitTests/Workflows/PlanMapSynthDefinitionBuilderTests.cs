@@ -409,6 +409,15 @@ public class PlanMapSynthDefinitionBuilderTests
 
         bare["mode"].ValueKind.ShouldBe(JsonValueKind.Null,
             customMessage: "same for an untyped item: a null mode is AgentMode.Unset, the tier-derived posture (byte-identical to a no-mode node)");
+
+        // The same arm for the ORACLE, which the planner can now reach deliberately: an item whose authored acceptance
+        // never bound keeps its work with no contract. AgentCodeNode.TryReadAcceptance reads a null as "no oracle", so
+        // the branch is never graded and AcceptancePassed stays null — an ABSENCE, which the Room reports as
+        // "Unverified — no check ran". It must not resolve to an object, which would fail the node, nor be dropped from
+        // the bag, which is how an ungraded branch would read as a graded pass.
+        bare.ShouldContainKey("acceptance");
+        bare["acceptance"].ValueKind.ShouldBe(JsonValueKind.Null,
+            customMessage: "an item with no bound oracle must resolve to null — graded by nothing and honest about it, never a silent pass");
     }
 
     /// <summary>A map-branch scope carrying ONE plan item as <c>{{item}}</c> — the same Iteration slot the engine's BuildMapBranchScope fills per element.</summary>

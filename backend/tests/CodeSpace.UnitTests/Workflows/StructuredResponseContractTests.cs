@@ -87,6 +87,49 @@ public sealed class StructuredResponseContractTests
         response.Usage.OutputTokens.ShouldBe(14);
     }
 
+    [Theory]
+    [InlineData("Anthropic", "TestsPass", "argv")]
+    [InlineData("OpenAI", "TestsPass", "argv")]
+    [InlineData("Anthropic", "ArtifactPresent", "artifactPaths")]
+    [InlineData("OpenAI", "ArtifactPresent", "artifactPaths")]
+    public async Task A_planner_reply_that_never_authors_the_payload_is_returned_after_its_one_reask_instead_of_killing_the_plan(string provider, string kind, string payloadName)
+    {
+        // Live run 34084564329: the model skipped ONE acceptance payload, the re-ask did not fix it, and the reply
+        // became a Malformed fault — so the planner NODE failed and a plan-map launch died at planning. A
+        // model-quality miss must cost that subtask its oracle, never the run its plan.
+        var bad = "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"" + kind + "\"}}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
+        var request = LlmWorkflowPlanner.BuildRequest(new WorkflowPlanRequest { TaskText = "produce the result", TeamId = Guid.NewGuid() }, new ModelPoolPick { ModelId = "wire-test-model", Credential = new ResolvedModelCredential { Provider = provider, ApiKey = "fixture-key" } }, "", []);
+        var handler = new WireHandler(provider, [bad, bad]);
+
+        var response = await Client(provider, handler).CompleteStructuredAsync(request, CancellationToken.None);
+
+        handler.Bodies.Count.ShouldBe(2, "the bounded re-ask still fires — the model gets its one chance to author the payload");
+        handler.Bodies[1].ShouldContain("s1", customMessage: "the re-ask names the subtask to equip, not just the rule it broke");
+
+        var plan = LlmWorkflowPlanner.Deserialize(response.Json);
+        plan.Subtasks.Single().Acceptance.ShouldBeNull("no oracle, never a guessed one");
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("s1");
+        drop.Reason.ShouldContain(payloadName);
+    }
+
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
+    public async Task A_fatal_planner_contract_violation_is_still_a_bounded_typed_fault(string provider)
+    {
+        // The degrade is scoped to the ONE absent-payload shape. A payload the server would have to reinterpret
+        // (argv on a file oracle) stays fatal — the alternative is a silently mis-typed oracle.
+        var bad = "{\"goal\":\"g\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"t\",\"instruction\":\"i\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}}]}";
+        var request = LlmWorkflowPlanner.BuildRequest(new WorkflowPlanRequest { TaskText = "produce the result", TeamId = Guid.NewGuid() }, new ModelPoolPick { ModelId = "wire-test-model", Credential = new ResolvedModelCredential { Provider = provider, ApiKey = "fixture-key" } }, "", []);
+        var handler = new WireHandler(provider, [bad, bad]);
+
+        var error = await Should.ThrowAsync<LlmApiException>(() => Client(provider, handler).CompleteStructuredAsync(request, CancellationToken.None));
+
+        error.Category.ShouldBe(LlmErrorCategory.Malformed);
+        handler.Bodies.Count.ShouldBe(2);
+    }
+
     private static StructuredLLMCompletionRequest Request(string provider) => new()
     {
         Model = "wire-test-model", SystemPrompt = "Return data", UserPrompt = "Create the requested result", JsonSchema = JsonDocument.Parse("""{"type":"object"}""").RootElement,
