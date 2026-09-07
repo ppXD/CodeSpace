@@ -1,6 +1,7 @@
 using Autofac;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Commands.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
@@ -9,8 +10,9 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 /// Default <see cref="ITaskLaunchBenchmarkCellRunner"/> — a flat pipeline (Rule 4): stage the pre-staged fixture
 /// directory as a local git origin → launch through the real <c>ITaskLaunchService</c> → drive the resulting
 /// workflow run to a terminal state → reconstruct the produced diff onto the fixture → grade it independently →
-/// fold everything into a <see cref="BenchmarkResult"/>. The ad-hoc fixture repository is always retired, success
-/// or failure.
+/// fold everything into a <see cref="BenchmarkResult"/>. Every ad-hoc resource the cell created — the fixture
+/// repository, its provider instance, and the launch's <c>WorkSession</c>/<c>Conversation</c> — is always retired,
+/// success or failure (see <see cref="RetireFixtureResourcesAsync"/>).
 ///
 /// <para><b>Scope discipline:</b> every operation that touches <c>CodeSpaceDbContext</c> or drives the engine /
 /// executor / resume service runs in its OWN freshly-opened <see cref="ILifetimeScope"/> (<see cref="InFreshScopeAsync"/>)
@@ -40,10 +42,11 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
     public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
     {
         var fixture = await StageFixtureRepositoryAsync(task, context, cancellationToken).ConfigureAwait(false);
+        LaunchTaskResult? launched = null;
 
         try
         {
-            var launched = await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
+            launched = await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
 
             await DriveToTerminalAsync(launched.RunId, DriveDeadline(task), cancellationToken).ConfigureAwait(false);
 
@@ -54,13 +57,13 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
             await ReconstructWorkspaceAsync(context.WorkspaceDirectory, attempts, cancellationToken).ConfigureAwait(false);
 
-            var grade = await GradeAsync(task, context.WorkspaceDirectory, cancellationToken).ConfigureAwait(false);
+            var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, task, context.WorkspaceDirectory, cancellationToken).ConfigureAwait(false);
 
             return BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts));
         }
         finally
         {
-            await RetireFixtureRepositoryAsync(fixture, cancellationToken).ConfigureAwait(false);
+            await RetireFixtureResourcesAsync(fixture, launched?.SessionId, cancellationToken).ConfigureAwait(false);
         }
     }
 

@@ -80,9 +80,11 @@ public sealed record BenchmarkResult
 
     /// <summary>
     /// P19: the model the harness ACTUALLY ran, read off the run's own event stream (<c>AgentRunResult.Model</c> —
-    /// provider-wire, not the requested/pinned model). Null when the run reported none: an unknown observed model
-    /// stays unknown here, it is never backfilled from what was requested. Populated for every mode that has an
-    /// underlying <c>AgentRun</c> to read; a cell whose run never reached a result stays null.
+    /// HARNESS-reported, not the requested/pinned model, and not the LLM-provider-wire string
+    /// <c>ObservedLlmModel.FromWire</c> captures at the client layer — this is what the harness CLI process itself
+    /// self-reported). Null when the run reported none: an unknown observed model stays unknown here, it is never
+    /// backfilled from what was requested. Populated for every mode that has an underlying <c>AgentRun</c> to read;
+    /// a cell whose run never reached a result stays null.
     /// </summary>
     public string? ObservedModel { get; init; }
 

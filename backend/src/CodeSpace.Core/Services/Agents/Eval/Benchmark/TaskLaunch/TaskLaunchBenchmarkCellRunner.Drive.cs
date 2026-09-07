@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +24,14 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// — the router's own classify contract); a <c>null</c> selection folds to Launch's OWN safe defaults exactly
     /// like a real un-overridden launch, mirroring how the direct instrument's <c>BuildAgentTask</c> treats a
     /// null selection as "the deterministic default", not a caller error. Its own fresh scope.
+    ///
+    /// <para><b>Always Shadow completion mode.</b> A null <c>CompletionMode</c> inherits the platform default, which
+    /// (since #1774/C5) is Enforced for the supervisor lane — an unbackable Success claim PARKS a Deep/Auto cell
+    /// instead of terminaling it, because <see cref="BenchmarkTask"/> authors no <c>AcceptanceChecks</c> for the
+    /// completion-contract system to back a claim with. This instrument grades independently via its OWN objective
+    /// oracle (<see cref="BenchmarkTaskGrading.GradeAsync"/>) regardless of completion-contract enforcement, so
+    /// Shadow is correct here — the SAME opt-out <c>SupervisorProjectionFlowTests</c> declares for the identical
+    /// reason.</para>
     /// </summary>
     private Task<LaunchTaskResult> LaunchAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, StagedFixture fixture, CancellationToken cancellationToken)
     {
@@ -37,6 +46,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             RepositoryId = fixture.RepositoryId,
             RequestedEffort = BenchmarkModeEffort.RequestedEffortFor(mode),
             Autonomy = selection?.Autonomy?.ToString(),
+            CompletionMode = WorkflowDefinition.CompletionModeShadow,
             Overrides = new TaskExecutionOverrides
             {
                 Harness = selection?.Harness ?? task.Harness,
@@ -62,6 +72,14 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// run. Idempotent by construction: <c>ExecuteRunAsync</c> is documented safe to re-call, and re-driving an
     /// already-resolved wait is a no-op on both the executor and resume sides — so a real background worker racing
     /// this loop in production is harmless, never a double delivery.
+    ///
+    /// <para><b>Known limitation.</b> This loop only knows how to advance <see cref="WorkflowWaitKinds.AgentRun"/>
+    /// and <see cref="WorkflowWaitKinds.SupervisorDecision"/> waits (see <see cref="DriveOnePendingWaveAsync"/>). A
+    /// Deep supervisor may instead park on <c>ask_human</c> (<see cref="WorkflowWaitKinds.Action"/>) — nothing ever
+    /// resolves that wait here, so rather than silently burning the whole drive budget until <paramref name="deadline"/>
+    /// forces a <see cref="TimeoutException"/>, <see cref="FailFastOnUnadvanceableWaitAsync"/> detects the parked
+    /// wait immediately and fails with the wait kind named. The corpus loop classifies either exception identically
+    /// (infra-errored, excluded from the solve denominator) — this only saves the wasted wall-clock.</para>
     /// </summary>
     private async Task DriveToTerminalAsync(Guid runId, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
@@ -78,9 +96,43 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
 
             await ExecuteEngineOnceAsync(runId, cancellationToken).ConfigureAwait(false);
 
-            if (!progressed) await Task.Delay(DrivePollIntervalMs, cancellationToken).ConfigureAwait(false);
+            if (progressed) continue;
+
+            await FailFastOnUnadvanceableWaitAsync(runId, cancellationToken).ConfigureAwait(false);
+
+            await Task.Delay(DrivePollIntervalMs, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// When a poll drives NOTHING (<see cref="DriveOnePendingWaveAsync"/> returned false), that is USUALLY a
+    /// transient race — the engine hasn't yet materialized the next wait — which the caller's own poll-and-retry
+    /// absorbs. The one case that is NOT transient: the run has already parked on a wait kind this loop will NEVER
+    /// learn to advance (only <see cref="WorkflowWaitKinds.AgentRun"/> and <see cref="WorkflowWaitKinds.SupervisorDecision"/>
+    /// self-drive). Failing fast here turns that dead wait into an immediate, NAMED fault instead of silently
+    /// polling until <see cref="DriveToTerminalAsync"/>'s deadline forces a generic <see cref="TimeoutException"/>.
+    /// </summary>
+    private async Task FailFastOnUnadvanceableWaitAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (await PendingUnadvanceableWaitKindAsync(runId, cancellationToken).ConfigureAwait(false) is not { } stuckKind) return;
+
+        throw new InvalidOperationException($"TaskLaunch qualification cell (run {runId}) parked on a '{stuckKind}' wait this drive loop has no seam to advance (only AgentRun and SupervisorDecision waits self-drive) — failing fast instead of burning the drive budget.");
+    }
+
+    /// <summary>The wait kind of a PENDING wait <see cref="DriveOnePendingWaveAsync"/> has no seam for (see <see cref="IsAdvanceableWaitKind"/>), or null when every pending wait is one this loop already knows how to drive (the ordinary in-flight case).</summary>
+    private Task<string?> PendingUnadvanceableWaitKindAsync(Guid runId, CancellationToken cancellationToken) =>
+        InFreshScopeAsync(async scope =>
+        {
+            var pendingKinds = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+                .Select(w => w.WaitKind)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            return pendingKinds.FirstOrDefault(k => !IsAdvanceableWaitKind(k));
+        });
+
+    /// <summary>The exhaustive set of wait kinds <see cref="DriveOnePendingWaveAsync"/> knows how to drive. Internal (not private) so the fail-fast boundary is unit-pinned directly (InternalsVisibleTo) with no DbContext needed.</summary>
+    internal static bool IsAdvanceableWaitKind(string waitKind) => waitKind is WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision;
 
     private Task ExecuteEngineOnceAsync(Guid runId, CancellationToken cancellationToken) =>
         InFreshScopeAsync(scope => scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, cancellationToken));

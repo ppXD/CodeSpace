@@ -10,8 +10,8 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 
 public sealed partial class TaskLaunchBenchmarkCellRunner
 {
-    /// <summary>The ad-hoc repository this cell launched against, and the team actor it launched as — retired in <see cref="RetireFixtureRepositoryAsync"/> regardless of outcome.</summary>
-    private sealed record StagedFixture(Guid RepositoryId, Guid ActorUserId);
+    /// <summary>The ad-hoc repository + provider instance this cell launched against, and the team actor it launched as — all retired in <see cref="RetireFixtureResourcesAsync"/> regardless of outcome.</summary>
+    private sealed record StagedFixture(Guid RepositoryId, Guid ProviderInstanceId, Guid ActorUserId);
 
     private const string FixtureDefaultBranch = "main";
     private const string GitAuthorEmail = "qualification@codespace.local";
@@ -35,9 +35,9 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             var db = scope.Resolve<CodeSpaceDbContext>();
 
             var actorUserId = await ResolveTeamOwnerAsync(db, context.TeamId, cancellationToken).ConfigureAwait(false);
-            var repositoryId = await SeedFixtureRepositoryRowAsync(db, task, context, actorUserId, cancellationToken).ConfigureAwait(false);
+            var (repositoryId, providerInstanceId) = await SeedFixtureRepositoryRowAsync(db, task, context, actorUserId, cancellationToken).ConfigureAwait(false);
 
-            return new StagedFixture(repositoryId, actorUserId);
+            return new StagedFixture(repositoryId, providerInstanceId, actorUserId);
         }).ConfigureAwait(false);
     }
 
@@ -48,7 +48,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
         await RunGitAsync(new[] { "-c", $"user.email={GitAuthorEmail}", "-c", $"user.name={GitAuthorName}", "commit", "-q", "--allow-empty", "-m", "fixture: pre-staged failing state" }, directory, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<Guid> SeedFixtureRepositoryRowAsync(CodeSpaceDbContext db, BenchmarkTask task, BenchmarkExecutionContext context, Guid actorUserId, CancellationToken cancellationToken)
+    private static async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedFixtureRepositoryRowAsync(CodeSpaceDbContext db, BenchmarkTask task, BenchmarkExecutionContext context, Guid actorUserId, CancellationToken cancellationToken)
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var providerInstanceId = Guid.NewGuid();
@@ -75,10 +75,17 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        return repositoryId;
+        return (repositoryId, providerInstanceId);
     }
 
-    /// <summary>The team's active Owner — the actor a caller-supplied <c>teamId</c> (not an authenticated request) launches a qualification cell as, mirroring how every other operator-triggered Q-ops entry resolves an actor for a team it wasn't handed a user for.</summary>
+    /// <summary>
+    /// The team's active Owner — the actor a caller-supplied <c>teamId</c> (not an authenticated request) launches a
+    /// qualification cell as. There is no real requesting user on this path (the qualification endpoint's caller
+    /// supplies only a team), so this borrows the team's own Owner as the closest stand-in for "who launched this" —
+    /// which is exactly why the launch's <c>WorkSession</c> (and its <c>Conversation</c> when one opens) must be
+    /// retired afterward in <see cref="RetireFixtureResourcesAsync"/>, alongside the fixture repository + provider
+    /// instance: none of it is real work the Owner did, and none of it may linger in that person's history.
+    /// </summary>
     private static async Task<Guid> ResolveTeamOwnerAsync(CodeSpaceDbContext db, Guid teamId, CancellationToken cancellationToken)
     {
         var ownerId = await db.TeamMembership.AsNoTracking()
@@ -89,19 +96,54 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
         return ownerId ?? throw new InvalidOperationException($"Team {teamId} has no active Owner to launch a TaskLaunch qualification cell as.");
     }
 
-    /// <summary>Soft-delete the ad-hoc fixture repository so it never lingers as a real, launchable team repo. Best-effort: a cleanup fault must not turn a graded cell into a corpus-wide throw. Its own fresh scope — a cleanup step with no reason to share a DbContext with anything above it.</summary>
-    private async Task RetireFixtureRepositoryAsync(StagedFixture fixture, CancellationToken cancellationToken)
+    /// <summary>
+    /// Soft-delete/archive every ad-hoc resource this cell created — the fixture repository, its provider instance,
+    /// and (once the launch got far enough to open one) the <c>WorkSession</c>/<c>Conversation</c> it launched under
+    /// the team's real Owner — so NONE of it lingers as a real, visible team asset or a real person's history.
+    /// <paramref name="sessionId"/> is null when the launch never reached <c>ITaskLaunchService.StageAsync</c> (no
+    /// session was ever opened). Best-effort: a cleanup fault must not turn a graded cell into a corpus-wide throw.
+    /// Its own fresh scope — a cleanup step with no reason to share a DbContext with anything above it.
+    /// </summary>
+    private async Task RetireFixtureResourcesAsync(StagedFixture fixture, Guid? sessionId, CancellationToken cancellationToken)
     {
         try
         {
-            await InFreshScopeAsync(scope =>
-                scope.Resolve<CodeSpaceDbContext>().Repository.Where(r => r.Id == fixture.RepositoryId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-            ).ConfigureAwait(false);
+            await InFreshScopeAsync(async scope =>
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+
+                await RetireFixtureRepositoryRowsAsync(db, fixture, cancellationToken).ConfigureAwait(false);
+
+                if (sessionId is { } id) await RetireSessionArtifactsAsync(db, id, cancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "TaskLaunchBenchmarkCellRunner: could not retire the ad-hoc fixture repository {RepositoryId}", fixture.RepositoryId);
+            _logger.LogWarning(ex, "TaskLaunchBenchmarkCellRunner: could not retire the ad-hoc fixture resources for repository {RepositoryId}", fixture.RepositoryId);
         }
+    }
+
+    /// <summary>Soft-delete the ad-hoc fixture repository + its provider instance — sequential on the ONE shared DbContext (EF Core forbids concurrent operations on one context), never lingering as a real, launchable team repo or a real Integrations-list connection.</summary>
+    private static async Task RetireFixtureRepositoryRowsAsync(CodeSpaceDbContext db, StagedFixture fixture, CancellationToken cancellationToken)
+    {
+        await db.Repository.Where(r => r.Id == fixture.RepositoryId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+        await db.ProviderInstance.Where(p => p.Id == fixture.ProviderInstanceId)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Archive the launch's <c>WorkSession</c> (and its <c>Conversation</c> when a supervisor-tier launch opened one) — the SAME retired-thread lifecycle <see cref="WorkSessionStatus.Archived"/> already models, so the Owner the cell borrowed never sees this launch as a live thread in their own history.</summary>
+    private static async Task RetireSessionArtifactsAsync(CodeSpaceDbContext db, Guid sessionId, CancellationToken cancellationToken)
+    {
+        var conversationId = await db.WorkSession.AsNoTracking().Where(s => s.Id == sessionId)
+            .Select(s => s.ConversationId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        await db.WorkSession.Where(s => s.Id == sessionId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkSessionStatus.Archived), cancellationToken).ConfigureAwait(false);
+
+        if (conversationId is { } id)
+            await db.Conversation.Where(c => c.Id == id)
+                .ExecuteUpdateAsync(c => c.SetProperty(x => x.Archived, true), cancellationToken).ConfigureAwait(false);
     }
 }

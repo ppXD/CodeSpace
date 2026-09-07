@@ -33,12 +33,12 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     private readonly Sandbox.ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
     private readonly IBenchmarkFixtureStager _stager;
-    private readonly TaskLaunch.ITaskLaunchBenchmarkCellRunner _taskLaunchCells;
+    private readonly ITaskLaunchBenchmarkCellRunner _taskLaunchCells;
 
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     private readonly Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> _logger;
 
-    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IBenchmarkFixtureStager stager, TaskLaunch.ITaskLaunchBenchmarkCellRunner taskLaunchCells, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
+    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IBenchmarkFixtureStager stager, ITaskLaunchBenchmarkCellRunner taskLaunchCells, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
     {
         _runs = runs;
         _executor = executor;
@@ -72,7 +72,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, context, cancellationToken).ConfigureAwait(false);
 
-        var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
+        var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
         grade = ApplyMcpFabricRule(grade, mode, attempts[^1]);
 
@@ -111,9 +111,10 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     /// <see cref="IBenchmarkFixtureStager"/> seam the corpus loop stages each cell through, over the same directory.
     ///
     /// <para>The faulted attempt is documented as one where "the model never got a turn", but nothing ENFORCED that:
-    /// the respawn re-executed into the SAME directory and <see cref="GradeAsync"/> runs the oracle over the workspace
-    /// AFTERWARDS, so anything the first attempt wrote before the gateway killed it — a partial edit, a forged check —
-    /// was graded as the respawn's work. Wiping and re-staging makes the respawn's grade about the respawn alone.</para>
+    /// the respawn re-executed into the SAME directory and <see cref="BenchmarkTaskGrading.GradeAsync"/> runs the
+    /// oracle over the workspace AFTERWARDS, so anything the first attempt wrote before the gateway killed it — a
+    /// partial edit, a forged check — was graded as the respawn's work. Wiping and re-staging makes the respawn's
+    /// grade about the respawn alone.</para>
     ///
     /// <para>FAIL-CLOSED: a stager throw propagates, so the cell is recorded as an infra error rather than graded over a
     /// tree we cannot vouch for — a polluted verdict is worse than a lost cell.</para>
@@ -252,21 +253,6 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         };
     }
 
-    /// <summary>Grade the finished run with the task's oracle, against the post-run workspace, on the same runner kind the agent ran on. The grader is independent of the agent (it re-runs the repo's tests).</summary>
-    private async Task<BenchmarkGrade> GradeAsync(BenchmarkTask task, string workspaceDirectory, CancellationToken cancellationToken)
-    {
-        var grader = _graders.Resolve(task.Grading);
-
-        var context = new BenchmarkGradingContext
-        {
-            Task = task,
-            WorkspaceDirectory = workspaceDirectory,
-            Runner = _runners.Resolve(Sandbox.SandboxKinds.Local),
-        };
-
-        return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
-    }
-
     /// <summary>
     /// Fold the cell's attempts + the grade into a result row. <paramref name="attempts"/> is every dispatched attempt
     /// in order — normally one, two when the gateway-format-fault repair was bought — and the LAST is the GRADED one:
@@ -301,7 +287,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             TokenUsage = SumTokenUsage(attempts),
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,
-            ObservedModel = ObservedModelOf(attempts),
+            ObservedModel = ObservedModelOf(attempts, result?.Model),
             PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
         };
     }
@@ -320,9 +306,9 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.TokenUsage : null)
             .Aggregate((AgentTokenUsage?)null, AgentRunExecutor.SumTokenUsage);
 
-    /// <summary>The census's provider-wire observed model: the first attempt that reported one, harness-agnostic (mirrors <c>TaskLaunchBenchmarkCellRunner.ObservedModelOf</c>). Null (unknown) when NONE reported one — never backfilled from what was requested.</summary>
-    private static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
-        attempts
+    /// <summary>The census's harness-reported observed model: <paramref name="gradedModel"/> (the GRADED attempt's own model, already parsed by the caller) when it reported one — that's the tree <see cref="BuildResult"/> judges — else the first EARLIER attempt (a format-fault respawn's first try) that did (mirrors <c>TaskLaunchBenchmarkCellRunner.ObservedModelOf</c>). Null (unknown) when NONE reported one — never backfilled from what was requested.</summary>
+    private static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts, string? gradedModel) =>
+        gradedModel ?? attempts
             .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.Model : null)
             .FirstOrDefault(model => model is not null);
 }

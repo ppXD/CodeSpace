@@ -310,17 +310,19 @@ public class BenchmarkRunnerBuildTaskTests
 
     // ── P19: the direct-harness arm's observed-model census field, harness-agnostic like the TaskLaunch arm's ──
 
-    [Fact]
-    public void The_first_attempt_to_report_an_observed_model_is_the_cells_observed_model()
+    [Theory]
+    [InlineData("claude-first-wire", null, "claude-first-wire")]              // the graded (last) attempt reported none ⇒ falls back to the earlier attempt that did
+    [InlineData("claude-first-wire", "claude-graded-wire", "claude-graded-wire")]   // the graded attempt reported its OWN model ⇒ that wins — it is the tree the grade actually judged
+    public void The_observed_model_prefers_the_graded_attempts_own_report_falling_back_to_an_earlier_attempt(string? firstModel, string? gradedModel, string expected)
     {
-        // Mirrors TaskLaunchBenchmarkCellRunner.ObservedModelOf: the census's observed model is read off WHICHEVER
-        // attempt reported one first, harness-agnostic — a respawn still drives the same model, but the dead
-        // attempt already proved the wire before the gateway broke it.
-        var died = Attempt(inputTokens: 100, outputTokens: 40, seconds: 3, status: AgentRunStatus.Failed, exitReason: "error", model: "claude-first-wire");
-        var graded = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+        // Mirrors TaskLaunchBenchmarkCellRunner.ObservedModelOf: the census must be as harness-agnostic as the
+        // TaskLaunch arm's, and consistent with the SAME graded attempt BuildResult reads status/exit-reason off —
+        // never a DIFFERENT attempt's model than the one whose tree the grade actually judged.
+        var died = Attempt(inputTokens: 100, outputTokens: 40, seconds: 3, status: AgentRunStatus.Failed, exitReason: "error", model: firstModel);
+        var graded = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12, model: gradedModel);
 
         BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { died, graded }, PassingGrade, mcpFullCatalog: false)
-            .ObservedModel.ShouldBe("claude-first-wire", "the direct arm's census must be as harness-agnostic as the TaskLaunch arm's — both read the SAME AgentRunResult.Model");
+            .ObservedModel.ShouldBe(expected);
     }
 
     [Fact]

@@ -1,6 +1,6 @@
 using CodeSpace.Messages.Agents.Benchmark;
 
-namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
+namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
 /// <summary>
 /// P19: the Launch-mode sibling of the single-run instrument — drives ONE (task, TaskLaunch arm) cell through the

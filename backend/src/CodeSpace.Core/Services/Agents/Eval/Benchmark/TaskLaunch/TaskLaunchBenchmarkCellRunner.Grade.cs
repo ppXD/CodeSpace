@@ -20,9 +20,15 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     private static AgentRunResult? ParseResult(AgentRun run) =>
         string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
 
-    /// <summary>The census's provider-wire observed model: the first attempt that reported one, harness-agnostic. Null (unknown) when NONE reported one — never backfilled from what was requested.</summary>
-    private static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
-        attempts.Select(ParseResult).Select(r => r?.Model).FirstOrDefault(model => model is not null);
+    /// <summary>
+    /// The census's harness-reported observed model: the GRADED attempt's model (<see cref="BuildResult"/>'s own
+    /// <c>attempts[^1]</c> pick — the SAME run whose status/exit-reason/etc. the result reads off) when it reported
+    /// one, else the first EARLIER attempt (a map/spawn branch) that did. Null (unknown) when NONE reported one —
+    /// never backfilled from what was requested. Internal (not private) so the graded-first-then-fallback
+    /// preference is unit-pinned directly (InternalsVisibleTo) with no DB/engine needed.
+    /// </summary>
+    internal static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
+        ParseResult(attempts[^1])?.Model ?? attempts.Select(ParseResult).Select(r => r?.Model).FirstOrDefault(model => model is not null);
 
     /// <summary>
     /// Bring the pristine fixture directory forward to the state the Launch run actually produced: every
@@ -52,16 +58,6 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
 
         try { await RunGitAsync(new[] { "apply", "--whitespace=nowarn", patchFile }, workspaceDirectory, cancellationToken).ConfigureAwait(false); }
         finally { try { File.Delete(patchFile); } catch { /* best-effort */ } }
-    }
-
-    /// <summary>Grade the reconstructed workspace with the task's objective oracle — the SAME grader registry + sandbox runner the direct instrument uses, so a TaskLaunch cell and a direct-harness cell of the same task are judged by identical, agent-independent criteria.</summary>
-    private async Task<BenchmarkGrade> GradeAsync(BenchmarkTask task, string workspaceDirectory, CancellationToken cancellationToken)
-    {
-        var grader = _graders.Resolve(task.Grading);
-
-        var context = new BenchmarkGradingContext { Task = task, WorkspaceDirectory = workspaceDirectory, Runner = _runners.Resolve(Sandbox.SandboxKinds.Local) };
-
-        return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
     private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, LaunchTaskResult launched, IReadOnlyList<AgentRun> attempts, BenchmarkGrade grade, string? observedModel)
