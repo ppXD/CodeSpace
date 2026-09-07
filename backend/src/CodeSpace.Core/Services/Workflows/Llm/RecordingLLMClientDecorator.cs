@@ -88,6 +88,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         try
         {
             var payload = await buildPayload().ConfigureAwait(false);
+            if (scope.NativeCredentialRedactor is { } credentials) payload = Observe(scope, credentials.Redact(payload));
             await scope.Logger.RecordInteractionAsync(scope.RunId, recordType, scope.NodeId, scope.IterationKey, correlationId, parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -185,6 +186,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         return JsonSerializer.SerializeToElement(new
         {
             kind = scope.Kind,
+            accountingSource = scope.NativeModelCallId is not null ? Budget.BudgetLedger.PhysicalLlmSource : null,
             provider,
             model,
             @params = new { temperature, maxOutputTokens },
@@ -196,6 +198,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         JsonSerializer.SerializeToElement(new
         {
             kind = scope.Kind,
+            accountingSource = scope.NativeModelCallId is not null ? Budget.BudgetLedger.PhysicalLlmSource : null,
             provider,
             model,
             usage = new { inputTokens = usage.InputTokens, outputTokens = usage.OutputTokens, finishReason = usage.FinishReason, isPartial = usage.IsPartial },
@@ -213,7 +216,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         };
 
         var error = scope.CaptureRedactor is null ? ex.Message : Observe(scope, scope.CaptureRedactor.Redact(ex.Message));
-        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, provider, error, category, failureKind });
+        return JsonSerializer.SerializeToElement(new { kind = scope.Kind, accountingSource = scope.NativeModelCallId is not null ? Budget.BudgetLedger.PhysicalLlmSource : null, provider, error, category, failureKind });
     }
 
     /// <summary>Fold one redaction into THIS call's masking observation and hand its value back, so the flag the presence delta carries is a fact about the bytes that reached storage rather than about the configuration. A scope minted outside <see cref="LlmCallScope.ForOneCall"/> observes nothing and reads back verbatim, which is the conservative answer.</summary>
@@ -222,6 +225,7 @@ public class RecordingLLMClientDecorator : ILLMClient
     /// <summary>A plain-text field (a prompt / a text completion): the inline string when small, else a content-addressed <c>$artifact_id</c> ref. Null/empty rides as-is.</summary>
     protected static async Task<object?> OffloadTextAsync(LlmCallScope scope, string? text, CancellationToken cancellationToken)
     {
+        if (scope.NativeCredentialRedactor is { } credentials) text = Observe(scope, credentials.Redact(text));
         if (scope.CaptureRedactor is not null) text = Observe(scope, scope.CaptureRedactor.Redact(text));
         if (string.IsNullOrEmpty(text)) return text;
 
@@ -233,6 +237,7 @@ public class RecordingLLMClientDecorator : ILLMClient
     /// <summary>A JSON field (a structured completion): the inline JSON object when small, else a <c>$artifact_id</c> ref to its serialized bytes.</summary>
     protected static async Task<object?> OffloadJsonAsync(LlmCallScope scope, JsonElement json, CancellationToken cancellationToken)
     {
+        if (scope.NativeCredentialRedactor is { } credentials) json = Observe(scope, credentials.Redact(json));
         if (scope.CaptureRedactor is not null) json = Observe(scope, scope.CaptureRedactor.Redact(json));
         var text = json.GetRawText();
 

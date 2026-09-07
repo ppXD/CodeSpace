@@ -49,6 +49,7 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        using var physicalOperation = PhysicalLlmCallContext.EnterOperation();
         var trail = new List<string>();
         LlmApiException? wireHealth = null;
 
@@ -60,6 +61,7 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
             try
             {
                 var completion = await client.CompleteStructuredAsync(attempt, cancellationToken).ConfigureAwait(false);
+                completion = PhysicalLlmCallContext.Aggregate(completion);
                 return trail.Count == 0 ? completion : completion with { FailedOver = trail, FailedOverCause = wireHealth };
             }
             catch (LlmApiException ex) when (IsFailoverWorthy(ex.Category) && i < _candidates.Count - 1)

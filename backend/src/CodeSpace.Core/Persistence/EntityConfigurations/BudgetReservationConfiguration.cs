@@ -9,6 +9,7 @@ public class BudgetReservationConfiguration : IEntityTypeConfiguration<BudgetRes
     public void Configure(EntityTypeBuilder<BudgetReservation> builder)
     {
         builder.HasKey(r => r.Id);
+        builder.HasAlternateKey(r => new { r.Id, r.TeamId, r.WorkflowRunId }).HasName("ak_budget_reservation_scope");
         builder.Property(r => r.ReservedUsd).HasColumnType("numeric");
         builder.Property(r => r.SettledUsd).HasColumnType("numeric");
         builder.Property(r => r.CapUsd).HasColumnType("numeric");
