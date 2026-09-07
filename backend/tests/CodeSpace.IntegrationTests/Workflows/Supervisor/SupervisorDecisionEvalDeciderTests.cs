@@ -196,6 +196,8 @@ public class SupervisorDecisionEvalDeciderTests
         "subset-conflict-across-three" => """{"kind":"resolve","resolve":{}}""",
         "confirmation-approved" => """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""",
         "confirmation-feedback" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1r","title":"Merged step","instruction":"do both, verify with ./check.sh"}]}}""",
+        // B5 co-sign loop: the ONLY move that consumes the co-signed oracle is a retry of its target.
+        "amended-oracle-awaiting-retry" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
         // A1.5 resolve negative controls — the correct answer is precisely NOT resolve.
         "resolve-bait-clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "agent-reported-conflict-no-integration" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",

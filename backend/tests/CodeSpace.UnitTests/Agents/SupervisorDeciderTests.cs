@@ -451,6 +451,116 @@ public class SupervisorDeciderTests
         prompt.ShouldNotContain("RETRY this exact subtask", Case.Sensitive, "the retry bait line must not render for an infra-classed failure");
     }
 
+    // ── The infra steer vs. a co-signed amendment: re-planning DISCARDS the co-sign, so it must not be the steer ──
+
+    /// <summary>One graded unit whose CHECK could not run — the infra arm's fixture, folded exactly as the rehydrate fold folds it.</summary>
+    private static string InfraFailedUnit(Guid agentId, string detail = "grade-error: npm not found") =>
+        SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[] { new SupervisorAgentResult { AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = detail } });
+
+    /// <summary>An amend card the human APPROVED — the PRODUCTION card builder, so the marker and the structured proposal are exactly what the overlay and the obligation walk read back.</summary>
+    private static SupervisorPriorDecision ApprovedAmendCard(long sequence, string subtaskId)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = subtaskId, Reason = "the check shells out to tooling this repository never had",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } },
+        });
+
+        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.AskHuman, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = card.PayloadJson, OutcomeJson = """{"question":"q","answer":"approve"}""" };
+    }
+
+    /// <summary>A spawn or retry that staged 's1' and folded one infra-failed result for it.</summary>
+    private static SupervisorPriorDecision StagedInfraFailure(long sequence, string decisionKind, string detail) =>
+        new()
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = decisionKind, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = decisionKind == SupervisorDecisionKinds.Spawn ? """{"subtaskIds":["s1"]}""" : """{"subtaskId":"s1"}""",
+            OutcomeJson = InfraFailedUnit(Guid.NewGuid(), detail),
+        };
+
+    /// <summary>
+    /// The three steers, swept — the arm the live miss picked is the AwaitingRetry cell, and its whole content is
+    /// that a co-signed check is retried rather than re-planned. Pinned as a full mapping (the #1795 convention)
+    /// because the defect was a single cell rendering the wrong one of three.
+    /// </summary>
+    [Theory]
+    [InlineData(SupervisorAmendStanding.None, "Do NOT retry the agent — another pass cannot fix the check. Re-plan this item with a check its agent can satisfy, or ask a human to rule.")]
+    [InlineData(SupervisorAmendStanding.AwaitingRetry, "Its check was AMENDED by an approved human co-sign that is NOT yet consumed — RETRY this exact subtask so the amended check grades it. Do NOT author a new plan for it: approved amendments are anchored to the CURRENT plan, so a new plan DISCARDS the co-signed check and this unit re-enters on the one that could not run.")]
+    [InlineData(SupervisorAmendStanding.Consumed, "Do NOT retry the agent — another pass cannot fix the check. Its check was already AMENDED by an approved human co-sign and this unit has ALREADY been re-staged under it, so propose 'amend_acceptance' once more or 'ask_human' to rule. Do NOT author a new plan for it: approved amendments are anchored to the CURRENT plan, so a new plan DISCARDS the co-signed check and this unit re-enters on the one that could not run.")]
+    public void Each_amend_standing_maps_to_one_infra_steer(SupervisorAmendStanding standing, string steer)
+    {
+        LlmSupervisorDecider.InfraSteerFor(standing).ShouldBe(steer);
+
+        if (standing != SupervisorAmendStanding.None)
+            steer.ShouldNotContain("Re-plan this item", Case.Insensitive,
+                "both amended arms sit one line from the None arm's copy — a model picks its verb off the wording, so the cost sentence must not read as the instruction");
+    }
+
+    [Fact]
+    public void An_infra_verdict_under_an_unconsumed_cosign_steers_to_the_retry_and_names_the_re_plan_cost()
+    {
+        // Run 34066916864, arm The_real_model_repairs_a_broken_oracle_through_the_cosign_loop: the human co-signed,
+        // the banner said RETRY, and this line — in the same prompt — said "Re-plan this item". The brain re-planned
+        // eight times into the no-progress kill, and every re-plan silently discarded the amendment it was steered
+        // away from consuming.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3,
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found"), ApprovedAmendCard(3, "s1")));
+
+        prompt.ShouldContain("acceptance UNVERIFIED", Case.Sensitive, "an unrunnable check is still not a verdict on the work");
+        prompt.ShouldContain("RETRY this exact subtask so the amended check grades it", Case.Sensitive, "the co-signed repair is consumed by a retry and by nothing else");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive, "the steer that killed the run — a re-plan is the ONE move that throws the co-sign away");
+        prompt.ShouldContain("DISCARDS the co-signed check", Case.Sensitive, "and the cost is named, not left to be inferred from the anchoring rule");
+    }
+
+    [Fact]
+    public void An_infra_verdict_whose_cosign_was_already_retried_steers_to_a_second_cosign_or_a_human()
+    {
+        // The amended check ran and STILL could not grade. A third retry buys nothing, but a re-plan is worse than
+        // nothing — it discards the ruling that is already in hand. The precondition (SupervisorAmendPrecondition)
+        // admits a second card here for exactly this reason, so the steer names it.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4,
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found"),
+            ApprovedAmendCard(3, "s1"),
+            StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: dotnet not found")));
+
+        prompt.ShouldContain("propose 'amend_acceptance' once more or 'ask_human' to rule", Case.Sensitive, "the two moves the precondition actually leaves open");
+        prompt.ShouldContain("DISCARDS the co-signed check", Case.Sensitive, "the cost survives the retry — the amendment is still anchored to this plan");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive);
+        prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive, "the retry consumed the obligation — the banner is silent, and so is the steer's retry offer");
+    }
+
+    /// <summary>
+    /// The BOND. The per-unit verdict and the outstanding-amendment banner sit in ONE prompt and are rendered by two
+    /// different methods; the live miss was precisely them disagreeing about the same subtask. Both read
+    /// <see cref="SupervisorAmendObligation"/>, and this sweeps the three tapes that separate the states to prove it
+    /// — derived from the obligation walk rather than restated, so a copy here cannot drift into blessing the split.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]   // no co-sign          → no banner, and the steer re-plans the check
+    [InlineData(true, false)]    // co-signed, unstaged → the banner names the retry and so does the steer
+    [InlineData(true, true)]     // co-signed, staged   → both go quiet about the retry
+    public void The_infra_steer_and_the_amendment_banner_read_the_same_state(bool cosigned, bool retried)
+    {
+        var tape = new List<SupervisorPriorDecision> { StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found") };
+
+        if (cosigned) tape.Add(ApprovedAmendCard(3, "s1"));
+        if (retried) tape.Add(StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: dotnet not found"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 5, tape.ToArray()));
+        var outstanding = SupervisorAmendObligation.IsOutstanding(tape, "s1");
+
+        outstanding.ShouldBe(cosigned && !retried, "the walk itself must separate the three tapes, or the bond below proves nothing");
+
+        prompt.Contains("OUTSTANDING ORACLE AMENDMENT", StringComparison.Ordinal)
+            .ShouldBe(outstanding, "the banner renders exactly on an outstanding obligation");
+        prompt.Contains(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.AwaitingRetry), StringComparison.Ordinal)
+            .ShouldBe(outstanding, "the results block offers the retry exactly when the banner does — one prompt, one answer");
+        prompt.Contains("Re-plan this item", StringComparison.OrdinalIgnoreCase)
+            .ShouldBe(!cosigned, "a co-signed unit is never steered at the plan the co-sign is anchored to");
+    }
+
     // ── P5-2 (diagnosis-driven repair): the failing check's OUTPUT + the S3 baseline differential reach the brain ──
 
     /// <summary>The single fixture for the P5-2 verdict renders: one graded unit with configurable verdict fields.</summary>

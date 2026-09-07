@@ -33,10 +33,34 @@ public static class SupervisorAmendObligation
     /// <summary>Whether THIS subtask's latest attempt predates an approved amendment for it — its recorded verdict and contradiction were graded by the dead oracle, so retry escalation must not treat them as live evidence.</summary>
     public static bool IsOutstanding(SupervisorTurnContext context, string? subtaskId) => IsOutstanding(context.PriorDecisions, subtaskId);
 
-    /// <summary>The priors-only overload of <see cref="IsOutstanding(SupervisorTurnContext, string?)"/>.</summary>
+    /// <summary>The priors-only overload of <see cref="IsOutstanding(SupervisorTurnContext, string?)"/> — the AwaitingRetry reading of <see cref="StandingFor"/>, never a second walk that could answer differently.</summary>
     public static bool IsOutstanding(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId) =>
-        subtaskId is not null
-        && ApprovedReplacementsAfterNewestPlan(priorDecisions).Any(a => a.SubtaskId == subtaskId && LatestStagingSequence(priorDecisions, subtaskId) < a.CardSequence);
+        StandingFor(priorDecisions, subtaskId) == SupervisorAmendStanding.AwaitingRetry;
+
+    /// <summary>
+    /// Where this subtask stands against the co-signed amendments on the tape — the fuller reading
+    /// <see cref="IsOutstanding"/> collapses to one bit. The prompt needs the third state as well: a unit whose
+    /// amendment was already CONSUMED and whose check still cannot run is not owed a retry, but re-planning it is
+    /// still the one move that destroys the human's ruling, and the steer has to say so.
+    ///
+    /// <para>Cards apply in sequence order, so the LATEST approved amendment per subtask decides — the co-sign
+    /// overlay's own rule. Pure over the tape: a replay re-derives the identical answer.</para>
+    /// </summary>
+    public static SupervisorAmendStanding StandingFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId)
+    {
+        if (subtaskId is null) return SupervisorAmendStanding.None;
+
+        var standing = SupervisorAmendStanding.None;
+
+        foreach (var (id, cardSequence) in ApprovedReplacementsAfterNewestPlan(priorDecisions))
+        {
+            if (!string.Equals(id, subtaskId, StringComparison.Ordinal)) continue;
+
+            standing = LatestStagingSequence(priorDecisions, subtaskId) < cardSequence ? SupervisorAmendStanding.AwaitingRetry : SupervisorAmendStanding.Consumed;
+        }
+
+        return standing;
+    }
 
     /// <summary>Every approved REPLACEMENT amendment after the newest plan, in sequence order: (target subtask, the card's sequence).</summary>
     private static IEnumerable<(string SubtaskId, long CardSequence)> ApprovedReplacementsAfterNewestPlan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
