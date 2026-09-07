@@ -97,10 +97,10 @@ public class SupervisorAmendObligationTests
     }
 
     /// <summary>
-    /// The THIRD state <see cref="SupervisorAmendObligation.IsOutstanding"/> collapses away: a co-sign that was
-    /// already consumed still forbids a re-plan, because the amendment stays anchored to this plan. The decider's
-    /// infra steer is the only reader that needs it, and it must be able to tell that tape from one that never
-    /// carried a co-sign at all.
+    /// The states <see cref="SupervisorAmendObligation.IsOutstanding"/> collapses away: a co-sign that was already
+    /// consumed still forbids a re-plan, because the amendment stays anchored to this plan. The decider's infra
+    /// steer is the only reader that needs it, and it must be able to tell that tape from one that never carried a
+    /// co-sign at all.
     /// </summary>
     [Theory]
     [InlineData(false, false, SupervisorAmendStanding.None)]
@@ -119,14 +119,55 @@ public class SupervisorAmendObligationTests
         SupervisorAmendObligation.IsOutstanding(tape, "s1").ShouldBe(expected == SupervisorAmendStanding.AwaitingRetry);
     }
 
+    /// <summary>
+    /// The reading the first cut of this walk did NOT have, and the one the observed loop lived in: after a re-plan
+    /// the card is still on the tape but its anchor is gone, and answering that with <c>None</c> re-rendered the
+    /// pre-fix "Re-plan this item" steer on every historical infra verdict — fuel for another plan, and another.
+    /// Ordering IS the whole rule, so all three orderings are swept against the one card.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 2, SupervisorAmendStanding.Discarded)]      // card 3 BEFORE plan 4 → a re-plan already threw it away
+    [InlineData(1, 2, SupervisorAmendStanding.AwaitingRetry)]  // card 3 after plan 1, staging 2 BEFORE it → nothing consumed it
+    [InlineData(1, 9, SupervisorAmendStanding.Consumed)]       // card 3 after plan 1, staging 9 AFTER it  → the retry consumed it
+    public void The_standing_is_decided_by_where_the_card_sits_between_the_newest_plan_and_the_latest_staging(long newestPlanSequence, long retrySequence, SupervisorAmendStanding expected)
+    {
+        var tape = new List<SupervisorPriorDecision> { Plan(newestPlanSequence), Card(3, "s1", waive: false, answer: "approve"), Retry(retrySequence, "s1") };
+
+        SupervisorAmendObligation.StandingFor(tape.OrderBy(d => d.Sequence).ToList(), "s1").ShouldBe(expected);
+    }
+
     [Fact]
-    public void A_re_plan_resets_the_standing_to_none_because_it_discarded_the_amendment()
+    public void A_re_plan_moves_the_standing_to_discarded_not_to_never_cosigned()
     {
         var tape = new List<SupervisorPriorDecision> { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "approve"), Retry(4, "s1"), Plan(5) };
 
-        SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(SupervisorAmendStanding.None,
-            "MAJOR-8: the co-sign died with the plan it was anchored to — which is exactly why the infra steer must never ask for that plan");
+        SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(SupervisorAmendStanding.Discarded,
+            "MAJOR-8: the co-sign died with the plan it was anchored to — and a unit that HAS been repaired-then-discarded must be steered back to the amendment, never at one more plan");
+        SupervisorAmendObligation.IsOutstanding(tape, "s1").ShouldBeFalse("a discarded amendment owes no retry — there is nothing left to re-grade under");
         SupervisorAmendObligation.StandingFor(tape, "s2").ShouldBe(SupervisorAmendStanding.None, "a subtask no card ever named carries no standing");
         SupervisorAmendObligation.StandingFor(tape, null).ShouldBe(SupervisorAmendStanding.None);
+    }
+
+    [Fact]
+    public void A_card_co_signed_after_the_re_plan_re_anchors_the_repair_to_it()
+    {
+        // The move the Discarded steer asks for, and the proof it is not a dead end: a second amend_acceptance,
+        // co-signed against the CURRENT plan, puts the unit back where a retry consumes it.
+        var tape = new List<SupervisorPriorDecision> { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "approve"), Plan(4), Card(5, "s1", waive: false, answer: "approve") };
+
+        SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(SupervisorAmendStanding.AwaitingRetry, "the LATEST card decides, and this one outlives the re-plan");
+        SupervisorAmendObligation.FirstOutstanding(Context(tape.ToArray())).ShouldBe("s1", "the banner and the steer read the same walk — a re-anchored repair is outstanding again");
+    }
+
+    [Fact]
+    public void Any_approved_amendment_sees_a_discarded_card_too()
+    {
+        // The once-per-prompt re-plan-cost note renders off this: a run whose only co-sign a re-plan already ate has
+        // still spent a human's ruling, and is exactly the run that must be told what the next plan would cost.
+        SupervisorAmendObligation.AnyApprovedAmendment(new[] { Plan(1), Spawn(2, "s1") }).ShouldBeFalse();
+        SupervisorAmendObligation.AnyApprovedAmendment(new[] { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "approve") }).ShouldBeTrue();
+        SupervisorAmendObligation.AnyApprovedAmendment(new[] { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "approve"), Plan(4) }).ShouldBeTrue("a discarded co-sign was still a co-sign");
+        SupervisorAmendObligation.AnyApprovedAmendment(new[] { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "reject") }).ShouldBeFalse("an unapproved card never bound anything");
+        SupervisorAmendObligation.AnyApprovedAmendment(new[] { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: true, answer: "approve") }).ShouldBeFalse("a waive changes no check a later plan could discard");
     }
 }

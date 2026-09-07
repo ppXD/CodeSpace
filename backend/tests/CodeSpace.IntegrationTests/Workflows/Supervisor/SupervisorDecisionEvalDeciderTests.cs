@@ -198,6 +198,8 @@ public class SupervisorDecisionEvalDeciderTests
         "confirmation-feedback" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1r","title":"Merged step","instruction":"do both, verify with ./check.sh"}]}}""",
         // B5 co-sign loop: the ONLY move that consumes the co-signed oracle is a retry of its target.
         "amended-oracle-awaiting-retry" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        // …and once a re-plan has DISCARDED that co-sign, the repair has to be re-proposed against the current plan.
+        "amended-oracle-discarded-by-replan" => """{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s2","reason":"the authored check shells out to a package manager this repository does not have, so it fails before it can grade anything","acceptance":{"command":["dotnet","test"]}}}""",
         // A1.5 resolve negative controls — the correct answer is precisely NOT resolve.
         "resolve-bait-clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "agent-reported-conflict-no-integration" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",

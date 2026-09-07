@@ -53,6 +53,7 @@ public static class SupervisorDecisionGoldenScenarios
         ConfirmationFeedback(),           // plan + revision feedback        → plan (a REVISED version, never spawn)
         // B5 co-sign loop — the human repaired a unit's ORACLE; only a retry consumes it, and a re-plan destroys it.
         AmendedOracleAwaitingRetry(),     // infra-failed unit + co-signed   → retry s2, NEVER re-plan
+        AmendedOracleDiscardedByReplan(), // the re-plan already ATE it      → amend again / ask, NEVER another plan
         // A1.5 resolve NEGATIVE controls — the corpus proved resolve-WHEN-conflicted and nothing else. Naming the
         // verb in the rails (#1271) created the opposite risk, and the action mask (#1274) exists to cover it; only
         // a live model can settle whether it obeys a server fact over conflict-flavoured prose.
@@ -385,6 +386,45 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
         PayloadCheck = RetryTargets("s2"),
     };
+
+    /// <summary>
+    /// The SAME loop one turn later, at the point the first cut of the steer could not see: the co-sign happened,
+    /// and then a re-plan DISCARDED it (MAJOR-8 anchors an approved amendment to the newest plan). s2 is back on the
+    /// check that could not run, holding a repair the run has already thrown away once.
+    ///
+    /// <para>The wrong answer this measures is <c>plan</c> AGAIN — and it is the answer the pre-fix prompt actively
+    /// invited, because after the re-plan the unit's standing fell back to "never co-signed" and its verdict line
+    /// re-rendered "Re-plan this item with a check its agent can satisfy". That is the loop run 34066916864 spent
+    /// eight turns in. The moves that go anywhere are re-proposing the amendment (which re-anchors the repaired
+    /// check to the CURRENT plan, where a retry can consume it) or handing the oracle to a human. A retry is wrong
+    /// too: with the amendment gone there is no repaired check for it to grade under.</para>
+    ///
+    /// <para>The accepted set names <c>amend_acceptance</c> beside <c>ask_human</c> because that is the verb the
+    /// MODEL authors; the projector rewrites it into the ask card (<see cref="SupervisorAmendAcceptance.IntoAskHuman"/>),
+    /// so the kind that reaches the scorer is always <c>ask_human</c>.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario AmendedOracleDiscardedByReplan() => new()
+    {
+        Name = "amended-oracle-discarded-by-replan",
+        Context = Context(turn: 4, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1"),
+                Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
+            AmendApproved("s2"),
+            RePlan(3, "s1", "s2"),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.AmendAcceptance, SupervisorDecisionKinds.AskHuman },
+    };
+
+    /// <summary>The SAME plan re-authored as a later version — the re-plan whose MAJOR-8 anchoring discards every approved amendment that predates it. Built from <see cref="Plan"/> so the payload shape cannot drift from the plan the corpus already renders.</summary>
+    private static SupervisorPriorDecision RePlan(long sequence, params string[] subtaskIds) =>
+        Plan(subtaskIds) with
+        {
+            Sequence = sequence,
+            OutcomeJson = JsonSerializer.Serialize(new { planned = subtaskIds, count = subtaskIds.Length, workPlanId = FixtureWorkPlanId, workPlanVersion = 2 }, AgentJson.Options),
+        };
 
     /// <summary>A unit whose CHECK could not run: a FAILED grade whose detail classifies INFRA (<see cref="AgentAcceptanceContract.IsInfraFailure(string?, bool)"/>), which is the only verdict shape an amend proposal is admissible against. No evidence id — an oracle that never ran captured nothing to point at.</summary>
     private static SupervisorAgentResult Unrunnable(SupervisorAgentResult result) =>
