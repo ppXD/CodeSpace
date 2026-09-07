@@ -98,6 +98,7 @@ public class FailureTaxonomyTests
         FailureCodes.PasswordResetNotUsable.ShouldBe("password_reset_not_usable");
         FailureCodes.HarnessReductionGap.ShouldBe("harness_reduction_gap");
         FailureCodes.HarnessRecordUnreadable.ShouldBe("harness_record_unreadable");
+        FailureCodes.SandboxOutputIncomplete.ShouldBe("sandbox_output_incomplete");
         FailureCodes.Internal.ShouldBe("internal_error");
     }
 

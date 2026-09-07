@@ -20,6 +20,10 @@ public sealed record SandboxSpec
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<string> ReadOnlyPaths { get; init; } = Array.Empty<string>();
 
+    /// <summary>Opt-in bounded UTF-8 output observation. The server sets this policy; omitted retains legacy capture semantics until that consumer handles incompleteness. Consult SandboxResult.Observation before parsing or offloading a supposedly complete output.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public SandboxCaptureBudget? CaptureBudget { get; init; }
+
     /// <summary>Extra environment variables layered onto the runner's own environment. Secrets belong here, never in <see cref="Args"/>.</summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
@@ -192,22 +196,24 @@ public sealed record ConfigHomeFile
 /// <summary>
 /// Outcome of a sandbox run. A runner that streams (<c>ISandboxStreamRunner</c>) delivers stdout
 /// live line-by-line and leaves <see cref="Stdout"/> empty; the non-streaming <c>ISandboxRunner.RunAsync</c>
-/// path returns it buffered in full.
+/// path returns a buffered capture. Observation states whether that capture is complete and whether source-byte counts are final; omitted observations retain the legacy full-return contract.
 /// </summary>
 public sealed record SandboxResult
 {
+    /// <summary>Optional capture completeness and source-byte observations; independent of exit success or failure.</summary>
+    public SandboxObservation? Observation { get; init; }
+
     public required SandboxStatus Status { get; init; }
 
     /// <summary>Process exit code. <c>-1</c> when the command was terminated before a natural exit (timeout).</summary>
     public required int ExitCode { get; init; }
 
-    /// <summary>Buffered stdout from the non-streaming path; empty when the run streamed line-by-line (the lines were delivered live).</summary>
+    /// <summary>Buffered stdout capture from the non-streaming path; consult Observation for completeness. Empty when stdout was delivered live through the streaming callback.</summary>
     public required string Stdout { get; init; }
 
     /// <summary>
     /// The run's diagnostics, in memory. HOW MUCH of them is the producing runner's own statement, and a reader that
-    /// needs the whole stream must not take this for it. The local runner's short-lived batch and streaming paths
-    /// buffer stderr entire; its DURABLE path — whose runs are agent-long — returns a bounded excerpt of the spooled
+    /// needs the whole stream must not take this for it. Short-lived runners may return bounded captures whose completeness is stated in Observation; the local DURABLE path — whose runs are agent-long — returns a bounded excerpt of the spooled
     /// stderr instead, because reading that file whole grew with the run. The stream is not lost by that bound: it
     /// stays on the run's spool, readable through a sibling capability a bounded budget at a time — a line at a time,
     /// except where a line is longer than one of that reader's passes and arrives cut, marked as cut.

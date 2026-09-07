@@ -158,6 +158,10 @@ jobs:
           death = [r for r in results if r.get('testName', '').endswith('GitWorkspaceIsolationE2ETests.Killing_the_worker_process_still_terminates_its_confined_command')]
           assert len(death) == 1 and death[0].get('outcome') == 'Passed', 'Worker process death must still terminate the real sandbox'
           print('All 3 worker/thread lifetime cases passed.')
+          for method in ('Bounded_capture_preserves_confinement_and_exit_receipts_while_draining_overflow', 'Bounded_capture_keeps_kernel_oom_classification_and_reclaims_its_cgroup'):
+              cases = [r for r in results if 'BoundedCommandCaptureE2ETests.' + method + '(' in r.get('testName', '')]
+              assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both batch and streaming kernel cases must pass, skips are not evidence'
+          print('All 4 bounded command capture kernel cases passed.')
           PY
 
       - name: Upload test results
