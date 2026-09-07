@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -135,7 +134,7 @@ internal static class BenchmarkEvidenceExport
                 erroredCells = run?.Errored.Select(e => new { taskId = Safe(e.TaskId), mode = e.Mode.ToString(), status = "infra-unknown" }).ToArray(),
                 scope = "direct benchmark runner; this is not full Launch qualification or a total-cost receipt",
                 attemptPolicy = "Only final AgentRunId is authoritative. Workspace discoveries are not causal retry receipts; ungraded pre-respawn oracle outcomes stay unknown.",
-                bounds = new { gradeReadBytes = BenchmarkEvidenceOptions.GradeReadLimitBytes, candidateRowsPerCell = BenchmarkEvidenceOptions.CandidateLimit, maximumSecretBytes = BenchmarkEvidenceOptions.MaximumSecretBytes },
+                bounds = new { gradeReadBytes = BenchmarkEvidenceOptions.GradeReadLimitBytes, candidateRowsPerCell = BenchmarkEvidenceOptions.CandidateLimit, maximumSecretBytes = BenchmarkEvidenceOptions.MaximumSecretBytes, exitReasonBytes = BenchmarkRunEvidenceReader.ExitReasonBytes },
             };
             WriteFile(Path.Combine(_options.Directory, "manifest.json"), JsonSerializer.SerializeToUtf8Bytes(manifest, AgentJson.Options));
         }
@@ -144,32 +143,33 @@ internal static class BenchmarkEvidenceExport
         {
             var ordinal = _cells.Count + 1;
             var result = capture.Result;
-            AgentRun? final = null;
-            AgentRun[] candidates = [];
+            BenchmarkRunEvidence? final = null;
+            BenchmarkRunEvidence[] candidates = [];
             int? discoveredCount = null;
             var discovery = "available";
             try
             {
-                if (result?.AgentRunId is { } runId) final = await db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == runId && r.TeamId == capture.Context.TeamId, cancellationToken).ConfigureAwait(false);
+                if (result?.AgentRunId is { } runId) final = (await BenchmarkRunEvidenceReader.ReadAsync(db, new BenchmarkRunEvidenceQuery(capture.Context.TeamId, runId, capture.Context.WorkspaceDirectory, 1), cancellationToken).ConfigureAwait(false)).SingleOrDefault();
                 // A unique staged cwd only discovers candidates. Reviewer/other-process rows must never be counted as retries.
                 var hint = JsonSerializer.Serialize(new { workspaceDirectory = capture.Context.WorkspaceDirectory }, AgentJson.Options);
                 var query = db.AgentRun.AsNoTracking().Where(r => r.TeamId == capture.Context.TeamId && EF.Functions.JsonContains(r.TaskJson, hint));
                 discoveredCount = await query.CountAsync(cancellationToken).ConfigureAwait(false);
-                candidates = await query.OrderBy(r => r.CreatedDate).ThenBy(r => r.Id).Take(BenchmarkEvidenceOptions.CandidateLimit).ToArrayAsync(cancellationToken).ConfigureAwait(false);
+                candidates = await BenchmarkRunEvidenceReader.ReadAsync(db, new BenchmarkRunEvidenceQuery(capture.Context.TeamId, null, capture.Context.WorkspaceDirectory, BenchmarkEvidenceOptions.CandidateLimit), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception) { discovery = "unknown-read-failed"; }
 
-            var models = candidates.Append(final).Where(r => r is not null).Select(r => ReadResult(r!)?.Model).Where(m => !string.IsNullOrWhiteSpace(m)).Cast<string>().Distinct().ToArray();
+            var models = candidates.Append(final).Where(r => r is not null).Select(r => r!.Model).Where(m => !string.IsNullOrWhiteSpace(m)).Cast<string>().Distinct().ToArray();
             _redactor = _redactor.With(RedactionNeedles(models));
-            var grade = await BenchmarkGradeEvidenceExport.ReadAsync(artifacts, result?.Grade, new GradeEvidenceRequest(capture.Context.TeamId, _options.Directory, $"grade-{ordinal:D4}.txt", _options.KnownSecrets.Concat(models).ToArray()), cancellationToken).ConfigureAwait(false);
-            var finalResult = final is null ? null : ReadResult(final);
-            var finalAttempt = final is null ? null : Attempt(final, finalResult);
+            var modelExceededBound = candidates.Append(final).Any(r => r?.ModelExceededBound == true);
+            var grade = await BenchmarkGradeEvidenceExport.ReadAsync(artifacts, result?.Grade, new GradeEvidenceRequest(capture.Context.TeamId, _options.Directory, $"grade-{ordinal:D4}.txt", _options.KnownSecrets.Concat(models).ToArray(), modelExceededBound), cancellationToken).ConfigureAwait(false);
+            var finalAttempt = final is null ? null : Attempt(final, modelExceededBound);
             bool? firstOracle = result is { FormatFaultRespawns: 0 } && final is not null ? result.Grade.Passed : null;
-            bool? firstCompletion = result is { FormatFaultRespawns: 0 } && final is not null ? final.Status == AgentRunStatus.Succeeded : null;
+            bool? firstCompletion = result is { FormatFaultRespawns: 0 } && final is not null ? final.Status == nameof(AgentRunStatus.Succeeded) : null;
             var row = new
             {
                 schemaVersion = 1, taskId = Safe(capture.Task.Id), mode = capture.Mode.ToString(),
-                finalGradePassed = result?.Grade.Passed, finalGradeDetail = Safe(result?.Grade.Detail), finalGradeClass = result?.Grade.Class?.ToString(),
+                finalGradePassed = result?.Grade.Passed, finalGradeDetail = modelExceededBound ? null : Safe(result?.Grade.Detail), finalGradeClass = result?.Grade.Class?.ToString(),
+                finalGradeDetailAvailability = modelExceededBound ? "unknown-model-exceeds-export-bound" : result is null ? "unknown" : "available",
                 finalAttempt, declaredRespawns = result?.FormatFaultRespawns, declaredAgentRunAttempts = result is null ? (int?)null : result.FormatFaultRespawns + 1,
                 attemptUnit = "AgentRun; internal CLI revise rounds, reattachments and provider requests are not independently enumerated",
                 firstOraclePassed = firstOracle, firstCompletionSucceeded = firstCompletion,
@@ -177,7 +177,7 @@ internal static class BenchmarkEvidenceExport
                 reportedAggregateUsage = result?.TokenUsage, aggregateUsageCompleteness = "unknown",
                 usageScope = "reported agent tokens; may omit unreported usage and critic/provider costs; not a monetary total or hard cap",
                 discoveryStatus = discovery, discoveredCount, candidatesTruncated = discoveredCount > candidates.Length,
-                discoveredCandidates = candidates.Select(r => Attempt(r, ReadResult(r))).ToArray(), candidateMeaning = "discovery only; excluded from attempt count, scoring and usage totals",
+                discoveredCandidates = candidates.Select(r => Attempt(r, modelExceededBound)).ToArray(), candidateMeaning = "discovery only; excluded from attempt count, scoring and usage totals",
                 gradeEvidence = grade,
             };
             var name = $"cell-{ordinal:D4}.json";
@@ -187,11 +187,11 @@ internal static class BenchmarkEvidenceExport
             WriteManifest(null);
         }
 
-        private object Attempt(AgentRun run, AgentRunResult? result) => new
+        private object Attempt(BenchmarkRunEvidence run, bool withholdText) => new
         {
-            runId = run.Id, status = run.Status.ToString(), exitReason = Safe(result?.ExitReason), reviseRounds = result?.ReviseRounds, reattachAttempts = run.ReattachAttempts, reportedUsage = result?.TokenUsage,
-            usageAvailability = result?.TokenUsage is null ? "unknown" : result.TokenUsage.InputTokens < 0 || result.TokenUsage.OutputTokens < 0 ? "invalid" : "reported",
-            observedModelFingerprint = string.IsNullOrEmpty(result?.Model) ? null : Hash(Encoding.UTF8.GetBytes(result.Model))[..16],
+            runId = run.Id, status = run.Status, resultAvailability = run.ResultAvailability, exitReason = withholdText ? null : Safe(run.ExitReason), exitReasonAvailability = withholdText && run.ExitReason is not null ? "unknown-model-exceeds-export-bound" : run.ExitReasonAvailability,
+            reviseRounds = run.ReviseRounds, reattachAttempts = run.ReattachAttempts, reportedUsage = run.Usage, usageAvailability = run.UsageAvailability, modelAvailability = run.ModelAvailability,
+            observedModelFingerprint = string.IsNullOrEmpty(run.Model) ? null : Hash(Encoding.UTF8.GetBytes(run.Model))[..16],
         };
 
         private string? Safe(string? value)
@@ -200,6 +200,5 @@ internal static class BenchmarkEvidenceExport
             var redacted = _redactor.Redact(value);
             return redacted.Length > 2_048 ? redacted[..2_048] : redacted;
         }
-        private static AgentRunResult? ReadResult(AgentRun run) { try { return run.ResultJson is null ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson, AgentJson.Options); } catch (JsonException) { return null; } }
     }
 }

@@ -5,7 +5,7 @@ using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.E2ETests.Workflows;
 
-internal sealed record GradeEvidenceRequest(Guid TeamId, string Directory, string FileName, IReadOnlyList<string> KnownSecrets);
+internal sealed record GradeEvidenceRequest(Guid TeamId, string Directory, string FileName, IReadOnlyList<string> KnownSecrets, bool ModelExceededBound = false);
 
 internal sealed record GradeEvidenceProjection
 {
@@ -32,12 +32,13 @@ internal static class BenchmarkGradeEvidenceExport
         var needles = BenchmarkEvidenceExport.RedactionNeedles(request.KnownSecrets);
         var oversizedSecret = needles.Any(s => Encoding.UTF8.GetByteCount(s) > BenchmarkEvidenceOptions.MaximumSecretBytes);
         ArtifactRangeReadResult range;
-        try { range = await reader.ReadRangeAsync(request.TeamId, id, 0, oversizedSecret ? 1 : BenchmarkEvidenceOptions.GradeReadLimitBytes, cancellationToken).ConfigureAwait(false); }
+        try { range = await reader.ReadRangeAsync(request.TeamId, id, 0, oversizedSecret || request.ModelExceededBound ? 1 : BenchmarkEvidenceOptions.GradeReadLimitBytes, cancellationToken).ConfigureAwait(false); }
         catch (Exception) { return new GradeEvidenceProjection { ArtifactId = id, Availability = "unknown-read-failed" }; }
 
         var record = new GradeEvidenceProjection { ArtifactId = id, Availability = range.State.ToString(), SourceLength = range.TotalLength, SourceDeclaredSha256 = range.Sha256, IntegrityVerified = range.IntegrityVerified, ReadByteCount = range.Bytes?.Length ?? 0 };
         if (range.State != ArtifactRangeReadState.Available || range.Bytes is null) return record;
         if (oversizedSecret) return record with { Availability = "unknown-secret-exceeds-export-bound", Partial = true };
+        if (request.ModelExceededBound) return record with { Availability = "unknown-model-exceeds-export-bound", Partial = true };
         if (range.Bytes.Length > BenchmarkEvidenceOptions.GradeReadLimitBytes) return record with { Availability = "unknown-range-exceeded-bound", Partial = true };
 
         var complete = range.TotalLength == range.Bytes.LongLength;
