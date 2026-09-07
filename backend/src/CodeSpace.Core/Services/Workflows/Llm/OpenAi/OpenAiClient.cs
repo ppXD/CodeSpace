@@ -149,23 +149,15 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         using var physical = PhysicalLlmCallContext.EnterProvider(request, Provider);
-        // Get the JSON via the progressive path (with a re-ask when it produces NO parseable JSON at all), then VALIDATE
-        // it against the requested schema — a recovered object that is missing a required field / has a wrong-typed value
-        // / an invalid enum is NOT success. On a validation miss, RE-ASK ONCE with the exact violations named, then
-        // re-validate; a second miss is a typed Malformed fault — unless the only thing left is ADVISORY, which earns
-        // the re-ask but never the fault.
+        // Get the JSON via the progressive path (with a re-ask when it produces NO parseable JSON at all), then hand it
+        // to the SHARED contract decision: a recovered object that is missing a required field / has a wrong-typed
+        // value / an invalid enum is NOT success, so it earns ONE re-ask with the exact violations named. Which miss is
+        // a fault and which one degrades lives in that one place — never twice, once per provider.
         var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
-        var errors = StructuredResponseValidation.Validate(first.Json, request);
-        var advisories = errors.Count == 0 ? StructuredResponseValidation.Advise(first.Json, request) : Array.Empty<string>();
-        if (errors.Count == 0 && advisories.Count == 0) return PhysicalLlmCallContext.Aggregate(first, candidateOnly: true);
 
-        var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, [.. errors, .. advisories], first.Json);
-        var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
-        var errors2 = StructuredResponseValidation.Validate(second.Json, request);
-        if (errors2.Count == 0) return PhysicalLlmCallContext.Aggregate(second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) }, candidateOnly: true);   // total billed = the first (invalid) attempt + the re-ask
+        var decided = await StructuredResponseValidation.ReaskOnceThenDecideAsync(first, request, Provider, feedback => CompleteStructuredOnceAsync(request, feedback, cancellationToken)).ConfigureAwait(false);
 
-        throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
-            $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
+        return PhysicalLlmCallContext.Aggregate(decided, candidateOnly: true);
     }
 
     /// <summary>The first structured attempt, with ONE re-ask when it produces NO parseable JSON at all — a transient malformation the repair pass can't recover (e.g. a stray-quote token mid-object). A parse failure gets the same second chance a schema violation does, with explicit "your output was not valid JSON" feedback, before it becomes a hard Malformed fault; a SECOND parse failure propagates as Malformed (the re-ask is bounded to once).</summary>

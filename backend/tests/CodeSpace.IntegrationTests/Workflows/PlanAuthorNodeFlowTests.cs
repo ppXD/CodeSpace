@@ -106,6 +106,52 @@ public class PlanAuthorNodeFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unbound_acceptance_keeps_the_plan_and_names_itself_beside_the_offloadable_plan_payload()
+    {
+        // The live regression, end to end through the REAL node: one subtask names an oracle and authors no payload
+        // for it. The plan must survive (the run succeeds, the item keeps its work with no oracle) AND the defect must
+        // be readable as its OWN top-level output key — a sibling of `json`, not a field inside it. `json` is offloaded
+        // to the artifact store once a plan is large, so a fact readable only there disappears exactly when the plan is
+        // big enough for a lost oracle to matter.
+        using (var s = _fixture.BeginScope())
+        {
+            var script = s.Resolve<WorkPlanPlanScript>();
+            script.AuthorContract = true;
+            script.AcceptanceCommand = Array.Empty<string>();   // the authored oracle kind with an EMPTY argv — the shape whose payload never binds
+        }
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreatePlanWorkflowAsync(teamId, userId, plannerRowId, singleNode: true);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "an acceptance payload the model never authored is a model-quality miss — it must not fail the plan node; inspect this run's WorkflowRunNode.Error if it did");
+
+        var plan = await db.WorkPlan.AsNoTracking().SingleAsync(p => p.WorkflowRunId == runId);
+        var items = JsonDocument.Parse(plan.ItemsJson).RootElement;
+        items.GetArrayLength().ShouldBe(2, "the plan keeps every subtask — only the one oracle was lost");
+        items[1].TryGetProperty("acceptance", out _).ShouldBeFalse("no oracle, never a guessed or repaired one");
+
+        var node = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "plan" && n.IterationKey == "");
+        var outputs = JsonDocument.Parse(node.OutputsJson!).RootElement;
+
+        outputs.TryGetProperty("droppedAcceptances", out var dropped).ShouldBeTrue(
+            customMessage: "the defect must be its own TOP-LEVEL key beside 'json' — an operator reading \"Unverified — no check ran\" cannot open an offloaded artifact to learn which item lost its oracle");
+
+        dropped[0].GetProperty("subtaskId").GetString().ShouldBe("s2");
+        dropped[0].GetProperty("kind").GetString().ShouldBe("TestsPass", "the wire kind is the acceptance contract's own vocabulary");
+        dropped[0].GetProperty("reason").GetString().ShouldNotBeNullOrWhiteSpace();
+        outputs.GetProperty("json").GetProperty("subtasks").GetArrayLength().ShouldBe(2, "'json' still carries the whole plan — the top-level key is a SECOND, always-inline copy, not a move");
+    }
+
+    [Fact]
     public async Task Plan_author_records_the_planners_model_call_via_the_engine_node_scope()
     {
         // Recording coverage: the planner (+ its critic decorator) was one of the sites the "record EVERY model call"

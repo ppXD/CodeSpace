@@ -192,7 +192,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         // An acceptance the re-ask could not get authored is carried as a NAMED defect on the plan, not thrown away
         // silently and not thrown at all: the subtask keeps its work with no oracle (graded unverified downstream).
-        return dropped.Count == 0 ? plan : plan with { DroppedAcceptances = dropped };
+        // Stamped UNCONDITIONALLY, exactly like the AuthoredByModel / LessonArm / InjectedLessonIds siblings above: a
+        // conditional stamp leaves a model-authored value standing on a clean plan, and this field is a DEFECT REPORT
+        // — the one thing a model must never be able to write about its own reply.
+        return plan with { DroppedAcceptances = dropped.Count == 0 ? null : dropped };
     }
 
     // Internal (not private): the planner-cassette drift detector reconstructs the EXACT run-time request from

@@ -25,7 +25,7 @@ internal sealed record PlannerAcceptanceDraft
     {
         Converters = { new JsonStringEnumConverter(allowIntegerValues: false) },
     };
-    private static readonly JsonSerializerOptions ResponseReadOptions = new(PlannerSchema.Options) { Converters = { new ModelAcceptanceConverter() } };
+    private static readonly JsonSerializerOptions ResponseReadOptions = new(PlannerSchema.Options) { Converters = { new ModelAcceptanceConverter(), new UnauthorableDropRecordConverter() } };
 
     /// <summary>
     /// The wire contract, checked IN ORDER. Every violation throws except one: an oracle kind chosen with no payload
@@ -33,6 +33,16 @@ internal sealed record PlannerAcceptanceDraft
     /// subtask without an oracle. The order is the reason this is one method and not a rule plus a predicate — a
     /// payload the server would have to REINTERPRET (argv on a file oracle) is rejected before the absence of the
     /// right one is ever considered, and a separate "is the payload missing?" test would not know that.
+    ///
+    /// <para>What that ordering decides, concretely — the boundary is narrow and the cases next to it are NOT:</para>
+    /// <list type="bullet">
+    /// <item><c>{"kind":"LlmJudge"}</c> with neither <c>artifactPaths</c> nor <c>rubric</c> DEGRADES: the payload gate
+    /// runs first, so the subtask simply loses its oracle before the missing rubric is ever reached.</item>
+    /// <item><c>{"kind":"LlmJudge","artifactPaths":["report.md"]}</c> with no rubric THROWS: the payload bound, so the
+    /// reply is a judge oracle with nothing to judge against — an obligation the server would have to invent.</item>
+    /// <item><c>{"kind":"TestsPass","artifactPaths":[]}</c> THROWS even though the array is empty: it is the WRONG
+    /// payload for the chosen oracle, and that is reinterpretable intent, which is checked before absence.</item>
+    /// </list>
     /// </summary>
     public SupervisorAcceptanceSpec? ToRuntime(out string? unboundPayload)
     {
@@ -134,6 +144,25 @@ internal sealed record PlannerAcceptanceDraft
     }
 
     private static string ReadId(JsonElement subtask) => TryReadProperty(subtask, "id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() ?? "" : "";
+
+    /// <summary>
+    /// <c>droppedAcceptances</c> is SERVER-stamped — the planner's own record of which acceptance it could not bind.
+    /// The model schema does not declare it, but the schema check is deliberately lenient on additionalProperties and
+    /// these options disallow no unmapped member, so a reply that invents the field would otherwise BIND a fabricated
+    /// defect report, and one shaped <c>[{}]</c> would fail required-member binding — a NEW plan-killer inside the very
+    /// change that exists to stop plans dying over model-quality misses. Read it as nothing;
+    /// <c>LlmWorkflowPlanner.Deserialize</c> stamps the real value from its own bind, unconditionally.
+    /// </summary>
+    private sealed class UnauthorableDropRecordConverter : JsonConverter<IReadOnlyList<DroppedAcceptance>>
+    {
+        public override IReadOnlyList<DroppedAcceptance>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            reader.Skip();   // consume whatever shape the model wrote (array / object / scalar) without binding any of it
+            return null;
+        }
+
+        public override void Write(Utf8JsonWriter writer, IReadOnlyList<DroppedAcceptance> value, JsonSerializerOptions options) => throw new NotSupportedException("Model response options are read-only; serialize normalized runtime plans with AgentJson.Options.");
+    }
 
     private sealed class ModelAcceptanceConverter : JsonConverter<SupervisorAcceptanceSpec>
     {

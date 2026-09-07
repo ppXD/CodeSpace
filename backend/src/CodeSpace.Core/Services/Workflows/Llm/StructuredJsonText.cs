@@ -31,6 +31,24 @@ internal static class StructuredJsonText
         return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
     }
 
+    /// <summary>
+    /// Augment the base system prompt with the ADVISORY findings from a previous attempt — the reply CONFORMED to the
+    /// schema but left a payload its consumer needs unauthored. The wording is deliberately not
+    /// <see cref="WithValidationFeedback"/>'s: telling a model its schema-valid reply "did NOT conform … (invalid)"
+    /// is a false correction on the very reply that is about to be accepted, and it invites re-authoring the parts
+    /// that were already right. The findings themselves carry what to author and the honest alternative to inventing
+    /// it (for the planner: omit that subtask's acceptance).
+    /// </summary>
+    public static string WithAdvisoryFeedback(string systemPrompt, IReadOnlyList<string> advisories, JsonElement previous)
+    {
+        var feedback =
+            "Your previous response conformed to the required JSON Schema but left a required payload unauthored, so part of it cannot be used. Fix exactly these problems and respond again with ONLY the corrected JSON object:\n" +
+            string.Join("\n", advisories.Select(a => "- " + a)) +
+            "\n\nYour previous response was:\n" + previous.GetRawText();
+
+        return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
+    }
+
     /// <summary>Augment the base system prompt after a PARSE failure (the previous reply wasn't valid JSON at all — not merely schema-invalid) so the RE-ASK names the fault + shows what was returned. The correction is precise: a single complete, valid, fully-closed JSON object and nothing else.</summary>
     public static string WithMalformedFeedback(string systemPrompt, string? previousError)
     {
