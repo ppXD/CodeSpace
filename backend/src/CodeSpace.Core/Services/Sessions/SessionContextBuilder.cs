@@ -104,8 +104,12 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
         if (carriedForward.Count > 0)
         {
+            // The qualifier names the fold's OWN watermark — these verdicts are current AS OF that fold, not
+            // necessarily right now (SessionSummarizer is fail-open, so a later drift may not have been refreshed
+            // yet; a per-line flag below covers the specific case where a newer assessment already exists).
+            var throughTurn = session?.SummaryThroughTurnIndex?.ToString() ?? "unknown";
             sb.AppendLine();
-            sb.AppendLine("## Unresolved contracts carried forward from earlier (summarized) turns");
+            sb.AppendLine($"## Unresolved contracts carried forward from earlier (summarized) turns (as of the last fold — turn {throughTurn})");
             foreach (var line in carriedForward) sb.AppendLine(line);
         }
 
@@ -132,8 +136,10 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
     /// Every durably-bound older turn whose LAST-RECORDED assessment was unresolved, rendered as one line each —
     /// reads the assessment by its EXACT bound id (the one the fold actually saw when it was folded), never
     /// "whatever is latest now" for that run (a source change behind the watermark is <c>SessionSummarizer</c>'s job
-    /// to detect and refresh, not this digest's). Bounded to the (typically tiny) set of bound turns that ever had
-    /// an assessment.
+    /// to detect and refresh, not this digest's). Because that refresh is fail-open (a drift may not have been
+    /// picked up yet), a line whose run now has a NEWER recorded assessment than the bound one says so — the bound
+    /// verdict is still what renders, flagged as possibly superseded rather than presented as current. Bounded to
+    /// the (typically tiny) set of bound turns that ever had an assessment.
     /// </summary>
     private async Task<IReadOnlyList<string>> BuildCarriedForwardContractsAsync(string? bindingJson, Guid teamId, CancellationToken cancellationToken)
     {
@@ -149,6 +155,8 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToDictionary(a => a.Id, a => a);
 
+        var latestAssessmentIdByRunId = await LoadLatestAssessmentIdsAsync(teamId, bindings.Select(b => b.EffectiveRunId).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
+
         var lines = new List<string>();
 
         foreach (var binding in bindings)
@@ -157,10 +165,28 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
             if (RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is not { } completion) continue;
 
-            lines.Add($"Turn {binding.Turn} (run {binding.EffectiveRunId}, assessment {binding.AssessmentId}): {completion}");
+            var supersededNote = latestAssessmentIdByRunId.TryGetValue(binding.EffectiveRunId, out var latestId) && latestId != binding.AssessmentId!.Value
+                ? " [a NEWER assessment now exists for this run — this verdict may be superseded]"
+                : "";
+
+            lines.Add($"Turn {binding.Turn} (run {binding.EffectiveRunId}, assessment {binding.AssessmentId}): {completion}{supersededNote}");
         }
 
         return lines;
+    }
+
+    /// <summary>The latest <c>CompletionAssessmentRecord.Id</c> per <c>WorkflowRunId</c>, for the given (already-narrow) run ids — an id-only read, never the assessment body. Mirrors <c>SessionSummarizer</c>'s own lookup (the SAME (CreatedDate, Id) tie-break), so "latest" means the same thing in both places.</summary>
+    private async Task<IReadOnlyDictionary<Guid, Guid>> LoadLatestAssessmentIdsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0) return new Dictionary<Guid, Guid>();
+
+        return (await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.TeamId == teamId && runIds.Contains(a.WorkflowRunId))
+            .OrderBy(a => a.CreatedDate).ThenBy(a => a.Id)
+            .Select(a => new { a.WorkflowRunId, a.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .GroupBy(a => a.WorkflowRunId)
+            .ToDictionary(g => g.Key, g => g.Last().Id);
     }
 
     /// <summary>The turn's contract verdict in ONE legible line — dimensions that are fine are omitted, so a clean turn reads clean and an unclean one names exactly what is still owed. Null (no line) when everything is settled positive; a malformed record renders nothing rather than a wrong claim.</summary>

@@ -1,4 +1,6 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions;
@@ -12,8 +14,16 @@ namespace CodeSpace.UnitTests.Sessions;
 [Trait("Category", "Unit")]
 public class SessionSummarySourceBindingTests
 {
+    private static readonly IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> NoManifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>>();
+
     private static SessionSummarizer.TurnRow Turn(int n, string status, string? goal, string? result, string? branch = null) =>
         new(Guid.NewGuid(), n, status, goal, result, branch);
+
+    private static PublishManifest PushedManifest(string branch) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, Branch = branch,
+        PublishStateValue = PublishState.Pushed, RepositoryId = Guid.NewGuid(), RepositoryAlias = "primary",
+    };
 
     // ─── Parse / Serialize ──────────────────────────────────────────────────
 
@@ -46,6 +56,36 @@ public class SessionSummarySourceBindingTests
         Should.NotThrow(() => SessionSummarySourceBindings.Parse(json)).ShouldBeEmpty();
     }
 
+    [Fact]
+    public void Parse_skips_a_null_array_element_instead_of_letting_it_reach_a_callers_Turn_access()
+    {
+        // JsonSerializer deserializes a JSON null into a List<T> element as a plain C# null WITHOUT throwing (there is
+        // no `required`-member check against a JSON null) — a caller that assumes a clean list, e.g.
+        // SessionSummarizer's `.ToDictionary(b => b.Turn)`, would NullReferenceException on this entry otherwise.
+        const string json = """[null,{"turn":1,"effectiveRunId":"11111111-1111-1111-1111-111111111111","resultFingerprint":"x"}]""";
+
+        var parsed = Should.NotThrow(() => SessionSummarySourceBindings.Parse(json));
+
+        parsed.Count.ShouldBe(1);
+        parsed[0].Turn.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Parse_deduplicates_a_malformed_duplicate_turn_key_instead_of_letting_a_callers_ToDictionary_throw()
+    {
+        const string json = """
+            [
+                {"turn":1,"effectiveRunId":"11111111-1111-1111-1111-111111111111","resultFingerprint":"a"},
+                {"turn":1,"effectiveRunId":"22222222-2222-2222-2222-222222222222","resultFingerprint":"b"}
+            ]
+            """;
+
+        var parsed = Should.NotThrow(() => SessionSummarySourceBindings.Parse(json));
+
+        parsed.Count.ShouldBe(1, "a hand-edited duplicate 'turn' key must not reach a caller's ToDictionary(b => b.Turn) unresolved");
+        Should.NotThrow(() => parsed.ToDictionary(b => b.Turn));
+    }
+
     // ─── BuildBinding fingerprint ───────────────────────────────────────────
 
     [Fact]
@@ -54,8 +94,8 @@ public class SessionSummarySourceBindingTests
         var turn = Turn(1, "Success", "goal-1", "result-1", "main");
         var noAssessments = new Dictionary<Guid, Guid>();
 
-        var first = SessionSummarizer.BuildBinding(turn, noAssessments);
-        var second = SessionSummarizer.BuildBinding(turn, noAssessments);
+        var first = SessionSummarizer.BuildBinding(turn, noAssessments, NoManifests);
+        var second = SessionSummarizer.BuildBinding(turn, noAssessments, NoManifests);
 
         first.ResultFingerprint.ShouldBe(second.ResultFingerprint);
         first.EffectiveRunId.ShouldBe(turn.Id);
@@ -74,10 +114,42 @@ public class SessionSummarySourceBindingTests
     {
         var noAssessments = new Dictionary<Guid, Guid>();
 
-        var a = SessionSummarizer.BuildBinding(new SessionSummarizer.TurnRow(Guid.NewGuid(), 1, statusA, goalA, resultA, branchA), noAssessments);
-        var b = SessionSummarizer.BuildBinding(new SessionSummarizer.TurnRow(Guid.NewGuid(), 1, statusB, goalB, resultB, branchB), noAssessments);
+        var a = SessionSummarizer.BuildBinding(new SessionSummarizer.TurnRow(Guid.NewGuid(), 1, statusA, goalA, resultA, branchA), noAssessments, NoManifests);
+        var b = SessionSummarizer.BuildBinding(new SessionSummarizer.TurnRow(Guid.NewGuid(), 1, statusB, goalB, resultB, branchB), noAssessments, NoManifests);
 
         a.ResultFingerprint.ShouldNotBe(b.ResultFingerprint);
+    }
+
+    [Fact]
+    public void BuildBinding_fingerprint_uses_the_manifest_resolved_branch_over_the_raw_legacy_one()
+    {
+        // The fold (SessionSummarizer.BuildUserPrompt) folds the manifest-preferred (I2) branch, not the raw legacy
+        // OutputsJson.branch leaf, when a PublishManifest row resolves one — the fingerprint must track the SAME
+        // value, or a manifest that resolves (or changes) after the fold goes undetected as drift.
+        var turn = Turn(1, "Success", "goal-1", "result-1", branch: "raw-legacy-guess");
+        var noAssessments = new Dictionary<Guid, Guid>();
+        var withManifest = new Dictionary<Guid, IReadOnlyList<PublishManifest>> { [turn.Id] = [PushedManifest("manifest-preferred")] };
+
+        var boundToManifest = SessionSummarizer.BuildBinding(turn, noAssessments, withManifest);
+        var boundToLegacyOnly = SessionSummarizer.BuildBinding(turn, noAssessments, NoManifests);
+
+        boundToManifest.ResultFingerprint.ShouldNotBe(boundToLegacyOnly.ResultFingerprint,
+            "a resolvable manifest branch must drive the fingerprint — a fingerprint still keyed on the raw legacy leaf would miss this turn's real content");
+    }
+
+    [Fact]
+    public void BuildBinding_fingerprint_ignores_the_legacy_branch_once_a_manifest_resolves()
+    {
+        var noAssessments = new Dictionary<Guid, Guid>();
+        var runId = Guid.NewGuid();
+        var withLegacyA = new SessionSummarizer.TurnRow(runId, 1, "Success", "goal-1", "result-1", "legacy-a");
+        var withLegacyB = new SessionSummarizer.TurnRow(runId, 1, "Success", "goal-1", "result-1", "legacy-b");
+        var manifests = new Dictionary<Guid, IReadOnlyList<PublishManifest>> { [runId] = [PushedManifest("manifest-preferred")] };
+
+        var a = SessionSummarizer.BuildBinding(withLegacyA, noAssessments, manifests);
+        var b = SessionSummarizer.BuildBinding(withLegacyB, noAssessments, manifests);
+
+        a.ResultFingerprint.ShouldBe(b.ResultFingerprint, "once a manifest resolves the branch, the superseded raw legacy leaf must no longer affect the fingerprint");
     }
 
     [Fact]
@@ -86,7 +158,7 @@ public class SessionSummarySourceBindingTests
         var turn = Turn(1, "Success", "goal-1", "result-1");
         var assessmentId = Guid.NewGuid();
 
-        var binding = SessionSummarizer.BuildBinding(turn, new Dictionary<Guid, Guid> { [turn.Id] = assessmentId });
+        var binding = SessionSummarizer.BuildBinding(turn, new Dictionary<Guid, Guid> { [turn.Id] = assessmentId }, NoManifests);
 
         binding.AssessmentId.ShouldBe(assessmentId);
     }

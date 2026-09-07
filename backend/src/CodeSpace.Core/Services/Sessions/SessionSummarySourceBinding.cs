@@ -20,7 +20,7 @@ internal sealed record SessionSummarySourceBinding
     /// <summary>The turn's EFFECTIVE attempt id (<see cref="SessionTurnAttempts"/>) at the time this entry was written.</summary>
     public required Guid EffectiveRunId { get; init; }
 
-    /// <summary>SHA-256 (hex) of the effective attempt's status + goal/result/branch — changes whenever the folded content would change, without persisting the content itself.</summary>
+    /// <summary>SHA-256 (hex) of the effective attempt's status + goal/result + its RESOLVED branch (the same manifest-preferred branch <c>SessionSummarizer.BuildUserPrompt</c> folds, never the raw <c>LegacyBranch</c> column alone) — changes whenever the folded content would change, without persisting the content itself.</summary>
     public required string ResultFingerprint { get; init; }
 
     /// <summary>The effective run's latest <c>CompletionAssessmentRecord.Id</c> at fold time, or null when none existed yet.</summary>
@@ -34,7 +34,16 @@ internal static class SessionSummarySourceBindings
     {
         if (string.IsNullOrWhiteSpace(json)) return [];
 
-        try { return JsonSerializer.Deserialize<List<SessionSummarySourceBinding>>(json, AgentJson.Options) ?? []; }
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<List<SessionSummarySourceBinding>>(json, AgentJson.Options);
+
+            // Past JsonSerializer's own (JsonException-only) guarantee: a malformed `[null, ...]` element deserializes
+            // WITHOUT throwing (there is no `required`-member check against a JSON null), and a hand-edited duplicate
+            // "turn" key would throw INSIDE a caller's ToDictionary(b => b.Turn) instead of here — both must still
+            // honor this class's "never an error" contract.
+            return parsed?.Where(b => b is not null).DistinctBy(b => b.Turn).ToList() ?? [];
+        }
         catch (JsonException) { return []; }
     }
 
