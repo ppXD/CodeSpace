@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -60,9 +61,19 @@ public sealed partial class AgentExecutionAuthorityFlowTests
     {
         var seed = await SeedAsync();
         using var scope = _fixture.BeginScope();
-        var exception = await Should.ThrowAsync<Exception>(() => scope.Resolve<IAgentRunService>().CreateAsync(Task(), seed.TeamId, null, null, cancellationToken: CancellationToken.None));
+        var exception = await Should.ThrowAsync<AgentAuthorityDeniedException>(() => scope.Resolve<IAgentRunService>().CreateAsync(Task(), seed.TeamId, null, null, cancellationToken: CancellationToken.None));
         AssertAuthorityFailure(exception);
+        exception.Reason.ShouldBe("actor-unverifiable", "a standalone admission resolves its launcher from ICurrentUser, so a scope that names no operator is refused for THAT reason");
         (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.TeamId == seed.TeamId)).ShouldBe(0);
+
+        // The other half of the fixture shape every standalone-run test now depends on: the SAME call under the
+        // seeded owner is admitted, and its receipt names that owner as the launcher.
+        using var launcher = _fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        var admitted = await launcher.Resolve<IAgentRunService>().CreateAsync(Task(), seed.TeamId, null, null, cancellationToken: CancellationToken.None);
+        admitted.Status.ShouldBe(AgentRunStatus.Queued);
+        var receipt = JsonSerializer.Deserialize<AgentTask>(admitted.TaskJson, AgentJson.Options)!.ExecutionAuthority.ShouldNotBeNull();
+        receipt.SourceKind.ShouldBe("standalone");
+        receipt.Subjects.ShouldHaveSingleItem().UserId.ShouldBe(seed.UserId);
     }
 
     [Fact]
