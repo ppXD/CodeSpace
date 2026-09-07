@@ -9,6 +9,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -48,13 +49,13 @@ public sealed class CorpusBenchmarkFlowTests
         proxy.ShouldNotBeNull("the codespace-mcp proxy must be built beside its dll (the build-only ProjectReference in CodeSpace.IntegrationTests.csproj) — without it the mcp arm degrades to a tool-less run and this suite measures half the matrix while reporting the mode it requested");
 
         using var cli = new NoopBenchmarkCli(proxy);   // a no-op agent: succeeds without editing the seeded failing fixtures
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
 
         var corpus = SeedBenchmarkCorpus.Tasks;
         var expectedPairs = corpus.Sum(t => t.Modes.Count);
 
         CorpusBenchmarkRun run;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = _fixture.BeginScopeAs(userId, teamId))
             run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(corpus, teamId, selection: null, CancellationToken.None);
 
         // EVERY (task × mode) pair ran end to end — staged, executed, graded — with NO infra error.
@@ -90,6 +91,7 @@ public sealed class CorpusBenchmarkFlowTests
         run.Cells!.Count.ShouldBe(expectedPairs, "the FIXED denominator: every (task × mode) cell classified");
         run.Cells!.ShouldAllBe(c => c.State == CorpusCellState.Unsolved, "every cell is a real measurement now: the bare-cli arm ran, and the mcp arm's fabric served an initialize — nothing is infra-dead");
         EvalSuite.Score(run.Cells!).EvaluatorHealth.ShouldBe(1.0, "the offline rig exercises the WHOLE matrix once its CLI actually loads the declaration — a cli-mcp cell that classifies InfraUnknown means the fabric was never reached");
+        await AssertInitiatorAsync(teamId, userId);
     }
 
     [Fact]
@@ -101,7 +103,7 @@ public sealed class CorpusBenchmarkFlowTests
         proxy.ShouldNotBeNull("the mcp-arm cell below is only a measurement while the proxy the declaration names exists — see the sibling test");
 
         using var cli = new NoopBenchmarkCli(proxy);
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
 
         // A one-task corpus whose fixture ref does not exist: staging throws → the pair is recorded errored.
         // M1a's point: that cell must STILL be counted — as InfraUnknown — never silently dropped from the divisor.
@@ -112,7 +114,7 @@ public sealed class CorpusBenchmarkFlowTests
         };
 
         CorpusBenchmarkRun run;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = _fixture.BeginScopeAs(userId, teamId))
             run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(corpus, teamId, selection: null, CancellationToken.None);
 
         var expectedCells = corpus.Sum(t => t.Modes.Count);
@@ -129,9 +131,10 @@ public sealed class CorpusBenchmarkFlowTests
         // The pre-M1a shape (scorecard over graded results only) reported the SAME rate with or without the ghost
         // task; the fixed-denominator score cannot — the infra-dead cells occupy their slots in the divisor.
         run.Scorecard.Overall.Total.ShouldBe(2, "the legacy scorecard still sees only the graded pairs — exactly the shrinking-divisor shape M1a's Cells replace for percentage claims");
+        await AssertInitiatorAsync(teamId, userId);
     }
 
-    private async Task<Guid> SeedTeamAsync()
+    private async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync()
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -144,7 +147,15 @@ public sealed class CorpusBenchmarkFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
-        return teamId;
+        return (teamId, userId);
+    }
+
+    private async Task AssertInitiatorAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var initiators = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(run => run.TeamId == teamId).Select(run => run.CreatedBy).ToListAsync();
+        initiators.ShouldNotBeEmpty();
+        initiators.ShouldAllBe(initiator => initiator == userId, "each physical benchmark attempt records the seeded user as its initiator; this audit identity is not itself a permission grant");
     }
 
     /// <summary>
