@@ -251,11 +251,7 @@ public sealed partial class LocalProcessRunner
             if (stream.Length < request.OffsetBytes) return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.SourceReset));
             var available = stream.Length - request.OffsetBytes;
             if (available == 0)
-            {
-                if (request.FinalDrain && await IsDurableSourceSealedAsync(request.Handle, path, cancellationToken).ConfigureAwait(false))
-                    return new SandboxDurableLogReadResult.EndOfSource(IsSourceTruncated(path));
-                return new SandboxDurableLogReadResult.NoData();
-            }
+                return await ReadAtObservedEndAsync(request, path, cancellationToken).ConfigureAwait(false);
             if (!request.FinalDrain && available < request.MinimumBytes) return new SandboxDurableLogReadResult.NoData();
             var length = (int)Math.Min(available, request.MaximumBytes);
             var bytes = new byte[length];
@@ -278,6 +274,14 @@ public sealed partial class LocalProcessRunner
         {
             return new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.IoUnavailable, true));
         }
+    }
+
+    /// <summary>Resolve an observed empty range after its initial length read. A producer may append before seal inspection begins.</summary>
+    internal static async Task<SandboxDurableLogReadResult> ReadAtObservedEndAsync(SandboxDurableLogReadRequest request, string path, CancellationToken cancellationToken)
+    {
+        if (request.FinalDrain && await IsDurableSourceSealedAsync(request.Handle, path, request.OffsetBytes, cancellationToken).ConfigureAwait(false))
+            return new SandboxDurableLogReadResult.EndOfSource(IsSourceTruncated(path));
+        return new SandboxDurableLogReadResult.NoData();
     }
 
     /// <summary>
@@ -328,12 +332,15 @@ public sealed partial class LocalProcessRunner
         }
     }
 
-    private static async Task<bool> IsDurableSourceSealedAsync(SandboxHandle handle, string path, CancellationToken cancellationToken)
+    private static async Task<bool> IsDurableSourceSealedAsync(SandboxHandle handle, string path, long expectedLength, CancellationToken cancellationToken)
     {
         var seal = new FileInfo(Path.Combine(handle.SpoolDirectory, LogSealMarkerFile));
         // "Not PROVABLY gone" withholds the seal, so a worker that cannot resolve the pid never certifies EOF on a
         // source another host's producer may still be appending to.
         if (!seal.Exists || IsLinkOrReparsePoint(seal) || !IsSupervisorGone(handle) || !TryFileLength(path, out var stableLength)) return false;
+        // The initial empty-range read may precede the producer's final append and seal. A stable later length
+        // proves nothing about EOF at that earlier offset: the caller must consume the remaining bytes first.
+        if (stableLength != expectedLength) return false;
 
         for (var observation = 0; observation < SourceQuiescenceChecks; observation++)
         {
