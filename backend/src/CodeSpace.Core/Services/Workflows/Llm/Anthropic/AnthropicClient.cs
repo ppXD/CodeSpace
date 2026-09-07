@@ -127,12 +127,12 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
         // it blindly, so {} or a "no kind" object slipped through). On a validation miss, RE-ASK ONCE with the exact
         // violations named, then re-validate. A second miss is a typed Malformed fault (the engine fails it fast).
         var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
-        var errors = JsonSchemaValidator.Validate(first.Json, request.JsonSchema);
+        var errors = StructuredResponseValidation.Validate(first.Json, request);
         if (errors.Count == 0) return first;
 
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
-        var errors2 = JsonSchemaValidator.Validate(second.Json, request.JsonSchema);
+        var errors2 = StructuredResponseValidation.Validate(second.Json, request);
         if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) };   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
