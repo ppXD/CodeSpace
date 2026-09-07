@@ -1,3 +1,7 @@
+using Autofac;
+using Autofac.Extensions.DependencyInjection;
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.IntegrationTests.Infrastructure;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -48,7 +52,7 @@ public sealed class StandaloneRunCaptureGapEndpointE2ETests : IClassFixture<Task
     public async Task A_standalone_run_that_lost_a_frame_shows_its_gap()
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
-        var run = await SeedStandaloneRunAsync(teamId);
+        var run = await SeedStandaloneRunAsync(teamId, userId);
 
         using (var quiet = await ReadCaptureGapsAsync(run.AgentRunId, userId, teamId))
         {
@@ -140,10 +144,14 @@ public sealed class StandaloneRunCaptureGapEndpointE2ETests : IClassFixture<Task
         };
     }
 
-    private async Task<SeededRun> SeedStandaloneRunAsync(Guid teamId)
+    private async Task<SeededRun> SeedStandaloneRunAsync(Guid teamId, Guid userId)
     {
-        using var scope = _factory.Services.CreateScope();
-        var runs = scope.ServiceProvider.GetRequiredService<IAgentRunService>();
+        using var scope = _factory.Services.GetAutofacRoot().BeginLifetimeScope(builder =>
+        {
+            builder.RegisterInstance(new TestCurrentUser(userId)).As<ICurrentUser>();
+            builder.RegisterInstance(new TestCurrentTeam(teamId)).As<ICurrentTeam>();
+        });
+        var runs = scope.Resolve<IAgentRunService>();
         var created = await runs.CreateAsync(
             new AgentTask { Goal = "lose a frame with no workflow run to blame", Harness = ClaudeCodeHarness.HarnessKind, Model = PricedModel, TimeoutSeconds = 1800 },
             teamId, workflowRunId: null, nodeId: null, iterationKey: "", CancellationToken.None);

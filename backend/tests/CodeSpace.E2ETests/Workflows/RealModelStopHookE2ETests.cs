@@ -95,7 +95,7 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         };
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, live.TeamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
@@ -122,7 +122,7 @@ public sealed class RealModelStopHookE2ETests : IDisposable
 
     // ─── gate + seeding ────────────────────────────────────────────────────────
 
-    private readonly record struct LiveContext(Guid TeamId, string BaseUrl, string ApiKey, string Model);
+    private readonly record struct LiveContext(Guid TeamId, Guid UserId, string BaseUrl, string ApiKey, string Model);
 
     /// <summary>Resolve the live-model preconditions (creds + a real claude CLI + a seeded team) or self-skip LOUDLY (skip ≠ pass). Returns null when the run cannot go live.</summary>
     private async Task<LiveContext?> EnsureLiveOrSkipAsync()
@@ -138,8 +138,8 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         if (OperatingSystem.IsWindows()) return null;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
-        return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        return new LiveContext(teamId, userId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 
     private async Task<Guid> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey)

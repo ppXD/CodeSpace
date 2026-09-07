@@ -1979,18 +1979,21 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-sup-livewholeloop-" + Guid.NewGuid().ToString("N"));
         private readonly string _bare;
+        private readonly CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer _server;
 
         public BareRemote()
         {
             Directory.CreateDirectory(_root);
             _bare = Path.Combine(_root, "remote.git");
+            _server = new CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer(_root);
         }
 
-        public string Url => new Uri(_bare).AbsoluteUri;
+        public string Url => _server.Url;
 
         public async Task SeedBaseAsync(Dictionary<string, string> files)
         {
             await Git(_root, "init", "--bare", "-b", "main", _bare);
+            await Git(_root, "--git-dir", _bare, "config", "http.receivepack", "true");
             var seed = Path.Combine(_root, "seed");
             Directory.CreateDirectory(seed);
             await Git(seed, "clone", _bare, seed);
@@ -2009,15 +2012,12 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(b => b.TrimStart('*', ' ').Trim()).ToList();
 
-        private static async Task<string> Git(string workdir, params string[] args)
-        {
-            var result = await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
-            if (result.Status != SandboxStatus.Success) throw new InvalidOperationException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr}");
-            return result.Stdout;
-        }
+        private static Task<string> Git(string workdir, params string[] args) =>
+            CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer.RunFixtureGitAsync(workdir, args);
 
         public void Dispose()
         {
+            _server.Dispose();
             try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
     }
