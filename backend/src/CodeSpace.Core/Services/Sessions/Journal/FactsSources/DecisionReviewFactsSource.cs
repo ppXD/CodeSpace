@@ -9,7 +9,7 @@ namespace CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 /// verdict card — approved/flagged, rationale, evidence-attached issues, and the DISCARDED DRAFT's attribution
 /// (the once-anonymous "model call · N tokens" now reads as "the flagged draft") — keyed by the same deterministic
 /// id the timeline map emits. <c>ReviewerRunId</c> stays null on purpose: a model critic has no run to deep-link,
-/// and the card renders the "model critic — independently prompted" independence line instead.
+/// and the card names the reported model (or says identity is unavailable) instead, qualified by <see cref="SameModel"/>.
 /// </summary>
 public sealed class DecisionReviewFactsSource : IJournalFactsSource
 {
@@ -27,8 +27,9 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
         {
             var reviews = SupervisorOutcome.ReadReviews(decision.OutcomeJson);
 
-            // The decision's OWN authoring model — the other half of the independence question. Read once per
-            // decision: a verdict is only a second OPINION if it ran on a different model than the thing it judged.
+            // The decision's OWN authoring model — the other half of the identity comparison. Read once per decision:
+            // a DIFFERENT reported name is not, by itself, evidence of a second opinion (a gateway alias can make one
+            // backing model answer under two names) — see SameModel below for what this comparison actually is.
             var producerModel = SupervisorOutcome.ReadModelUsage(decision.OutcomeJson)?.Model;
 
             for (var i = 0; i < reviews.Count; i++)

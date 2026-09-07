@@ -37,7 +37,9 @@ public sealed partial class DeterministicJudgeLlmClient : ILLMClient, IStructure
 
         var json = JsonSerializer.SerializeToElement(new { criteria });
 
-        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 9, OutputTokens = 5 } });
+        // Known identity — an honest fake echoes what a real provider's wire response would carry, matching every
+        // other structured double (Rule: don't leave a fake's completion in the unknown-identity branch by omission).
+        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, ObservedModel = request.Model, Usage = new() { InputTokens = 9, OutputTokens = 5 } });
     }
 
     /// <summary>A rubric line as the production prompt renders it: <c>- [id] requirement</c>.</summary>

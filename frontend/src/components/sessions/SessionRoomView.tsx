@@ -1203,10 +1203,11 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
 
 /** The reviewer's verdict card under a REVIEW beat — COLLAPSED by default to one line (badge + rationale + chevron)
  *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues and the independence
- *  line — "independent agent · claude-code" with a deep-link into the reviewer's OWN run, or "model critic —
- *  independently prompted" when the verdict came from the in-process critic. A model critic's line NAMES the model it
- *  reported. Unknown identity remains unknown, and different reported names alone do not establish independence.
- *  A one-model pool's legitimate fallback stays an independently prompted call, not a second opinion.
+ *  line — "independent agent · claude-code" with a deep-link into the reviewer's OWN run, or, when the verdict came
+ *  from the in-process model critic, the reported model's own name (or "model identity unavailable") paired with an
+ *  independence verdict: "independence not established" when either side's identity is unknown, "the producer's own
+ *  model, independently prompted — not a second opinion" when the names match, or "a review with a different reported
+ *  model — independence not established" when they differ. Different reported names alone never establish independence.
  *  The WHOLE card toggles (open or closed) — clicking the expanded body collapses it again; only the deep-link button
  *  opts out. */
 export function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {

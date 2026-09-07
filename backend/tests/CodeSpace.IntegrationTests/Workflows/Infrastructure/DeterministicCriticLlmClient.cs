@@ -23,6 +23,9 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
     /// <summary>An artifact carrying this marker (but NOT <see cref="RejectMarker"/>) draws a MINOR-only flag — the model raises a nitpick but the severity-authoritative projection APPROVES it, so the calibration path (no halt, no revise) is exercised deterministically.</summary>
     public const string NitpickMarker = "STYLE-NIT";
 
+    /// <summary>An artifact carrying this marker gets a verdict with NO observed wire identity — the honest fake's ONE deliberate unknown-identity flow (a missing/untrusted provider observation), kept alongside the default known-identity answer below so both branches of <c>ObservedLlmModel.FromWire</c> stay exercised by the shared fake.</summary>
+    public const string UnknownIdentityMarker = "NO-WIRE-IDENTITY";
+
     /// <summary>The deterministic critique the disapproval carries — the revise loop feeds it back, so the E2Es assert it verbatim in the revise instruction.</summary>
     public const string Critique = "the change still carries a placeholder hack";
 
@@ -41,6 +44,7 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
 
         var flawed = request.UserPrompt.Contains(RejectMarker, StringComparison.Ordinal);
         var nitpick = !flawed && request.UserPrompt.Contains(NitpickMarker, StringComparison.Ordinal);
+        var unknownIdentity = request.UserPrompt.Contains(UnknownIdentityMarker, StringComparison.Ordinal);
 
         // The critique (and its evidence) deliberately does NOT repeat the marker: the revise loop echoes the critique
         // into the next round's goal (and the goal echoes into the next review prompt), so a marker-quoting critique
@@ -55,7 +59,10 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
                 ? JsonSerializer.SerializeToElement(new { approved = false, score = 8, issues = new[] { new { issue = "a terse local name could be clearer", evidence = "the naming in the diff", severity = "minor" } }, rationale = "sound; one cosmetic nit" })
                 : JsonSerializer.SerializeToElement(new { approved = true, score = 9, issues = Array.Empty<object>(), rationale = "clean and goal-aligned" });
 
-        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 7 } });
+        // Known identity by default — an honest fake echoes what a real provider's wire response would carry, so
+        // the critic's ObservedLlmModel.FromWire policy has a real name to accept on every OTHER flow through this
+        // fake (the blind spot a null-only ObservedModel used to leave). UnknownIdentityMarker opts one flow OUT.
+        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, ObservedModel = unknownIdentity ? null : request.Model, Usage = new() { InputTokens = 11, OutputTokens = 7 } });
     }
 }
 

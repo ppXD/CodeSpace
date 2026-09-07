@@ -239,12 +239,16 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     public async Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken)
     {
         // The distinct-first ladder (S4d): a reviewer on a DIFFERENT model is a real second opinion, so exclude the
-        // producer's MODEL — not merely its row. Independence is a property of the model, so the same model under a
-        // second credential is the producer reviewing itself; excluding only the row counted that as independent. A
-        // one-model team must still get its critic, so an empty excluded pick falls back to the full pool — which
-        // yields A ROW CARRYING the producer's model (not necessarily the producer's own row: any credential backing
-        // that model serves, and the pool's total order decides which), independently prompted. The verdict now NAMES
-        // the model it ran on, so the fallback reads as the fallback instead of as a second opinion.
+        // producer's MODEL — not merely its row. This is a CONFIGURED-vs-configured comparison (the pool's own model
+        // id strings, decided before either call runs — there is no wire response yet to check): the same configured
+        // model under a second credential is the producer reviewing itself, so excluding only the row counted that as
+        // independent. It is NOT alias-aware — a gateway that answers two configured names from the same backing
+        // model, or renames one over time, can still defeat this exclusion (frozen producer provenance / alias-aware
+        // exclusion is deferred). A one-model team must still get its critic, so an empty excluded pick falls back to
+        // the full pool — which yields A ROW CARRYING the producer's model (not necessarily the producer's own row:
+        // any credential backing that model serves, and the pool's total order decides which), independently
+        // prompted. The verdict now NAMES the model that actually answered (the provider's own wire report, not this
+        // configured pick), so the fallback reads as the fallback instead of as a second opinion.
         if (producerRowId is { } producer)
         {
             var distinct = await SelectBrainRowIdCoreAsync(teamId, eligibleProviders, await ProducerModelIdAsync(teamId, producer, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
