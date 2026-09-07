@@ -258,11 +258,39 @@ public class TaskSpecCompilerTests
         trace.UsageMayBeIncomplete.ShouldBe(incomplete);
     }
 
+    [Theory]
+    [InlineData("supported")]
+    [InlineData("contradicted")]
+    public async Task A_literal_reference_with_no_generated_tokens_reaches_the_independent_review_as_exact_argv(string support)
+    {
+        var expected = new[] { "random-validator-" + Guid.NewGuid().ToString("N"), "資料 Δ", "", " ", "line\nbreak" };
+        var quote = JsonSerializer.Serialize(expected);
+        var goal = "The user's task discusses this exact argv: " + quote;
+        var client = new SequenceStructuredClient("success")
+        {
+            SourceGoal = goal, ReviewSupport = support,
+            ProposalOverride = JsonSerializer.SerializeToElement(new TaskSpecCompilation { AcceptanceChecks = [], AcceptanceArgvSource = new("goal", quote, "json-argv"), AcceptanceCriteria = ["Deliver the requested result"], Rationale = "PROPOSER_SELF_ENDORSEMENT" }),
+        };
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        var result = await compiler.CompileAsync(Guid.NewGuid(), goal, null, CancellationToken.None);
+        client.Requests.Count.ShouldBe(2, "literal extraction does not skip the independent intent review");
+        client.Requests[0].ResponseValidator.ShouldNotBeNull()(client.ProposalOverride!.Value).ShouldBeEmpty();
+        using var reviewInput = JsonDocument.Parse(client.Requests[1].UserPrompt);
+        reviewInput.RootElement.GetProperty("candidateArgv").EnumerateArray().Select(x => x.GetString()).ShouldBe(expected);
+        client.Requests[1].UserPrompt.ShouldNotContain("PROPOSER_SELF_ENDORSEMENT");
+        result.Suggestion!.AcceptanceProposal!.Argv.ShouldBe(expected);
+        result.Suggestion.AcceptanceChecks.ShouldBe(support == "supported" ? expected : []);
+        result.ModelCalls!.Select(c => c.Phase).ShouldBe(new[] { "proposal", "semantic-review" });
+    }
+
     // ── Fakes at the honest seams ───────────────────────────────────────────────────
 
     private sealed class SequenceStructuredClient : ILLMClient, IStructuredLLMClient
     {
         public const string Goal = "Use custom-audit --check for final validation.";
+        public string SourceGoal { get; init; } = Goal;
+        public string ReviewSupport { get; init; } = "supported";
+        public JsonElement? ProposalOverride { get; init; }
         private readonly string _reviewOutcome;
         public List<StructuredLLMCompletionRequest> Requests { get; } = [];
         public SequenceStructuredClient(string reviewOutcome) { _reviewOutcome = reviewOutcome; }
@@ -276,11 +304,11 @@ public class TaskSpecCompilerTests
             if (Requests.Count == 1) return Task.FromResult(new StructuredLLMCompletion
             {
                 Model = "proposal-model", Usage = new LlmUsage { InputTokens = 10, OutputTokens = 5 },
-                Json = JsonDocument.Parse("""{"acceptanceChecks":["custom-audit","--check"],"evidencePaths":[],"dependencies":[{"requirement":"Validator input exists","validationStrategy":"Inspect input and invoke the requested validator"}],"acceptanceCriteria":["The report meets the requested requirements."],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.8,"rationale":"PROPOSER_SELF_ENDORSEMENT"}""").RootElement.Clone(),
+                Json = ProposalOverride ?? JsonDocument.Parse("""{"acceptanceChecks":["custom-audit","--check"],"evidencePaths":[],"dependencies":[{"requirement":"Validator input exists","validationStrategy":"Inspect input and invoke the requested validator"}],"acceptanceCriteria":["The report meets the requested requirements."],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.8,"rationale":"PROPOSER_SELF_ENDORSEMENT"}""").RootElement.Clone(),
             });
             if (_reviewOutcome == "failed") throw new IOException("review transport unavailable");
             if (_reviewOutcome == "timed-out") throw new OperationCanceledException("review request deadline");
-            var json = _reviewOutcome == "malformed" ? "[]" : JsonSerializer.Serialize(new TaskSpecReview { Source = "user-explicit", Support = "supported", Citations = [new TaskSpecReviewCitation("goal", Goal)], Reason = "The original user explicitly requested this command; it has not been executed." });
+            var json = _reviewOutcome == "malformed" ? "[]" : JsonSerializer.Serialize(new TaskSpecReview { Source = "user-explicit", Support = ReviewSupport, Citations = [new TaskSpecReviewCitation("goal", SourceGoal)], Reason = "The original user explicitly requested this command; it has not been executed." });
             return Task.FromResult(new StructuredLLMCompletion { Model = "fallback-model", Json = JsonDocument.Parse(json).RootElement.Clone(), Usage = ReviewUsage, FailedOver = ReviewFailedOver });
         }
     }
