@@ -2,10 +2,12 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
+using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -103,12 +105,14 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     private readonly CodeSpaceDbContext _db;
     private readonly IArtifactStreamRetentionWriter _retention;
     private readonly ILogger<ArtifactManifestStore> _logger;
+    private readonly ICurrentUser? _currentUser;
 
-    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactStreamRetentionWriter retention, ILogger<ArtifactManifestStore> logger)
+    public ArtifactManifestStore(CodeSpaceDbContext db, IArtifactStreamRetentionWriter retention, ILogger<ArtifactManifestStore> logger, ICurrentUser? currentUser = null)
     {
         _db = db;
         _retention = retention;
         _logger = logger;
+        _currentUser = currentUser;
     }
 
     public async Task<int> CaptureDeclaredAsync(AgentTask task, string workspaceDirectory, Guid agentRunId, Guid? workflowRunId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken)
@@ -310,27 +314,66 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// <summary>Idempotent per <c>(attempt, epoch, path)</c>: an existing CURRENT row for the same coordinates is superseded by the fresh one — a pointer, never a rewrite (the #1352 discipline), so history stays intact and consumers follow the unsuperseded row.</summary>
     private async Task UpsertAsync(ArtifactManifest fresh, CancellationToken cancellationToken)
     {
-        var prior = await _db.ArtifactManifest
-            .Where(m => m.AgentRunId == fresh.AgentRunId && m.FenceEpoch == fresh.FenceEpoch && m.LogicalPath == fresh.LogicalPath && m.SupersededByManifestId == null)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        // Blob placement and its retention declaration have already completed. Only the pointer replacement holds
+        // this short transaction; a failed insert must not commit the retirement, even when a caller catches the
+        // error and commits its own transaction. Keep caller-owned tracked changes entirely out of these writes.
+        var ambient = _db.Database.CurrentTransaction;
+        await using var owned = ambient == null ? await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
+        var savepoint = ambient == null ? null : $"artifact_manifest_{Guid.NewGuid():N}";
+        if (savepoint != null) await ambient!.CreateSavepointAsync(savepoint, cancellationToken).ConfigureAwait(false);
 
-        // Same coordinates, same bytes ⇒ the exactly-once no-op (a re-compose/re-capture lands on the first row).
-        if (prior is not null && prior.Sha256 == fresh.Sha256) return;
-
-        // TWO steps, retire-then-install: the current-rows-only unique index means the fresh row can't insert
-        // while the prior is still current, and EF's statement ordering inside one SaveChanges is not a contract.
-        // fresh.Id is pre-generated, so the pointer written first stays consistent; a crash between the steps
-        // leaves a visibly dangling pointer (no current row) — fail-visible, and the next capture self-heals it.
-        if (prior is not null)
+        try
         {
-            prior.SupersededByManifestId = fresh.Id;
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        }
+            // Namespace 122 is the manifest ledger's original migration. The canonical key and seed must remain
+            // stable across rolling versions. A collision only serializes unrelated paths; it never merges rows.
+            var key = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"artifact_manifest/{fresh.AgentRunId:N}/{fresh.FenceEpoch}/{fresh.LogicalPath}");
+            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 122))", cancellationToken).ConfigureAwait(false);
+            // Lock even an identical-content read: a caller's older repeatable-read snapshot must not treat a
+            // concurrently superseded row as current and report a false deduplication success.
+            var prior = await _db.ArtifactManifest.FromSqlInterpolated($"""
+                SELECT * FROM artifact_manifest
+                WHERE team_id = {fresh.TeamId} AND agent_run_id = {fresh.AgentRunId} AND fence_epoch = {fresh.FenceEpoch}
+                    AND logical_path = {fresh.LogicalPath} AND superseded_by_manifest_id IS NULL
+                FOR UPDATE
+                """).AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        _db.ArtifactManifest.Add(fresh);
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            if (prior == null || prior.Sha256 != fresh.Sha256)
+                await ReplaceCurrentAsync(prior, fresh, cancellationToken).ConfigureAwait(false);
+
+            if (owned != null) await owned.CommitAsync(cancellationToken).ConfigureAwait(false);
+            else await ambient!.ReleaseSavepointAsync(savepoint!, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // No tracked entries were changed, so rollback cannot discard a caller's pending changes or leave a
+            // failed Added manifest to be silently inserted by its next SaveChanges. A stale stronger-isolation
+            // snapshot still raises PostgreSQL's serialization error; the caller retries its whole transaction.
+            if (ambient != null) await ambient.RollbackToSavepointAsync(savepoint!, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
+    private async Task ReplaceCurrentAsync(ArtifactManifest? prior, ArtifactManifest fresh, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var actorId = _currentUser?.Id ?? SystemUsers.SeederId;
+        if (prior != null)
+        {
+            var retired = await _db.ArtifactManifest.Where(m => m.Id == prior.Id && m.SupersededByManifestId == null)
+                .ExecuteUpdateAsync(set => set.SetProperty(m => m.SupersededByManifestId, fresh.Id).SetProperty(m => m.LastModifiedDate, now).SetProperty(m => m.LastModifiedBy, actorId), cancellationToken).ConfigureAwait(false);
+            if (retired != 1) throw new DbUpdateConcurrencyException("The current artifact manifest changed before replacement.");
+        }
+
+        await _db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO artifact_manifest (id, team_id, agent_run_id, workflow_run_id, fence_epoch, kind, logical_path,
+                content_artifact_id, sha256, size_bytes, content_type, created_date, created_by, last_modified_date, last_modified_by)
+            VALUES ({fresh.Id}, {fresh.TeamId}, {fresh.AgentRunId}, {fresh.WorkflowRunId}, {fresh.FenceEpoch}, {fresh.Kind.ToString()}, {fresh.LogicalPath},
+                {fresh.ContentArtifactId}, {fresh.Sha256}, {fresh.SizeBytes}, {fresh.ContentType}, {now}, {actorId}, {now}, {actorId})
+            """, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Set-based publication deliberately leaves existing tracked instances as caller-owned snapshots. These
+    // public reads query the database afresh; callers needing to refresh their own instance must explicitly reload.
     public async Task<IReadOnlyList<ArtifactManifest>> ListForAgentRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ArtifactManifest.AsNoTracking()
             .Where(m => m.AgentRunId == agentRunId && m.TeamId == teamId)
