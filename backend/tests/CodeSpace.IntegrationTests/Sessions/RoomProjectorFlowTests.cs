@@ -682,6 +682,53 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task An_agent_approval_whose_co_sign_faulted_is_still_verified_not_unreviewed()
+    {
+        // D② reachable in production: the S8 agent reviewer approves, so the executor asks the independent model for
+        // a co-sign; the co-sign FAULTS and the critic's own review.skipped beat lands on the ledger — but the
+        // agent's approval still stands (fail-open), so a review.completed beat for the SAME reviewed unit follows
+        // right after it. Before the threading fix the skip carried no agentRunId and fell back to its ledger CELL
+        // while the completed beat grouped by the real id: the fold read ONE reviewed unit as TWO, and the stray
+        // skip (Approved: null) outranked the run's own approval, painting a clean pass as "could not run".
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Co-sign faulted, agent approval stands");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the fix", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Shipped the fix.");
+
+        var agentRunId = Guid.NewGuid();
+        await SeedUnreviewedOutputAsync(run, "InvalidOperationException: the independent model co-check faulted", agentRunId: agentRunId);
+        await SeedReviewVerdictAsync(run, approved: true, reason: "looks complete", agentRunId: agentRunId);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true, "the agent's own approval is the reviewed unit's LATEST word — a co-sign it fails open over must not read as the unit having never been reviewed");
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(CriticArtifactKinds.WorkflowPlan)]
+    [InlineData(CriticArtifactKinds.SupervisorDecision)]
+    public async Task A_skipped_review_of_a_non_OUTPUT_artifact_never_taints_the_output_review(string artifactKind)
+    {
+        // The output-review probe is scoped to the two OUTPUT artifact kinds (agent change / agent answer) precisely
+        // so a plan critic's or a decision critic's own review.skipped beat — which never names an agent run at all
+        // — can never be mistaken for THIS run's result going unreviewed.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Non-output review skipped, output review clean");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the fix", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Shipped the fix.");
+        await SeedUnreviewedOutputAsync(run, "no reviewer model", artifactKind: artifactKind);
+        await SeedReviewVerdictAsync(run, approved: true, reason: "looks complete");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(true, "a plan/decision review's own silence says nothing about the RESULT — only the output review's two artifact kinds may taint this fold");
+        result.VerificationNote.ShouldBeNull();
+    }
+
+    [Fact]
     public async Task A_plan_map_run_that_reached_Success_with_a_REJECTED_branch_names_it_instead_of_claiming_verified()
     {
         // The defect: the RESULT card read acceptance ONLY off the supervisor stop tape, which the quick and plan-map
@@ -1647,10 +1694,13 @@ public class RoomProjectorFlowTests
 
     /// <summary>
     /// 5.6 residual — the OUTPUT review's <c>review.skipped</c> beat: both the S8 agent reviewer and the model-critic
-    /// fallback exhausted without a verdict, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it (no
-    /// <c>agentRunId</c> key at all — it never names the unit, only the CELL it lands on).
+    /// fallback exhausted without a verdict, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it.
+    /// <paramref name="agentRunId"/> defaults to absent (never names the unit, only the CELL it lands on) — pass it to
+    /// simulate a faulted D② co-sign, whose request now names the SAME unit a sibling <c>review.completed</c> beat
+    /// does. <paramref name="artifactKind"/> defaults to the OUTPUT review's own kind; pass a plan/decision kind to
+    /// simulate a DIFFERENT rung's skip landing on this run's ledger.
     /// </summary>
-    private async Task SeedUnreviewedOutputAsync(Guid runId, string reason, string nodeId = "agent", string iterationKey = "")
+    private async Task SeedUnreviewedOutputAsync(Guid runId, string reason, string nodeId = "agent", string iterationKey = "", Guid? agentRunId = null, string artifactKind = CriticArtifactKinds.AgentChange)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1658,7 +1708,7 @@ public class RoomProjectorFlowTests
         db.WorkflowRunRecord.Add(new WorkflowRunRecord
         {
             Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewSkipped, NodeId = nodeId, IterationKey = iterationKey, OccurredAt = DateTimeOffset.UtcNow,
-            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.SkippedCallKind, mode = "Gate", artifact_kind = CriticArtifactKinds.AgentChange, reason }),
+            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.SkippedCallKind, mode = "Gate", artifact_kind = artifactKind, reason, agentRunId }),
         });
         await db.SaveChangesAsync();
     }

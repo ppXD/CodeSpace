@@ -198,6 +198,29 @@ public class LlmStructuredCriticTests
         log.Entries.ShouldContain(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning, "a review that stopped happening is a Warning, never a swallow");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_skipped_beats_agentRunId_key_always_rides_valued_ONLY_when_the_request_names_a_unit(bool namesAgentRun)
+    {
+        // 5.6 residual: AgentRunExecutor.BuildReviewRequestAsync threads the reviewed unit's AgentRunId onto the
+        // OUTPUT review's request (the model rung + the D② co-sign) so a review.skipped beat groups into the SAME
+        // fold unit as a review.completed beat for that run (RoomProjector.FoldReviewVerdicts keys on it). A
+        // plan/decision review names none — the key still rides, valued null, the same "always present" shape
+        // reviewerModel already uses, so a reader tells "no unit named" from "the key was never written" one way.
+        var agentRunId = namesAgentRun ? Guid.NewGuid() : (Guid?)null;
+        var request = new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = "a", Goal = "g", CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = agentRunId };
+
+        var (ledger, _, verdict) = await ReviewUnderScopeAsync(new PickByRowSelector(resolves: false), new KindCapturingClient(new List<string?>()), request: request);
+
+        verdict.Failed.ShouldBeTrue("no reviewer ⇒ fail-open");
+
+        var idProperty = ledger.Calls.ShouldHaveSingleItem().Payload.GetProperty("agentRunId");
+
+        if (namesAgentRun) idProperty.GetString().ShouldBe(agentRunId.ToString());
+        else idProperty.ValueKind.ShouldBe(JsonValueKind.Null, "a plan/decision review names no unit — unchanged");
+    }
+
     [Fact]
     public async Task A_faulted_review_call_carries_the_exception_type_and_message_head_as_its_reason()
     {
@@ -308,9 +331,9 @@ public class LlmStructuredCriticTests
 
     private static CriticRequest Request() => new() { Mode = ReviewMode.Gate, ArtifactKind = "plan", Artifact = "a", Goal = "g" };
 
-    /// <summary>One review under an ambient run scope, returning what reached the ledger, what was logged, and the verdict.</summary>
+    /// <summary>One review under an ambient run scope, returning what reached the ledger, what was logged, and the verdict. <paramref name="request"/> defaults to the plain plan-shaped <see cref="Request"/>.</summary>
     private static async Task<(CapturingLedger Ledger, CapturingLogger<LlmStructuredCritic> Log, CriticVerdict Verdict)> ReviewUnderScopeAsync(
-        IModelPoolSelector selector, Core.Services.Workflows.Llm.ILLMClient client, bool throwOnRecord = false)
+        IModelPoolSelector selector, Core.Services.Workflows.Llm.ILLMClient client, bool throwOnRecord = false, CriticRequest? request = null)
     {
         var ledger = new CapturingLedger { ThrowOnRecord = throwOnRecord };
         var log = new CapturingLogger<LlmStructuredCritic>();
@@ -318,7 +341,7 @@ public class LlmStructuredCriticTests
 
         using (Core.Services.Workflows.Llm.LlmCallContext.Push(new Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "sup", "sup#turn0", "supervisor.decision", ledger, Offloader: null!)))
         {
-            return (ledger, log, await critic.ReviewAsync(Request(), Guid.NewGuid(), reviewerModelId: Guid.NewGuid(), CancellationToken.None));
+            return (ledger, log, await critic.ReviewAsync(request ?? Request(), Guid.NewGuid(), reviewerModelId: Guid.NewGuid(), CancellationToken.None));
         }
     }
 
