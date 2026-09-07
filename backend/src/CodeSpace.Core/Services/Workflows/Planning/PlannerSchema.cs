@@ -9,15 +9,15 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// pinned by a unit test — a drift in either the schema or the property mapping is a contract change a
 /// reviewer must see, not an invisible refactor.
 ///
-/// <para>The schema's property names map 1:1 onto the model-authored projection of <c>PlannedWorkflow</c> /
-/// <c>PlannedSubtask</c>; server-stamped provenance and server/runtime-only fields on reused acceptance records are
-/// explicit exclusions in the contract test. The options are case-insensitive so the model's <c>goal</c> binds to
+/// <para>The schema's property names map onto the model-authored projection of <c>PlannedWorkflow</c> /
+/// <c>PlannedSubtask</c>, with a versioned <see cref="PlannerAcceptanceDraft"/> mapped explicitly into the existing
+/// runtime acceptance contract. Server-stamped provenance remains outside model input. The options are case-insensitive so the model's <c>goal</c> binds to
 /// <c>Goal</c>. <c>additionalProperties: false</c> + <c>required</c> keep the model from inventing fields or dropping
 /// the ones the projector depends on; <c>subtasks</c> is bounded <c>[1,20]</c>.</para>
 /// </summary>
 public static class PlannerSchema
 {
-    /// <summary>The JSON-Schema (root object) the structured-LLM call is constrained to. The deserialized <c>PlannedWorkflow</c> round-trips from any object that conforms.</summary>
+    /// <summary>The JSON schema constraining fresh model output. PlannerAcceptanceDraft maps its typed acceptance payloads before the normalized PlannedWorkflow reaches persistence or execution.</summary>
     public static readonly JsonElement ResponseSchema = JsonDocument.Parse("""
         {
           "type": "object",
@@ -45,13 +45,15 @@ public static class PlannerSchema
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "For kind=TestsPass (default): an argv the server runs to OBJECTIVELY verify this subtask is done. For every other kind: the repo-relative DELIVERABLE file paths the oracle reads (ArtifactPresent: must exist; LlmJudge: judged against the rubric; CitationsResolve: every citation must resolve; ArtifactSchema: must validate against the schema)." },
-                      "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema"], "description": "Which objective oracle verifies this — TestsPass (run the argv, exit 0) for code; for research/analysis/data output: ArtifactPresent (deliverables exist), LlmJudge (an independent judge grades the deliverables against the rubric — author the rubric), CitationsResolve (every markdown citation in the deliverables resolves), ArtifactSchema (each deliverable validates against the schema — author the schema). Omit for TestsPass." },
+                      "formatVersion": { "type": "integer", "enum": [2], "description": "Typed acceptance wire version. Always 2; legacy command payloads are not accepted from a fresh planner response." },
+                      "argv": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Required only for TestsPass. Exact executable followed by its individual arguments; preserve empty and whitespace arguments. Never shell-split or put file obligations here. Omit artifactPaths." },
+                      "artifactPaths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Required for ArtifactPresent, LlmJudge, CitationsResolve or ArtifactSchema. Workspace-relative deliverable file paths that this oracle reads. These are literal paths, not executable names, shell commands or argv. Omit argv." },
+                      "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent", "LlmJudge", "CitationsResolve", "ArtifactSchema"], "description": "Required oracle choice based on the evidence needed, independently of task type. TestsPass executes argv and requires exit 0; ArtifactPresent checks file existence; LlmJudge evaluates file content against rubric; CitationsResolve checks citations; ArtifactSchema validates file content against schema. File existence cannot replace a required behavioral or content check." },
                       "rubric": { "type": "object", "additionalProperties": false, "properties": { "criteria": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string" }, "requirement": { "type": "string", "description": "A concrete requirement judgeable on the deliverable alone, e.g. 'names at least three competitors with sources'." }, "weight": { "type": "number", "description": "Relative weight (omit for 1)." } }, "required": ["id", "requirement"] } }, "threshold": { "type": "number", "description": "Weighted met-fraction (0..1] required to pass. Omit for 1.0 — every criterion." } }, "required": ["criteria"], "description": "REQUIRED for kind=LlmJudge: the weighted BINARY criteria an independent judge grades the deliverables against." },
                       "schema": { "type": "object", "additionalProperties": true, "description": "REQUIRED for kind=ArtifactSchema: the JSON schema each deliverable file must validate against (required / type / enum / nested properties+items)." },
                       "description": { "type": "string", "description": "Optional human-readable description of the subtask's acceptance check." }
                     },
-                    "required": ["command"],
+                    "required": ["formatVersion", "kind"],
                     "description": "Optional per-subtask acceptance — the unit's objective definition of done, authored WITH the task so the evaluation layer grades against the plan's own contract."
                   }
                 },

@@ -139,7 +139,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         try
         {
-            plan = json.Deserialize<PlannedWorkflow>(PlannerSchema.Options);
+            plan = PlannerAcceptanceDraft.ReadResponse(json);
         }
         catch (JsonException ex)
         {
@@ -162,7 +162,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     internal const string SystemPrompt =
         "You are a senior engineer turning a free-text task into a concrete, reviewable plan. " +
         "A task's DELIVERABLE may be an answer, a written document, a code change or read-only research findings — " +
-        "read which one is being asked for and match each subtask's kind and acceptance to it, rather than assuming code. " +
+        "identify the requested result and the evidence that would establish completion. " +
         "Break the task into a small number of ordered, independently-executable subtasks (1–20). " +
         "Give each subtask a stable id, a short title, and a concrete instruction. " +
         "State the success criteria a reviewer would check and the main risks. " +
@@ -171,9 +171,14 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         "When a capability catalog is provided, you MAY give each subtask its best-fit harness + model from it — pick a " +
         "model from the listed pool and a harness whose providers can drive that model's provider; omit them to use the " +
         "run defaults. " +
-        "When a subtask's completion can be OBJECTIVELY verified, author its acceptance: a test/check command argv " +
-        "(kind TestsPass) for code, or the deliverable file paths (kind ArtifactPresent) for research/analysis output — " +
-        "omit it when no objective check exists. Add short subjective acceptanceCriteria a reviewer checks when they " +
+        "When a subtask's completion can be objectively verified, author acceptance with formatVersion 2 and an explicit oracle kind. " +
+        "TestsPass uses argv: the exact executable and argument tokens, including any intentional empty arguments. " +
+        "ArtifactPresent, LlmJudge, CitationsResolve and ArtifactSchema use artifactPaths: workspace-relative files the selected oracle reads. " +
+        "Choose the oracle for the required evidence independently of the subtask's kind; neither coding nor research determines the oracle. " +
+        "Supply exactly one of argv or artifactPaths. A file-presence requirement names files in artifactPaths; executable checks belong in argv. " +
+        "LlmJudge also requires its rubric, and ArtifactSchema its schema. Do not substitute existence for required content or behavioral verification. " +
+        "A proposal is not evidence that a command ran or that an execution workspace or dependency is available. " +
+        "Omit acceptance when no objective check exists. Add short subjective acceptanceCriteria a reviewer checks when they " +
         "add real signal. Use dependsOn to order subtasks that need another subtask's result; you MAY type each " +
         "subtask with a short open kind (research / code / analysis / write). " +
         "When the goal leaves a REAL direction choice open, author up to 3 questions, each with 2-4 mutually " +

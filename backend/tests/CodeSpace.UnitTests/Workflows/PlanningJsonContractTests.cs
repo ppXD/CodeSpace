@@ -27,10 +27,17 @@ public sealed class PlanningJsonContractTests
         AssertProperties(serializedSubtask, subtaskSchema);
         AssertRequired<PlannedSubtask>(subtaskSchema, AgentJson.Options);
 
-        var serializedAcceptance = serializedSubtask.GetProperty("acceptance");
+        // The fresh model wire is versioned separately from the normalized runtime plan. This property probe
+        // populates every wire field; the mutually exclusive payload/kind rules have execution-boundary tests.
+        var runtimeAcceptance = FullSubtask().Acceptance!;
+        var serializedAcceptance = JsonSerializer.SerializeToElement(new PlannerAcceptanceDraft
+        {
+            FormatVersion = 2, Kind = BenchmarkGradingKind.LlmJudge, Argv = new[] { "dotnet", "test" }, ArtifactPaths = new[] { "report.md" },
+            Description = runtimeAcceptance.Description, Rubric = runtimeAcceptance.Rubric, Schema = runtimeAcceptance.Schema,
+        }, AgentJson.Options);
         var acceptanceSchema = subtaskSchema.GetProperty("properties").GetProperty("acceptance");
-        AssertProperties(serializedAcceptance, acceptanceSchema, "protectedPaths", "setupCommand", "timeoutSeconds");
-        AssertRequired<SupervisorAcceptanceSpec>(acceptanceSchema, AgentJson.Options);
+        AssertProperties(serializedAcceptance, acceptanceSchema);
+        AssertRequired<PlannerAcceptanceDraft>(acceptanceSchema, AgentJson.Options);
 
         var serializedRubric = serializedAcceptance.GetProperty("rubric");
         var rubricSchema = acceptanceSchema.GetProperty("properties").GetProperty("rubric");
