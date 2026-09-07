@@ -830,13 +830,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(bounds);
         }
 
-        // A1.5 — the action mask: name what CANNOT advance the run this turn, so a futile verb is refused before
-        // the model spends a turn on it. Null when everything is available ⇒ byte-identical prompt for a healthy run.
-        if (SupervisorActionMask.Render(context) is { } mask)
-        {
-            builder.AppendLine();
-            builder.AppendLine(mask);
-        }
+        // A1.5 — the turn's VERB ROSTER, offered half then masked half, both read off SupervisorActionMask. The
+        // roster used to be a static sentence in the SYSTEM prompt naming all seven verbs on every turn, which
+        // presented a masked verb as choosable three lines above the block forbidding it (golden
+        // `resolve-cap-spent`, 2 of 4 branch lanes). Always renders: the model must be told what it may emit, and
+        // an offerable verb always exists — plan / ask_human / stop are never masked.
+        builder.AppendLine();
+        builder.AppendLine(SupervisorActionRoster.Render(context));
 
         // P5-6 — the reducer's own "if you stopped now" verdict, prerendered at rehydrate (the prompt build stays
         // pure). Null for contract-less / pre-F0 runs ⇒ byte-identical prompt.
@@ -1029,7 +1029,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             AppendBlockedSpawn(builder, prior, blocked);
 
             if (SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } stagingConflict)
-                AppendConflictedIntegration(builder, prior.DecisionKind, "then re-author the spawn that was withheld", stagingConflict);
+                AppendConflictedIntegration(builder, prior.DecisionKind, "then re-author the spawn that was withheld", stagingConflict, resolveExhausted);
 
             return;
         }
@@ -1049,7 +1049,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // and reverted — the mutation test proved it dead code (re-gating reddened nothing).
         if (prior.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } integration)
         {
-            AppendConflictedIntegration(builder, prior.DecisionKind, "then you merge again", integration);
+            AppendConflictedIntegration(builder, prior.DecisionKind, "then you merge again", integration, resolveExhausted);
             return;
         }
 
@@ -1505,8 +1505,23 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine(Agents.AcceptanceEvidenceRenderer.Render(result.AcceptanceEvidenceTail, result.AcceptanceEvidenceId, "        | "));
     }
 
-    /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>
-    private static void AppendConflictedIntegration(StringBuilder builder, string decisionKind, string afterResolve, SupervisorIntegrationOutcome integration)
+    /// <summary>The conflicted-integration block's closing line once the resolve cap is spent — a fact, and no third steer. Named so the golden corpus's re-pin receipt can wind this commit's rendering back without restating live copy.</summary>
+    internal const string ResolveWithdrawnOnAConflictedIntegration = "    'resolve' is NOT available on this run any more — the resolve cap is spent, so a further reconciliation attempt would FORCE-STOP the run instead of reconciling.";
+
+    /// <summary>
+    /// Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the
+    /// moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).
+    ///
+    /// <para>The closing line is CAP-AWARE for the same reason <see cref="AppendResolutionVerdict"/>'s is: with the
+    /// resolve cap spent, a further resolve does not get refused — it FORCE-STOPS the run — so "To reconcile: choose
+    /// 'resolve' … then you merge again" offered the model BOTH verbs the mask and the stopped-now steer had already
+    /// withdrawn, in the closest, loudest block on the tape. That is the contradiction golden
+    /// <c>resolve-cap-spent</c> answered twice on the gating wire, once with each verb it names. Past the cap the
+    /// line states the fact and stops: what to do INSTEAD is owned by the resolution verdict above it (three-way and
+    /// already cap-aware) and by the stopped-now steer below it (<see cref="SupervisorActionMask.LandingReachFor"/>)
+    /// — a third steer authored here could only disagree with one of them.</para>
+    /// </summary>
+    private static void AppendConflictedIntegration(StringBuilder builder, string decisionKind, string afterResolve, SupervisorIntegrationOutcome integration, bool resolveExhausted)
     {
         builder.AppendLine($"- {decisionKind}: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
         builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
@@ -1516,8 +1531,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // The verb is named EXPLICITLY here (M0, 2026-07-11): the live golden eval proved a model picks its verb off
         // this copy, and the reconciling agent is the SERVER's to spawn — a model that reads "spawn ONE agent" emits
-        // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation.
-        builder.AppendLine($"    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, {afterResolve}. Or stop to leave the conflict for a human.");
+        // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation. That same
+        // proof is why the exhausted arm names NEITHER verb rather than softening the invitation.
+        builder.AppendLine(resolveExhausted
+            ? ResolveWithdrawnOnAConflictedIntegration
+            : $"    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, {afterResolve}. Or stop to leave the conflict for a human.");
     }
 
     /// <summary>
@@ -1589,15 +1607,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
     private const string SystemPrompt =
         "You are a software-delivery supervisor driving a bounded loop of decisions toward a goal. " +
-        "On each turn you emit ONE action from a fixed vocabulary: 'plan' (decompose the goal into subtasks), " +
-        "'spawn' (fan out coding agents over planned subtask ids), 'retry' (re-run one subtask), " +
-        "'merge' (synthesize the agents' results), 'resolve' (reconcile a CONFLICTED integration — the server spawns " +
-        "ONE reconciling agent from the recorded conflict; you name no subtask and author no branches), " +
-        "'ask_human' (ask a question), 'stop' (finish). " +
+        "On each turn you emit ONE action. " + SupervisorActionRoster.SystemPromptPointer + " " +
         "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
-        "succeeded — and when an integration reports CONFLICTED, 'resolve' it before merging again. " +
+        "succeeded — and when an integration reports CONFLICTED and the turn still offers 'resolve', resolve it before " +
+        "merging again. " +
         "Stop when the goal is met or a bound forces it. " +
         "When you spawn, you MAY optionally author a per-agent 'agents[]' override (one entry per subtask id) to give " +
         "each agent a DISTINCT role, goal, repo subset, harness, model, persona, or a LOWER autonomy — use it when the " +
@@ -1624,9 +1639,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +
         "work is wanted. A follow-up that asks for NEW or ADDITIONAL work — even building on prior turns, or touching the " +
         "same file/endpoint/area as prior work — is NOT redundant; plan it. " +
-        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; choose 'resolve' — the " +
-        "server spawns ONE agent that reconciles the preserved branches, builds, and runs the tests (then merge again) — " +
-        "or stop to leave the conflict for a human — never accept an unverified resolution. " +
+        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; choose 'resolve' while " +
+        "the turn's AVAILABLE ACTIONS block still offers it — the server spawns ONE agent that reconciles the preserved " +
+        "branches, builds, and runs the tests (then merge again) — or stop to leave the conflict for a human — never " +
+        "accept an unverified resolution. Once the reconciliation budget is spent, 'resolve' is withdrawn — and an " +
+        "UNVERIFIED reconciliation must not be merged either: stop with outcome 'gave_up', or ask_human to rule. " +
         "If the context shows a PLAN-CONFIRMATION question (it asks the human to confirm a plan version) that was just " +
         "answered: an approving answer means the plan is confirmed — proceed to 'spawn' its subtasks; ANY other answer " +
         "is the operator's revision feedback — author a REVISED 'plan' that incorporates it (keep what they liked, " +
