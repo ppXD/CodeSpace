@@ -33,6 +33,9 @@ export interface LaunchCaps {
  * design-ahead and intentionally absent from this shape until their backend seams land.
  */
 export interface LaunchTaskInput {
+  /** Server-owned preview reference for this exact input. It is not consent or an execution grant. */
+  routeSnapshotId?: string;
+  recipe?: string;
   taskText: string;
   surfaceKind: TaskSurfaceKind;
   /** Continue an existing work session as its NEXT top-level turn. Binds to `LaunchTaskCommand.SessionId`
@@ -190,6 +193,10 @@ export interface RoutePlan {
 
 /** Mirror of the backend `TaskRoutePreviewResult`. */
 export interface TaskRoutePreviewResult {
+  /** Optional for compatibility with an older server. Current previews always return the reference and database timestamps. */
+  routeSnapshotId?: string;
+  expiresAt?: string;
+  createdAt?: string;
   route: RoutePlan;
   /** This deployment's own autonomy ceiling (`Sandbox:MaxAutonomy`) — already folded into `route.caps.autonomyCeiling`,
    *  and named separately so the composer's posture line can say WHICH bound denied the network: a route ceiling the
@@ -197,20 +204,8 @@ export interface TaskRoutePreviewResult {
   deploymentAutonomyCeiling: string;
 }
 
-/** The WIRED subset of `PreviewTaskRouteCommand` — every field that actually changes the router's answer, and
- *  nothing else. Built ONLY by `buildRoutePreviewInput`, which derives it from the launch input so the previewed
- *  route is the route the launch would take. */
-export interface RoutePreviewInput {
-  taskText: string;
-  surfaceKind: TaskSurfaceKind;
-  repositoryId?: string;
-  relatedRepositories?: LaunchRelatedRepository[];
-  baseBranch?: string;
-  effort?: string;
-  caps?: LaunchCaps;
-  autonomyCeiling?: string;
-  deliverableShape?: string;
-}
+/** Preview binds the entire launch intent; controls recorded here are not claims of enforcement. */
+export type RoutePreviewInput = Omit<LaunchTaskInput, "routeSnapshotId">;
 
 export const tasksApi = {
   // Launch a run from a task spec — the run resource is rooted at api/workflows/runs (the substrate is the
@@ -221,7 +216,7 @@ export const tasksApi = {
   specPreview: (input: { goal: string; repositoryId?: string }) =>
     fetchJson<CompileTaskSpecResult>("/api/workflows/runs/spec-preview", { method: "POST", body: JSON.stringify(input) }),
   // Preview the ROUTE a launch would take — same seed provider, same router, same request mapping as the launch
-  // itself. Read-only: no session is opened, no run is staged, nothing is persisted.
+  // itself. Persists a decision reference; opens no session and stages no run.
   routePreview: (input: RoutePreviewInput) =>
     fetchJson<TaskRoutePreviewResult>("/api/workflows/runs/route-preview", { method: "POST", body: JSON.stringify(input) }),
 };

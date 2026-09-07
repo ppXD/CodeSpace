@@ -306,34 +306,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   return input;
 }
 
-/**
- * B1: the ROUTE-PREVIEW payload — DERIVED from {@link buildLaunchInput}, never assembled separately. The preview
- * only means anything if it routes the launch the operator is actually about to send, and every field below
- * genuinely moves the answer: `effort` picks the tier (or asks the classifier), `caps` + `autonomyCeiling` merge
- * onto the preset's bounds, `surfaceKind` selects the seed provider, and repo / branch / related repos shape the
- * seed the classifier reads and the scope guard validates. Sending a bare goal previewed a DIFFERENT launch.
- *
- * <p>Execution overrides (model, harness, persona, runner, review modes, timeouts, quality tier) are absent
- * because the router never reads them — including them would imply this predicts more than it does. `recipe` is
- * absent because the composer has no control that pins one; the backend command still accepts it.</p>
- */
+/** Bind the same complete intent that launch will send. This preserves controls without claiming the router executes them. */
 export function buildRoutePreviewInput(state: LaunchFormState): RoutePreviewInput {
-  const launch = buildLaunchInput(state);
-
-  const input: RoutePreviewInput = {
-    taskText: launch.taskText,
-    surfaceKind: launch.surfaceKind,
-  };
-
-  if (launch.repositoryId) input.repositoryId = launch.repositoryId;
-  if (launch.baseBranch) input.baseBranch = launch.baseBranch;
-  if (launch.effort) input.effort = launch.effort;
-  if (launch.relatedRepositories) input.relatedRepositories = launch.relatedRepositories;
-  if (launch.caps) input.caps = launch.caps;
-  if (launch.autonomyCeiling) input.autonomyCeiling = launch.autonomyCeiling;
-  if (launch.deliverableShape) input.deliverableShape = launch.deliverableShape;
-
-  return input;
+  return buildLaunchInput(state);
 }
 
 /** Every workspace repo EXCEPT the primary becomes a related-repository. Blank alias ⇒ omitted (the

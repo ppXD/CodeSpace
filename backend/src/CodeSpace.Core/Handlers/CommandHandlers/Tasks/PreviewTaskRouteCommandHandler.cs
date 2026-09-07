@@ -27,18 +27,5 @@ public sealed class PreviewTaskRouteCommandHandler : IRequestHandler<PreviewTask
     }
 
     public Task<TaskRoutePreviewResult> Handle(PreviewTaskRouteCommand request, CancellationToken cancellationToken) =>
-        _service.PreviewAsync(new TaskLaunchRequest
-        {
-            TeamId = _currentTeam.Id!.Value,
-            ActorUserId = _currentUser.Id!.Value,
-            SurfaceKind = request.SurfaceKind,
-            TaskText = request.TaskText,
-            RepositoryId = request.RepositoryId,
-            RelatedRepositories = request.RelatedRepositories,
-            BaseBranch = request.BaseBranch,
-            RequestedEffort = request.Effort,
-            RequestedRecipe = request.Recipe,
-            DeliverableShape = request.DeliverableShape,
-            CapsOverride = LaunchTaskCommandHandler.BuildCapsOverride(request.Caps, request.AutonomyCeiling),
-        }, cancellationToken);
+        _service.PreviewAsync(LaunchTaskCommandHandler.BuildRequest(request, _currentTeam.Id!.Value, _currentUser.Id!.Value), cancellationToken);
 }

@@ -452,12 +452,12 @@ describe("buildLaunchInput — network access (B5)", () => {
     expect(buildLaunchInput(form({ effort: "deep" })).autonomy).toBe("Standard");
   });
 
-  it("never reaches the route preview, which the router routes without the requested tier", () => {
+  it("binds requested autonomy in the preview without granting that tier", () => {
     // The preview predicts the ROUTE; the requested tier moves no routing decision, so carrying it would imply the
     // preview says more than it does. The ceiling — which the router DOES merge — still rides.
     const preview = buildRoutePreviewInput(form({ effort: "deep", autonomy: "Trusted", autonomyCeiling: "Standard" }));
 
-    expect(preview).not.toHaveProperty("autonomy");
+    expect(preview.autonomy).toBe("Standard");
     expect(preview.autonomyCeiling).toBe("Standard");
   });
 
@@ -652,20 +652,17 @@ describe("buildRoutePreviewInput (B1)", () => {
     expect(preview.relatedRepositories).toEqual([{ repositoryId: "second", access: "read", alias: "web" }]);
   });
 
-  it("omits the execution overrides the router never reads", () => {
-    // Including them would imply the preview predicts more than it does — the router sees none of these.
-    const preview = buildRoutePreviewInput(form({ model: "gpt-5-codex", harness: "codex", agentDefinitionId: "a1", runnerKind: "local", tier: "Delivery", acceptanceChecks: ["sh", "check.sh"] }));
-
-    for (const field of ["model", "harness", "agentDefinitionId", "runnerKind", "autonomy", "tier", "acceptanceChecks", "timeoutSeconds"]) {
-      expect(preview).not.toHaveProperty(field);
-    }
+  it("binds the complete launch intent including controls the router does not execute", () => {
+    const state = form({ model: "gpt-5-codex", harness: "codex", agentDefinitionId: "a1", runnerKind: "local", tier: "Delivery", acceptanceChecks: ["sh", "check.sh"] });
+    expect(buildRoutePreviewInput(state)).toEqual(buildLaunchInput(state));
+    expect(buildRoutePreviewInput(state)).toMatchObject({ model: "gpt-5-codex", tier: "Delivery", acceptanceChecks: ["sh", "check.sh"] });
   });
 
-  it("omits an unset optional rather than sending null (the backend treats absent as 'not named')", () => {
+  it("uses the same null and omitted optional values as launch", () => {
     const preview = buildRoutePreviewInput(form({ workspace: [], effort: "quick" }));
 
-    expect(preview).not.toHaveProperty("repositoryId");
-    expect(preview).not.toHaveProperty("baseBranch");
+    expect(preview.repositoryId).toBeNull();
+    expect(preview.baseBranch).toBeNull();
     expect(preview).not.toHaveProperty("caps");
     expect(preview).toMatchObject({ taskText: "do the thing", surfaceKind: "chat", effort: "quick" });
   });

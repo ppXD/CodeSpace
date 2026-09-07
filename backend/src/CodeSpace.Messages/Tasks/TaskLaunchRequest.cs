@@ -14,6 +14,9 @@ namespace CodeSpace.Messages.Tasks;
 /// </summary>
 public sealed record TaskLaunchRequest
 {
+    /// <summary>Optional server-owned preview reference. A binding to routing intent, never an authorization receipt.</summary>
+    public Guid? RouteSnapshotId { get; init; }
+
     /// <summary>The team (tenancy) the task runs under — sourced from <c>ICurrentTeam</c>, never the wire.</summary>
     public required Guid TeamId { get; init; }
 

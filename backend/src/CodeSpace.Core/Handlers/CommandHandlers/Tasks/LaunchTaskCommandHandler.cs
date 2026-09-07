@@ -29,34 +29,37 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
     }
 
     public Task<LaunchTaskResult> Handle(LaunchTaskCommand request, CancellationToken cancellationToken) =>
-        _service.LaunchAsync(new TaskLaunchRequest
-        {
-            TeamId = _currentTeam.Id!.Value,
-            ActorUserId = _currentUser.Id!.Value,
-            SurfaceKind = request.SurfaceKind,
-            TaskText = request.TaskText,
-            ContinueSessionId = request.SessionId,
-            RepositoryId = request.RepositoryId,
-            RelatedRepositories = request.RelatedRepositories,
-            BaseBranch = request.BaseBranch,
-            CompletionMode = request.CompletionMode,
-            RequestedEffort = request.Effort,
-            DeliverableShape = request.DeliverableShape,
-            Autonomy = request.Autonomy,
-            Overrides = BuildOverrides(request),
-            CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),
-            AllowedModelIds = request.AllowedModelIds,
-            AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds,
-            AcceptanceCriteria = request.AcceptanceCriteria,
-            AcceptanceChecks = request.AcceptanceChecks,
-            DeliverySpec = request.DeliverySpec,
-            RequirePlanConfirmation = request.RequirePlanConfirmation,
-            PlannerReviewMode = request.PlannerReviewMode,
-            DecisionReviewMode = request.DecisionReviewMode,
-            ReviewerModelId = request.ReviewerModelId,
-            Tier = request.Tier,
-            SurfacePayload = BuildSurfacePayload(request),
-        }, cancellationToken);
+        _service.LaunchAsync(BuildRequest(request, _currentTeam.Id!.Value, _currentUser.Id!.Value) with { RouteSnapshotId = request.RouteSnapshotId }, cancellationToken);
+
+    internal static TaskLaunchRequest BuildRequest(TaskLaunchInput request, Guid teamId, Guid actorUserId) => new()
+    {
+        TeamId = teamId,
+        ActorUserId = actorUserId,
+        SurfaceKind = request.SurfaceKind,
+        TaskText = request.TaskText,
+        ContinueSessionId = request.SessionId,
+        RepositoryId = request.RepositoryId,
+        RelatedRepositories = request.RelatedRepositories,
+        BaseBranch = request.BaseBranch,
+        CompletionMode = request.CompletionMode,
+        RequestedEffort = request.Effort,
+        RequestedRecipe = request.Recipe,
+        DeliverableShape = request.DeliverableShape,
+        Autonomy = request.Autonomy,
+        Overrides = BuildOverrides(request),
+        CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),
+        AllowedModelIds = request.AllowedModelIds,
+        AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds,
+        AcceptanceCriteria = request.AcceptanceCriteria,
+        AcceptanceChecks = request.AcceptanceChecks,
+        DeliverySpec = request.DeliverySpec,
+        RequirePlanConfirmation = request.RequirePlanConfirmation,
+        PlannerReviewMode = request.PlannerReviewMode,
+        DecisionReviewMode = request.DecisionReviewMode,
+        ReviewerModelId = request.ReviewerModelId,
+        Tier = request.Tier,
+        SurfacePayload = BuildSurfacePayload(request),
+    };
 
     /// <summary>Project the operator's safety-budget caps + autonomy ceiling onto the router's <c>CapsOverride</c> seam. Both null / empty ⇒ null (the launch service then leaves the router override unset — byte-identical to the preset-only path). A set-but-invalid numeric cap fails LOUD (<see cref="ArgumentException"/>) here rather than silently degrading to "no cap" downstream. The autonomy ceiling rides the SAME seam (it is a <c>RouteCaps</c> field): the router merges it TIGHTEN-ONLY onto the preset's ceiling and <c>ClampAutonomy</c> then clamps the run's autonomy to it. Internal (not private) so the mapping + empty-collapse + reject is unit-pinned directly (InternalsVisibleTo), like <c>TaskLaunchService.BuildAgentProfile</c>.</summary>
     internal static RouteCaps? BuildCapsOverride(TaskCapsOverride? caps, string? autonomyCeiling = null)
@@ -72,7 +75,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
         return ceiling is null ? routeCaps : routeCaps with { AutonomyCeiling = ceiling };
     }
 
-    private static TaskExecutionOverrides BuildOverrides(LaunchTaskCommand request) => new()
+    private static TaskExecutionOverrides BuildOverrides(TaskLaunchInput request) => new()
     {
         Harness = request.Harness,
         Model = request.Model,
@@ -93,7 +96,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
     };
 
     /// <summary>Carries the opaque <c>LaunchContext.Raw</c> through under its surface-kind key for the resolved seed provider to read — the handler never interprets it. Absent context ⇒ an empty payload.</summary>
-    private static IReadOnlyDictionary<string, JsonElement> BuildSurfacePayload(LaunchTaskCommand request)
+    private static IReadOnlyDictionary<string, JsonElement> BuildSurfacePayload(TaskLaunchInput request)
     {
         if (request.LaunchContext == null) return new Dictionary<string, JsonElement>();
 
