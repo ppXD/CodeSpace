@@ -9,6 +9,8 @@ public class WorkflowRunWaitConfiguration : IEntityTypeConfiguration<WorkflowRun
     public void Configure(EntityTypeBuilder<WorkflowRunWait> builder)
     {
         builder.HasKey(w => w.Id);
+        builder.HasIndex(w => new { w.LastAgentRecoveryAttemptAt, w.CreatedAt, w.Id }).HasDatabaseName("idx_workflow_run_wait_agent_recovery")
+            .HasFilter("status = 'Pending' AND wait_kind = 'AgentRun'");
 
         builder.Property(w => w.WaitKind).HasMaxLength(24);   // widened with 0054 to fit 'SupervisorDecision' (18) — keep in lockstep with the migration's VARCHAR(24)
         builder.Property(w => w.Status).HasMaxLength(16);
