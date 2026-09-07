@@ -53,6 +53,31 @@ public sealed class LocalGitBranchIntegratorFlowTests
         (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "d-new.txt")).Trim().ShouldBe("brand new", "every agent's change lands on the one integrated branch");
     }
 
+    /// <summary>
+    /// The reported false-conflict shape, isolated: TWO contributions that are BOTH pure new-file adds (no edits at
+    /// all) from the identical recorded base — every other crown jewel above mixes edits with at most one add. Pins
+    /// that <c>git apply --index --3way</c>'s blob-reconstruction fallback (which only ever matters for an EXISTING
+    /// file's pre-image) never gets in the way of two disjoint brand-new files applied back to back.
+    /// </summary>
+    [Fact]
+    public async Task Two_pure_new_file_adds_from_the_same_base_integrate_clean()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["seed.txt"] = "seed" });
+
+        var a = await ctx.MakeContributionAsync("agent-a", baseSha, d => File.WriteAllText(Path.Combine(d, "a.txt"), "a"));
+        var b = await ctx.MakeContributionAsync("agent-b", baseSha, d => File.WriteAllText(Path.Combine(d, "b.txt"), "b"));
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, a, b), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Clean, customMessage: $"reason: {result.Reason}");
+        result.AppliedCount.ShouldBe(2);
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "a.txt")).Trim().ShouldBe("a");
+        (await ctx.RemoteFileAsync(ctx.IntegrationBranch, "b.txt")).Trim().ShouldBe("b");
+    }
+
     // ── Crown jewel: base-anchoring (the BLOCKER) — checkout the RECORDED base, not the moved tip ──
 
     [Fact]
