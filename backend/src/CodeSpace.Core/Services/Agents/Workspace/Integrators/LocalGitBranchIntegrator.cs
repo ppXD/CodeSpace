@@ -207,7 +207,8 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         // optimisation — it needs remote allow-filter support a bare file:// remote can't give a test.)
         var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
 
-        var result = await RunGitAsync(new[] { "clone", url, directory }, workingDirectory: null, cancellationToken).ConfigureAwait(false);
+        Directory.CreateDirectory(directory);
+        var result = await RunGitAsync(new[] { "clone", url, directory }, directory, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
