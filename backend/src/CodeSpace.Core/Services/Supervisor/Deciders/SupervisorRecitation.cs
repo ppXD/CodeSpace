@@ -231,7 +231,7 @@ public static class SupervisorRecitation
     {
         // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
         _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
-        "Succeeded" when result.AcceptancePassed == true => "done (accepted)",
+        "Succeeded" when result.AcceptancePassed == true => $"done (accepted){SubjectClause(result)}",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).
         // Reads AcceptancePassed directly (not the newer Contradiction field) so a row folded BEFORE P4-1 shipped —
@@ -260,6 +260,10 @@ public static class SupervisorRecitation
 
         return -1;
     }
+
+    /// <summary>What an ACCEPTED row owes about a program file the check ran without protecting — empty on every ordinary pass, so the compact stays byte-identical. Reads the same clause the decider's verdict line does (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>), never a second derivation the two sections could disagree over.</summary>
+    private static string SubjectClause(SupervisorAgentResult result) =>
+        AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is { Length: > 0 } files ? $" — graded on the candidate's OWN {Truncate(files)}, not a protected judge" : "";
 
     private static string Truncate(string? detail) =>
         string.IsNullOrWhiteSpace(detail) ? "no detail" : detail.Length <= 160 ? detail : detail[..160] + "…";

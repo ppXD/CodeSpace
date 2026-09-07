@@ -97,7 +97,7 @@ public class AcceptanceOracleProtectionTests
     private static string[] Expected(string spec) => spec.Length == 0 ? Array.Empty<string>() : spec.Split(',');
 
     // ── MayProtect: the RESTORE-BASE decision — the one guard shared by the grader (widen the clone before the
-    // restore) and SupervisorTurnService.Rehydrate.cs's per-unit OracleBaseShaAsync (resolve a base sha worth
+    // restore) and SupervisorTurnService.Rehydrate.cs's per-unit OracleAnchorAsync (resolve a base sha worth
     // restoring from at all). An authored-only guard there meant a per-unit oracle whose only protection was
     // DERIVED — the shape every real operator floor has, since nothing in Core or the UI ever authors
     // ProtectedPaths — never got a base sha to restore from in the first place.
@@ -167,6 +167,54 @@ public class AcceptanceOracleProtectionTests
         AcceptanceOracleProtection.CommandOracleCandidates(spec, FloorOwnsCheckScript).ShouldBeEmpty();
         AcceptanceOracleProtection.CommandProgramCandidates(spec).ShouldBeEmpty("not even as a subject — a deliverable is not a program the check runs");
         AcceptanceOracleProtection.MayProtect(spec, FloorOwnsCheckScript).ShouldBeFalse();
+    }
+
+    [Theory]
+    // a fixture / data file / judge script this command does NOT run: still the model's to protect, outright
+    [InlineData("sh|check.sh", "tests/fixtures/", true, "tests/fixtures/")]
+    [InlineData("dotnet|test", "tests/fixtures/", false, "tests/fixtures/")]
+    // the floor's own judge, named explicitly: owned, so the authored name stands
+    [InlineData("sh|check.sh", "check.sh", true, "check.sh")]
+    // THE REGRESSION, re-entered through the authored door: the check EXECUTES the file the goal required editing
+    [InlineData("sh|solution.sh|7|5", "solution.sh", true, "")]
+    // the same shape with no floor at all — a check the run does not own is the subject however it was named
+    [InlineData("sh|check.sh", "check.sh", false, "")]
+    // mixed: the fixture survives, the file under test does not
+    [InlineData("sh|solution.sh|7|5", "tests/fixtures/,solution.sh", true, "tests/fixtures/")]
+    public void An_authored_path_the_check_itself_executes_is_the_subject_unless_the_run_owns_it(string argv, string authored, bool hasFloor, string expected)
+    {
+        // The schema's own field description used to invite exactly the third case ("name them whenever the
+        // acceptance command executes repo-resident files the worker could rewrite"), so the brain that authored
+        // `sh solution.sh 7 5` would list solution.sh and the restore would put the stub back over correct work —
+        // the live regression, through the one door the derived narrowing does not guard.
+        var spec = new SupervisorAcceptanceSpec { Command = Argv(argv), ProtectedPaths = authored.Split(',') };
+
+        AcceptanceOracleProtection.AuthoredOracleCandidates(spec, hasFloor ? FloorOwnsCheckScript : null).ShouldBe(Expected(expected));
+    }
+
+    [Fact]
+    public void A_contract_that_authored_only_its_own_subject_is_no_more_protectable_than_one_that_authored_nothing()
+    {
+        // MayProtect is what decides whether a base sha is resolved and a full-history clone paid for. An authored
+        // set that survives the fence empty must not keep answering true, or the grade widens its clone, resolves a
+        // base, and then restores nothing — while the evidence calls the file the subject anyway.
+        var spec = new SupervisorAcceptanceSpec { Command = Argv("sh|solution.sh|7|5"), ProtectedPaths = new[] { "solution.sh" } };
+
+        AcceptanceOracleProtection.MayProtect(spec, FloorOwnsCheckScript).ShouldBeFalse();
+        AcceptanceOracleProtection.MayProtect(spec with { ProtectedPaths = new[] { "solution.sh", "tests/fixtures/" } }, FloorOwnsCheckScript).ShouldBeTrue("one surviving fixture is still an oracle worth anchoring");
+    }
+
+    [Theory]
+    [InlineData("tests-passed — graded on the candidate's own solution.sh", "solution.sh")]
+    [InlineData("tests-passed — graded on the candidate's own check.sh, main.py", "check.sh, main.py")]
+    [InlineData("tests-passed", null)]
+    [InlineData("tests-failed-exit-1", null)]
+    [InlineData(null, null)]
+    public void The_pass_paths_subject_clause_is_read_back_from_the_detail_the_grade_carries(string? detail, string? expected)
+    {
+        // The decider's verdict line and the recitation's compact both render this, and they must never disagree
+        // about a row — so there is ONE reader, and the producer (the grader) writes through the same constant.
+        AcceptanceOracleProtection.SubjectFilesIn(detail).ShouldBe(expected);
     }
 
     [Fact]

@@ -1550,6 +1550,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(result.Status == "Failed"
                 ? "      acceptance PASSED — this unit's definition-of-done check ran green, even though the agent itself reported failure. The work is objectively fine; do NOT retry this subtask, merge it."
                 : "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
+
+            // The one thing a PASS can hide: the check EXECUTED a file this run does not own as a judge, so it
+            // graded the candidate's own bytes. The evidence says so, but a pass carries no evidence here (the
+            // fold drops the tail on green and this branch renders none) — so the clause the grade's detail
+            // carries is the only way the fact reaches the brain weighing a merge.
+            AppendSubjectClause(builder, result);
             return;
         }
 
@@ -1678,6 +1684,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         SupervisorReplanExit.ToHuman => "A plan has ALREADY been authored over this verdict and it did not move, so do NOT author another one for this item — and repairing its check cannot move it either, so do not propose that: 'ask_human' to rule.",
         _ => null,
     };
+
+    /// <summary>Name the program file a PASSING grade ran WITHOUT protecting (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>) — silent, byte-identical, on every ordinary pass.</summary>
+    private static void AppendSubjectClause(StringBuilder builder, SupervisorAgentResult result)
+    {
+        if (AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is not { Length: > 0 } files) return;
+
+        builder.AppendLine($"      the check EXECUTES {files} — the SUBJECT under test, so this pass was graded on the candidate's OWN copy of it, not a protected judge.");
+    }
 
     /// <summary>
     /// WHY a re-plan is forbidden once a human has co-signed any of this run's oracles — rendered ONCE per prompt,

@@ -207,6 +207,12 @@ public class AgentRunExecutorAcceptanceTests
         await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), produced, workspace: null, CancellationToken.None);
 
         grader.OracleBaseShaByBranch["agent/s5-test"].ShouldBe("base1234base1234", "without the anchor the agent's own edit of check.sh IS the judge");
+
+        // The base alone protects NOTHING derived: the restore is narrowed to files the run's own oracle inventory
+        // names, so a lane that records a base and forgets the inventory silently grades the candidate's own judge
+        // while every assertion above still passes. Reverting the inventory to null is exactly that regression.
+        grader.OracleFloorProgramsByBranch["agent/s5-test"].ShouldBe(new[] { "check.sh" },
+            "this lane's one contract IS the run's definition of done, so its own program file is the judge the restore covers");
     }
 
     [Fact]
@@ -710,10 +716,10 @@ public class AgentRunExecutorAcceptanceTests
         /// <summary>C3 narrowing — the run's own ORACLE INVENTORY each branch grade was handed. This lane's contract IS the run's one gate, so its own program file(s) are the judge.</summary>
         public Dictionary<string, IReadOnlyList<string>?> OracleFloorProgramsByBranch { get; } = new();
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken)
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken)
         {
-            OracleBaseShaByBranch[branch] = oracleBaseSha;
-            OracleFloorProgramsByBranch[branch] = oracleFloorPrograms;
+            OracleBaseShaByBranch[branch] = anchor.BaseSha;
+            OracleFloorProgramsByBranch[branch] = anchor.FloorPrograms;
             return GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
         }
 

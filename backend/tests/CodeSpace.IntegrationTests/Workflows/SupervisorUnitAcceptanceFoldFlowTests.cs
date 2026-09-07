@@ -1237,7 +1237,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     [InlineData(false, true)]    // no operator floor → the run owns no judge by that name, so the rewrite stands and the grade says so
     public async Task A_units_derived_only_protection_restores_a_rewritten_check_script_the_run_owns(bool floorRunsTheCheck, bool expectedPass)
     {
-        // The per-unit shape #1865 closed: before OracleBaseShaAsync consulted the SAME
+        // The per-unit shape #1865 closed: before OracleAnchorAsync consulted the SAME
         // AcceptanceOracleProtection.MayProtect derivation the grader itself uses to decide whether to widen its
         // clone, an authored-only guard meant this unit's base sha was never resolved — the grader had nothing to
         // restore check.sh from, and a candidate that rewrote its own judge to `exit 0` graded itself a pass.
@@ -1285,14 +1285,17 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         }
         else
         {
-            result.AcceptanceDetail.ShouldBe("tests-passed");
+            result.AcceptanceDetail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh",
+                "the tape drops the evidence tail on a pass, so the DETAIL is the only thing that still tells the brain this pass graded the candidate's own bytes");
             evidence.ShouldNotContain("TAMPER", Case.Insensitive, "nothing was protected, so nothing was voided — calling this tamper would be a claim the grade cannot support");
             evidence.ShouldContain("the check EXECUTES check.sh", Case.Sensitive, "a pass off the candidate's own copy of the check must never read as a protected pass");
         }
     }
 
-    [Fact]
-    public async Task A_units_check_that_executes_the_file_the_goal_required_editing_grades_the_candidates_fix()
+    [Theory]
+    [InlineData(false)]   // the DERIVED door: the brain's argv names the deliverable, and nothing else says so
+    [InlineData(true)]    // the AUTHORED door: the same brain also lists it in protectedPaths, exactly as the schema used to invite
+    public async Task A_units_check_that_executes_the_file_the_goal_required_editing_grades_the_candidates_fix(bool brainAuthoredProtection)
     {
         // The live regression (real-model lane run 34135877074): the goal was "edit solution.sh so that
         // `sh solution.sh A B` prints the SUM", the operator floor was `sh check.sh`, and the brain authored a
@@ -1321,7 +1324,10 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         // DELIVERABLE as the judge. It fails on the stub and passes on the fix, so the verdict is decisive.
         var unitCheck = new[] { "sh", "-c", "sh solution.sh 7 5 | grep -qx 12" };
 
-        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", unitCheck)));
+        // The AUTHORED arm is the same brain reaching through the other door: it names the file its own check runs.
+        await SeedPlanAsync(runId, teamId, sequence: 1, brainAuthoredProtection
+            ? ProtectedPlanPayload("s1", unitCheck, new[] { "solution.sh" })
+            : PlanPayload(("s1", unitCheck)));
         var agentId = Guid.NewGuid();
         await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "candidate")));
         await SeedManifestAsync(teamId, agentId, repoId, "candidate", baseSha: baseSha, patchArtifactId: null);
@@ -1334,7 +1340,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         result.AcceptancePassed.ShouldBe(true,
             "solution.sh is the SUBJECT under test, not the run's judge — restoring the stub over the candidate's correct fix is the regression this closes, and no retry could ever pass it");
-        result.AcceptanceDetail.ShouldBe("tests-passed");
+        result.AcceptanceDetail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "solution.sh",
+            "a pass keeps no evidence tail, so the detail is what carries the fact to the brain that is about to merge on it");
 
         var evidence = await EvidenceTextAsync(teamId, result.AcceptanceEvidenceId);
 
@@ -1363,6 +1370,10 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         return JsonSerializer.Serialize(new { goal = Goal, subtasks = ordered }, AgentJson.Options);
     }
+
+    /// <summary>A single-subtask plan whose acceptance AUTHORS <c>protectedPaths</c> — the door the model reaches through when it decides for itself which bytes belong to the oracle rather than leaving the server to derive them.</summary>
+    private static string ProtectedPlanPayload(string id, string[] command, string[] protectedPaths) =>
+        JsonSerializer.Serialize(new { goal = Goal, subtasks = new[] { new { id, title = id, instruction = "do " + id, acceptance = new { command, protectedPaths } } } }, AgentJson.Options);
 
     /// <summary>A plan whose single subtask authors a NON-coding acceptance — Kind=ArtifactPresent + the declared deliverable paths in the command slot.</summary>
     private static string ArtifactPlanPayload(string id, string[] paths) =>

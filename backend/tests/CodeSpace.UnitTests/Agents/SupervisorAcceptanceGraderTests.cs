@@ -25,8 +25,11 @@ public class SupervisorAcceptanceGraderTests
 {
     private static readonly string[] Command = { "./check.sh", "--ci" };
 
-    /// <summary>The run's own ORACLE INVENTORY — what the operator's floor (<c>sh check.sh</c>) runs. The C3 restore only ever covers a file the run owns, so every derived-protection case below states it; an AUTHORED contract outranks it and does not care.</summary>
+    /// <summary>The run's own ORACLE INVENTORY — what the operator's floor (<c>sh check.sh</c>) runs. The C3 restore only ever covers a file the run owns, so every case below states it; an AUTHORED contract outranks it for any file the check does not itself EXECUTE.</summary>
     private static readonly string[] Floor = { "check.sh" };
+
+    /// <summary>This run's anchor: a base sha to restore from, paired with the inventory that says which files it may cover. One value, because handing the grader a base and no inventory silently protects nothing but an authored path.</summary>
+    private static OracleAnchor Anchor(string? baseSha) => new(baseSha, Floor);
 
     /// <summary>The spec-shaped acceptance the adapter now takes (triad S7) — same argv, optional kind.</summary>
     private static SupervisorAcceptanceSpec Spec(BenchmarkGradingKind? kind = null) => new() { Command = Command, Kind = kind };
@@ -84,7 +87,10 @@ public class SupervisorAcceptanceGraderTests
             .GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
 
         grade.Passed.ShouldBeTrue();
-        grade.Detail.ShouldBe("tests-passed");
+
+        // The ORACLE's own text is returned untouched; the only thing this grade adds is the fact that nothing
+        // anchored it — an unanchored call owns no judge, so `./check.sh` ran as the candidate left it.
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
     }
 
     [Fact]
@@ -409,7 +415,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: "/tmp/clone-xyz", runners: runners, artifacts: artifacts);
 
         var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/", "check.sh" } };
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("restore succeeded, so the grade proceeds to the oracle's own verdict");
 
@@ -437,7 +443,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
 
         var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "check.sh" } };
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("the restore VOIDS the tamper — the verdict is the base judge's, so it can stand");
 
@@ -456,7 +462,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
 
         var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" } };
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeFalse("an oracle that cannot be protected cannot verify anything — never a silent pass");
         grade.Detail.ShouldStartWith("oracle-restore-failed:");
@@ -523,7 +529,7 @@ public class SupervisorAcceptanceGraderTests
         var artifacts = new FakeArtifactStore();
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("the restore VOIDS the tamper — the verdict is the base judge's");
 
@@ -543,7 +549,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
 
         var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" } };
-        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         runners.Invocations.ShouldAllBe(i => !i.Args.Contains("ls-tree"), "an authored set needs no existence probe");
         runners.Invocations.Count.ShouldBe(4, "tamper diff, restore, addition scan, untracked clean — the same four as before C3");
@@ -561,7 +567,7 @@ public class SupervisorAcceptanceGraderTests
         var oracle = new FakeGrader(Pass);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue();
         runners.Invocations.Count.ShouldBe(1, "the probe alone — no restore, no sweep");
@@ -576,7 +582,7 @@ public class SupervisorAcceptanceGraderTests
         var oracle = new FakeGrader(Pass);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("a base we cannot read protects nothing — it does not invent a verdict");
         grade.Detail.ShouldBe("tests-passed");
@@ -592,7 +598,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
 
         var spec = new SupervisorAcceptanceSpec { Command = new[] { "docs/report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent };
-        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         runners.Invocations.ShouldBeEmpty("no probe, no restore — the deliverable is not the oracle");
     }
@@ -610,7 +616,7 @@ public class SupervisorAcceptanceGraderTests
         runners.Script(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "check.sh\n", Stderr = "" });   // diff: the candidate changed it
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.OracleNote.ShouldNotBeNull();
         grade.OracleNote!.ShouldContain("ORACLE TAMPER VOIDED", Case.Sensitive);
@@ -627,7 +633,7 @@ public class SupervisorAcceptanceGraderTests
         var artifacts = new FakeArtifactStore();
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.OracleNote.ShouldBeNull("the dominant case must not annotate every verdict detail on the tape");
         artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain("restored from abc123def456", Case.Sensitive, "the restore stays legible in the evidence");
@@ -645,12 +651,31 @@ public class SupervisorAcceptanceGraderTests
         var artifacts = new FakeArtifactStore();
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, oracleBaseSha, Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor(oracleBaseSha), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("an unanchored oracle never invents a verdict — it reports honestly and grades");
         grade.Detail.ShouldBe("tests-passed");
         grade.OracleNote.ShouldBe(expectedNote);
         artifacts.Puts.ShouldBeEmpty("an ABSENCE must not mint the CAS evidence a receipt binds to — that would loosen admission on the strength of nothing");
+    }
+
+    [Fact]
+    public async Task An_authored_oracle_with_no_base_says_it_went_unanchored_instead_of_calling_itself_the_subject()
+    {
+        // The gate here has to be the SAME question the clone-widening asks (MayProtect), not just the derived
+        // half: a unit whose manifest carries no base still AUTHORED an oracle, so the honest report is "nobody
+        // anchored it". Reading only the derived half sent that grade down the subject path instead — silently
+        // (no integrity note at all) and while minting evidence that called the authored oracle the subject.
+        var runners = new RecordingRunnerRegistry();
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "solution.sh", "7", "5" }, ProtectedPaths = new[] { "tests/fixtures/" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor(baseSha: null), CancellationToken.None);
+
+        grade.OracleNote.ShouldBe("oracle: graded UNPROTECTED (no base recorded)");
+        grade.Detail.ShouldBe("tests-passed", "an unanchored grade reports the absence on the grade; it does not annotate the verdict as if something had been decided about the subject");
+        artifacts.Puts.ShouldBeEmpty("an ABSENCE must not mint the CAS evidence a receipt binds to");
     }
 
     [Fact]
@@ -661,7 +686,7 @@ public class SupervisorAcceptanceGraderTests
         var runners = new RecordingRunnerRegistry();
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } }, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.OracleNote.ShouldBeNull();
         runners.Invocations.ShouldBeEmpty("not even a probe — a bare binary name is never worth full history");
@@ -685,11 +710,15 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners, artifacts: artifacts);
 
         var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "solution.sh", "7", "5" } };
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, oracleBaseSha, Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor(oracleBaseSha), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("the verdict is the check's REAL result against the work the goal asked for");
-        grade.Detail.ShouldBe("tests-passed");
         oracle.Context.ShouldNotBeNull();
+
+        // A PASS keeps nothing else: both folds drop the evidence tail on green and the decider's pass branch
+        // renders no evidence at all, so without this clause a self-graded pass reaches the brain reading exactly
+        // like a protected one. The detail is the only string every verdict consumer already carries.
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "solution.sh");
 
         runners.Invocations.ShouldBeEmpty("no probe, no checkout, no clean — restoring the file under test is exactly the regression");
         grade.OracleNote.ShouldBeNull("nothing went unprotected: the run never owned this file, so there is no integrity fault to report");
@@ -697,6 +726,46 @@ public class SupervisorAcceptanceGraderTests
         artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain(
             "the check EXECUTES solution.sh — the SUBJECT under test, so this grade ran the candidate's own version of it, not a protected one",
             Case.Sensitive, "the brain has to be able to weigh a pass that came from the candidate's own copy of the file it was told to edit");
+    }
+
+    [Fact]
+    public async Task An_authored_path_naming_the_file_the_check_executes_is_the_subject_not_a_judge()
+    {
+        // The door the narrowing left open: the schema invited "name them whenever the acceptance command executes
+        // repo-resident files the worker could rewrite", so the brain that authors `sh solution.sh 7 5` against a
+        // goal saying "edit solution.sh" is exactly the brain that lists solution.sh in protectedPaths. Honoring
+        // that restored the stub over correct work and voided it — the live regression, re-entered through the one
+        // door the derived narrowing does not guard.
+        var runners = new RecordingRunnerRegistry();
+        var artifacts = new FakeArtifactStore();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "solution.sh", "7", "5" }, ProtectedPaths = new[] { "solution.sh" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
+
+        grade.Passed.ShouldBeTrue("the verdict is the check's real result against the work the goal asked for");
+        grade.OracleNote.ShouldBeNull("nothing was restored, so there is no tamper to void and no integrity fault to report");
+
+        runners.Invocations.ShouldBeEmpty("no diff, no checkout, no clean — restoring the file under test is exactly the regression, however it was named");
+
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain(
+            "the check EXECUTES solution.sh — the SUBJECT under test", Case.Sensitive,
+            "an authored path the check itself runs is reported like any other subject, not silently honored");
+    }
+
+    [Fact]
+    public async Task An_authored_path_the_check_never_executes_is_still_protected_outright()
+    {
+        // The carve-out is narrow on purpose: a fixture, a data file, a judge script this command does not run is
+        // still the model's to protect, unprobed and unwidened. Only the file under test degrades.
+        var runners = new RecordingRunnerRegistry();
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "solution.sh", "7", "5" }, ProtectedPaths = new[] { "tests/fixtures/", "solution.sh" } };
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
+
+        runners.Invocations.ShouldAllBe(i => !i.Args.Contains("ls-tree"), "an authored set still needs no existence probe");
+        runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/fixtures/" }, "the fixture is restored; the file the check RUNS is not");
     }
 
     [Fact]
@@ -711,7 +780,7 @@ public class SupervisorAcceptanceGraderTests
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);
 
         var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "-c", "./check.sh && python main.py" } };
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, "abc123def4567890", Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         runners.Invocations[0].Args.ShouldBe(new[] { "ls-tree", "-r", "--name-only", "abc123def4567890", "--", "check.sh" }, "only the run-owned candidate is probed — main.py is never a restore target");
         runners.Invocations[2].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "check.sh" });
@@ -750,7 +819,7 @@ public class SupervisorAcceptanceGraderTests
         var artifacts = new FakeArtifactStore();
         var grader = BuildReal(repo.Directory, artifacts);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, baseSha, Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, Anchor(baseSha), CancellationToken.None);
 
         grade.Passed.ShouldBe(expectedPass, $"the acceptance command's own program is restored from the base before it runs (detail='{grade.Detail}')");
         grade.Detail.ShouldBe(expectedDetail, "the tampered candidate fails as a REAL verdict — never an oracle-restore collapse, never a self-awarded pass");
@@ -777,12 +846,20 @@ public class SupervisorAcceptanceGraderTests
 
         repo.CommitOnCandidate("check.sh", "#!/bin/sh\nexit 0\n");
 
-        var grader = BuildReal(repo.Directory, new FakeArtifactStore());
+        var artifacts = new FakeArtifactStore();
+        var grader = BuildReal(repo.Directory, artifacts);
 
-        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, baseSha, Floor, CancellationToken.None);
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "candidate", new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, 60, Anchor(baseSha), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue($"the candidate AUTHORED check.sh — it is the work, not the judge (detail='{grade.Detail}')");
-        grade.Detail.ShouldBe("tests-passed");
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
+
+        // The run DOES own this name — its floor runs check.sh — so calling it "the SUBJECT under test" would tell
+        // the operator their own judge was the deliverable. What actually happened is narrower and says so.
+        var evidence = artifacts.Puts.ShouldHaveSingleItem().Text;
+
+        evidence.ShouldContain("a file the base does not ship, so this grade ran your own new check script", Case.Sensitive);
+        evidence.ShouldNotContain("the SUBJECT under test", Case.Sensitive, "the run's own floor script is never the deliverable");
     }
 
     /// <summary>The grader with ONLY the clone seam faked: <paramref name="directory"/> is a real git working tree, and the runner + oracle are the production ones.</summary>
