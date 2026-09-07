@@ -56,11 +56,58 @@ public static class PlannerSchema
                     },
                     "required": ["formatVersion", "kind"],
                     "oneOf": [
-                      { "properties": { "kind": { "enum": ["TestsPass"] } }, "required": ["argv"], "not": { "required": ["artifactPaths"] } },
-                      { "properties": { "kind": { "enum": ["ArtifactPresent"] } }, "required": ["artifactPaths"], "not": { "required": ["argv"] } },
-                      { "properties": { "kind": { "enum": ["CitationsResolve"] } }, "required": ["artifactPaths"], "not": { "required": ["argv"] } },
-                      { "properties": { "kind": { "enum": ["LlmJudge"] } }, "required": ["artifactPaths", "rubric"], "not": { "required": ["argv"] } },
-                      { "properties": { "kind": { "enum": ["ArtifactSchema"] } }, "required": ["artifactPaths", "schema"], "not": { "required": ["argv"] } }
+                      {
+                        "title": "TestsPass acceptance",
+                        "properties": {
+                          "formatVersion": { "type": "integer", "enum": [2] },
+                          "kind": { "type": "string", "enum": ["TestsPass"] },
+                          "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+                        },
+                        "required": ["formatVersion", "kind", "argv"],
+                        "not": { "required": ["artifactPaths"] }
+                      },
+                      {
+                        "title": "ArtifactPresent acceptance",
+                        "properties": {
+                          "formatVersion": { "type": "integer", "enum": [2] },
+                          "kind": { "type": "string", "enum": ["ArtifactPresent"] },
+                          "artifactPaths": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+                        },
+                        "required": ["formatVersion", "kind", "artifactPaths"],
+                        "not": { "required": ["argv"] }
+                      },
+                      {
+                        "title": "CitationsResolve acceptance",
+                        "properties": {
+                          "formatVersion": { "type": "integer", "enum": [2] },
+                          "kind": { "type": "string", "enum": ["CitationsResolve"] },
+                          "artifactPaths": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+                        },
+                        "required": ["formatVersion", "kind", "artifactPaths"],
+                        "not": { "required": ["argv"] }
+                      },
+                      {
+                        "title": "LlmJudge acceptance",
+                        "properties": {
+                          "formatVersion": { "type": "integer", "enum": [2] },
+                          "kind": { "type": "string", "enum": ["LlmJudge"] },
+                          "artifactPaths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                          "rubric": { "type": "object", "properties": { "criteria": { "type": "array", "minItems": 1 } }, "required": ["criteria"] }
+                        },
+                        "required": ["formatVersion", "kind", "artifactPaths", "rubric"],
+                        "not": { "required": ["argv"] }
+                      },
+                      {
+                        "title": "ArtifactSchema acceptance",
+                        "properties": {
+                          "formatVersion": { "type": "integer", "enum": [2] },
+                          "kind": { "type": "string", "enum": ["ArtifactSchema"] },
+                          "artifactPaths": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                          "schema": { "type": "object" }
+                        },
+                        "required": ["formatVersion", "kind", "artifactPaths", "schema"],
+                        "not": { "required": ["argv"] }
+                      }
                     ],
                     "description": "Optional per-subtask acceptance — the unit's objective definition of done, authored WITH the task so the evaluation layer grades against the plan's own contract."
                   }

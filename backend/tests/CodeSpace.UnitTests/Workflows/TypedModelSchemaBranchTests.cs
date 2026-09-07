@@ -8,6 +8,27 @@ namespace CodeSpace.UnitTests.Workflows;
 
 public sealed class TypedModelSchemaBranchTests
 {
+    [Fact]
+    public void Every_oracle_branch_is_self_describing_for_structured_output_generators()
+    {
+        var branches = AcceptanceSchema().GetProperty("oneOf").EnumerateArray().ToArray();
+
+        branches.Length.ShouldBe(5);
+        foreach (var branch in branches)
+        {
+            var properties = branch.GetProperty("properties");
+            var required = branch.GetProperty("required").EnumerateArray().Select(value => value.GetString()).ToArray();
+            var kind = properties.GetProperty("kind").GetProperty("enum")[0].GetString();
+            var payload = kind == "TestsPass" ? "argv" : "artifactPaths";
+
+            properties.TryGetProperty("formatVersion", out _).ShouldBeTrue("a generator may interpret a oneOf branch without merging its parent's properties");
+            properties.TryGetProperty(payload, out _).ShouldBeTrue($"the {kind} branch must expose its required payload shape where that requirement is declared");
+            required.ShouldContain("formatVersion");
+            required.ShouldContain("kind");
+            required.ShouldContain(payload);
+        }
+    }
+
     [Theory]
     [InlineData("TestsPass")]
     [InlineData("ArtifactPresent")]
