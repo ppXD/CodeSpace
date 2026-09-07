@@ -118,8 +118,13 @@ public sealed partial class LocalProcessRunner
             NativeLaunchReceipt? receipt = null;
             try { receipt = NativeLaunchFiles.Read<NativeLaunchReceipt>(directory, NativeLaunchProtocol.ReceiptFile); }
             catch (FileNotFoundException) { }
+            catch (Exception error) when (error is JsonException or InvalidDataException or IOException or UnauthorizedAccessException)
+            {
+                throw new NativeLaunchException("indeterminate", "The committed launch receipt is unreadable; automatic re-execution is forbidden.");
+            }
             if (receipt is not null)
             {
+                if (receipt.Broker is null || string.IsNullOrWhiteSpace(receipt.State)) throw new NativeLaunchException("indeterminate", "The committed launch receipt is incomplete; automatic re-execution is forbidden.");
                 if (receipt.SpecHash != request.SpecHash || receipt.Broker.BootId != request.BootId) throw new NativeLaunchException("receipt-conflict", "The launch receipt does not match its immutable request.");
                 if (receipt.State is "ready" or "exited" or "stopped" && receipt.Execution is { } execution)
                     return new SandboxHandle { Kind = LocalKind, ProcessId = execution.ProcessId, ProcessStartTimeUtc = new DateTimeOffset(execution.StartTimeUtcTicks, TimeSpan.Zero), LaunchHost = request.Host, SpoolDirectory = spool, Deadline = request.Deadline, Confinement = receipt.Confinement, CgroupRunKey = receipt.CgroupRunKey, EgressNetnsKey = receipt.EgressNetnsKey };

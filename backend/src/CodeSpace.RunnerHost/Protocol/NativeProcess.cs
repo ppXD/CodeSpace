@@ -50,6 +50,9 @@ internal static class NativeProcess
         if (getppid() != parent.ProcessId || !IsAlive(parent)) throw new IOException("The launch broker no longer owns the bootstrap.");
     }
 
+    /// <summary>Compare the recorded kernel birth key before signaling. This portable check/use sequence is not
+    /// a kernel-atomic PID capability: a later platform slice must use pidfd/generation-bound containment where
+    /// stronger signal attribution is required. Host/process crash lifecycle tests do not prove absence of this race.</summary>
     public static void KillSession(NativeProcessIdentity identity)
     {
         if (identity.BootId != BootId || identity.ProcessId <= 1 || identity.ProcessId == Environment.ProcessId) return;

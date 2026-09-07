@@ -224,6 +224,26 @@ public sealed class NativeLaunchRegistryTests
         fixture.StartCount.ShouldBe(0);
     }
 
+    [Theory]
+    [InlineData("{\"specHash\":")]
+    [InlineData("null")]
+    public async Task Corrupt_committed_receipt_is_typed_indeterminate_and_cannot_start_another_execution(string corrupt)
+    {
+        await using var fixture = new Fixture();
+        await fixture.LaunchAsync();
+        await fixture.WaitAsync(() => fixture.StartCount == 1);
+        var path = Path.Combine(fixture.Directory, NativeLaunchProtocol.ReceiptFile);
+        var original = await File.ReadAllTextAsync(path);
+        try
+        {
+            await File.WriteAllTextAsync(path, corrupt);
+            var error = await Should.ThrowAsync<NativeLaunchException>(() => fixture.LaunchAsync());
+            error.Reason.ShouldBe("indeterminate");
+            fixture.StartCount.ShouldBe(1);
+        }
+        finally { await File.WriteAllTextAsync(path, original); }
+    }
+
     [Fact]
     public async Task Duplicate_bootstraps_cannot_both_consume_the_start_commitment()
     {
