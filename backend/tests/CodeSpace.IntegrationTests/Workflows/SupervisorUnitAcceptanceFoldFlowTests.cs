@@ -1226,6 +1226,50 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         results[1].AcceptancePassed.ShouldBeNull("s2 (no contract) stays ungraded");
     }
 
+    // ─── C3 follow-up: a per-unit oracle whose only protection is DERIVED from its command (the shape every real
+    // operator floor actually has — nothing in Core or the UI ever authors ProtectedPaths) must still get a base
+    // sha to restore from. Real Postgres, real git, the REAL SupervisorAcceptanceGrader — no fake at the grading
+    // seam, so the restore's git semantics are the ones actually exercised, not a scripted stand-in for them. ───
+
+    [Fact]
+    public async Task A_units_derived_only_protection_still_restores_a_rewritten_check_script()
+    {
+        // The exact per-unit shape this fix closes: before OracleBaseShaAsync consulted the SAME
+        // AcceptanceOracleProtection.MayProtect derivation the grader itself uses to decide whether to widen its
+        // clone, an authored-only guard meant this unit's base sha was never resolved — the grader had nothing to
+        // restore check.sh from, and a candidate that rewrote its own judge to `exit 0` graded itself a pass.
+        if (!await GitAvailableAsync()) return;
+
+        using var remote = new BareRemote();
+        // The real judge: only a genuine agent_*.txt deliverable makes it exit 0 (the same shape the whole-loop E2E suite seeds).
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var baseSha = await remote.HeadShaAsync();
+
+        // The candidate rewrites the judge to an unconditional pass and does none of the actual work.
+        await remote.CommitOnBranchAsync("candidate", new() { ["check.sh"] = "#!/bin/sh\nexit 0\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));   // Check = ["sh","check.sh"] — NO authored ProtectedPaths, exactly like a real operator floor
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "candidate")));
+        await SeedManifestAsync(teamId, agentId, repoId, "candidate", baseSha: baseSha, patchArtifactId: null);
+
+        SupervisorTurnContext ctx;
+        using (var graderScope = _fixture.BeginScope())
+            ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), graderScope.Resolve<ISupervisorAcceptanceGrader>());
+
+        var result = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+
+        result.AcceptancePassed.ShouldBe(false,
+            "the candidate's rewritten check.sh must be restored from base before it grades — an unrestored tampered `exit 0` would wrongly pass a candidate who did none of the required work");
+        // The RESTORED (pristine) check.sh genuinely ran and genuinely failed — not an infra collapse, and not a masked "graded UNPROTECTED".
+        result.AcceptanceDetail.ShouldStartWith("tests-failed-exit-");
+        result.AcceptanceEvidenceTail.ShouldContain("TAMPER VOIDED", Case.Insensitive, "the candidate's rewrite of check.sh must be SEEN, not just neutralized");
+    }
+
     // ─── Helpers ───
 
     private static string PlanPayload(params (string Id, string[]? Command)[] subtasks)
@@ -1265,6 +1309,42 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         await db.SaveChangesAsync();
     }
 
+    /// <summary>A real repository row bound to a real clone URL — what the REAL grader needs to actually clone <paramref name="cloneUrlHttps"/> (mirrors OracleRestoreFlowTests' seeding).</summary>
+    private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var instanceId = Guid.NewGuid();
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = Messages.Enums.ProviderKind.GitHub, DisplayName = "local", BaseUrl = $"https://local/{instanceId:N}" });
+
+        var credentialId = Guid.NewGuid();
+        db.Credential.Add(new Credential
+        {
+            Id = credentialId, TeamId = teamId, ProviderInstanceId = instanceId, AuthType = Messages.Enums.AuthType.Pat, DisplayName = "clone cred",
+            EncryptedPayload = scope.Resolve<Core.Services.Credentials.IPayloadEncryptor>().Encrypt(scope.Resolve<Core.Services.Credentials.ICredentialPayloadSerializer>().Serialize(new Messages.Credentials.PatPayload { Token = "oracle-restore-token" })),
+            Status = Messages.Enums.CredentialStatus.Active,
+        });
+
+        var repoId = Guid.NewGuid();
+        db.Repository.Add(new Repository
+        {
+            Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, CredentialId = credentialId,
+            ExternalId = repoId.ToString(), NamespacePath = "org", Name = "repo", FullPath = "org/repo",
+            DefaultBranch = "main", CloneUrlHttps = cloneUrlHttps, WebUrl = "https://local/org/repo",
+        });
+
+        await db.SaveChangesAsync();
+        return repoId;
+    }
+
+    private static async Task<bool> GitAvailableAsync()
+    {
+        if (OperatingSystem.IsWindows()) return false;
+        try { return (await new Core.Services.Agents.Sandbox.Runners.LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = new[] { "--version" }, TimeoutSeconds = 10 }, CancellationToken.None)).Status == SandboxStatus.Success; }
+        catch { return false; }
+    }
+
     private static SupervisorAgentResult Unit(Guid agentRunId, string? producedBranch) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch };
 
@@ -1275,7 +1355,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     private static string SpawnOutcome(params SupervisorAgentResult[] units) =>
         JsonSerializer.Serialize(new { agentRunIds = units.Select(u => u.AgentRunId).ToArray(), agentCount = units.Length, agentResults = units }, AgentJson.Options);
 
-    private async Task<SupervisorTurnContext> RehydrateAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, RecordingGrader grader)
+    private async Task<SupervisorTurnContext> RehydrateAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, ISupervisorAcceptanceGrader grader)
     {
         using var scope = _fixture.BeginScope();
         var service = new SupervisorTurnService(
@@ -1435,6 +1515,77 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             CapturedCalls.Add((agentRunId, teamId, spec.Command, spec.Kind ?? BenchmarkGradingKind.TestsPass));
             if (_throw != null) throw _throw;
             return Task.FromResult(CapturedGrade);
+        }
+    }
+
+    /// <summary>A real bare file:// remote (mirrors OracleRestoreFlowTests' own) — seeds a base commit, then a candidate branch, for the REAL grader to actually clone and restore against.</summary>
+    private sealed class BareRemote : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-sup-unit-oracle-" + Guid.NewGuid().ToString("N"));
+        private readonly string _bare;
+        private readonly string _seed;
+
+        public BareRemote()
+        {
+            Directory.CreateDirectory(_root);
+            _bare = Path.Combine(_root, "remote.git");
+            _seed = Path.Combine(_root, "seed");
+        }
+
+        public string Url => new Uri(_bare).AbsoluteUri;
+
+        public async Task SeedBaseAsync(Dictionary<string, string> files)
+        {
+            await Git(_root, "init", "--bare", "-b", "main", _bare);
+
+            Directory.CreateDirectory(_seed);
+            await Git(_seed, "clone", _bare, _seed);
+            await Git(_seed, "config", "user.email", "test@codespace.dev");
+            await Git(_seed, "config", "user.name", "Test");
+            await Git(_seed, "config", "commit.gpgsign", "false");
+
+            await WriteAsync(files);
+            await Git(_seed, "add", "-A");
+            await Git(_seed, "commit", "-m", "seed");
+            await Git(_seed, "push", "origin", "main");
+        }
+
+        public async Task<string> HeadShaAsync() => (await Git(_seed, "rev-parse", "HEAD")).Trim();
+
+        /// <summary>The candidate's commit — branched from the CURRENT head so the base sha the grader restores from is a real ancestor.</summary>
+        public async Task CommitOnBranchAsync(string branch, Dictionary<string, string> files)
+        {
+            await Git(_seed, "checkout", "-b", branch);
+
+            await WriteAsync(files);
+            await Git(_seed, "add", "-A");
+            await Git(_seed, "commit", "-m", "candidate work");
+            await Git(_seed, "push", "origin", branch);
+        }
+
+        private async Task WriteAsync(Dictionary<string, string> files)
+        {
+            foreach (var (name, content) in files)
+            {
+                var path = Path.Combine(_seed, name.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                await File.WriteAllTextAsync(path, content);
+            }
+        }
+
+        private static async Task<string> Git(string workdir, params string[] args)
+        {
+            var result = await new Core.Services.Agents.Sandbox.Runners.LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+
+            if (result.Status != SandboxStatus.Success || result.ExitCode != 0)
+                throw new InvalidOperationException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr}");
+
+            return result.Stdout;
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
     }
 }

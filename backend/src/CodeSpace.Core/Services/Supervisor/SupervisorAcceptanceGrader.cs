@@ -28,7 +28,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v5";   // v5: live local acceptance context, explicit oracle snapshots, and malformed-contract fail-closed semantics
+    public const string EvaluatorVersion = "supervisor-acceptance/v6";   // v6: the per-unit oracle base sha is anchored on the SAME derivation (authored or derived) the grader restores from, not authored-only
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -73,7 +73,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             // contract that named protected paths did not merely go unprotected, it stopped being gradeable at all,
             // and read as infrastructure noise while doing it. IntegrationRequest.Depth records the same lesson for
             // its 3-way apply: an operation that reaches back to the base needs the base history.
-            if (MayProtect(spec) && !string.IsNullOrEmpty(oracleBaseSha))
+            if (AcceptanceOracleProtection.MayProtect(spec) && !string.IsNullOrEmpty(oracleBaseSha))
                 clone = clone with { Depth = 0 };
 
             await using var workspace = await _providers.Resolve(GradingRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
@@ -368,7 +368,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         // protection — the one reading it (a decider weighing a pass, an operator reading a receipt) cannot tell
         // "the oracle was restored and untouched" from "nobody ever anchored it" unless the second case speaks.
         if (string.IsNullOrEmpty(oracleBaseSha))
-            return CommandOracleCandidates(spec).Count == 0 ? OracleProtectionOutcome.None : OracleProtectionOutcome.Unprotected("no base recorded");
+            return AcceptanceOracleProtection.CommandOracleCandidates(spec).Count == 0 ? OracleProtectionOutcome.None : OracleProtectionOutcome.Unprotected("no base recorded");
 
         var runner = _runners.Resolve(GradingRunnerKind);
 
@@ -466,7 +466,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     {
         if (spec.ProtectedPaths is { Count: > 0 } authored) return (authored, false);
 
-        var candidates = CommandOracleCandidates(spec);
+        var candidates = AcceptanceOracleProtection.CommandOracleCandidates(spec);
 
         if (candidates.Count == 0) return (Array.Empty<string>(), false);
 
@@ -482,17 +482,6 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         return (AcceptanceOracleProtection.DeriveProtectedPaths(spec.Command, present.Contains), false);
     }
-
-    /// <summary>Whether a protected grade is possible at all — decided BEFORE the clone, because the restore and its probe both reach back to the base and so need its history (the agents' default shallow clone holds only the candidate tip).</summary>
-    private static bool MayProtect(SupervisorAcceptanceSpec spec) => spec.ProtectedPaths is { Count: > 0 } || CommandOracleCandidates(spec).Count > 0;
-
-    /// <summary>
-    /// The argv's program candidates — empty for any oracle whose <c>Command</c> is NOT an argv. An
-    /// <c>ArtifactPresent</c> contract's command is the list of deliverables the candidate must PRODUCE; restoring
-    /// one of those from base would void the very work being verified, which is the opposite of protecting a judge.
-    /// </summary>
-    private static IReadOnlyList<string> CommandOracleCandidates(SupervisorAcceptanceSpec spec) =>
-        spec.Kind is null or BenchmarkGradingKind.TestsPass ? AcceptanceOracleProtection.ProgramCandidates(spec.Command) : Array.Empty<string>();
 
     /// <summary>
     /// Deletes everything under the protected paths that the candidate ADDED relative to base — the half
