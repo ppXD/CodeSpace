@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
@@ -17,6 +18,13 @@ namespace CodeSpace.Core.Services.Sessions;
 /// <c>LlmWorkflowPlanner</c> does. Incremental (only the newly scrolled-out turns are folded into the existing summary)
 /// and FAIL-OPEN (no pool model / LLM error ⇒ the summary is left unchanged and the launch proceeds with the recent
 /// window only).
+///
+/// <para>Every already-folded turn also carries a durable <see cref="SessionSummarySourceBinding"/> (its effective run
+/// id, a content fingerprint, its latest assessment id). On EVERY run, every bound turn is re-checked against its
+/// CURRENT effective source — an unmoved watermark does not mean "nothing to do": if a bound turn's rerun has since
+/// won, its result mutated, or a new assessment was recorded, the older-turns span is rebuilt fresh rather than left
+/// silently stale behind an equal watermark. <see cref="SessionContextBuilder"/> reads the binding to carry an
+/// out-of-window turn's unresolved contract forward without re-deriving it from this class's own model-written prose.</para>
 /// </summary>
 public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 {
@@ -66,31 +74,88 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         if (session is null) return;
 
         var currentWatermark = session.SummaryThroughTurnIndex ?? 0;
+        var storedBindings = SessionSummarySourceBindings.Parse(session.SummarySourceBindingJson).ToDictionary(b => b.Turn);
 
-        if (targetWatermark <= currentWatermark) return;   // the summary already covers the older turns
+        // Every older turn's CURRENT source binding — cheap (ids + a fingerprint, never the JSON roots) — computed
+        // for the whole older-turns span so an already-folded turn's drift can be detected even when the watermark
+        // itself has nothing new to fold.
+        var assessmentIdsByRunId = await LoadLatestAssessmentIdsAsync(teamId, olderTurns.Select(t => t.Id).ToList(), cancellationToken).ConfigureAwait(false);
+        var freshBindings = olderTurns.ToDictionary(t => t.Turn!.Value, t => BuildBinding(t, assessmentIdsByRunId));
 
-        // Fold ONLY the turns newly scrolled out (above the current watermark), oldest-first — incremental, not a re-summarize.
-        var newTurns = olderTurns.Where(t => t.Turn > currentWatermark).OrderBy(t => t.Turn).ToList();
+        // A previously-folded turn whose bound source no longer matches what is CURRENTLY effective — a rerun that
+        // has since won, a mutated result, or a newly recorded assessment. A turn with NO stored binding (a legacy
+        // row from before this column existed) is left alone — unknown provenance, never a forced mass re-summarize.
+        var dirtyTurns = olderTurns.Where(t => t.Turn <= currentWatermark && IsDirty(freshBindings[t.Turn!.Value], storedBindings.GetValueOrDefault(t.Turn!.Value))).ToList();
 
-        if (newTurns.Count == 0) return;
+        if (targetWatermark <= currentWatermark && dirtyTurns.Count == 0) return;   // fully caught up, and nothing changed underneath either
 
-        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(newTurns.Select(t => t.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
+        List<TurnRow> foldTurns;
+        string? baseSummary;
 
-        var distilled = await TryDistillAsync(teamId, session.Summary, newTurns, manifestsByRunId, cancellationToken).ConfigureAwait(false);
+        if (dirtyTurns.Count > 0)
+        {
+            // The incremental base is no longer trustworthy once ANY already-folded turn's bound source changed
+            // underneath it — rebuild the WHOLE older-turns span fresh (this also naturally folds in any turns that
+            // scrolled out in the same pass) rather than silently keep stale prose sitting on top of it.
+            foldTurns = olderTurns.OrderBy(t => t.Turn).ToList();
+            baseSummary = null;
+        }
+        else
+        {
+            // Fold ONLY the turns newly scrolled out (above the current watermark), oldest-first — incremental, not a re-summarize.
+            foldTurns = olderTurns.Where(t => t.Turn > currentWatermark).OrderBy(t => t.Turn).ToList();
+            baseSummary = session.Summary;
+        }
+
+        var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(foldTurns.Select(t => t.Id).ToList(), teamId, cancellationToken).ConfigureAwait(false);
+
+        var distilled = await TryDistillAsync(teamId, baseSummary, foldTurns, manifestsByRunId, cancellationToken).ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(distilled))
         {
-            // Fail-open: no model / LLM error — Summary is left unchanged, but the GAP must not stay silent. The
-            // oldest un-folded turn is the earliest one this failure leaves behind; never overwritten by a LATER
-            // failure's (necessarily newer) gap — the oldest gap is the one a reader needs to know about.
-            session.SummaryStaleSinceTurn ??= newTurns[0].Turn;
+            // Fail-open: no model / LLM error — Summary (and its source binding) are left unchanged, but the GAP must
+            // not stay silent. The oldest un-folded turn is the earliest one this failure leaves behind; never
+            // overwritten by a LATER failure's (necessarily newer) gap — the oldest gap is the one a reader needs to know about.
+            session.SummaryStaleSinceTurn ??= foldTurns[0].Turn;
             return;
         }
 
         session.Summary = distilled.Trim();
         session.SummaryThroughTurnIndex = targetWatermark;
         session.SummaryStaleSinceTurn = null;
+
+        // Accumulate: the just-folded turns' FRESH bindings + every previously-stored binding this fold did not touch.
+        var carriedOverBindings = storedBindings.Values.Where(b => foldTurns.All(t => t.Turn!.Value != b.Turn));
+        session.SummarySourceBindingJson = SessionSummarySourceBindings.Serialize(
+            foldTurns.Select(t => freshBindings[t.Turn!.Value]).Concat(carriedOverBindings).OrderBy(b => b.Turn).ToList());
     }
+
+    /// <summary>The latest <c>CompletionAssessmentRecord.Id</c> per <c>WorkflowRunId</c>, for the given (already-narrow) run ids — an id-only read, never the assessment body.</summary>
+    private async Task<IReadOnlyDictionary<Guid, Guid>> LoadLatestAssessmentIdsAsync(Guid teamId, IReadOnlyList<Guid> runIds, CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0) return new Dictionary<Guid, Guid>();
+
+        return (await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.TeamId == teamId && runIds.Contains(a.WorkflowRunId))
+            .OrderBy(a => a.CreatedDate)
+            .Select(a => new { a.WorkflowRunId, a.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .GroupBy(a => a.WorkflowRunId)
+            .ToDictionary(g => g.Key, g => g.Last().Id);
+    }
+
+    /// <summary>This turn's CURRENT source binding — its effective run id, a fingerprint of what would be folded, and its latest assessment id (null = none recorded). Internal so a test can pin the fingerprint's determinism without a DB round-trip.</summary>
+    internal static SessionSummarySourceBinding BuildBinding(TurnRow t, IReadOnlyDictionary<Guid, Guid> assessmentIdsByRunId) => new()
+    {
+        Turn = t.Turn!.Value,
+        EffectiveRunId = t.Id,
+        ResultFingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{t.Status}|{t.Goal}|{t.Result}|{t.LegacyBranch}"))),
+        AssessmentId = assessmentIdsByRunId.TryGetValue(t.Id, out var id) ? id : null,
+    };
+
+    /// <summary>True when a previously-bound turn's CURRENT source no longer matches what the summary was built from — its effective attempt changed (a rerun won), its content changed, or its recorded assessment changed. A turn with no stored binding is never dirty (unknown legacy provenance, not a forced refresh). Internal so a test can pin each dirty dimension directly.</summary>
+    internal static bool IsDirty(SessionSummarySourceBinding fresh, SessionSummarySourceBinding? stored) =>
+        stored is not null && (fresh.EffectiveRunId != stored.EffectiveRunId || fresh.ResultFingerprint != stored.ResultFingerprint || fresh.AssessmentId != stored.AssessmentId);
 
     /// <summary>Distill the existing summary + the newly scrolled-out turns into an updated summary. Returns null (fail-open) when no provider/model is available or the LLM call fails. Internal so the real-model eval can drive the live distillation directly (DB-free), pinning that the summary actually preserves older turns.</summary>
     internal async Task<string?> TryDistillAsync(Guid teamId, string? existingSummary, IReadOnlyList<TurnRow> newTurns, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> manifestsByRunId, CancellationToken cancellationToken)

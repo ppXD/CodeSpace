@@ -87,6 +87,19 @@ public class WorkSession : IEntity<Guid>, IAuditable
     public int? SummaryStaleSinceTurn { get; set; }
 
     /// <summary>
+    /// Durable per-folded-turn SOURCE BINDING for <see cref="Summary"/> — a JSON array of
+    /// <c>Services.Sessions.SessionSummarySourceBinding</c> entries (one per turn <see cref="Summary"/> has folded),
+    /// each carrying that turn's effective run id, a content fingerprint, and its latest recorded completion-assessment
+    /// id. <c>SessionSummarizer</c> is the sole writer: it appends an entry per newly-folded turn and re-checks every
+    /// existing entry's fingerprint on each run, so an effective-source change BEHIND an unmoved watermark (a rerun
+    /// winning, a mutated result, a newly recorded assessment) is detected and the summary refreshed rather than
+    /// silently going stale. <c>SessionContextBuilder</c> reads it to carry an out-of-window turn's unresolved
+    /// contract into the digest without re-deriving it from the model's own prose. NULL = no binding recorded yet
+    /// (legacy or never-folded row).
+    /// </summary>
+    public string? SummarySourceBindingJson { get; set; }
+
+    /// <summary>
     /// The highest top-level turn ordinal assigned in this thread — the atomic, race-free turn counter that replaces
     /// the old MAX(SessionTurnIndex)+1 read. Starts at 1 (the opening run's turn, <c>WorkSessionService.FirstTurnIndex</c>).
     /// A CONTINUE atomically increments it (<c>UPDATE … SET last_turn_index = last_turn_index + 1 … RETURNING</c>), so
