@@ -1,6 +1,8 @@
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
 
@@ -25,21 +27,24 @@ public static class LlmHttpClientRegistration
 
     public static IServiceCollection AddLlmHttpClients(this IServiceCollection services)
     {
+        services.AddOptions<PhysicalLlmObservationOptions>();
+        services.AddTransient<PhysicalLlmAccountingHandler>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHttpMessageHandlerBuilderFilter, PhysicalLlmPipelineValidationFilter>());
         foreach (var name in ClientNames)
         {
-            services.AddHttpClient(name, c => c.Timeout = LlmHttpDefaults.RequestTimeout)
+            var client = services.AddHttpClient(name, c => { c.Timeout = LlmHttpDefaults.RequestTimeout; PhysicalLlmCallContext.Register(c); })
                 .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
                 {
                     // A finite lifetime so a long-lived process picks up a gateway DNS/cert rotation; redirects off so a
                     // same-host https→http downgrade can't smuggle the api-key/Bearer header to a plaintext hop.
                     PooledConnectionLifetime = TimeSpan.FromMinutes(2),
                     AllowAutoRedirect = false,
-                })
-                // RETRY ONLY — deliberately NO timeout strategy (the AddStandardResilienceHandler default 10s attempt /
-                // 30s total would be WORSE than 100s for a long LLM generation; the real ceiling is HttpClient.Timeout +
-                // the node's optional per-call budget) and NO circuit breaker (a shared breaker would bleed one team's
-                // bad gateway onto every team — a per-endpoint-keyed breaker is a deferred refinement).
-                .AddResilienceHandler(ResilienceHandlerName, b => b.AddRetry(new HttpRetryStrategyOptions
+                });
+            // RETRY ONLY — deliberately NO timeout strategy (the AddStandardResilienceHandler default 10s attempt /
+            // 30s total would be WORSE than 100s for a long LLM generation; the real ceiling is HttpClient.Timeout +
+            // the node's optional per-call budget) and NO circuit breaker (a shared breaker would bleed one team's
+            // bad gateway onto every team — a per-endpoint-keyed breaker is a deferred refinement).
+            client.AddResilienceHandler(ResilienceHandlerName, b => b.AddRetry(new HttpRetryStrategyOptions
                 {
                     MaxRetryAttempts = 2,
                     BackoffType = DelayBackoffType.Exponential,
@@ -47,6 +52,7 @@ public static class LlmHttpClientRegistration
                     Delay = TimeSpan.FromSeconds(1),
                     ShouldRetryAfterHeader = true,
                 }));
+            client.AddHttpMessageHandler<PhysicalLlmAccountingHandler>();
         }
 
         return services;

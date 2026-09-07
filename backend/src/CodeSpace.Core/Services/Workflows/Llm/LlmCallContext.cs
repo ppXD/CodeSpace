@@ -38,6 +38,10 @@ public sealed record LlmCallScope(
     /// <summary>What THIS call's capture actually masked, minted per call by <see cref="ForOneCall"/>. Null on the ambient scope a caller pushes, because nothing has been captured under it yet.</summary>
     ModelCallCaptureMasking? Masking = null)
 {
+    /// <summary>Server-owned native physical accounting identity; the interaction tape is then a logical observation only.</summary>
+    public Guid? NativeModelCallId { get; init; }
+    public PersistenceSecretRedactor? NativeCredentialRedactor { get; init; }
+
     /// <summary>This scope viewed for ONE model call: the same identity and collaborators, its own masking observation. The recording decorators take it before capturing, so a call whose prompt carried a secret cannot report the next call on the same node scope as masked.</summary>
     public LlmCallScope ForOneCall() => this with { Masking = new ModelCallCaptureMasking() };
 }

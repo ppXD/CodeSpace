@@ -44,7 +44,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
     {
         var candidates = await (from record in _db.WorkflowRunRecord.AsNoTracking()
                                 join run in _db.WorkflowRun.AsNoTracking() on record.RunId equals run.Id
-                                where record.CorrelationId != null && record.RecordType == WorkflowRunRecordTypes.InteractionStarted
+                                where !EF.Functions.JsonContains(record.PayloadJson, "{\"accountingSource\":\"structured-post/v1\"}") && record.CorrelationId != null && record.RecordType == WorkflowRunRecordTypes.InteractionStarted
                                       && !_db.WorkflowRunModelCallAttempt.Any(attempt => attempt.SourceStartedRecordId == record.Id)
                                       && !_db.WorkflowRunModelCall.Any(call => call.TeamId == run.TeamId && call.WorkflowRunId == record.RunId
                                           && call.SourceKind == SourceKind && call.SourceCorrelationId == record.CorrelationId)
@@ -176,7 +176,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
     {
         var candidates = await (from record in _db.WorkflowRunRecord.AsNoTracking()
                                 join run in _db.WorkflowRun.AsNoTracking() on record.RunId equals run.Id
-                                where record.CorrelationId != null
+                                where !EF.Functions.JsonContains(record.PayloadJson, "{\"accountingSource\":\"structured-post/v1\"}") && record.CorrelationId != null
                                       && (record.RecordType == WorkflowRunRecordTypes.InteractionCompleted || record.RecordType == WorkflowRunRecordTypes.InteractionFailed)
                                       && !_db.WorkflowRunModelCallAttempt.Any(attempt => attempt.SourceTerminalRecordId == record.Id)
                                       && !_db.WorkflowRunModelCall.Any(call => call.TeamId == run.TeamId && call.WorkflowRunId == record.RunId

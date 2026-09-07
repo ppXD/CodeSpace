@@ -21,14 +21,17 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
+public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture) : IDisposable
 {
+    private readonly System.Collections.Concurrent.ConcurrentBag<ServiceProvider> _httpServices = new();
+    public void Dispose() { foreach (var services in _httpServices) services.Dispose(); }
     [Theory]
     [InlineData(null)]
     [InlineData("{\"prompt_tokens\":5}")]
@@ -42,7 +45,9 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
         response.Calls.ShouldBe(1);
 
         var row = (await ReservationsAsync(scenario)).ShouldHaveSingleItem();
-        row.Kind.ShouldBe("llm:critic.review", "the real critic relabel preserves the ambient budget");
+        row.Kind.ShouldBe("llm:physical-post/v1");
+        using (var read = fixture.BeginScope())
+            (await read.Resolve<CodeSpaceDbContext>().WorkflowRunModelCall.SingleAsync(c => c.WorkflowRunId == scenario.RunId)).Purpose.ShouldBe("critic.review", "the real critic preserves the semantic purpose and workflow budget");
         row.State.ShouldBe(BudgetReservationStates.Indeterminate);
         row.SettledUsd.ShouldBeNull();
         row.ReservedUsd.ShouldBeGreaterThan(0m);
@@ -88,19 +93,20 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
         using var response = new ReplyHandler((HttpStatusCode.OK, malformed), (HttpStatusCode.OK, malformed), (HttpStatusCode.OK, accepted));
         (await ReviewAsync(scenario, response, 100m)).Failed.ShouldBeFalse();
         response.Calls.ShouldBe(3);
-        var row = (await ReservationsAsync(scenario)).ShouldHaveSingleItem();
-        row.State.ShouldBe(BudgetReservationStates.Indeterminate);
-        row.SettledUsd.ShouldBeNull("the final POST's usage is only a known subtotal of this logical provider call");
+        var rows = await ReservationsAsync(scenario);
+        rows.Count.ShouldBe(3);
+        rows.ShouldAllBe(r => r.State == BudgetReservationStates.Settled);
+        rows.Sum(r => r.SettledUsd).ShouldBe(0.00124m, "all three known provider envelopes survive the structured parse failure");
         var completed = await CompletedAsync(scenario);
-        JsonDocument.Parse(completed.PayloadJson).RootElement.GetProperty("usage").GetProperty("isPartial").GetBoolean().ShouldBeTrue();
-        InteractionSpend.From(completed, Prices()).CostUsd.ShouldBeNull("the persisted cost fold must see the same uncertainty as admission");
+        JsonDocument.Parse(completed.PayloadJson).RootElement.GetProperty("usage").GetProperty("isPartial").GetBoolean().ShouldBeFalse();
+        InteractionSpend.From(completed, Prices()).CostUsd.ShouldBe(0.00124m);
     }
 
     [Fact]
     public async Task A_failed_over_provider_keeps_the_failed_hops_claim_and_the_successor_spend()
     {
         var scenario = await SeedAsync();
-        using var firstHttp = new ReplyHandler((HttpStatusCode.ServiceUnavailable, "{\"error\":{\"message\":\"upstream unavailable\"}}"));
+        using var firstHttp = new ReplyHandler(Enumerable.Repeat((HttpStatusCode.ServiceUnavailable, "{\"error\":{\"message\":\"upstream unavailable\"}}"), 3).ToArray());
         using var secondHttp = new ReplyHandler((HttpStatusCode.OK, Response("{\"prompt_tokens\":10,\"completion_tokens\":5}")));
         using var scope = fixture.BeginScope();
         var pick = (await scope.Resolve<IModelPoolSelector>().ResolveByRowIdAsync(scenario.TeamId, scenario.ModelRowId, CancellationToken.None)).ShouldNotBeNull();
@@ -117,12 +123,12 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
         }
 
         var rows = await ReservationsAsync(scenario);
-        rows.Count.ShouldBe(2, "each failover candidate passes through the production recording/budget decorator");
-        rows.Count(r => r.State == BudgetReservationStates.Indeterminate && r.SettledUsd == null).ShouldBe(1);
+        rows.Count.ShouldBe(4, "three Polly attempts and the next pool candidate each have their own receipt");
+        rows.Count(r => r.State == BudgetReservationStates.Indeterminate && r.SettledUsd == null).ShouldBe(3);
         rows.Single(r => r.State == BudgetReservationStates.Settled).SettledUsd.ShouldBe(0.00004m);
         var committed = await scope.Resolve<IBudgetLedger>().CommittedUsdAsync(scenario.RunId, scenario.TeamId, CancellationToken.None);
-        committed.ShouldBe(rows.Single(r => r.State == BudgetReservationStates.Indeterminate).ReservedUsd + 0.00004m);
-        firstHttp.Calls.ShouldBe(1);
+        committed.ShouldBe(rows.Where(r => r.State == BudgetReservationStates.Indeterminate).Sum(r => r.ReservedUsd) + 0.00004m);
+        firstHttp.Calls.ShouldBe(3);
         secondHttp.Calls.ShouldBe(1);
     }
 
@@ -147,7 +153,9 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
         using var resolve = fixture.BeginScope();
         var pick = (await resolve.Resolve<IModelPoolSelector>().ResolveByRowIdAsync(scenario.TeamId, scenario.ModelRowId, CancellationToken.None)).ShouldNotBeNull();
         var request = Request(pick.Credential);
-        var estimate = LlmBudgetGuard.EstimateUsd(request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens, Prices())!.Value;
+        using var calibration = new ReplyHandler((HttpStatusCode.OK, Response("{\"prompt_tokens\":10,\"completion_tokens\":5}")));
+        await Decorated(calibration).CompleteStructuredAsync(request, CancellationToken.None);
+        var estimate = AgentCostPricing.CostUsd(request.Model, (int)(calibration.RequestBytes / 3 + 64), request.MaxOutputTokens!.Value, Prices())!.Value;
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var admissions = System.Threading.Channels.Channel.CreateUnbounded<bool>();
         var workers = Enumerable.Range(0, 8).Select(async _ =>
@@ -179,7 +187,7 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
             entered.ShouldBe(3, "five callers are refused while three real HTTP requests still hold their claims");
             var held = await ReservationsAsync(scenario);
             held.Count.ShouldBe(3);
-            held.ShouldAllBe(r => r.State == BudgetReservationStates.Reserved && r.SettledUsd == null);
+            held.ShouldAllBe(r => r.State == BudgetReservationStates.Indeterminate && r.SettledUsd == null);
         }
         finally { release.TrySetResult(); await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(20)); }
         (await Task.WhenAll(workers)).Count(accepted => accepted).ShouldBe(3);
@@ -199,9 +207,10 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
         using var http = new ReplyHandler((HttpStatusCode.OK, invalid), (HttpStatusCode.OK, anthropic ? AnthropicResponse() : Response("{\"prompt_tokens\":10,\"completion_tokens\":5}")));
         (await ReviewAsync(scenario, http, 100m)).Failed.ShouldBeFalse();
         http.Calls.ShouldBe(2);
-        var row = (await ReservationsAsync(scenario)).ShouldHaveSingleItem();
-        row.SettledUsd.ShouldBeNull("an earlier model's tokens cannot be billed at the successor model's rate");
-        row.State.ShouldBe(BudgetReservationStates.Indeterminate);
+        var rows = await ReservationsAsync(scenario);
+        rows.Count.ShouldBe(2);
+        rows.ShouldAllBe(r => r.State == BudgetReservationStates.Settled);
+        rows.Sum(r => r.SettledUsd).ShouldBe(0.00104m, "each model is billed under its own frozen price; do not price their aggregate as one model");
         InteractionSpend.From(await CompletedAsync(scenario), Prices()).CostUsd.ShouldBeNull();
     }
 
@@ -215,11 +224,21 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
     }
 
     private static IDisposable PushScope(ILifetimeScope scope, Scenario scenario, decimal cap) => LlmCallContext.Push(new LlmCallScope(scenario.RunId, scenario.TeamId, "sup", "turn1", "supervisor.decision", scope.Resolve<IRunRecordLogger>(), scope.Resolve<IArtifactOffloader>(), scope.Resolve<IBudgetLedger>(), cap, Prices()));
-    private static RecordingStreamingStructuredLLMClientDecorator Decorated(ReplyHandler response, bool anthropic = false) => new(anthropic ? new AnthropicClient(new HttpFactory(response)) : new OpenAiClient(new HttpFactory(response)));
+    private RecordingStreamingStructuredLLMClientDecorator Decorated(ReplyHandler response, bool anthropic = false)
+    {
+        var collection = new ServiceCollection();
+        collection.AddLlmHttpClients();
+        foreach (var name in LlmHttpClientRegistration.ClientNames) collection.AddHttpClient(name).ConfigurePrimaryHttpMessageHandler(() => response);
+        var services = collection.BuildServiceProvider();
+        _httpServices.Add(services);
+        var factory = services.GetRequiredService<IHttpClientFactory>();
+        return new(anthropic ? new AnthropicClient(factory) : new OpenAiClient(factory));
+    }
     private static IReadOnlyDictionary<string, ModelPrice> Prices() => new Dictionary<string, ModelPrice>
     {
         ["requested-model"] = new() { InputPerMillionUsd = 1m, OutputPerMillionUsd = 1m },
         ["observed-model"] = new() { InputPerMillionUsd = 2m, OutputPerMillionUsd = 4m },
+        ["earlier-model"] = new() { InputPerMillionUsd = 3m, OutputPerMillionUsd = 7m },
     };
 
     private static StructuredLLMCompletionRequest Request(ResolvedModelCredential credential) => new() { Model = "requested-model", SystemPrompt = "s", UserPrompt = "u", MaxOutputTokens = 100, JsonSchema = JsonSerializer.SerializeToElement(new { type = "object" }), Credential = credential };
@@ -260,24 +279,24 @@ public sealed class ProviderBudgetAccountingFlowTests(PostgresFixture fixture)
     }
 
     private sealed record Scenario(Guid RunId, Guid TeamId, Guid ModelRowId, bool Anthropic);
-    private sealed class HttpFactory(HttpMessageHandler handler) : IHttpClientFactory
-    {
-        public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
-    }
     private sealed class ReplyHandler(params (HttpStatusCode Status, string Body)[] responses) : HttpMessageHandler
     {
         private readonly Queue<(HttpStatusCode Status, string Body)> _responses = new(responses);
         public int Calls { get; private set; }
+        public long RequestBytes { get; private set; }
         public Task? BeforeReply { get; init; }
         public Action? RequestStarted { get; init; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Calls++;
+            RequestBytes = request.Content!.Headers.ContentLength!.Value;
             RequestStarted?.Invoke();
             if (BeforeReply is { } gate) await gate.WaitAsync(cancellationToken);
             if (_responses.Count == 0) throw new InvalidOperationException("unexpected additional provider POST");
             var response = _responses.Dequeue();
-            return new HttpResponseMessage(response.Status) { Content = new StringContent(response.Body, Encoding.UTF8, "application/json") };
+            var message = new HttpResponseMessage(response.Status) { Content = new StringContent(response.Body, Encoding.UTF8, "application/json") };
+            if (response.Status == HttpStatusCode.ServiceUnavailable) message.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+            return message;
         }
     }
 }

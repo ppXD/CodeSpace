@@ -17,7 +17,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Custom;
 /// way to the supervisor". The structured client makes <c>"Custom"</c> an eligible brain provider (the brain auto-pick +
 /// the decider's provider-match both flow through it).</para>
 /// </summary>
-public sealed class CustomClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+public sealed class CustomClient : ILLMClient, IPhysicalStructuredLLMClient, IStreamingLLMClient
 {
     private readonly OpenAiClient _wire;
 
