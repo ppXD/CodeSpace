@@ -81,7 +81,7 @@ public sealed class RealModelBenchmarkHiddenFixtureE2ETests
                     Tasks = suite.Tasks, TeamId = teamId, FixtureStager = suite.FixtureStager, SuiteContentHash = suite.SuiteContentHash,
                     Selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = model, ModelCredentialId = credentialId, Autonomy = AgentAutonomyLevel.Trusted },
                 };
-                var run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(request, CancellationToken.None);
+                var run = await BenchmarkEvidenceExport.RunAsync(scope, request, BenchmarkEvidenceExport.LiveOptions("external-development-fixture", new[] { baseUrl!, key!, model! }), CancellationToken.None);
                 run.Errored.ShouldBeEmpty("a custom fixture must reach the model, never fall back to a seed");
                 var result = run.Results.ShouldHaveSingleItem();
                 result.AgentRunId.ShouldNotBeNull();

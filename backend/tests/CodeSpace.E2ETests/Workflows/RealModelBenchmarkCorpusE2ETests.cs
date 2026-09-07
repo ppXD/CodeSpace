@@ -85,7 +85,7 @@ public sealed class RealModelBenchmarkCorpusE2ETests
 
             CorpusBenchmarkRun run;
             using (var scope = _fixture.BeginScopeAs(userId, teamId))
-                run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(SeedBenchmarkCorpus.Tasks, teamId, selection, CancellationToken.None);
+                run = await BenchmarkEvidenceExport.RunAsync(scope, new CorpusBenchmarkRequest { Tasks = SeedBenchmarkCorpus.Tasks, TeamId = teamId, Selection = selection }, BenchmarkEvidenceExport.LiveOptions("seed-corpus", new[] { baseUrl!, apiKey!, model! }), CancellationToken.None);
 
             // P4.2 — reuse the ALREADY-HONEST BenchmarkScorecard/EvalScorecard denominator (run.Scorecard.Overall)
             // instead of re-deriving a stricter "RunStatus==Succeeded" filter here: that hand-rolled filter used to

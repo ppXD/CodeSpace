@@ -607,6 +607,8 @@ jobs:
       # structurally cannot fit 10 minutes — run 29094292726/29099883836 both tripped it. 2700s (45m) fits the
       # corpus inside this job's own 60-minute cap while still bounding a genuine hang.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
+      # Per-cell manifests and redacted bounded grader bytes are included in the existing always-upload artifact.
+      CODESPACE_BENCHMARK_EVIDENCE_DIRECTORY: ${{ github.workspace }}/backend/TestResults/benchmark-evidence
       # Force the real agent UNCONFINED (a non-existent bwrap binary → BubblewrapSandbox probe degrades to "unavailable"),
       # and disable the prlimit caps (caps=0 → ProcessRlimits.Wrap returns the command unchanged → no RLIMIT_NPROC kill on
       # a shared host). Safe: REQUIRE_SANDBOX is unset, the benchmark edits trusted offline fixtures, and real confinement
