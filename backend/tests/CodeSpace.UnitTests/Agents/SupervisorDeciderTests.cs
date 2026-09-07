@@ -480,22 +480,47 @@ public class SupervisorDeciderTests
             OutcomeJson = InfraFailedUnit(Guid.NewGuid(), detail),
         };
 
+    /// <summary>A plan prior — the anchor every approved amendment lives or dies by (MAJOR-8), so the amend tapes can put one AFTER a co-sign and read what the steer does then.</summary>
+    private static SupervisorPriorDecision PlanAt(long sequence) =>
+        new()
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(OnePlannedSubtask(), AgentJson.Options), OutcomeJson = """{"planned":["s1"],"count":1}""",
+        };
+
     /// <summary>
-    /// The three steers, swept — the arm the live miss picked is the AwaitingRetry cell, and its whole content is
+    /// The four steers, swept — the arm the live miss picked is the AwaitingRetry cell, and its whole content is
     /// that a co-signed check is retried rather than re-planned. Pinned as a full mapping (the #1795 convention)
-    /// because the defect was a single cell rendering the wrong one of three.
+    /// because the defect was a single cell rendering the wrong one of four.
     /// </summary>
     [Theory]
     [InlineData(SupervisorAmendStanding.None, "Do NOT retry the agent — another pass cannot fix the check. Re-plan this item with a check its agent can satisfy, or ask a human to rule.")]
-    [InlineData(SupervisorAmendStanding.AwaitingRetry, "Its check was AMENDED by an approved human co-sign that is NOT yet consumed — RETRY this exact subtask so the amended check grades it. Do NOT author a new plan for it: approved amendments are anchored to the CURRENT plan, so a new plan DISCARDS the co-signed check and this unit re-enters on the one that could not run.")]
-    [InlineData(SupervisorAmendStanding.Consumed, "Do NOT retry the agent — another pass cannot fix the check. Its check was already AMENDED by an approved human co-sign and this unit has ALREADY been re-staged under it, so propose 'amend_acceptance' once more or 'ask_human' to rule. Do NOT author a new plan for it: approved amendments are anchored to the CURRENT plan, so a new plan DISCARDS the co-signed check and this unit re-enters on the one that could not run.")]
+    [InlineData(SupervisorAmendStanding.AwaitingRetry, "Its check was AMENDED by an approved human co-sign that is NOT yet consumed — RETRY this exact subtask so the amended check grades it; do NOT author a new plan for it.")]
+    [InlineData(SupervisorAmendStanding.Consumed, "Do NOT retry the agent — another pass cannot fix the check. Its check was already AMENDED by an approved human co-sign and this unit has ALREADY been re-staged under it, so propose 'amend_acceptance' once more or 'ask_human' to rule; do NOT author a new plan for it.")]
+    [InlineData(SupervisorAmendStanding.Discarded, "Do NOT retry the agent — another pass cannot fix the check. Its check WAS amended by an approved human co-sign, and a later re-plan DISCARDED that amendment — so do NOT author another plan: propose 'amend_acceptance' again, re-anchoring the repaired check to THIS plan, or 'ask_human' to rule.")]
     public void Each_amend_standing_maps_to_one_infra_steer(SupervisorAmendStanding standing, string steer)
     {
         LlmSupervisorDecider.InfraSteerFor(standing).ShouldBe(steer);
 
         if (standing != SupervisorAmendStanding.None)
+        {
             steer.ShouldNotContain("Re-plan this item", Case.Insensitive,
-                "both amended arms sit one line from the None arm's copy — a model picks its verb off the wording, so the cost sentence must not read as the instruction");
+                "every amended arm sits one line from the None arm's copy — a model picks its verb off the wording, so no amended arm may read as that instruction");
+            steer.ShouldContain("plan", Case.Insensitive,
+                "…and every amended arm must still name the plan verb it forbids: the prohibition is the point, the mechanism behind it is stated once per prompt");
+        }
+    }
+
+    [Fact]
+    public void Every_amend_standing_has_its_own_steer()
+    {
+        // A new reading that silently falls through to the None arm is exactly the defect this arc is about — the
+        // Discarded state existed on the tape long before it had a steer, and the fallthrough re-rendered "Re-plan
+        // this item" on units a re-plan had already robbed. Swept over the enum so a fifth state cannot land mute.
+        var steers = Enum.GetValues<SupervisorAmendStanding>().ToDictionary(v => v, LlmSupervisorDecider.InfraSteerFor);
+
+        steers.Values.Distinct(StringComparer.Ordinal).Count().ShouldBe(steers.Count,
+            "two standings render the same steer — one of them is falling through to another arm, which is how a reading gets added without ever reaching the model");
     }
 
     [Fact]
@@ -511,7 +536,7 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("acceptance UNVERIFIED", Case.Sensitive, "an unrunnable check is still not a verdict on the work");
         prompt.ShouldContain("RETRY this exact subtask so the amended check grades it", Case.Sensitive, "the co-signed repair is consumed by a retry and by nothing else");
         prompt.ShouldNotContain("Re-plan this item", Case.Insensitive, "the steer that killed the run — a re-plan is the ONE move that throws the co-sign away");
-        prompt.ShouldContain("DISCARDS the co-signed check", Case.Sensitive, "and the cost is named, not left to be inferred from the anchoring rule");
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive, "and the cost is named, not left to be inferred from the anchoring rule");
     }
 
     [Fact]
@@ -526,9 +551,80 @@ public class SupervisorDeciderTests
             StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: dotnet not found")));
 
         prompt.ShouldContain("propose 'amend_acceptance' once more or 'ask_human' to rule", Case.Sensitive, "the two moves the precondition actually leaves open");
-        prompt.ShouldContain("DISCARDS the co-signed check", Case.Sensitive, "the cost survives the retry — the amendment is still anchored to this plan");
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive, "the cost survives the retry — the amendment is still anchored to this plan");
         prompt.ShouldNotContain("Re-plan this item", Case.Insensitive);
         prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive, "the retry consumed the obligation — the banner is silent, and so is the steer's retry offer");
+    }
+
+    [Fact]
+    public void An_infra_verdict_whose_cosign_a_re_plan_discarded_steers_back_to_the_amendment_not_at_another_plan()
+    {
+        // THE hole the first cut of this fix left open, and the one the observed plan×8 lived in: after the first
+        // re-plan the standing fell back to None, so every historical infra verdict re-rendered "Re-plan this item"
+        // — the same fuel, one turn later, on a unit whose repair that very plan had just eaten.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 5,
+            PlanAt(1),
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found"),
+            ApprovedAmendCard(3, "s1"),
+            PlanAt(4)));
+
+        prompt.ShouldContain("a later re-plan DISCARDED that amendment", Case.Sensitive, "the unit's own line must say what happened to the repair it was given");
+        prompt.ShouldContain("propose 'amend_acceptance' again", Case.Sensitive, "…and send it at the verb that re-anchors the repair to the current plan");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive, "asking for another plan here is asking to lose the next co-sign the same way");
+        prompt.ShouldNotContain("RETRY this exact subtask so the amended check grades it", Case.Sensitive, "there is no amended check left to grade under — the retry offer belongs to the outstanding arm alone");
+        prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive, "a discarded amendment owes no retry, so the banner stays silent: Discarded is steer-only by design");
+    }
+
+    [Fact]
+    public void The_re_plan_cost_is_stated_once_per_prompt_however_many_amended_results_it_carries()
+    {
+        // The render loop is per-prior × per-result, so an inline cost sentence repeated for every historical infra
+        // verdict of the SAME subtask — about six copies (~300 tokens a turn) in the shape run 34066916864 reached.
+        // The prohibition stays on each arm; the mechanism behind it is stated once, beside the amendment banner.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4,
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found"),
+            ApprovedAmendCard(3, "s1"),
+            StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: dotnet not found")));
+
+        prompt.Split(LlmSupervisorDecider.ReplanDiscardsTheCosign).Length.ShouldBe(2,
+            "two infra results for the same subtask must not buy two copies of the same paragraph — it is rendered once per prompt");
+        prompt.Split("acceptance UNVERIFIED").Length.ShouldBe(3,
+            "…and the tape really does carry two of them, or the count above proves nothing");
+    }
+
+    [Fact]
+    public void The_cost_note_stays_off_a_prompt_no_human_has_co_signed()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3,
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found")));
+
+        prompt.ShouldNotContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive,
+            "a run with no co-sign on its tape has nothing a plan could discard — telling it otherwise is a rule it cannot act on");
+        prompt.ShouldContain("Re-plan this item", Case.Insensitive, "…and the un-amended steer is untouched, byte for byte");
+    }
+
+    [Fact]
+    public void The_evidence_tail_under_an_amended_verdict_points_at_the_amendment_not_at_a_re_plan()
+    {
+        // The tail's preamble follows the verdict's OWN directive (the M0 note). Under a Consumed/Discarded verdict
+        // the forbidden verb is the plan, so a tail still offering "(re-plan)" reinstates the contradiction one line
+        // below the steer that removed it.
+        var tail = SupervisorOutcome.FoldAgentResults(
+            """{"agentRunIds":["33333333-3333-3333-3333-333333333333"],"agentCount":1}""",
+            new[] { new SupervisorAgentResult { AgentRunId = Guid.Parse("33333333-3333-3333-3333-333333333333"), Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = "grade-error: npm not found", AcceptanceEvidenceTail = "sh: npm: command not found" } });
+
+        var staged = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = tail,
+        };
+
+        var amended = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 5, PlanAt(1), staged, ApprovedAmendCard(3, "s1"), PlanAt(4)));
+        var plain = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, PlanAt(1), staged));
+
+        amended.ShouldContain("author the replacement check in an 'amend_acceptance'", Case.Sensitive, "the tail names the authoring verb the verdict above it actually left open");
+        amended.ShouldNotContain("(re-plan)", Case.Sensitive, "…and never the one it just forbade");
+        plain.ShouldContain("(re-plan)", Case.Sensitive, "an un-amended infra verdict keeps its original tail preamble, byte for byte");
     }
 
     /// <summary>
@@ -886,6 +982,19 @@ public class SupervisorDeciderTests
 
         system.ShouldContain("abandonEarlierResults", Case.Sensitive, "the model cannot use a signal the rails never name");
         system.ShouldContain("changes direction", Case.Insensitive, "...scoped to the direction-change case, so an ordinary re-plan still conserves finished work");
+    }
+
+    [Fact]
+    public void The_system_prompt_names_what_a_plan_costs_an_approved_acceptance_amendment()
+    {
+        // The verb's OWN description is the last thing a model reads before choosing it, and it is the ONLY carrier
+        // that survives the move it warns about: a re-plan discards the amendment, so the per-unit steer that named
+        // the cost is gone from the very next prompt. Run 34066916864 chose 'plan' eight times over two co-signed
+        // amendments. Pinned, because a sentence no test asserts is a sentence the next edit drops for free.
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("DISCARDS every approved acceptance amendment", Case.Sensitive, "the plan verb's cost to a co-signed oracle must be stated where the verb itself is described");
+        system.ShouldContain("anchored to the plan it was", Case.Insensitive, "...together with the anchoring rule that makes it true, so the model reads a mechanism and not a bare prohibition");
     }
 
     [Fact]

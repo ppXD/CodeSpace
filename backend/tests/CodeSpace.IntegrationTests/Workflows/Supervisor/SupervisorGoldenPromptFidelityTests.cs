@@ -110,6 +110,31 @@ public class SupervisorGoldenPromptFidelityTests
             "a scenario graded on 'retry' whose prompt asks for a re-plan measures obedience to a contradiction, not judgement");
     }
 
+    /// <summary>
+    /// The same bond one turn further on: <c>amended-oracle-discarded-by-replan</c> is graded on re-proposing the
+    /// amendment, so its prompt must say the re-plan already ate the co-sign and must NOT ask for another plan —
+    /// the arm the first cut of this fix fell through on, and the one the observed <c>plan×8</c> lived in. Derived
+    /// from the decider's own steer rather than restated, so a reword stays a one-file change.
+    /// </summary>
+    [Fact]
+    public void The_discarded_cosign_scenario_is_steered_back_at_the_amendment_never_at_another_plan()
+    {
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-discarded-by-replan");
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+        SupervisorAmendObligation.StandingFor(scenario.Context.PriorDecisions, "s2").ShouldBe(SupervisorAmendStanding.Discarded,
+            "the fixture must really carry a co-sign a later plan discarded, or the scenario measures nothing it claims to");
+
+        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.Discarded), Case.Sensitive,
+            "the unit's own verdict line must steer at the verb its accepted set demands");
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive,
+            "…and the prompt must state, once, why the plan it just refused is the move that lost the repair");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive,
+            "a scenario graded on re-proposing the amendment whose prompt asks for a re-plan is the pre-fix prompt with a new name");
+        prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive,
+            "a discarded amendment owes no retry — the banner is outstanding-only, and this reading is steer-only");
+    }
+
     [Fact]
     public void An_answered_ask_human_reaches_the_model_as_the_answer_never_as_the_wait_token()
     {
@@ -269,7 +294,8 @@ public class SupervisorGoldenPromptFidelityTests
     private static readonly HashSet<string> MissingARequiredStage = new(StringComparer.Ordinal)
     {
         "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "amended-oracle-awaiting-retry",
-        "five-subtask-middle-failed", "four-subtask-all-succeeded", "four-subtask-two-failed", "merge-conflict", "mixed-results",
+        "amended-oracle-discarded-by-replan", "five-subtask-middle-failed", "four-subtask-all-succeeded",
+        "four-subtask-two-failed", "merge-conflict", "mixed-results",
         "multi-file-conflict", "resolve-cap-spent", "retried-failure-succeeded", "retried-still-failed",
         "subset-conflict-across-three", "three-subtask-all-succeeded", "three-subtask-partial-failure",
         "unverified-resolution",
@@ -343,19 +369,22 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "b5015eb1e1316e6b787d21a79e42e55c014f9a269961c32438559a568c08d145";
+    private const string GoldenPromptDigest = "624fa1cc6d10a6354abdbfd675388390bf641c181e153d3ffe1f1c60f66eec27";
 
     /// <summary>
-    /// The pin this corpus carried while it held 23 scenarios — before <c>amended-oracle-awaiting-retry</c> joined
-    /// it. That scenario is the co-sign loop's own decision point: an infra-classed unit whose oracle a human has
-    /// APPROVED a replacement for, where the only move that consumes the co-sign is a retry and a re-plan destroys
-    /// it (real-model run 34066916864 re-planned eight times over two co-signed amendments and force-stopped with
-    /// nothing integrated).
+    /// The pin this corpus carried while it held 23 scenarios — before the two co-sign scenarios joined it. They
+    /// are the co-sign loop's own decision points: an infra-classed unit whose oracle a human has APPROVED a
+    /// replacement for, where the only move that consumes the co-sign is a retry
+    /// (<c>amended-oracle-awaiting-retry</c>) — and the same unit one re-plan later, its repair already discarded,
+    /// where the only moves left are re-proposing the amendment or a human ruling
+    /// (<c>amended-oracle-discarded-by-replan</c>). Real-model run 34066916864 answered the second with a plan
+    /// eight times over and force-stopped with nothing integrated.
     ///
     /// <para>The corpus's numbers stay comparable across the re-pin because NOTHING that was already in it moved:
     /// the new steer is derived from a co-signed amendment on the tape, and no pre-existing scenario has one. That
     /// is asserted rather than claimed — <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes
-    /// today's rendering over the 23 scenarios that predate this pin and requires exactly this value back.</para>
+    /// today's rendering over the 23 scenarios that predate this pin and requires exactly this value back. It has
+    /// now survived two corpus growths and one edit to the amended steers, which is the whole point of keeping it.</para>
     /// </summary>
     private const string PreCosignScenarioCorpusDigest = "4b44d4d228bd23b4dfaad94cc0f403e641af82fc221db31f8b0d35772b4d4bea";
 
@@ -462,7 +491,7 @@ public class SupervisorGoldenPromptFidelityTests
     public void The_digest_covers_every_scenario_in_the_corpus()
     {
         // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
-        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(24, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(25, "a scenario was added or dropped — re-pin this count together with the digest");
         SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
@@ -517,10 +546,16 @@ public class SupervisorGoldenPromptFidelityTests
     /// rather than folded into a re-pin of them: a superseded digest re-pinned over today's corpus is a
     /// re-derivation of today's code, and every receipt anchored to it silently degrades from "the before half is
     /// the rendering that really shipped" to "the before half is whatever this build produces".
+    ///
+    /// <para>ONE set serves BOTH superseded pins, and that is only sound while they were taken over the SAME
+    /// corpus — they were: <see cref="DimensionsOnlyCorpusDigest"/> and <see cref="PreCosignScenarioCorpusDigest"/>
+    /// both stood at the corpus's 23 pre-co-sign scenarios. The moment a pin is taken at a different corpus size,
+    /// split this into a per-pin set: excluding from a pin a scenario it already covered would silently recompute
+    /// that pin over a corpus it never measured, which is exactly the degradation above.</para>
     /// </summary>
     private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
     {
-        "amended-oracle-awaiting-retry",
+        "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan",
     };
 
     private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);

@@ -23,12 +23,17 @@ public static class SupervisorAmendObligation
     /// <summary>The priors-only overload — the recitation and other pure renderers resolve the SAME walk without a context.</summary>
     public static string? FirstOutstanding(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
-        foreach (var (subtaskId, cardSequence) in ApprovedReplacementsAfterNewestPlan(priorDecisions))
-            if (LatestStagingSequence(priorDecisions, subtaskId) < cardSequence)
+        var planSequence = NewestPlanSequence(priorDecisions);
+
+        foreach (var (subtaskId, cardSequence) in ApprovedReplacements(priorDecisions))
+            if (cardSequence > planSequence && LatestStagingSequence(priorDecisions, subtaskId) < cardSequence)
                 return subtaskId;
 
         return null;
     }
+
+    /// <summary>Whether ANY approved REPLACEMENT amendment sits on this tape at all — anchored to the current plan or already discarded by a later one. The single fact the prompt's once-per-turn re-plan-cost note renders from, so a run that has spent a human's co-sign is told what a <c>plan</c> costs exactly once, however many amended units its results block carries.</summary>
+    public static bool AnyApprovedAmendment(IReadOnlyList<SupervisorPriorDecision> priorDecisions) => ApprovedReplacements(priorDecisions).Any();
 
     /// <summary>Whether THIS subtask's latest attempt predates an approved amendment for it — its recorded verdict and contradiction were graded by the dead oracle, so retry escalation must not treat them as live evidence.</summary>
     public static bool IsOutstanding(SupervisorTurnContext context, string? subtaskId) => IsOutstanding(context.PriorDecisions, subtaskId);
@@ -39,41 +44,56 @@ public static class SupervisorAmendObligation
 
     /// <summary>
     /// Where this subtask stands against the co-signed amendments on the tape — the fuller reading
-    /// <see cref="IsOutstanding"/> collapses to one bit. The prompt needs the third state as well: a unit whose
+    /// <see cref="IsOutstanding"/> collapses to one bit. The prompt needs the other states as well: a unit whose
     /// amendment was already CONSUMED and whose check still cannot run is not owed a retry, but re-planning it is
-    /// still the one move that destroys the human's ruling, and the steer has to say so.
+    /// still the one move that destroys the human's ruling; and a unit whose amendment a re-plan ALREADY discarded
+    /// (<see cref="SupervisorAmendStanding.Discarded"/>) must be sent back to <c>amend_acceptance</c>, never told to
+    /// author one more plan — the exact loop that spent run 34066916864.
     ///
     /// <para>Cards apply in sequence order, so the LATEST approved amendment per subtask decides — the co-sign
-    /// overlay's own rule. Pure over the tape: a replay re-derives the identical answer.</para>
+    /// overlay's own rule. A card that predates the newest plan reads Discarded (MAJOR-8: the plan it was anchored
+    /// to is gone), and because sequences are monotonic that is exactly "no card was co-signed since the re-plan".
+    /// Pure over the tape: a replay re-derives the identical answer.</para>
+    ///
+    /// <para>KNOWN HOLE, deliberately left for its own change: <see cref="LatestStagingSequence"/> counts a
+    /// spawn/retry decision by KIND alone, ignoring its <c>Status</c> — so a retry row that never actually staged an
+    /// agent (Failed / Expired) still reads as consuming the co-sign, flipping AwaitingRetry to Consumed and
+    /// silencing the banner on an obligation nothing discharged. Reading Status here would move
+    /// <see cref="IsOutstanding"/> for all of its callers (the amend precondition, the retry-escalation gate, the
+    /// banner), so it belongs in a change that can be graded on that blast radius, not in the steer's.</para>
     /// </summary>
     public static SupervisorAmendStanding StandingFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId)
     {
         if (subtaskId is null) return SupervisorAmendStanding.None;
 
-        var standing = SupervisorAmendStanding.None;
+        var cardSequence = -1L;
 
-        foreach (var (id, cardSequence) in ApprovedReplacementsAfterNewestPlan(priorDecisions))
-        {
-            if (!string.Equals(id, subtaskId, StringComparison.Ordinal)) continue;
+        foreach (var (id, sequence) in ApprovedReplacements(priorDecisions))
+            if (string.Equals(id, subtaskId, StringComparison.Ordinal)) cardSequence = sequence;
 
-            standing = LatestStagingSequence(priorDecisions, subtaskId) < cardSequence ? SupervisorAmendStanding.AwaitingRetry : SupervisorAmendStanding.Consumed;
-        }
+        if (cardSequence < 0) return SupervisorAmendStanding.None;
 
-        return standing;
+        if (cardSequence <= NewestPlanSequence(priorDecisions)) return SupervisorAmendStanding.Discarded;
+
+        return LatestStagingSequence(priorDecisions, subtaskId) < cardSequence ? SupervisorAmendStanding.AwaitingRetry : SupervisorAmendStanding.Consumed;
     }
 
-    /// <summary>Every approved REPLACEMENT amendment after the newest plan, in sequence order: (target subtask, the card's sequence).</summary>
-    private static IEnumerable<(string SubtaskId, long CardSequence)> ApprovedReplacementsAfterNewestPlan(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    /// <summary>The sequence of the NEWEST plan on the tape, or -1 when nothing has been planned — the anchor every approved amendment lives or dies by (MAJOR-8).</summary>
+    private static long NewestPlanSequence(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var planSequence = -1L;
 
         foreach (var decision in priorDecisions)
             if (decision.DecisionKind == SupervisorDecisionKinds.Plan) planSequence = decision.Sequence;
 
+        return planSequence;
+    }
+
+    /// <summary>Every approved REPLACEMENT amendment on the tape, in sequence order: (target subtask, the card's sequence). Unfiltered by plan — the callers that care about the anchor compare against <see cref="NewestPlanSequence"/> themselves, because "discarded by a re-plan" is a reading the prompt needs, not a row to hide.</summary>
+    private static IEnumerable<(string SubtaskId, long CardSequence)> ApprovedReplacements(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
         foreach (var decision in priorDecisions)
         {
-            if (decision.Sequence <= planSequence) continue;
-
             if (!SupervisorAmendAcceptance.IsApprovedAmendCard(decision)) continue;
 
             var amend = SupervisorAmendAcceptance.ReadAmend(decision.PayloadJson)!;
