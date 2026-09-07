@@ -37,7 +37,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public partial class AgentRunExecutorTests
+public class AgentRunExecutorTests
 {
     private readonly PostgresFixture _fixture;
 
