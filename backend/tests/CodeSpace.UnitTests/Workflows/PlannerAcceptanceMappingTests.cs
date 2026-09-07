@@ -43,7 +43,9 @@ public sealed class PlannerAcceptanceMappingTests
 
     [Theory]
     // ArtifactPresent excluded: since P2.6 a bare one is self-certifying and dropped on an undeclared path — its own
-    // admissibility matrix is covered below (ArtifactPresent_admissibility_follows_the_declared_and_paired_matrix).
+    // admissibility matrix is covered below (A_bare_artifact_present_is_dropped_regardless_of_declared_paths,
+    // A_paired_artifact_present_is_promoted_and_kept_when_nothing_excludes_its_path, and
+    // A_paired_artifact_present_on_a_path_the_declared_set_excludes_is_still_dropped).
     [InlineData("LlmJudge", "{\"rubric\":{\"criteria\":[{\"id\":\"coverage\",\"requirement\":\"explains the evidence\"}],\"threshold\":1}}")]
     [InlineData("CitationsResolve", "{}")]
     [InlineData("ArtifactSchema", "{\"schema\":{\"type\":\"object\",\"required\":[\"answer\"]}}")]
@@ -271,15 +273,16 @@ public sealed class PlannerAcceptanceMappingTests
     // ── P2.6: a planner-authored ArtifactPresent cannot self-certify ─────────────────────────────────────────────
 
     [Theory]
-    [InlineData(false, "self-certifying")]
-    [InlineData(true, "no paired ArtifactSchema or LlmJudge")]
-    public void A_bare_artifact_present_is_dropped_whether_or_not_its_path_is_declared(bool declared, string reasonContains)
+    [InlineData(null, "no paired ArtifactSchema or LlmJudge")]
+    [InlineData(new[] { "report.md" }, "no paired ArtifactSchema or LlmJudge")]
+    [InlineData(new[] { "other.md" }, "self-certifying")]
+    public void A_bare_artifact_present_is_dropped_regardless_of_declared_paths(string[]? declaredPaths, string reasonContains)
     {
         // The defect this arc item closes: a planner subtask that both instructs the agent to write a path and
-        // grades that SAME path by mere existence is self-certifying. Declaring the path alone is not enough — file
-        // existence still proves nothing about content — so a bare ArtifactPresent is dropped either way, only the
-        // REASON differs (an operator reading it needs to know whether the path was invented or just unverified).
-        var declaredPaths = declared ? new[] { "report.md" } : null;
+        // grades that SAME path by mere existence is self-certifying, so a bare (unpaired) ArtifactPresent is
+        // dropped no matter what declaredDeliverablePaths says. With NO declaration source at all (null), or a
+        // declared set that DOES include this path, the only defect left is the missing companion; a declared set
+        // that EXCLUDES the path is the more fundamental problem (an invented deliverable) and is reported first.
         var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]}"), declaredPaths);
 
         plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "item", "sibling" });
@@ -293,19 +296,41 @@ public sealed class PlannerAcceptanceMappingTests
     }
 
     [Theory]
-    [InlineData("\"schema\":{\"type\":\"object\"}", BenchmarkGradingKind.ArtifactSchema)]
-    [InlineData("\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}", BenchmarkGradingKind.LlmJudge)]
-    public void A_declared_artifact_present_paired_with_a_content_oracle_is_promoted_and_kept(string companion, BenchmarkGradingKind promotedKind)
+    [InlineData(null, "\"schema\":{\"type\":\"object\"}", BenchmarkGradingKind.ArtifactSchema)]
+    [InlineData(null, "\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}", BenchmarkGradingKind.LlmJudge)]
+    [InlineData(new[] { "report.md" }, "\"schema\":{\"type\":\"object\"}", BenchmarkGradingKind.ArtifactSchema)]
+    [InlineData(new[] { "report.md" }, "\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}", BenchmarkGradingKind.LlmJudge)]
+    public void A_paired_artifact_present_is_promoted_and_kept_when_nothing_excludes_its_path(string[]? declaredPaths, string companion, BenchmarkGradingKind promotedKind)
     {
-        // Declared AND paired is the one admissible shape: the companion oracle actually reads the file, so it
-        // becomes the EFFECTIVE kind — ArtifactPresent has nothing left to check once its companion runs, and this
-        // reuses the existing ArtifactSchema/LlmJudge graders exactly as if the planner had authored them directly.
-        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]," + companion + "}"), new[] { "report.md" });
+        // Paired is the one admissible shape, PROVIDED nothing excludes the path: with no declaration source at all
+        // (null) there is nothing to exclude it — a planner-authored ArtifactPresent is admitted on trust once it is
+        // paired — and a declared set that names the path is a direct match. Either way the companion oracle
+        // actually reads the file, so it becomes the EFFECTIVE kind — ArtifactPresent has nothing left to check
+        // once its companion runs, reusing the existing ArtifactSchema/LlmJudge graders exactly as if the planner
+        // had authored them directly.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]," + companion + "}"), declaredPaths);
 
-        plan.DroppedAcceptances.ShouldBeNull("a declared, paired ArtifactPresent is admissible — nothing is lost");
+        plan.DroppedAcceptances.ShouldBeNull("a paired ArtifactPresent whose path nothing excludes is admissible — nothing is lost");
         var acceptance = plan.Subtasks[0].Acceptance.ShouldNotBeNull();
         acceptance.Kind.ShouldBe(promotedKind, "the content oracle it paired with is what actually verifies the file, so that becomes the effective kind");
         acceptance.Command.ShouldBe(new[] { "report.md" });
+    }
+
+    [Theory]
+    [InlineData("\"schema\":{\"type\":\"object\"}")]
+    [InlineData("\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}")]
+    public void A_paired_artifact_present_on_a_path_the_declared_set_excludes_is_still_dropped(string companion)
+    {
+        // The security-relevant case: pairing proves the CONTENT is right, never that the PATH is one anybody
+        // asked for. Once a declaration source exists, a path outside it must still be refused no matter how the
+        // acceptance is paired — otherwise a planner could launder an invented deliverable past the declared-paths
+        // gate just by attaching any companion schema/rubric.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]," + companion + "}"), new[] { "other.md" });
+
+        plan.Subtasks[0].Acceptance.ShouldBeNull("a companion cannot launder a path the operator never declared");
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("item");
+        drop.Reason.ShouldContain("self-certifying");
     }
 
     [Fact]
@@ -322,7 +347,7 @@ public sealed class PlannerAcceptanceMappingTests
     [Fact]
     public void An_undeclared_artifact_present_drop_surfaces_under_the_droppedAcceptances_wire_key()
     {
-        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]}"));
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]}"), new[] { "other.md" });
 
         var drop = JsonSerializer.SerializeToElement(plan, AgentJson.Options).GetProperty("droppedAcceptances")[0];
 

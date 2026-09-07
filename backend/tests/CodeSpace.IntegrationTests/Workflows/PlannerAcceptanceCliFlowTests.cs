@@ -20,8 +20,10 @@ public sealed class PlannerAcceptanceCliFlowTests
         Directory.CreateDirectory(directory);
         try
         {
-            var path = Path.Combine(directory, "report.txt");
-            await File.WriteAllTextAsync(path, "accepted");
+            var reportPath = Path.Combine(directory, "report.txt");
+            var dataPath = Path.Combine(directory, "data.json");
+            await File.WriteAllTextAsync(reportPath, "accepted");
+            await File.WriteAllTextAsync(dataPath, "{\"status\":\"accepted\"}");
             var argv = new[] { "/bin/sh", "-c", "test \"$1\" = \"\" && test \"$2\" = \"  \" && test \"$(cat report.txt)\" = \"accepted\"", "argv-proof", "", "  " };
             var json = JsonSerializer.SerializeToElement(new
             {
@@ -29,31 +31,33 @@ public sealed class PlannerAcceptanceCliFlowTests
                 {
                     new { id = "behavior", title = "Verify", instruction = "verify exact content", kind = "research", acceptance = new { formatVersion = 2, kind = "TestsPass", argv } },
                     // P2.6: a bare ArtifactPresent from the planner is self-certifying and dropped — declared +
-                    // paired with a (permissive, never validated here) schema companion admits it. ArtifactPresentGrader
-                    // never reads Acceptance.Kind (only the Command path list, asserted below), so grading it directly
-                    // still proves the SAME existence-only pipeline the promoted spec's Kind no longer names.
-                    new { id = "file", title = "Presence", instruction = "require the file", kind = "code", acceptance = new { formatVersion = 2, kind = "ArtifactPresent", artifactPaths = new[] { "report.txt" }, schema = new { } } },
+                    // paired with a schema companion promotes it to ArtifactSchema instead, so the REAL registry
+                    // dispatch (never a directly-constructed grader) must land on ArtifactSchemaGrader — which,
+                    // unlike ArtifactPresentGrader, also parses the file as JSON, hence the valid-JSON fixture.
+                    new { id = "file", title = "Presence", instruction = "require the file", kind = "code", acceptance = new { formatVersion = 2, kind = "ArtifactPresent", artifactPaths = new[] { "data.json" }, schema = new { } } },
                 },
             });
-            var plan = LlmWorkflowPlanner.Deserialize(json, declaredDeliverablePaths: new[] { "report.txt" });
+            var plan = LlmWorkflowPlanner.Deserialize(json, declaredDeliverablePaths: new[] { "data.json" });
             plan.DroppedAcceptances.ShouldBeNull("the file obligation is declared and paired — nothing here should be dropped");
-            plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "report.txt" }, "the promoted spec still names the same deliverable path");
+            plan.Subtasks[1].Acceptance!.Kind.ShouldBe(BenchmarkGradingKind.ArtifactSchema, "an empty schema companion promotes ArtifactPresent to ArtifactSchema, never leaves it bare");
+            plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "data.json" }, "the promoted spec still names the same deliverable path");
             var runner = new LocalProcessRunner();
+            var registry = new BenchmarkGraderRegistry(new IBenchmarkGrader[] { new TestsPassGrader(), new ArtifactPresentGrader(), new ArtifactSchemaGrader() });
             var commandContext = BenchmarkGradingContext.ForAcceptance(plan.Subtasks[0].Acceptance!, Guid.NewGuid(), 15, directory, runner);
             var fileContext = BenchmarkGradingContext.ForAcceptance(plan.Subtasks[1].Acceptance!, Guid.NewGuid(), 15, directory, runner);
             commandContext.Task.TestCommand.ShouldBe(argv);
-            var commandGrader = new TestsPassGrader();
-            var fileGrader = new ArtifactPresentGrader();
+            var commandGrader = registry.Resolve(plan.Subtasks[0].Acceptance!.Kind!.Value);
+            var fileGrader = registry.Resolve(plan.Subtasks[1].Acceptance!.Kind!.Value);
             (await commandGrader.GradeAsync(commandContext, CancellationToken.None)).Passed.ShouldBeTrue();
             (await fileGrader.GradeAsync(fileContext, CancellationToken.None)).Passed.ShouldBeTrue();
 
-            await File.WriteAllTextAsync(path, "incorrect");
+            await File.WriteAllTextAsync(reportPath, "incorrect");
             var rejected = await commandGrader.GradeAsync(commandContext, CancellationToken.None);
             rejected.Passed.ShouldBeFalse("file existence must never substitute for the model-authored content check");
             rejected.Class.ShouldBe(GradeFailureClass.Genuine);
             rejected.EvidenceText.ShouldContain("exit=1");
             (await fileGrader.GradeAsync(fileContext, CancellationToken.None)).Passed.ShouldBeTrue("the separately declared presence oracle has a narrower obligation");
-            File.Delete(path);
+            File.Delete(dataPath);
             (await fileGrader.GradeAsync(fileContext, CancellationToken.None)).Passed.ShouldBeFalse();
         }
         finally { Directory.Delete(directory, recursive: true); }
