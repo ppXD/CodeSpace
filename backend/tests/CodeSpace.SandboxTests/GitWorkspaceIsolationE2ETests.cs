@@ -169,12 +169,18 @@ public sealed class GitWorkspaceIsolationE2ETests
         private readonly LocalProcessRunner _inner = new();
         public string Kind => "local";
         public List<SandboxSpec> Specs { get; } = new();
-        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
         {
             Specs.Add(spec);
             spec.WorkingDirectory.ShouldNotBeNull("a filesystem command must explicitly bind its destination");
             Directory.Exists(spec.WorkingDirectory).ShouldBeTrue("the writable destination must exist before bubblewrap binds it");
-            return _inner.RunAsync(spec, cancellationToken);
+            var result = await _inner.RunAsync(spec, cancellationToken);
+            if (spec.Args.FirstOrDefault() == "ls-remote" && spec.Args.LastOrDefault() == "session-gone")
+            {
+                result.Status.ShouldBe(SandboxStatus.Success, $"the missing-ref probe must complete: exit={result.ExitCode}, stderr={result.Stderr.Replace("fixture-only-token", "[redacted]")}");
+                result.Stdout.ShouldBeEmpty("the fixture never created session-gone; a successful probe must establish its absence");
+            }
+            return result;
         }
     }
 
