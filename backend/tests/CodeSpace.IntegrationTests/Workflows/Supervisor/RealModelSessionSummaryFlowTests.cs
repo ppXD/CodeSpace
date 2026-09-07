@@ -9,12 +9,14 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// <summary>
 /// THE real-model ROLLING-SUMMARY quality gate — does the live brain's distillation actually PRESERVE the older
 /// turns it folds (so a long thread keeps its early memory)? It drives the REAL <see cref="SessionSummarizer"/>'s
-/// distillation (DB-free, via the internal <c>TryDistillAsync</c>) over a handful of older turns each carrying a
-/// distinctive entity, and scores the produced summary: every older turn's key entity must survive into the summary.
-/// A <see cref="Theory"/> over BOTH wires (Anthropic gating + OpenAI informational); HONESTLY GATED on the
-/// <c>CODESPACE_LLM_*</c> secrets (absent → skip, so CI/forks stay green). The fold/watermark/persist plumbing is pinned
-/// always-on by <c>WorkSessionSummaryFlowTests</c> (faked LLM), so a failure HERE is the model's distillation quality —
-/// dropping an older turn's work — not a broken harness.
+/// distillation (DB-free, via the internal throwing <c>DistillAsync</c> — NOT the best-effort <c>TryDistillAsync</c>,
+/// so a gateway fault PROPAGATES into <see cref="RealModelGate.AssessLiveAsync"/> as a non-gating infra skip instead
+/// of being swallowed into the same empty-string verdict a genuine quality miss produces) over a handful of older
+/// turns each carrying a distinctive entity, and scores the produced summary: every older turn's key entity must
+/// survive into the summary. A <see cref="Theory"/> over BOTH wires (Anthropic gating + OpenAI informational);
+/// HONESTLY GATED on the <c>CODESPACE_LLM_*</c> secrets (absent → skip, so CI/forks stay green). The fold/watermark/persist
+/// plumbing is pinned always-on by <c>WorkSessionSummaryFlowTests</c> (faked LLM), so a failure HERE is the model's
+/// distillation quality — dropping an older turn's work — not a broken harness.
 /// </summary>
 [Trait("Category", "RealModel")]
 public sealed class RealModelSessionSummaryFlowTests
@@ -54,7 +56,7 @@ public sealed class RealModelSessionSummaryFlowTests
                 LegacyBranch: null)).ToList();
 
             var noManifests = new Dictionary<Guid, IReadOnlyList<Core.Persistence.Entities.PublishManifest>>();
-            var summary = await summarizer.TryDistillAsync(Guid.NewGuid(), existingSummary: null, turns, noManifests, CancellationToken.None);
+            var summary = await summarizer.DistillAsync(Guid.NewGuid(), existingSummary: null, turns, noManifests, CancellationToken.None);
 
             if (string.IsNullOrWhiteSpace(summary))
                 return (false, $"{provider} model '{model}' produced an EMPTY summary");

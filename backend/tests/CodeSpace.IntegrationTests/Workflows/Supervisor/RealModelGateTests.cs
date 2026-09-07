@@ -640,6 +640,38 @@ public sealed class RealModelGateTests
         RealModelGate.IsGatewayInfraFailure(new AggregateException(inner)).ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task AssessLiveAsync_treats_a_thrown_LlmApiException_as_infra_skip_while_a_genuine_empty_verdict_still_gates()
+    {
+        // The pairing the SessionSummarizer distillation split exists for (real-model lane run 34112615353's
+        // decision-eval job): a gateway 429 THROWN by the drive (the typed RateLimited category the decider
+        // propagates) must land as a non-gating infra skip on the blessed wire — never the same "produced an EMPTY
+        // summary" gating verdict a genuinely empty completion produces when the drive instead returns cleanly.
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-llmapi-pairing-{Guid.NewGuid():N}.md");
+        try
+        {
+            var skip = await Should.ThrowAsync<SkipException>(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => throw new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "rate limited"), gating: true, stepSummaryPath: path));
+
+            skip.Message.ShouldContain("NON-GATING infra skip");
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("NON-GATING infra skip");
+            written.ShouldNotContain("EMPTY summary", customMessage: "a thrown gateway fault must never be reported as the empty-completion verdict text");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+
+        // A driver that instead completes CLEANLY with a genuinely empty result — the outcome TryDistillAsync's
+        // swallow used to make indistinguishable from the 429 above — must still FAIL the job on the blessed wire.
+        var gated = false;
+        try { await RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((false, "Anthropic model 'x' produced an EMPTY summary")), gating: true, stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException) { gated = true; }
+        gated.ShouldBeTrue("a genuine empty-completion verdict is a real quality miss and must still fail the job — the split only reroutes the GATEWAY fault, never masks an actual empty summary");
+    }
+
     // ── Agent-execution infra fault: an all-failed fan-out of the deterministic exit-0 fake is INFRA, not a model miss ──
 
     [Fact]
