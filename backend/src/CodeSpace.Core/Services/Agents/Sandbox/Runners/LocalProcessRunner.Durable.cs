@@ -925,7 +925,7 @@ public sealed partial class LocalProcessRunner
             if (!string.IsNullOrEmpty(spec.WorkingDirectory)) writable.Add(spec.WorkingDirectory);
             if (configHome is not null) writable.Add(configHome);
 
-            var readOnlyExtra = new List<string>();
+            var readOnlyExtra = new List<string>(spec.ReadOnlyPaths);
 
             // Bind the run's MCP socket writable so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a
             // dir, so bind its PARENT dir — which is the DEDICATED <spool>/mcp/ subdir holding ONLY the socket (never

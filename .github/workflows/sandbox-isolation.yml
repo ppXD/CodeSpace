@@ -61,15 +61,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install bubblewrap + util-linux (prlimit) + iproute2/nftables (egress filter) + curl + python3 (cgroup memory hog)
+      - name: Install confinement tools, Python, and Git
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates iproute2 nftables curl python3
+          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates iproute2 nftables curl python3 git
           echo "bwrap: $(bwrap --version)"
           echo "prlimit: $(prlimit --version)"
           echo "ip: $(ip -Version)"
           echo "nft: $(nft --version)"
           echo "python3: $(python3 --version)"
+          echo "git: $(git --version)"
           echo "cgroup: $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo 'no cgroup-v2 controllers visible')"
 
       - name: Probe — unprivileged user namespaces (informational)
@@ -134,6 +135,24 @@ jobs:
               cases = [r for r in results if 'CommandIsolationE2ETests.' + method + '(' in r.get('testName', '')]
               assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both batch and stream must pass, skips are not evidence'
           print('All 8 batch/stream kernel cases passed.')
+          PY
+
+      - name: Assert every Git workspace confinement path passed
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          results = ET.parse('backend/TestResults/sandbox.trx').getroot().findall('.//{*}UnitTestResult')
+          methods = (
+              'Network_clone_pin_fetch_capture_and_authenticated_push_match_the_real_remote',
+              'Pack_clone_uses_only_its_destination_and_reclaims_it',
+              'Branch_integration_clones_applies_and_pushes_the_exact_patch',
+              'Acceptance_patch_clone_runs_the_real_oracle_on_the_applied_base',
+              'Explicit_local_source_is_read_only_and_siblings_stay_invisible',
+          )
+          for method in methods:
+              cases = [r for r in results if r.get('testName', '').endswith('GitWorkspaceIsolationE2ETests.' + method)]
+              assert len(cases) == 1 and cases[0].get('outcome') == 'Passed', f'{method}: the actual Git confinement case must pass, skips are not evidence'
+          print('All 5 Git workspace confinement cases passed.')
           PY
 
       - name: Upload test results

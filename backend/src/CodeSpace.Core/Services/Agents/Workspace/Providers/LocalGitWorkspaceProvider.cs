@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -63,9 +64,9 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         try
         {
-            // Multi-repo: pre-create the root so each repo can clone into its own <root>/<path> subdir. Single-repo:
-            // leave the root uncreated and clone FLAT into it (git creates the dir) — byte-identical to before.
-            if (!single) Directory.CreateDirectory(workspaceRoot);
+            // Each clone destination is pre-created below and becomes that command's only writable workspace.
+            // Never bind WorkspacesRoot: it also contains other runs' clones.
+            Directory.CreateDirectory(workspaceRoot);
 
             var materialized = new List<MaterializedRepo>(request.Repositories.Count);
 
@@ -131,16 +132,18 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// <summary>Clone one repo, strip its token from the persisted remote, and read its base revision — the per-repo unit of the workspace.</summary>
     private async Task<MaterializedRepo> MaterializeAsync(WorkspaceRepositoryProvision repo, string directory, CancellationToken cancellationToken)
     {
-        await CloneAsync(repo.CloneRequest, directory, cancellationToken).ConfigureAwait(false);
+        var context = new RepositoryCommandContext(directory, ResolveLocalSourcePaths(repo.CloneRequest));
+        Directory.CreateDirectory(directory);
+        await CloneAsync(repo.CloneRequest, context, cancellationToken).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(repo.CloneRequest.Token))
             await StripTokenFromRemoteAsync(repo.CloneRequest.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 
-        var baseSha = await ReadBaseShaAsync(directory, cancellationToken).ConfigureAwait(false);
+        var baseSha = await ReadBaseShaAsync(context, cancellationToken).ConfigureAwait(false);
 
         // Carry the SAME short-lived clone credential forward (in-memory only, never persisted / never in .git/config —
         // origin was stripped) so a later push re-injects auth into the push argv without a second auth round-trip.
-        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha, repo.CloneRequest.Ref);
+        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha, repo.CloneRequest.Ref) { ReadOnlyPaths = context.ReadOnlyPaths };
     }
 
     /// <summary>Where the harness runs: Auto → the primary repo's dir for one repo (the invariant), the workspace root for many; or the explicit mode.</summary>
@@ -183,13 +186,15 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     {
         /// <summary>P3b-2: the remote-CONFIRMED tip of the last successful push (readback matched the local tip); null = unconfirmed/no push.</summary>
         public string? PushedCommitSha { get; set; }
+        public IReadOnlyList<string> ReadOnlyPaths { get; init; } = Array.Empty<string>();
     }
 
     /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
-    private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
+    private async Task<string> ReadBaseShaAsync(RepositoryCommandContext context, CancellationToken cancellationToken)
     {
+        var directory = context.Directory;
         var result = await _runners.Resolve(Kind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "rev-parse", "HEAD" }, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "rev-parse", "HEAD" }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"Could not read the workspace base revision (exit {result.ExitCode}): {Summarize(result.Stderr)}");
@@ -292,11 +297,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         }
     }
 
-    private async Task CloneAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    private async Task CloneAsync(WorkspaceRequest request, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
+        var directory = context.Directory;
         var url = BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
 
-        var (checkoutRef, softRefFellBack, remoteTip) = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
+        var (checkoutRef, softRefFellBack, remoteTip) = await ResolveCheckoutRefAsync(request, url, context, cancellationToken).ConfigureAwait(false);
 
         var args = new List<string> { "clone" };
 
@@ -306,18 +312,18 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         args.Add(url);
         args.Add(directory);
 
-        var result = await RunGitAsync(args, cancellationToken).ConfigureAwait(false);
+        var result = await RunGitAsync(args, context, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
 
         if (!string.IsNullOrWhiteSpace(request.PinnedSha))
-            await MaterializePinAsync(request, directory, cancellationToken).ConfigureAwait(false);
+            await MaterializePinAsync(request, context, cancellationToken).ConfigureAwait(false);
         else if (softRefFellBack && !string.IsNullOrWhiteSpace(request.RefRecoverySha))
-            await MaterializeRecoveryAsync(request, directory, cancellationToken).ConfigureAwait(false);
+            await MaterializeRecoveryAsync(request, context, cancellationToken).ConfigureAwait(false);
         else if (!softRefFellBack && !string.IsNullOrWhiteSpace(request.DefaultRef) && !string.IsNullOrWhiteSpace(request.RefRecoverySha)
                  && remoteTip is not null && !remoteTip.StartsWith(request.RefRecoverySha!, StringComparison.OrdinalIgnoreCase))
-            await DetectAndRecoverDivergenceAsync(request, directory, cancellationToken).ConfigureAwait(false);
+            await DetectAndRecoverDivergenceAsync(request, context, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -330,27 +336,28 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// stays on the tip with a loud warning, never a failed provision. Costs nothing when the tip still equals the
     /// anchor (the caller's fast-path compare) — only a genuinely moved branch pays the ancestry check.
     /// </summary>
-    private async Task DetectAndRecoverDivergenceAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    private async Task DetectAndRecoverDivergenceAsync(WorkspaceRequest request, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
+        var directory = context.Directory;
         var sha = request.RefRecoverySha!;
 
-        await FetchCommitBestEffortAsync(directory, sha, request.Depth, cancellationToken).ConfigureAwait(false);
+        await FetchCommitBestEffortAsync(context, sha, request.Depth, cancellationToken).ConfigureAwait(false);
 
-        if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false))
+        if (!await CommitExistsLocallyAsync(context, sha, cancellationToken).ConfigureAwait(false))
         {
             _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' moved and its recorded tip {Sha} could not be fetched to arbitrate — continuing on the branch's current tip; if the branch was rewritten, the session's prior work is not in this workspace", request.Ref, sha);
             return;
         }
 
-        var ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, cancellationToken).ConfigureAwait(false);
+        var ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, context, cancellationToken).ConfigureAwait(false);
 
         // A SHALLOW clone can hold the anchor OBJECT (fetched by sha) without the CONNECTING history, so a genuine
         // forward move reads as "not an ancestor" through the shallow boundary — a false-positive rewrite that would
         // wrongly detach the continue backwards. Deepen once and re-arbitrate before believing a divergence verdict.
-        if (ancestry.Status != SandboxStatus.Success && await IsShallowAsync(directory, cancellationToken).ConfigureAwait(false))
+        if (ancestry.Status != SandboxStatus.Success && await IsShallowAsync(context, cancellationToken).ConfigureAwait(false))
         {
-            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
-            ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, cancellationToken).ConfigureAwait(false);
+            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, context, cancellationToken).ConfigureAwait(false);
+            ancestry = await RunGitAsync(new[] { "-C", directory, "merge-base", "--is-ancestor", sha, "HEAD" }, context, cancellationToken).ConfigureAwait(false);
         }
 
         if (ancestry.Status == SandboxStatus.Success)
@@ -359,7 +366,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             return;
         }
 
-        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, cancellationToken).ConfigureAwait(false);
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, context, cancellationToken).ConfigureAwait(false);
 
         if (checkout.Status == SandboxStatus.Success)
             _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' was REWRITTEN (its tip no longer descends from the recorded tip {Sha}) — recovered the session's prior work by detaching at the anchor; the rewritten branch is untouched on the remote", request.Ref, sha);
@@ -373,13 +380,14 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// silent rebase. Same fetch rungs as the pin, but BEST-EFFORT terminal: an unrecoverable anchor (GC'd, never
     /// reachable) stays on the default branch with a loud warning — a recovery hint must never fail the run.
     /// </summary>
-    private async Task MaterializeRecoveryAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    private async Task MaterializeRecoveryAsync(WorkspaceRequest request, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
+        var directory = context.Directory;
         var sha = request.RefRecoverySha!;
 
-        await FetchCommitBestEffortAsync(directory, sha, request.Depth, cancellationToken).ConfigureAwait(false);
+        await FetchCommitBestEffortAsync(context, sha, request.Depth, cancellationToken).ConfigureAwait(false);
 
-        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, cancellationToken).ConfigureAwait(false);
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", sha }, context, cancellationToken).ConfigureAwait(false);
 
         if (checkout.Status == SandboxStatus.Success)
             _logger.LogInformation("Session continuity: the prior branch '{PriorRef}' is gone — recovered the prior work by detaching at its confirmed tip {Sha}", request.Ref, sha);
@@ -388,20 +396,21 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     }
 
     /// <summary>The pin/recovery fetch rungs, cheapest first: local object check → fetch-by-sha (servers without allow-*-sha1-in-want refuse; best-effort) → unshallow → full ref space. Shared by the LOUD pin and the best-effort recovery so the two can never drift on how a commit is materialized.</summary>
-    private async Task FetchCommitBestEffortAsync(string directory, string sha, int depth, CancellationToken cancellationToken)
+    private async Task FetchCommitBestEffortAsync(RepositoryCommandContext context, string sha, int depth, CancellationToken cancellationToken)
     {
-        if (await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false)) return;
+        var directory = context.Directory;
+        if (await CommitExistsLocallyAsync(context, sha, cancellationToken).ConfigureAwait(false)) return;
 
-        await RunGitAsync(new[] { "-C", directory, "fetch", "origin", sha }, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout is the arbiter
+        await RunGitAsync(new[] { "-C", directory, "fetch", "origin", sha }, context, cancellationToken).ConfigureAwait(false);   // best-effort; the checkout is the arbiter
 
-        if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false) && depth > 0)
+        if (!await CommitExistsLocallyAsync(context, sha, cancellationToken).ConfigureAwait(false) && depth > 0)
         {
-            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, cancellationToken).ConfigureAwait(false);
+            await RunGitAsync(new[] { "-C", directory, "fetch", "--unshallow", "origin" }, context, cancellationToken).ConfigureAwait(false);
 
             // The shallow clone was SINGLE-BRANCH — a commit living on a branch the clone never fetched needs the
             // full ref space before the checkout can arbitrate.
-            if (!await CommitExistsLocallyAsync(directory, sha, cancellationToken).ConfigureAwait(false))
-                await RunGitAsync(new[] { "-C", directory, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*" }, cancellationToken).ConfigureAwait(false);
+            if (!await CommitExistsLocallyAsync(context, sha, cancellationToken).ConfigureAwait(false))
+                await RunGitAsync(new[] { "-C", directory, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*" }, context, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -414,23 +423,24 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// ⇒ the checkout fails LOUD: the pin is a freshness guarantee, never a suggestion (a force-push that orphaned
     /// the pin must surface, never a silent tip fallback).
     /// </summary>
-    private async Task MaterializePinAsync(WorkspaceRequest request, string directory, CancellationToken cancellationToken)
+    private async Task MaterializePinAsync(WorkspaceRequest request, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
+        var directory = context.Directory;
         var pin = request.PinnedSha!;
 
-        await FetchCommitBestEffortAsync(directory, pin, request.Depth, cancellationToken).ConfigureAwait(false);
+        await FetchCommitBestEffortAsync(context, pin, request.Depth, cancellationToken).ConfigureAwait(false);
 
-        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", pin }, cancellationToken).ConfigureAwait(false);
+        var checkout = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", pin }, context, cancellationToken).ConfigureAwait(false);
 
         if (checkout.Status != SandboxStatus.Success)
             throw new WorkspaceException($"the pinned base commit '{pin}' could not be checked out (exit {checkout.ExitCode}): {Redact(Summarize(checkout.Stderr), request.Token)} — the pin guarantees every participant sees the SAME immutable base; a stale or unpushed pin must fail the provision, never silently fall back to the tip");
     }
 
-    private async Task<bool> IsShallowAsync(string directory, CancellationToken cancellationToken) =>
-        (await RunGitAsync(new[] { "-C", directory, "rev-parse", "--is-shallow-repository" }, cancellationToken).ConfigureAwait(false)).Stdout.Trim() == "true";
+    private async Task<bool> IsShallowAsync(RepositoryCommandContext context, CancellationToken cancellationToken) =>
+        (await RunGitAsync(new[] { "-C", context.Directory, "rev-parse", "--is-shallow-repository" }, context, cancellationToken).ConfigureAwait(false)).Stdout.Trim() == "true";
 
-    private async Task<bool> CommitExistsLocallyAsync(string directory, string sha, CancellationToken cancellationToken) =>
-        (await RunGitAsync(new[] { "-C", directory, "rev-parse", "--verify", "--quiet", $"{sha}^{{commit}}" }, cancellationToken).ConfigureAwait(false)).Status == SandboxStatus.Success;
+    private async Task<bool> CommitExistsLocallyAsync(RepositoryCommandContext context, string sha, CancellationToken cancellationToken) =>
+        (await RunGitAsync(new[] { "-C", context.Directory, "rev-parse", "--verify", "--quiet", $"{sha}^{{commit}}" }, context, cancellationToken).ConfigureAwait(false)).Status == SandboxStatus.Success;
 
     /// <summary>
     /// The ref to actually check out. A SOFT ref (a session-inherited prior branch — <see cref="WorkspaceRequest.DefaultRef"/>
@@ -439,12 +449,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// default branch itself, or any ref with no fallback) is returned verbatim, so an explicit ref is never silently
     /// rewritten and the clone fails loud if it is gone. Byte-identical to before for every hard ref (no pre-flight runs).
     /// </summary>
-    private async Task<(string? CheckoutRef, bool SoftRefFellBack, string? RemoteTip)> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
+    private async Task<(string? CheckoutRef, bool SoftRefFellBack, string? RemoteTip)> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Ref) || string.IsNullOrWhiteSpace(request.DefaultRef) || string.Equals(request.Ref, request.DefaultRef, StringComparison.Ordinal))
             return (request.Ref, false, null);
 
-        var (exists, remoteTip) = await ProbeRemoteRefAsync(url, request.Ref!, cancellationToken).ConfigureAwait(false);
+        var (exists, remoteTip) = await ProbeRemoteRefAsync(url, request.Ref!, context, cancellationToken).ConfigureAwait(false);
 
         if (exists) return (request.Ref, false, remoteTip);
 
@@ -460,9 +470,9 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// network failure is treated as PRESENT with an UNKNOWN tip (true, null) so a flaky probe never silently
     /// downgrades a continuing run — and an unknown tip also skips the divergence check (fail-safe both ways).
     /// </summary>
-    private async Task<(bool Exists, string? Tip)> ProbeRemoteRefAsync(string url, string @ref, CancellationToken cancellationToken)
+    private async Task<(bool Exists, string? Tip)> ProbeRemoteRefAsync(string url, string @ref, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
-        var result = await RunGitAsync(new[] { "ls-remote", url, @ref }, cancellationToken).ConfigureAwait(false);
+        var result = await RunGitAsync(new[] { "ls-remote", url, @ref }, context, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success) return (true, null);
         if (string.IsNullOrWhiteSpace(result.Stdout)) return (false, null);
@@ -493,7 +503,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     internal static async Task StripTokenFromRemoteAsync(ISandboxRunner runner, int timeoutSeconds, ILogger logger, string cleanUrl, string directory, CancellationToken cancellationToken)
     {
         Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args) =>
-            runner.RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken);
+            runner.RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken);
 
         var rewrite = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }).ConfigureAwait(false);
 
@@ -512,10 +522,35 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// git spec in this provider: the field's default is now FAIL-CLOSED, and these helpers are shared by the
     /// commands that DO reach the remote (clone, fetch, push) as well as the local ones, so a single severed helper
     /// would break materialization on any runner that enforces it. The value is the egress they have always had —
-    /// this batch path is the unconfined one (see <see cref="LocalWorkspaceHandle"/>'s own git runner).
+    /// each command still uses the runner's filesystem isolation with its explicit workspace and source mounts.
     /// </summary>
-    private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-        _runners.Resolve(Kind).RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken);
+    private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, RepositoryCommandContext context, CancellationToken cancellationToken) =>
+        _runners.Resolve(Kind).RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = context.Directory, ReadOnlyPaths = context.ReadOnlyPaths, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken);
+
+    private sealed record RepositoryCommandContext(string Directory, IReadOnlyList<string> ReadOnlyPaths);
+
+    private static IReadOnlyList<string> ResolveLocalSourcePaths(WorkspaceRequest request)
+    {
+        var isFile = Uri.TryCreate(request.RepositoryUrl, UriKind.Absolute, out var uri) && uri.IsFile;
+        var localPath = isFile ? uri!.LocalPath : Path.IsPathRooted(request.RepositoryUrl) ? request.RepositoryUrl : null;
+        if (request.LocalSource is not { } source)
+        {
+            if (localPath is not null && (BubblewrapSandbox.Available is not null || BubblewrapSandbox.IsRequired))
+                throw new WorkspaceException("A confined local repository requires an explicit server-prepared source capability; the repository URL grants no host filesystem access.");
+            return Array.Empty<string>();
+        }
+
+        if (localPath is null || !Path.IsPathFullyQualified(source.Directory))
+            throw new WorkspaceException("A local source capability must name the exact absolute directory of a local repository URL.");
+        var approved = Path.TrimEndingDirectorySeparator(Path.GetFullPath(source.Directory));
+        var requested = Path.TrimEndingDirectorySeparator(Path.GetFullPath(localPath));
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(approved, requested, comparison) || approved == Path.GetPathRoot(approved))
+            throw new WorkspaceException("The local source capability does not match the exact repository directory.");
+        if (!Directory.Exists(approved) || new DirectoryInfo(approved).LinkTarget is not null)
+            throw new WorkspaceException("The server-prepared local source must be an existing directory, not a symbolic link.");
+        return new[] { approved };
+    }
 
     /// <summary>Build the HTTPS clone URL with embedded basic-auth credentials. No token → the URL unchanged. Pure + internal so it's unit-pinned.</summary>
     internal static string BuildAuthenticatedUrl(string repositoryUrl, string? tokenUsername, string? token)
@@ -724,13 +759,13 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             return result.Stdout;
         }
 
-        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) through the same unconfined batch path — host network, not bubblewrapped. Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
+        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) through the same confined batch path with explicit remote-network access. Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
         private async Task<SandboxResult> RunGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds)
         {
             try
             {
                 return await _runner.RunAsync(
-                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, ReadOnlyPaths = repo.ReadOnlyPaths, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

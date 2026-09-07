@@ -127,6 +127,78 @@ public sealed class LocalGitWorkspaceProviderTests
     // ─── Real clone mechanics ────────────────────────────────────────────────
 
     [Fact]
+    public async Task Preparation_explicitly_binds_each_command_to_its_existing_destination()
+    {
+        var runner = new WorkspacePathRunner();
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = "https://example.test/repo.git", Token = "test-token", Ref = "session", DefaultRef = "main", PinnedSha = new string('a', 40),
+        }), CancellationToken.None);
+
+        runner.Invocations.Count.ShouldBeGreaterThan(4, "probe, clone, pin, token strip and base revision must all be exercised");
+        foreach (var invocation in runner.Invocations)
+        {
+            invocation.Spec.WorkingDirectory.ShouldBe(handle.Directory, string.Join(' ', invocation.Spec.Args));
+            invocation.DirectoryExisted.ShouldBeTrue("the only writable clone mount must exist before bubblewrap starts");
+            invocation.Spec.ReadOnlyPaths.ShouldBeEmpty("a network URL must not grant any host source path");
+        }
+    }
+
+    [Fact]
+    public void Serialized_tasks_cannot_supply_host_path_capabilities()
+    {
+        var workspace = System.Text.Json.JsonSerializer.Deserialize<WorkspaceRequest>("{\"RepositoryUrl\":\"file:///private\",\"LocalSource\":{\"Directory\":\"/private\"}}");
+        workspace.ShouldNotBeNull().LocalSource.ShouldBeNull();
+        var sandbox = System.Text.Json.JsonSerializer.Deserialize<SandboxSpec>("{\"Command\":\"cat\",\"ReadOnlyPaths\":[\"/private\"]}");
+        sandbox.ShouldNotBeNull().ReadOnlyPaths.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_prepared_source_grants_its_exact_directory_without_granting_the_parent()
+    {
+        using var source = new TempDir();
+        var runner = new WorkspacePathRunner();
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = new Uri(source.Path).AbsoluteUri, LocalSource = new WorkspaceLocalSource { Directory = source.Path },
+        }), CancellationToken.None);
+        runner.Invocations.Single(invocation => invocation.Spec.Args.Contains("clone")).Spec.ReadOnlyPaths.ShouldBe(new[] { source.Path });
+    }
+
+    [Theory]
+    [InlineData("mismatch")]
+    [InlineData("network")]
+    [InlineData("root")]
+    [InlineData("missing")]
+    [InlineData("relative")]
+    public async Task Invalid_local_source_capabilities_fail_before_any_command(string mode)
+    {
+        using var source = new TempDir();
+        var path = mode switch { "root" => Path.GetPathRoot(source.Path)!, "missing" => Path.Combine(source.Path, "missing"), "relative" => "relative", _ => source.Path };
+        var url = mode switch { "network" => "https://example.test/repo.git", "mismatch" => new Uri(Path.Combine(source.Path, "other")).AbsoluteUri, "relative" => new Uri(source.Path).AbsoluteUri, _ => new Uri(path).AbsoluteUri };
+        var runner = new WorkspacePathRunner();
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        await Should.ThrowAsync<WorkspaceException>(() => provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = url, LocalSource = new WorkspaceLocalSource { Directory = path },
+        }), CancellationToken.None));
+        runner.Invocations.ShouldBeEmpty();
+    }
+
+    private sealed class WorkspacePathRunner : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<(SandboxSpec Spec, bool DirectoryExisted)> Invocations { get; } = new();
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocations.Add((spec, Directory.Exists(spec.WorkingDirectory)));
+            return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
+        }
+    }
+
+    [Fact]
     public async Task Clones_into_an_isolated_directory_and_cleans_up_on_dispose()
     {
         if (!await GitAvailableAsync()) return;

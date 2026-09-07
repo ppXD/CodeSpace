@@ -11,6 +11,10 @@ public sealed record WorkspaceRequest
     /// <summary>HTTPS (or file://) clone URL of the repository.</summary>
     public required string RepositoryUrl { get; init; }
 
+    /// <summary>A local source explicitly prepared by trusted server code. Its exact directory must match a local repository URL before a confined runner can read it. A URL alone grants no host filesystem access. Ignored by task JSON; this capability does not isolate processes sharing the host's OS identity.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public WorkspaceLocalSource? LocalSource { get; init; }
+
     /// <summary>Branch / tag / sha to check out. Null → the remote's default branch.</summary>
     public string? Ref { get; init; }
 
@@ -37,4 +41,10 @@ public sealed record WorkspaceRequest
 
     /// <summary>P4 (session branch recovery): the confirmed commit the SOFT ref pointed at when recorded — consulted ONLY when the soft fallback fired (the prior branch vanished): the provider clones the default branch, then best-effort detaches onto this anchor so the prior work survives. Unlike <see cref="PinnedSha"/> this never fails the provision — an unrecoverable anchor stays on the default branch with a loud warning. Null → today's fallback behaviour, byte-identical.</summary>
     public string? RefRecoverySha { get; init; }
+}
+
+/// <summary>Server-prepared local repository source; authorizes reading only this exact directory during workspace preparation.</summary>
+public sealed record WorkspaceLocalSource
+{
+    public required string Directory { get; init; }
 }

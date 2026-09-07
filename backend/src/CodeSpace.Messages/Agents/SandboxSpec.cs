@@ -16,6 +16,10 @@ public sealed record SandboxSpec
     /// <summary>Working directory for the command. <c>null</c> → the runner's default (current directory for the local runner).</summary>
     public string? WorkingDirectory { get; init; }
 
+    /// <summary>Exact host paths made readable by the server preparing this invocation. These are read-only mounts, never inferred from command arguments, and cannot be supplied through a serialized task. This in-process capability is not an OS principal boundary.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> ReadOnlyPaths { get; init; } = Array.Empty<string>();
+
     /// <summary>Extra environment variables layered onto the runner's own environment. Secrets belong here, never in <see cref="Args"/>.</summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
