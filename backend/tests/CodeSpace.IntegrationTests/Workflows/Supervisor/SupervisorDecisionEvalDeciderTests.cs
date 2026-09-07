@@ -196,6 +196,9 @@ public class SupervisorDecisionEvalDeciderTests
         "subset-conflict-across-three" => """{"kind":"resolve","resolve":{}}""",
         "confirmation-approved" => """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""",
         "confirmation-feedback" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1r","title":"Merged step","instruction":"do both, verify with ./check.sh"}]}}""",
+        // Item 4.3's residual: the FIRST unrunnable check on a tape, before any re-plan or co-sign — the honest,
+        // self-service move is a revised plan (the check itself is authored, not fixed infrastructure).
+        "first-infra-failure" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1","title":"Validate the email format on the signup endpoint","instruction":"Add server-side email-format validation to the signup endpoint handler; verify with dotnet test."},{"id":"s2","title":"Return HTTP 400 with a clear error message","instruction":"Reject a malformed address with HTTP 400 and a message naming what was wrong; verify with dotnet test."}]}}""",
         // B5 co-sign loop: the ONLY move that consumes the co-signed oracle is a retry of its target.
         "amended-oracle-awaiting-retry" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
         // …and once a re-plan has DISCARDED that co-sign, the repair has to be re-proposed against the current plan.
