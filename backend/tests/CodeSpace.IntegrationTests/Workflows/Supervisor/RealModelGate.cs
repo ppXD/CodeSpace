@@ -736,8 +736,8 @@ public static class RealModelGate
     /// <summary>
     /// The ONE rule every arm applies to a run that ended <see cref="WorkflowRunStatus.Failure"/>: a
     /// <see cref="RealModelOutcome.CodeFault"/> (the engine could not execute the brain's decisions — gates the
-    /// blessed wire) UNLESS the terminal is the completion authority's own DESIGNED non-success, which is a
-    /// <see cref="RealModelOutcome.CapabilityMiss"/> (reported, never gating).
+    /// blessed wire) UNLESS the terminal is the completion authority's own DESIGNED non-success over a BRAIN
+    /// shortfall, which is a <see cref="RealModelOutcome.CapabilityMiss"/> (reported, never gating).
     ///
     /// <para>The arbiter stamps Failure on purpose: an Enforced-cohort run whose contract is not evidenced folds to
     /// <c>TerminalDecision.HonestFailure</c> and the authority OVERRIDES the engine's Success with
@@ -747,13 +747,16 @@ public static class RealModelGate
     /// capability miss. Run 34068400279 reached it after a human had adjudicated the patch-only delivery conflict,
     /// and the delivery-gate arm reported "the engine FAULTED" over it.</para>
     ///
-    /// <para>MARKER, never a word (the <see cref="RealModelRunClassifier"/> rule): the prefix is matched at the
-    /// START of the run's error, the slot only the arbiter writes. A run error that merely CONTAINS the phrase (an
-    /// agent quoting a park card in a failure message) is an unrecognised engine fault like any other and GATES —
-    /// conservative in the direction that cannot hide a regression.</para>
+    /// <para>THE PREFIX ALONE IS NOT THE RULE. <c>TerminalDecider</c> reaches HonestFailure by three arms, and only
+    /// the middle one is a brain shortfall: a ForcedStop/Cancelled end and a Solved-but-CaptureFailed artifact stamp
+    /// the very same prefix, and both are engine-side regressions this lane exists to catch. The read is
+    /// <see cref="CodeSpace.Core.Services.Completion.HonestFailureReason.IsBrainShortfall"/> — the production shape's
+    /// own reader, paired with the renderer that writes the terminal so a slot cannot drift between them, and MARKER
+    /// never a word (matched at the START of the run's error, the slot only the arbiter writes; an agent quoting the
+    /// phrase in its own failure text is an unrecognised engine fault like any other and GATES).</para>
     /// </summary>
     public static RealModelOutcome ClassifyRunFailure(string? runError) =>
-        runError?.StartsWith(CodeSpace.Core.Services.Completion.CompletionTerminalAuthority.HonestFailureReasonPrefix, StringComparison.Ordinal) == true
+        CodeSpace.Core.Services.Completion.HonestFailureReason.IsBrainShortfall(runError)
             ? RealModelOutcome.CapabilityMiss
             : RealModelOutcome.CodeFault;
 
