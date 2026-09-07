@@ -6,11 +6,13 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -355,13 +357,14 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         // step that failed — and drives the recovery method by its InternalsVisibleTo seam.
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var attemptStartedAt = DateTimeOffset.UtcNow;
+        var repositoryId = Guid.NewGuid();
 
-        var (runId, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, attemptStartedAt.AddSeconds(1));
+        var (runId, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, repositoryId, attemptStartedAt.AddSeconds(1));
 
         using (var scope = _fixture.BeginScope())
         {
             var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
-            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, attemptStartedAt, CancellationToken.None);
+            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, repositoryId, attemptStartedAt, CancellationToken.None);
         }
 
         using var assertScope = _fixture.BeginScope();
@@ -382,13 +385,14 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         // session archived.
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var attemptStartedAt = DateTimeOffset.UtcNow;
+        var repositoryId = Guid.NewGuid();
 
-        var (_, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, attemptStartedAt.AddSeconds(-30));
+        var (_, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, repositoryId, attemptStartedAt.AddSeconds(-30));
 
         using (var scope = _fixture.BeginScope())
         {
             var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
-            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, attemptStartedAt, CancellationToken.None);
+            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, repositoryId, attemptStartedAt, CancellationToken.None);
         }
 
         using var assertScope = _fixture.BeginScope();
@@ -398,8 +402,131 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         session.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Open, "a run created BEFORE this attempt started is never this attempt's own orphan — its session must be left untouched");
     }
 
-    /// <summary>Seeds exactly the committed shape <c>RunFromSnapshotStarter.StageAsync</c> leaves behind: an OPEN <c>WorkSession</c> plus its <c>WorkflowRun</c> (snapshot-sourced, actored by the borrowed Owner, <c>Purpose</c> still null), <c>createdDate</c> controlling which side of the attempt-start boundary it falls on.</summary>
-    private async Task<(Guid RunId, Guid SessionId)> SeedOrphanedQualificationLaunchAsync(Guid teamId, Guid ownerId, DateTimeOffset createdDate)
+    [Fact]
+    public async Task RecoverOrphanedLaunchAsync_ignores_a_newer_genuine_run_by_the_same_actor_in_a_different_repository()
+    {
+        // BLOCKING fix this pins: the borrowed Owner is a REAL team member, so nothing stops them launching a
+        // genuine task in this same team while a cell is mid-flight. Without the repository scope, "newest wins"
+        // would recover the WRONG row here — the genuine run is created AFTER the orphan, so it (not the orphan)
+        // would sort first under an ActorId+CreatedDate-only match. Only the row scoped to THIS cell's own fixture
+        // repository may be recovered, regardless of which row is newer.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var attemptStartedAt = DateTimeOffset.UtcNow;
+        var fixtureRepositoryId = Guid.NewGuid();
+        var genuineRepositoryId = Guid.NewGuid();
+
+        var (orphanRunId, orphanSessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, fixtureRepositoryId, attemptStartedAt.AddSeconds(1));
+        var (genuineRunId, genuineSessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, genuineRepositoryId, attemptStartedAt.AddSeconds(2));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, fixtureRepositoryId, attemptStartedAt, CancellationToken.None);
+        }
+
+        using var assertScope = _fixture.BeginScope();
+        var db = assertScope.Resolve<CodeSpaceDbContext>();
+
+        var orphanSession = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == orphanSessionId);
+        orphanSession.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Archived, "the orphan scoped to THIS cell's own fixture repository must still be recovered even though it is the OLDER of the two");
+
+        var orphanRun = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == orphanRunId);
+        orphanRun.Purpose.ShouldBe(Messages.Constants.WorkflowRunPurposes.Qualification);
+
+        var genuineSession = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == genuineSessionId);
+        genuineSession.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Open, "a genuine run in a DIFFERENT repository — even though newer — must never be mistaken for this cell's own orphan and have its real session archived");
+
+        var genuineRun = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == genuineRunId);
+        genuineRun.Purpose.ShouldBeNull("the genuine run's Purpose must never be stamped — that would hide a real operator launch from the team's own Runs index");
+    }
+
+    [Fact]
+    public async Task RunAsync_recovers_the_orphaned_launch_when_the_launch_step_throws_after_committing()
+    {
+        // Pins the call-site wiring, not just RecoverOrphanedLaunchAsync in isolation: every test above drives that
+        // method directly by its InternalsVisibleTo seam, so NONE of them would notice if RunAsync's own call were
+        // ever reverted from LaunchOrRecoverAsync back to the plain, non-recovering LaunchAsync. This drives the SUT
+        // through its REAL public entry point (RunAsync) instead, substituting ONLY ITaskLaunchService with a fake
+        // that seeds the exact "committed, then a later step threw" row shape LaunchOrRecoverAsync guards against —
+        // mirroring what RunFromSnapshotStarter.StageAsync's own single SaveChangesAsync would have left behind —
+        // then throws. Recovery having actually run (Purpose re-stamped, session archived) is observable ONLY if
+        // RunAsync reached LaunchOrRecoverAsync's catch block; reverting the call site leaves both assertions below
+        // false (Purpose stays null, session stays Open), turning this test red.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli();
+        using var workspace = Fixture.Stage(checkExitCode: 0);
+
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var scope = _fixture.BeginScope(b => b.RegisterType<OrphanAfterCommitTaskLaunchService>().As<ITaskLaunchService>());
+        var sut = scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+        var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace.Directory, TeamId = teamId, Selection = null };
+
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => sut.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+        ex.Message.ShouldContain("simulated post-commit failure", customMessage: "the ORIGINAL launch exception must still be the one that propagates — recovery is best-effort and never swallows it");
+
+        using var assertScope = _fixture.BeginScope();
+        var db = assertScope.Resolve<CodeSpaceDbContext>();
+
+        var orphan = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.TeamId == teamId);
+        orphan.Purpose.ShouldBe(Messages.Constants.WorkflowRunPurposes.Qualification, "RunAsync must reach LaunchOrRecoverAsync's catch block for the orphan to ever be re-stamped — LaunchAsync alone never recovers anything");
+
+        var session = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == orphan.SessionId);
+        session.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Archived, "recovery must have actually archived the orphaned session — only reachable through RunAsync calling LaunchOrRecoverAsync");
+    }
+
+    /// <summary>
+    /// Test-only <see cref="ITaskLaunchService"/> substitute for the call-site pin above. Seeds the EXACT row shape
+    /// the real service's own single <c>SaveChangesAsync</c> (<c>RunFromSnapshotStarter.StageAsync</c>) would have
+    /// left committed — an OPEN <c>WorkSession</c> plus a snapshot <c>WorkflowRun</c>, <c>Purpose</c> still null,
+    /// <c>ScopeRepositoryIds</c> carrying the request's OWN <see cref="TaskLaunchRequest.RepositoryId"/> exactly like
+    /// a real launch — then throws, standing in for a later step (route/purpose stamping, the ledger write, the
+    /// post-commit dispatcher) failing after that commit. Registered ONLY for the test above (<c>BeginScope</c>
+    /// override), so every other test in this class still exercises the real <c>ITaskLaunchService</c>.
+    /// </summary>
+    private sealed class OrphanAfterCommitTaskLaunchService : ITaskLaunchService
+    {
+        private readonly CodeSpaceDbContext _db;
+
+        public OrphanAfterCommitTaskLaunchService(CodeSpaceDbContext db) { _db = db; }
+
+        public async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+        {
+            var createdDate = DateTimeOffset.UtcNow;
+            var sessionId = Guid.NewGuid();
+
+            _db.WorkSession.Add(new WorkSession
+            {
+                Id = sessionId, TeamId = request.TeamId, Title = "orphan-after-commit fixture", Kind = Messages.Enums.WorkSessionKind.Task,
+                Status = Messages.Enums.WorkSessionStatus.Open, LastActivityAt = createdDate,
+                CreatedDate = createdDate, CreatedBy = request.ActorUserId, LastModifiedBy = request.ActorUserId,
+            });
+
+            var requestId = Guid.NewGuid();
+            var runId = Guid.NewGuid();
+            _db.WorkflowRunRequest.Add(new WorkflowRunRequest
+            {
+                Id = requestId, TeamId = request.TeamId, WorkflowId = null, SourceType = Messages.Constants.WorkflowRunSourceTypes.Snapshot,
+                ActorType = Messages.Constants.WorkflowRunActorTypes.User, ActorId = request.ActorUserId, NormalizedPayloadJson = "{}",
+                Status = Messages.Enums.WorkflowRunRequestStatus.Consumed, ReceivedAt = createdDate, VerifiedAt = createdDate, NormalizedAt = createdDate,
+            });
+            _db.WorkflowRun.Add(new WorkflowRun
+            {
+                Id = runId, WorkflowId = null, TeamId = request.TeamId, RunRequestId = requestId,
+                SourceType = Messages.Constants.WorkflowRunSourceTypes.Snapshot, ActorId = request.ActorUserId, SessionId = sessionId, Purpose = null,
+                ScopeRepositoryIds = request.RepositoryId is { } repositoryId ? new List<Guid> { repositoryId } : [],
+                Status = Messages.Enums.WorkflowRunStatus.Pending, CreatedDate = createdDate, CreatedBy = request.ActorUserId, LastModifiedBy = request.ActorUserId,
+            });
+
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+            throw new InvalidOperationException("simulated post-commit failure — mirrors route/purpose stamping, the ledger write, or the post-commit dispatcher throwing after the real WorkSession+WorkflowRun commit");
+        }
+    }
+
+    /// <summary>Seeds exactly the committed shape <c>RunFromSnapshotStarter.StageAsync</c> leaves behind: an OPEN <c>WorkSession</c> plus its <c>WorkflowRun</c> (snapshot-sourced, actored by the borrowed Owner, <c>Purpose</c> still null, scoped to <paramref name="repositoryId"/> exactly like a real launch's <c>ScopeRepositoryIds</c>), <c>createdDate</c> controlling which side of the attempt-start boundary it falls on.</summary>
+    private async Task<(Guid RunId, Guid SessionId)> SeedOrphanedQualificationLaunchAsync(Guid teamId, Guid ownerId, Guid repositoryId, DateTimeOffset createdDate)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -424,6 +551,7 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         {
             Id = runId, WorkflowId = null, TeamId = teamId, RunRequestId = requestId,
             SourceType = Messages.Constants.WorkflowRunSourceTypes.Snapshot, ActorId = ownerId, SessionId = sessionId, Purpose = null,
+            ScopeRepositoryIds = [repositoryId],
             Status = Messages.Enums.WorkflowRunStatus.Pending, CreatedDate = createdDate, CreatedBy = ownerId, LastModifiedBy = ownerId,
         });
 

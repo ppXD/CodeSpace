@@ -27,8 +27,8 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// ledger write, or the immediate post-commit dispatch <see cref="IPostCommitActions.RunAfterCommitAsync"/> runs
     /// inline when it finds no open transaction) throwing leaves that WorkSession/WorkflowRun durably committed with
     /// no <see cref="LaunchTaskResult"/> ever returned to retire it. On exactly that shape of failure, recover the
-    /// newest run this borrowed Owner could have created since <paramref name="fixture"/> was staged and retire its
-    /// session artifacts before re-throwing — see <see cref="RecoverOrphanedLaunchAsync"/>.
+    /// newest run SCOPED TO <paramref name="fixture"/>'s own repository this borrowed Owner could have created since
+    /// it was staged, and retire its session artifacts before re-throwing — see <see cref="RecoverOrphanedLaunchAsync"/>.
     /// </summary>
     private async Task<LaunchTaskResult> LaunchOrRecoverAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, StagedFixture fixture, CancellationToken cancellationToken)
     {
@@ -40,7 +40,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await RecoverOrphanedLaunchAsync(context.TeamId, fixture.ActorUserId, attemptStartedAt, cancellationToken).ConfigureAwait(false);
+            await RecoverOrphanedLaunchAsync(context.TeamId, fixture.ActorUserId, fixture.RepositoryId, attemptStartedAt, cancellationToken).ConfigureAwait(false);
             throw;
         }
     }
@@ -96,15 +96,20 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// Best-effort recovery for the post-commit-throw shape documented on <see cref="LaunchOrRecoverAsync"/>. Identifies
     /// the orphan by the tightest key available WITHOUT relying on <see cref="Persistence.Entities.WorkflowRun.Purpose"/>
     /// (the very stamp a failure here may have pre-empted): the newest <c>WorkflowRun</c> sourced from a snapshot launch,
-    /// actored by this cell's borrowed Owner, in this team, created at or after <paramref name="attemptStartedAt"/> — by
-    /// construction at most one real launch (this cell's own) can match, since the borrowed Owner never launches
-    /// concurrently on their own behalf. Re-stamps <c>Purpose</c> when it didn't land (so the run also drops out of the
-    /// team Runs index) and retires the session artifacts exactly like a normal completed cell
-    /// (<see cref="RetireSessionArtifactsAsync"/>). Internal (not private) so this is unit/integration-pinned directly
-    /// (InternalsVisibleTo) by seeding the exact orphan shape, since no existing seam injects the underlying
-    /// post-commit fault itself. Never throws — the caller re-raises the ORIGINAL launch exception regardless.
+    /// actored by this cell's borrowed Owner, in this team, SCOPED TO <paramref name="repositoryId"/> — created at or
+    /// after <paramref name="attemptStartedAt"/>. The repository scope is load-bearing, not redundant: the borrowed
+    /// Owner is a REAL team member who can launch a genuine task in this same team while a cell is mid-flight, and
+    /// without this scope that genuine run — newer, same actor, same team — would look like the tightest match and
+    /// get its own real session silently archived and its run mislabelled Qualification. <paramref name="repositoryId"/>
+    /// is this cell's own freshly-minted, per-invocation fixture repository (<see cref="StagedFixture.RepositoryId"/>),
+    /// which a genuine launch can never reference, so it is the one key a real concurrent launch cannot share.
+    /// Re-stamps <c>Purpose</c> when it didn't land (so the run also drops out of the team Runs index) and retires the
+    /// session artifacts exactly like a normal completed cell (<see cref="RetireSessionArtifactsAsync"/>). Internal
+    /// (not private) so this is unit/integration-pinned directly (InternalsVisibleTo) by seeding the exact orphan
+    /// shape, since no existing seam injects the underlying post-commit fault itself. Never throws — the caller
+    /// re-raises the ORIGINAL launch exception regardless.
     /// </summary>
-    internal async Task RecoverOrphanedLaunchAsync(Guid teamId, Guid actorUserId, DateTimeOffset attemptStartedAt, CancellationToken cancellationToken)
+    internal async Task RecoverOrphanedLaunchAsync(Guid teamId, Guid actorUserId, Guid repositoryId, DateTimeOffset attemptStartedAt, CancellationToken cancellationToken)
     {
         try
         {
@@ -113,7 +118,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
                 var db = scope.Resolve<CodeSpaceDbContext>();
 
                 var orphan = await db.WorkflowRun.AsNoTracking()
-                    .Where(r => r.TeamId == teamId && r.ActorId == actorUserId && r.SourceType == WorkflowRunSourceTypes.Snapshot && r.CreatedDate >= attemptStartedAt)
+                    .Where(r => r.TeamId == teamId && r.ActorId == actorUserId && r.SourceType == WorkflowRunSourceTypes.Snapshot && r.ScopeRepositoryIds.Contains(repositoryId) && r.CreatedDate >= attemptStartedAt)
                     .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
                     .Select(r => new { r.Id, r.SessionId, r.Purpose })
                     .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

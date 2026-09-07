@@ -82,6 +82,24 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task A_purpose_marked_newer_rerun_never_hides_the_real_run_it_forked_from()
+    {
+        // Mutation guard for CollapseToLatestPerLineage's INNER Any(): the "is there a newer attempt in this
+        // lineage" probe must itself require Purpose == null, or a qualification-purposed rerun sharing a REAL
+        // run's lineage root would make that real run look superseded — while the rerun itself is excluded by the
+        // OUTER filter — vanishing the whole lineage from the index instead of correctly surfacing the real run.
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var original = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
+        await InsertRunAsync(teamA, parentRunId: original, rootRunId: original, createdDate: t.AddMinutes(5), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, purpose: WorkflowRunPurposes.Qualification);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Select(r => r.Id).ShouldBe(new[] { original }, "a purpose-marked newer fork in the SAME lineage must not suppress the real run it forked from — dropping the inner Any()'s own Purpose == null clause would vanish this lineage from the index entirely");
+    }
+
+    [Fact]
     public async Task The_0082_backfill_walks_a_pre_migration_fork_chain_up_to_its_root()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
