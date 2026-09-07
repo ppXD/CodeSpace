@@ -20,7 +20,12 @@ public static class SupervisorRecitation
     /// <summary>The stable, matchable prefix of an under-claim's recited state (P4-1) — <see cref="Render"/>'s unfinished-list gate matches on this rather than the full dynamic string (which carries the grader's detail).</summary>
     private const string UnderClaimPrefix = "reported failed, but its OWN acceptance check actually PASSED";
 
-    public static string? Render(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    /// <summary>The tape-only overload — the exits are resolved here. For a PROMPT build use <see cref="Render(IReadOnlyList{SupervisorPriorDecision}, IReadOnlyDictionary{string, SupervisorReplanExit})"/> and hand in the map the results block already resolved, or the walk is paid twice for one answer.</summary>
+    public static string? Render(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        Render(priorDecisions, SupervisorReplanStanding.ExitsFor(priorDecisions));
+
+    /// <summary>The block, with every unit's re-plan exit already resolved (<see cref="SupervisorReplanStanding.ExitsFor"/>) — the same map the decider's results block steers from, so the prohibition it renders and the reminder of it here cannot disagree.</summary>
+    public static string? Render(IReadOnlyList<SupervisorPriorDecision> priorDecisions, IReadOnlyDictionary<string, SupervisorReplanExit> replanExits)
     {
         var subtasks = LatestPlanSubtasks(priorDecisions);
 
@@ -35,10 +40,9 @@ public static class SupervisorRecitation
         var builder = new StringBuilder(Header);
         var unfinished = new List<string>();
 
-        // Resolved ONCE for the whole block rather than per item: the reading walks the entire tape to answer, and
-        // both the state line and the authoring lint below need the SAME answer for an item — two calls could not
-        // disagree, but they would pay twice for the privilege.
-        var replanExits = SupervisorReplanStanding.ExitsFor(priorDecisions);
+        // Every unit's LATEST folded verdict, off ONE walk of the tape — the shared join the amend gate reads too.
+        // The lint below needs the verdict SHAPE, not just the exit: see its own note.
+        var latestResults = SupervisorDependencyGate.LatestResultsBySubtask(priorDecisions);
 
         foreach (var subtask in subtasks)
         {
@@ -52,16 +56,22 @@ public static class SupervisorRecitation
             // NEVER pass at grade time — telling the model NOW turns a paid clone + a fail-closed verdict + a retry
             // temptation into one re-plan. Pure over the authored spec; a valid/absent spec adds nothing.
             //
-            // Its "re-plan this item's check" steer is DROPPED once this item has an exit, because no-rubric and
-            // no-schema classify INFRA (AgentAcceptanceContract.IsInfraFailure) — which is exactly the verdict shape
-            // the exit fires on. Left in, one recitation forbids and demands a re-plan of the same item two lines
-            // apart, and the model picks whichever it read last. The diagnosis still recites; only the verb moves to
-            // the one place that resolves it against the whole tape.
+            // Its "re-plan this item's check" steer is DROPPED once this item's verdict NAMED an exit, because
+            // no-rubric and no-schema classify INFRA (AgentAcceptanceContract.IsInfraFailure) — which is exactly the
+            // verdict shape the exit fires on. Left in, one recitation forbids and demands a re-plan of the same
+            // item two lines apart, and the model picks whichever it read last. The diagnosis still recites; only
+            // the verb moves to the one place that resolves it against the whole tape.
+            //
+            // The gate is the RAMP's own render condition, not "the exit is not None": the results block substitutes
+            // the ramp on exactly two of its three verdict arms, so a unit whose exit fired on a work rejection
+            // against a GREEN baseline is steered at the retry with no exit named anywhere — and this line would be
+            // deferring the only verb it has to a sentence no block rendered. Read off the shared predicate rather
+            // than a second copy of that condition, which is how the two would drift apart again.
             if (!effective.WaivedSubtaskIds.Contains(subtask.Id)
                 && effective.BySubtask.GetValueOrDefault(subtask.Id) is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
-                builder.Append(replanExit == SupervisorReplanExit.None
-                    ? $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check."
-                    : $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; take the exit its verdict names above, not another plan.");
+                builder.Append(DefersToItsExit(replanExit, latestResults.GetValueOrDefault(subtask.Id))
+                    ? $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; take the exit its verdict names above, not another plan."
+                    : $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check.");
 
             // An under-claim (P4-1) reads its own guidance line ("do not retry, merge it") — it is objectively DONE,
             // just self-reported wrong, so it must not also land on the unfinished list and contradict its own text.
@@ -93,6 +103,10 @@ public static class SupervisorRecitation
 
         return builder.ToString();
     }
+
+    /// <summary>Whether the authoring lint may defer its verb to the exit the results block named: an exit fired AND the item's latest verdict is one of the shapes that block substitutes the ramp into (<see cref="SupervisorReplanStanding.VerdictNamesTheExit"/>). A unit with no folded verdict at all — pending, or staged and unfolded — has no verdict line above to defer to.</summary>
+    private static bool DefersToItsExit(SupervisorReplanExit replanExit, SupervisorAgentResult? latest) =>
+        replanExit != SupervisorReplanExit.None && latest is not null && SupervisorReplanStanding.VerdictNamesTheExit(latest);
 
     /// <summary>The newest plan decision's subtasks — a re-plan supersedes (the same newest-plan rule the acceptance fold uses).</summary>
     internal static IReadOnlyList<SupervisorPlannedSubtask> LatestPlanSubtasks(IReadOnlyList<SupervisorPriorDecision> priors)
@@ -150,6 +164,7 @@ public static class SupervisorRecitation
     private static string ReplanExitRecital(SupervisorReplanExit replanExit) => replanExit switch
     {
         SupervisorReplanExit.ToStaging => "a plan for it was already authored and never run; SPAWN it under that plan, do not re-plan and do not retry",
+        SupervisorReplanExit.ToStagingBehindADependency => "a plan for it was already authored and never run, and the dependency frontier is still deferring it; SPAWN what it waits on and then this item, do not re-plan and do not retry",
         SupervisorReplanExit.ToAmendment => "a re-plan already left this verdict unchanged; propose 'amend_acceptance' or ask a human, do not re-plan and do not retry",
         _ => "a plan was already authored over this verdict and it did not move, and repairing its check cannot move it either; ask a human, do not re-plan and do not retry",
     };

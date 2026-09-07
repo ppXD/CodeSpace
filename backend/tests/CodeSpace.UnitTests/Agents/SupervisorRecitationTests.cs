@@ -302,6 +302,45 @@ public sealed class SupervisorRecitationTests
         recitation.ShouldNotContain("re-plan this item's check", customMessage: "one recitation must not forbid another plan and demand one");
     }
 
+    /// <summary>
+    /// The other half of the same gate, and the reason it is not simply "the exit is not None": the results block
+    /// substitutes its exit ramp on TWO of its three verdict arms, and a work rejection against a GREEN (or
+    /// unmeasured) baseline is not one of them — that unit is steered at the RETRY, with no exit named anywhere.
+    /// The lint deferring to "the exit its verdict names above" there points at a sentence no block rendered, and
+    /// the one verb the item actually needs — re-plan the broken spec the newest generation just authored — goes
+    /// unsaid.
+    ///
+    /// <para>The tape is the reachable shape: the verdict was graded under the FIRST generation's valid check (so a
+    /// work-classed rejection is honest), and the RE-PLAN is what authored the rubric-less judge the lint fires
+    /// on.</para>
+    /// </summary>
+    [Fact]
+    public void A_linted_spec_whose_verdict_named_no_exit_keeps_its_own_re_plan_verb()
+    {
+        var priors = new[]
+        {
+            TestsPassCheck(1),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "tests-failed-exit-1")),
+            JudgeWithoutARubric(3),
+        };
+
+        SupervisorReplanStanding.ExitFor(priors, "s1").ShouldBe(SupervisorReplanExit.ToStaging,
+            "fixture check — an exit DID fire, so this pins the GATE and not the absence of an exit");
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("done but REJECTED by its acceptance check", customMessage: "the check RAN and rejected the work — no exit is recited on this arm");
+        recitation.ShouldContain("re-plan this item's check", customMessage: "…so the lint keeps the only verb it has, which is also the right one: the newest plan's spec is the broken thing");
+        recitation.ShouldNotContain("take the exit its verdict names above", customMessage: "there is no exit above to take — the verdict block steers this unit at a retry");
+    }
+
+    /// <summary>A plan whose ONE item stakes a VALID <c>TestsPass</c> check — the generation a WORK-classed rejection can honestly be graded under, so a later re-plan can break the spec without the recorded verdict shape changing with it.</summary>
+    private static SupervisorPriorDecision TestsPassCheck(int seq) =>
+        Prior(seq, SupervisorDecisionKinds.Plan, JsonSerializer.Serialize(new
+        {
+            subtasks = new[] { new { id = "s1", title = "Report", instruction = "write it", acceptance = new { kind = "TestsPass", command = new[] { "dotnet", "test" } } } },
+        }, AgentJson.Options));
+
     /// <summary>A plan whose ONE item stakes an <c>LlmJudge</c> check with no rubric — the half-authored spec that can never pass at grade time and grades <c>no-rubric</c>, so a tape can carry both the authoring lint and an infra-classed verdict for the same unit.</summary>
     private static SupervisorPriorDecision JudgeWithoutARubric(int seq) =>
         Prior(seq, SupervisorDecisionKinds.Plan, JsonSerializer.Serialize(new

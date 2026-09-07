@@ -58,9 +58,12 @@ public static class SupervisorDependencyGate
     /// flat plan (no DAG → nothing to render). Lets the model spawn in dependency order instead of racing — the guidance
     /// half of the rail the clamp enforces.
     /// </summary>
-    public static (IReadOnlyList<string> Ready, IReadOnlyList<BlockedSubtask> Blocked) Frontier(SupervisorTurnContext context)
+    public static (IReadOnlyList<string> Ready, IReadOnlyList<BlockedSubtask> Blocked) Frontier(SupervisorTurnContext context) => Frontier(context.PriorDecisions);
+
+    /// <summary>The priors-only reading of <see cref="Frontier(SupervisorTurnContext)"/> — its only input was ever the tape, and the prompt renderers resolve the frontier without a turn context (the same reason <see cref="SupervisorAmendPrecondition.IsAmendable"/> carries such an overload). One definition, so a steer that names a spawn and the block that calls the unit blocked cannot disagree.</summary>
+    public static (IReadOnlyList<string> Ready, IReadOnlyList<BlockedSubtask> Blocked) Frontier(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
-        var window = SupervisorPlanWindow.Read(context.PriorDecisions);
+        var window = SupervisorPlanWindow.Read(priorDecisions);
         var dependsOn = DependsOnBySubtask(window);
 
         if (dependsOn.Count == 0) return (Array.Empty<string>(), Array.Empty<BlockedSubtask>());
