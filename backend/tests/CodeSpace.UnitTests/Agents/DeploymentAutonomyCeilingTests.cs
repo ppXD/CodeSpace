@@ -74,13 +74,9 @@ public class DeploymentAutonomyCeilingTests
     [InlineData("standard", AgentAutonomyLevel.Standard)]       // case-insensitive, like every other tier read
     [InlineData("Trusted", AgentAutonomyLevel.Trusted)]
     [InlineData(null, AgentAutonomyLevel.Unleashed)]            // unset ⇒ no deployment bound
-    [InlineData("", AgentAutonomyLevel.Unleashed)]
-    [InlineData("Standrad", AgentAutonomyLevel.Unleashed)]      // a typo falls back to the committed behaviour…
     public void The_configured_value_resolves_through_the_one_tier_parser(string? configured, AgentAutonomyLevel expected)
     {
-        // …rather than to the most restrictive row: a misspelling in a ConfigMap must not sever every run's network
-        // across a deployment. Same posture as AgentMemoryCeilingMb, whose unusable value falls back to the
-        // committed table instead of being read as "no limit".
+        // Valid values and an absent key preserve existing behavior; malformed deployment values fail at startup.
         WithCeiling(configured, () => AgentAutonomyPolicy.DeploymentCeiling.ShouldBe(expected));
     }
 
