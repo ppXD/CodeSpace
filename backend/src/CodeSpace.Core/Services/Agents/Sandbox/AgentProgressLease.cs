@@ -1,3 +1,4 @@
+using System.Globalization;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox;
@@ -37,8 +38,9 @@ public sealed class AgentProgressLease
     public static readonly TimeSpan RenewalHeartbeat = TimeSpan.FromSeconds(1);
 
     private readonly string _leaseDirectory;
+    private readonly TimeProvider _timeProvider;
 
-    public AgentProgressLease(string leaseDirectory) { _leaseDirectory = leaseDirectory; }
+    public AgentProgressLease(string leaseDirectory, TimeProvider? timeProvider = null) { _leaseDirectory = leaseDirectory; _timeProvider = timeProvider ?? TimeProvider.System; }
 
     /// <summary>Where this lease's markers live — exposed so a caller can assert the writer's and the observer's directories are the same one.</summary>
     public string LeaseDirectory => _leaseDirectory;
@@ -46,15 +48,26 @@ public sealed class AgentProgressLease
     /// <summary>Record that <paramref name="signal"/> observed progress NOW. Best-effort: an unwritable spool is swallowed (see the type remarks).</summary>
     public void Renew(AgentProgressSignal signal)
     {
+        string? temporary = null;
         try
         {
             Directory.CreateDirectory(_leaseDirectory);
-
-            File.WriteAllText(MarkerPath(signal), DateTimeOffset.UtcNow.ToString("O"));
+            var marker = MarkerPath(signal);
+            temporary = $"{marker}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(temporary, _timeProvider.GetUtcNow().ToString("O", CultureInfo.InvariantCulture));
+            // A reader may already hold the published inode. Close the complete sibling first, then atomically
+            // replace the directory entry: existing readers keep the old timestamp, new readers get the new one.
+            File.Move(temporary, marker, overwrite: true);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
         {
-            // A lease renewal is an optimisation on the watchdog's patience, never part of the run — swallow.
+            // Failed publication retains the previous marker; advisory progress cannot change the work's outcome.
+        }
+        finally
+        {
+            if (temporary != null)
+                try { File.Delete(temporary); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException) { /* best-effort cleanup */ }
         }
     }
 
@@ -102,7 +115,7 @@ public sealed class AgentProgressLease
     {
         while (true)
         {
-            try { await Task.Delay(RenewalHeartbeat, cancellationToken).ConfigureAwait(false); }
+            try { await Task.Delay(RenewalHeartbeat, _timeProvider, cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
 
             Renew(signal);
@@ -125,7 +138,7 @@ public sealed class AgentProgressLease
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return null;   // a marker being rewritten under us reads as "no renewal from this signal yet"; the next poll sees it
+            return null;   // unavailable storage contributes no evidence; renewal publication never truncates a live marker
         }
     }
 
