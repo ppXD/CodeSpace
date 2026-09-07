@@ -14,7 +14,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// worker image actually installs). A bump in the Dockerfile that isn't mirrored into the C# constant (or vice
 /// versa) FAILS here, so the harness-reported version can never silently drift from what the worker runs. The third
 /// surface — a developer's local install — is synced from the same ARG by <c>deploy/sync-local-harnesses.sh</c>. The
-/// fourth is <c>.github/workflows/real-model.yml</c>'s EXACT-pinned installs, the lanes that verify the CLI surface
+/// fourth is every install in <c>.github/workflows/real-model.yml</c>, the lanes that verify the CLI surface
 /// the harness argv targets; they must name the shipped version or the gate certifies a CLI nobody runs.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -29,22 +29,23 @@ public class HarnessVersionPinTests
         DockerfileArg("CLAUDE_CODE_VERSION").ShouldBe(ClaudeCodeHarness.DefaultVersion);
 
     /// <summary>
-    /// The FOURTH surface: <c>real-model.yml</c>'s exact-pinned installs — the lanes whose whole job is to verify the
-    /// CLI surface the harness argv targets. An exact pin there that lags the worker's ARG means the gate certifies a
-    /// version the product does not ship, which is precisely the silent drift the other pins exist to prevent. Only
-    /// EXACT pins are asserted; the deliberately FLOATING <c>@~2.1.0</c> lanes are excluded by the version pattern, so
-    /// they keep tracking the newest 2.1.x without failing here.
+    /// Every qualification lane, including benchmark and whole-loop workers, must exercise the version shipped in
+    /// the worker image. Inspect all install selectors: filtering to exact versions would silently exempt floating
+    /// ranges and certify a different binary. Provider or CLI drift belongs in a separately identified canary.
     /// </summary>
-    [Fact]
-    public void Claude_exact_workflow_pins_match_the_worker_dockerfile_pin()
+    [Theory]
+    [InlineData("@anthropic-ai/claude-code", "CLAUDE_CODE_VERSION")]
+    [InlineData("@openai/codex", "CODEX_CLI_VERSION")]
+    public void Every_qualification_workflow_install_matches_the_worker_dockerfile_pin(string package, string versionArgument)
     {
-        var pinned = DockerfileArg("CLAUDE_CODE_VERSION");
-        var matches = Regex.Matches(File.ReadAllText(LocateRealModelWorkflow()), @"@anthropic-ai/claude-code@(\d+\.\d+\.\d+)");
+        var pinned = DockerfileArg(versionArgument);
+        var installs = string.Join('\n', File.ReadLines(LocateRealModelWorkflow()).Where(line => !line.TrimStart().StartsWith('#') && line.Contains("npm install", StringComparison.Ordinal)));
+        var matches = Regex.Matches(installs, Regex.Escape(package) + "(?:@([^\\s'\";|]+))?");
 
-        matches.Count.ShouldBeGreaterThan(0, "real-model.yml must keep at least one exact-pinned claude-code install — the lane that verifies the CLI surface");
+        matches.Count.ShouldBeGreaterThan(0, $"real-model.yml must install {package} to verify the real CLI surface");
 
         foreach (var version in matches.Select(m => m.Groups[1].Value).Distinct())
-            version.ShouldBe(pinned, $"an exact '@anthropic-ai/claude-code@{version}' install in .github/workflows/real-model.yml lags CLAUDE_CODE_VERSION in backend/Dockerfile.worker — the lane would certify a CLI the worker image never installs");
+            version.ShouldBe(pinned, $"'{package}@{version}' in real-model.yml must match {versionArgument} in backend/Dockerfile.worker; a floating or stale selector certifies a different binary");
     }
 
     private static string DockerfileArg(string name)
