@@ -80,7 +80,7 @@ public sealed class RealModelCriticAbCorpusE2ETests
         if (!await GitReadyAsync()) return;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
         var reviewerRowId = await SeedReviewerPoolRowAsync(teamId, credId, model!);   // an explicit pool row → the critic resolves the SAME live model (no auto-pick fail-open)
 
@@ -91,9 +91,9 @@ public sealed class RealModelCriticAbCorpusE2ETests
             var armA = armB with { OutputReviewMode = ReviewMode.Improve, MaxReviseRounds = 1, ReviewerModelId = reviewerRowId };
 
             CorpusBenchmarkRun bRun, aRun;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(userId, teamId))
                 bRun = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(SeedBenchmarkCorpus.Tasks, teamId, armB, CancellationToken.None);
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(userId, teamId))
                 aRun = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(SeedBenchmarkCorpus.Tasks, teamId, armA, CancellationToken.None);
 
             // Per-arm infra guard: no pair reached a clean terminal ⇒ gateway/execution outage, LOUD infra — never a false capability verdict.

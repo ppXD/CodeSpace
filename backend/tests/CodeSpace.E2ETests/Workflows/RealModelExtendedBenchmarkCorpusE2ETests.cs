@@ -54,7 +54,7 @@ public sealed class RealModelExtendedBenchmarkCorpusE2ETests
         if (!await GitReadyAsync()) return;
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the benchmark needs a harness binary (skip ≠ pass)");   // honest-skip, NOT a pass
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
 
         await RealModelGate.AssessLiveAsync(Provider, async () =>
@@ -64,7 +64,7 @@ public sealed class RealModelExtendedBenchmarkCorpusE2ETests
             var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = model, ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted };
 
             CorpusBenchmarkRun run;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(userId, teamId))
                 run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(SeedBenchmarkCorpus.ExtendedTasks, teamId, selection, CancellationToken.None);
 
             // Reuse the same honest BenchmarkScorecard/EvalScorecard denominator as the blessed corpus test (P4.2) —
