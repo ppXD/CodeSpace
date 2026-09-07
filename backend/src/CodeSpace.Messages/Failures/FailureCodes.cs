@@ -96,4 +96,7 @@ public static class FailureCodes
 
     /// <summary>A captured native record does not hold together — its payload binding, digest, redaction claim or projection attribution contradicts itself — so it cannot be reduced. Remedy: fix the producer; the record is retained either way.</summary>
     public const string HarnessRecordUnreadable = "harness_record_unreadable";
+
+    /// <summary>A command observation is incomplete for a full-output consumer. Recover the observation without replaying the command's side effects.</summary>
+    public const string SandboxOutputIncomplete = "sandbox_output_incomplete";
 }

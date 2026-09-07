@@ -9,5 +9,5 @@ public sealed class IncompleteSandboxOutputException(SandboxResult result, strin
     public SandboxResult Result { get; } = result;
     public string Stream { get; } = stream;
     public FailureKind Kind => FailureKind.Unprocessable;
-    public string Code => "sandbox_output_incomplete";
+    public string Code => FailureCodes.SandboxOutputIncomplete;
 }
