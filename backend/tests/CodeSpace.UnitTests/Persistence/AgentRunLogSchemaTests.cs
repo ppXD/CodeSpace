@@ -26,7 +26,7 @@ public sealed class AgentRunLogSchemaTests
         entity.GetProperties().Select(property => property.Name).Order().ShouldBe(new[]
         {
             "AgentRunId", "CaptureFinalizedAt", "CaptureSessionId", "CaptureSource", "CaptureSourceBaseOffsetBytes", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
-            "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt",
+            "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt", "ManifestDigest",
             "NextOffsetBytes", "NextSegmentOrdinal", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
             "SourceOffsetBytes", "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
         }.Order());
@@ -41,8 +41,25 @@ public sealed class AgentRunLogSchemaTests
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
             "ck_agent_run_log_stream_claim", "ck_agent_run_log_stream_digest", "ck_agent_run_log_stream_error", "ck_agent_run_log_stream_head", "ck_agent_run_log_stream_identity",
-            "ck_agent_run_log_stream_retention", "ck_agent_run_log_stream_state", "ck_agent_run_log_stream_terminal",
+            "ck_agent_run_log_stream_manifest", "ck_agent_run_log_stream_retention", "ck_agent_run_log_stream_state", "ck_agent_run_log_stream_terminal",
             "ck_agent_run_log_stream_time",
+        }, ignoreOrder: true);
+    }
+
+    [Fact]
+    public void Verification_is_a_scoped_monotonic_cursor_with_an_explicit_seal_and_claim()
+    {
+        using var db = BuildContext();
+        var entity = Entity<AgentRunLogVerification>(db);
+        entity.GetTableName().ShouldBe("agent_run_log_verification");
+        entity.FindProperty(nameof(AgentRunLogVerification.Xmin))!.IsConcurrencyToken.ShouldBeTrue();
+        ForeignKey(entity, typeof(AgentRunLogStream)).Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "AgentRunId" });
+        var identity = Index(entity, "ux_agent_run_log_verification_head");
+        identity.IsUnique.ShouldBeTrue();
+        identity.Properties.Select(property => property.Name).ShouldBe(new[] { "TeamId", "StreamId", "StreamRevision" });
+        entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
+        {
+            "ck_agent_run_log_verification_bounds", "ck_agent_run_log_verification_claim", "ck_agent_run_log_verification_seal",
         }, ignoreOrder: true);
     }
 
@@ -92,7 +109,7 @@ public sealed class AgentRunLogSchemaTests
         {
             "ck_agent_run_log_capture_intent_claim", "ck_agent_run_log_capture_intent_error",
             "ck_agent_run_log_capture_intent_identity", "ck_agent_run_log_capture_intent_state",
-            "ck_agent_run_log_capture_intent_time",
+            "ck_agent_run_log_capture_intent_time", "ck_agent_run_log_capture_intent_verification_progress",
         }, ignoreOrder: true);
         entity.GetCheckConstraints().Single(constraint => constraint.Name == "ck_agent_run_log_capture_intent_claim").Sql.ShouldContain("recovery_started_at");
         entity.GetCheckConstraints().Single(constraint => constraint.Name == "ck_agent_run_log_capture_intent_state").Sql.ShouldContain("ExternalStateIndeterminate");

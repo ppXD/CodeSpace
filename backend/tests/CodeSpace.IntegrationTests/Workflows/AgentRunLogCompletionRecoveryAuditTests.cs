@@ -25,11 +25,15 @@ namespace CodeSpace.IntegrationTests.Workflows;
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
 [Trait("Audit", "LogCompletionResume")]
-public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixture, ITestOutputHelper output) : IDisposable
+public sealed partial class AgentRunLogCompletionRecoveryAuditTests(ITestOutputHelper output) : IAsyncLifetime
 {
     private const int SegmentBytes = 1024 * 1024;
     private const int SegmentCount = 4;
     private readonly List<string> _roots = [];
+    // Recovery scans the whole deployment. Each case needs its own real database, so another test's abandoned
+    // terminal intent cannot be mistaken for this case's claimed attempt or exhaust its counted step budget.
+    private readonly PostgresFixture fixture = new();
+    public Task InitializeAsync() => fixture.InitializeAsync();
 
     [Fact]
     public async Task Uninterrupted_v3_completion_verifies_all_content_with_an_explicit_manifest_identity()
@@ -170,7 +174,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixt
         }
     }
 
-    private async Task<World> SeedAsync(bool declareRecovery, int segmentCount = SegmentCount, int segmentBytes = SegmentBytes)
+    private async Task<World> SeedAsync(bool declareRecovery, int segmentCount = SegmentCount, int segmentBytes = SegmentBytes, LegacyLogDatabase? legacy = null)
     {
         var teamId = Guid.NewGuid();
         var actorId = Guid.NewGuid();
@@ -181,7 +185,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixt
         var root = Path.Combine(Path.GetTempPath(), $"codespace-log-completion-audit-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         _roots.Add(root);
-        using var scope = fixture.BeginScope();
+        using var scope = legacy?.BeginScope() ?? fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.User.Add(new User { Id = actorId, Email = $"log-completion-{actorId:N}@test.local", Name = "Log Completion Audit" });
         db.Team.Add(new Team { Id = teamId, Slug = $"log-completion-{teamId:N}", Name = "Log Completion Audit", Kind = TeamKind.Workspace });
@@ -197,6 +201,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixt
         await db.SaveChangesAsync();
         db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "test-harness", Status = AgentRunStatus.Running, TaskJson = "{}", FenceEpoch = 7, CreatedDate = now, CreatedBy = actorId, LastModifiedDate = now, LastModifiedBy = actorId });
         await db.SaveChangesAsync();
+        if (legacy != null) await legacy.InsertStreamAndUpgradeAsync(new AgentRunLogOpenRequest { TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1" });
         var logs = Logs(scope, scope.Resolve<IArtifactCasRuntimeCoordinator>());
         if (declareRecovery)
         {
@@ -265,6 +270,10 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixt
         reads.Select(value => value.ArtifactObjectId).ShouldBe(expectedObjects);
         reads.ShouldAllBe(value => value.BytesRead == SegmentBytes && value.EofCount == 1 && value.Disposed && value.MaximumRequestedBytes <= 128 * 1024);
     }
-    public void Dispose() { foreach (var root in _roots) if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    public async Task DisposeAsync()
+    {
+        try { await fixture.DisposeAsync(); }
+        finally { foreach (var root in _roots) if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
     private sealed record World(AgentRunLogCompleteRequest Complete, Guid[] ObjectIds, string WholeSha256, int SegmentSize, int Segments);
 }

@@ -21,7 +21,7 @@ public sealed class AgentRunLogPersistenceTests
     public AgentRunLogPersistenceTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task Verified_segment_advances_the_head_and_stream_can_complete_without_rewriting_bytes()
+    public async Task Verified_segment_advances_the_head_but_metadata_alone_cannot_complete_the_stream()
     {
         var world = await SeedWorldAsync();
         var artifact = await SeedArtifactAsync(world, 17, available: true);
@@ -64,15 +64,19 @@ public sealed class AgentRunLogPersistenceTests
             stored.ContentDigest = Enumerable.Repeat((byte)17, 32).ToArray();
             stored.CompletedAt = completedAt;
             stored.LastModifiedAt = completedAt;
-            await db.SaveChangesAsync();
+            // These are metadata-only CAS fixtures. They must no longer mint a v3 physical-read receipt by
+            // assigning an arbitrary whole digest. Real successful full-read completion is exercised by the
+            // AgentRunLogCompletionRecoveryAuditTests against actual CAS files.
+            var fabricated = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            fabricated.InnerException?.Message.ShouldContain("requires its exact sealed segment manifest");
         }
 
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
             var stored = await db.AgentRunLogStream.SingleAsync(candidate => candidate.Id == stream.Id);
-            stored.State.ShouldBe(AgentRunLogStreamState.Completed);
-            stored.Revision.ShouldBe(4);
+            stored.State.ShouldBe(AgentRunLogStreamState.Open);
+            stored.Revision.ShouldBe(3);
             stored.SegmentCount.ShouldBe(1);
             stored.TotalBytes.ShouldBe(17);
             (await db.AgentRunLogSegment.SingleAsync(candidate => candidate.Id == segment.Id)).ArtifactObjectId.ShouldBe(artifact.Id);
@@ -226,7 +230,7 @@ public sealed class AgentRunLogPersistenceTests
     }
 
     [Fact]
-    public async Task Runtime_completed_stream_requires_a_non_null_sha256_digest()
+    public async Task Runtime_v3_completion_requires_an_exact_sealed_manifest()
     {
         var world = await SeedWorldAsync();
         var stream = await SeedStreamAsync(world);
@@ -239,7 +243,7 @@ public sealed class AgentRunLogPersistenceTests
         stored.CompletedAt = DateTimeOffset.UtcNow;
         stored.LastModifiedAt = stored.CompletedAt.Value;
         var missingDigest = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
-        missingDigest.InnerException?.Message.ShouldContain("requires its verified SHA-256 content digest");
+        missingDigest.InnerException?.Message.ShouldContain("requires its exact sealed segment manifest");
     }
 
     [Fact]
@@ -404,7 +408,7 @@ public sealed class AgentRunLogPersistenceTests
             StreamKind = "stdout/v1", ContentType = "text/plain", ContentEncoding = "utf-8",
             CaptureSource = "sandbox-spool/v1", Retention = ArtifactRetention.Run,
             State = AgentRunLogStreamState.Open, Revision = 1, SegmentCount = 0, TotalBytes = 0,
-            NextSegmentOrdinal = 1, NextOffsetBytes = 0, SchemaVersion = 2,
+            NextSegmentOrdinal = 1, NextOffsetBytes = 0, SchemaVersion = 3,
             CreatedAt = now, LastModifiedAt = now,
         };
 
@@ -424,7 +428,7 @@ public sealed class AgentRunLogPersistenceTests
             SegmentOrdinal = ordinal, StartOffsetBytes = offset, LengthBytes = artifact.SizeBytes,
             SourceStartOffsetBytes = offset, SourceLengthBytes = artifact.SizeBytes,
             ArtifactObjectId = artifact.Id, WorkerFenceEpoch = fenceEpoch, CaptureSessionId = stream.CaptureSessionId!.Value,
-            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 2,
+            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 3,
         };
     }
 
