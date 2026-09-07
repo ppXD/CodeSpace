@@ -33,8 +33,7 @@ public sealed partial class ArtifactStore
         var existing = await FindDedupTargetAsync(request.TeamId, admission.Sha256, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
-            if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
-                await RestoreLocalStreamAsync(request, admission.Sha256, cancellationToken).ConfigureAwait(false);
+            await EnsureLocalDedupContentAsync(existing, request.TeamId, ct => WriteLegacyStreamAsync(request.Source, admission.Sha256, ct), cancellationToken).ConfigureAwait(false);
             return new ArtifactStreamRetentionWrite(existing.Id, false, admission.Sha256, request.Source.LengthBytes);
         }
 
@@ -69,6 +68,7 @@ public sealed partial class ArtifactStore
             var raceWinner = await FindDedupTargetAsync(request.TeamId, admission.Sha256, cancellationToken).ConfigureAwait(false);
             if (raceWinner is null)
                 throw new ArtifactStorageDestinationUnavailableException(request.TeamId, ArtifactCasProblemCode.TargetMissing);
+            await EnsureLocalDedupContentAsync(raceWinner, request.TeamId, ct => WriteLegacyStreamAsync(request.Source, admission.Sha256, ct), cancellationToken).ConfigureAwait(false);
             return new ArtifactStreamRetentionWrite(raceWinner.Id, false, admission.Sha256, request.Source.LengthBytes);
         }
     }
@@ -101,12 +101,6 @@ public sealed partial class ArtifactStore
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
-    }
-
-    private async Task RestoreLocalStreamAsync(ArtifactStreamWriteRequest request, string sha256, CancellationToken cancellationToken)
-    {
-        if (await _destinations.ResolveAsync(request.TeamId, cancellationToken).ConfigureAwait(false) is not WorkflowArtifactDestination.Local) return;
-        await WriteLegacyStreamAsync(request.Source, sha256, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<ArtifactPlacement> PlaceOffloadedStreamAsync(ArtifactStreamWriteRequest request, string sha256, CancellationToken cancellationToken)

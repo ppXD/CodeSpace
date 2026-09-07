@@ -70,8 +70,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
             // hand back an id whose read is doomed. We are HOLDING the exact bytes the claim describes (the sha
             // matched), so restore the blob instead of failing: self-healing beats a dead reference. Content
             // correctness on the healthy path stays the read's verification; inline rows have nothing to check.
-            if (existing.StorageUrl is { } url && !await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
-                await RestoreLocalBlobAsync(teamId, sha, bytes, cancellationToken).ConfigureAwait(false);
+            await EnsureLocalDedupContentAsync(existing, teamId, ct => _blobs.WriteAsync(sha, bytes, ct), cancellationToken).ConfigureAwait(false);
 
             return new ArtifactRetentionWrite(existing.Id, false);
         }
@@ -122,6 +121,7 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
             if (raceWinner == null)
                 throw new ArtifactStorageDestinationUnavailableException(teamId, ArtifactCasProblemCode.TargetMissing);
 
+            await EnsureLocalDedupContentAsync(raceWinner, teamId, ct => _blobs.WriteAsync(sha, bytes, ct), cancellationToken).ConfigureAwait(false);
             return new ArtifactRetentionWrite(raceWinner.Id, false);
         }
     }
@@ -162,17 +162,18 @@ public sealed partial class ArtifactStore : IArtifactStore, IArtifactStreamStore
     private sealed record ArtifactWrite(Guid TeamId, ReadOnlyMemory<byte> Bytes, string ContentType, ArtifactRetentionDeclaration? Declaration);
 
     /// <summary>
-    /// Puts a local row's missing blob back — but only while local disk is still where this team's new offloaded bytes
-    /// belong. Once the team routes this data class, a restore would mint fresh local-disk bytes for a routed team,
-    /// which is the same silent fallback the write path refuses; the dead reference then surfaces as a typed read
-    /// failure instead of being papered over. Refusing here rather than throwing keeps the dedup contract intact:
-    /// PutAsync still returns the existing id for content the store already knows.
+    /// A local dedup identity is not proof that its content still exists. Restore only under the current local
+    /// destination policy and verify the recorded location after acknowledgement. Preserve the historical placement;
+    /// an unavailable object cannot yield a successful write receipt or trigger a silent destination fallback.
     /// </summary>
-    private async Task RestoreLocalBlobAsync(Guid teamId, string sha, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    private async Task EnsureLocalDedupContentAsync(ArtifactDedupTarget target, Guid teamId, Func<CancellationToken, Task<string>> restore, CancellationToken cancellationToken)
     {
-        if (await _destinations.ResolveAsync(teamId, cancellationToken).ConfigureAwait(false) is not WorkflowArtifactDestination.Local) return;
-
-        await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false);
+        if (target.StorageUrl is not { } url || await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false)) return;
+        if (await _destinations.ResolveAsync(teamId, cancellationToken).ConfigureAwait(false) is not WorkflowArtifactDestination.Local)
+            throw new ArtifactContentUnavailableException(target.Id, ArtifactContentUnavailableKind.PhysicalObjectMissing);
+        await restore(cancellationToken).ConfigureAwait(false);
+        if (!await _blobs.ExistsAsync(url, cancellationToken).ConfigureAwait(false))
+            throw new ArtifactContentUnavailableException(target.Id, ArtifactContentUnavailableKind.PhysicalObjectMissing);
     }
 
     public async Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken)
