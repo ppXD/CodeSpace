@@ -171,15 +171,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // the root under their own names, so the nesting can be corrected here without spending a round-trip to ask
             // the model for information its first reply already delivered. Only a reply this cannot fix — a genuinely
             // absent payload, where moving fields would have to invent them — reaches the model repair below.
-            var lifted = SupervisorDecisionPayloadLift.Lift(completion.Json, model.Kind);
-            var nested = lifted is { } moved && TryDeserialize(moved, out _) is { } candidate && SupervisorDecisionCoherence.MissingPayload(candidate) is null ? candidate : null;
-
-            if (nested is not null)
+            if (TryNestFlattenedPayload(completion, model.Kind) is { } nested)
             {
                 _logger.LogInformation("Supervisor decision payload for kind '{Kind}' was flattened to the root and nested deterministically — no repair round-trip spent", model.Kind);
 
-                completion = completion with { Json = lifted!.Value };
-                model = nested;
+                completion = nested.Completion;
+                model = nested.Model;
             }
             else
             {
@@ -219,6 +216,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                         // the kind it started from rides along as evidence rather than being quietly overwritten.
                         completion = repaired;
                         model = reply;
+                        reaskedFromKind = namedKind;
+                        break;
+                    }
+
+                    // The SAME deterministic repair the FIRST reply got. A correction that answers with the payload at
+                    // the root carries every field the contract needs, under its own name, in the model's own words —
+                    // asking again for it is a round-trip spent on information this reply already delivered, and on the
+                    // LAST attempt it is the difference between the decision landing and the executor being handed the
+                    // projector's empty substitute for a payload the model demonstrably wrote.
+                    if (TryNestFlattenedPayload(repaired, reply.Kind) is { } relifted)
+                    {
+                        _logger.LogInformation("Supervisor decision re-ask for kind '{Kind}' answered with the payload flattened to the root and it was nested deterministically — no further repair round-trip spent", reply.Kind);
+
+                        completion = relifted.Completion;
+                        model = relifted.Model;
                         reaskedFromKind = namedKind;
                         break;
                     }
@@ -378,6 +390,22 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     }
 
     /// <summary>
+    /// The DETERMINISTIC rescue for a payload-less reply, applied identically to the first reply and to every bounded
+    /// re-ask's answer: the completion with its root-FLATTENED payload nested where the contract reads it, paired with
+    /// the decision that shape binds to — or null when the reply is not that shape and only the model can supply what
+    /// is missing. <see cref="SupervisorDecisionPayloadLift"/> is conservative by construction (it MOVES declared
+    /// fields and never invents one), so a null here means the round-trip below is genuinely owed.
+    /// </summary>
+    private static (StructuredLLMCompletion Completion, SupervisorModelDecision Model)? TryNestFlattenedPayload(StructuredLLMCompletion reply, string kind)
+    {
+        if (SupervisorDecisionPayloadLift.Lift(reply.Json, kind) is not { } lifted) return null;
+
+        var nested = TryDeserialize(lifted, out _);
+
+        return nested is not null && SupervisorDecisionCoherence.MissingPayload(nested) is null ? (reply with { Json = lifted }, nested) : null;
+    }
+
+    /// <summary>
     /// How many bounded payload re-asks ONE decision may spend before the ladder gives up and the original decision
     /// proceeds to the executor's refusal. TWO, not one: across the last ten real-model decision evals FOUR turns
     /// answered with a payload-less verb, on all three wires, and 6 of the 8 re-asks those turns bought recovered —
@@ -478,7 +506,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
       + $"Your previous reply:\n{rawReply}\n\n"
       + "Re-read the CURRENT PLAN STATE above and reply with the COMPLETE decision you now judge correct — retry a subtask that actually failed, or choose a different action entirely. If on that evidence you still mean to retry the same subtask, re-emit it and say why in the rationale: your reply decides.";
 
-    /// <summary>The correction a payload-less reply earns: the named defect, the model's OWN reply echoed back, that kind's payload schema, and the complete envelope to re-emit. Pure + unit-pinned per kind.</summary>
+    /// <summary>
+    /// The correction a payload-less reply earns: the named defect, the model's OWN reply echoed back, that kind's
+    /// payload schema, and the complete envelope to re-emit. Pure + unit-pinned per kind.
+    ///
+    /// <para>The header covers BOTH shapes <see cref="SupervisorDecisionCoherence.MissingPayload"/> names, because
+    /// half its arms are about an object that is PRESENT and incomplete (a <c>plan</c> declaring no subtask, a
+    /// <c>retry</c> whose <c>subtaskId</c> is blank) rather than absent. Told flatly that it "omitted" an object it
+    /// can see it wrote, a model is handed a first line its own reply contradicts and a <c>Defect:</c> line that is
+    /// true — so the sentence names the shortfall generically and lets the defect say which one it was.</para>
+    /// </summary>
     internal static string MissingPayloadRepairPrompt(string kind, string defect, string rawReply)
     {
         // A kind the schema gives no sub-object (resolve) never reaches the coherence gate, so the fallback is
@@ -490,7 +527,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             ? "the object your kind names"
             : $"an object matching this schema:\n{fragment}";
 
-        return $"You chose kind '{kind}' but your reply omitted the '{property}' object that carries its payload.\n\n"
+        return $"You chose kind '{kind}' but your reply omitted or left incomplete the '{property}' object that carries its payload.\n\n"
              + $"Defect: {defect}\n\n"
              + $"Your previous reply:\n{rawReply}\n\n"
              + $"Reply with the COMPLETE decision — the same intent, re-emitted as {{ \"kind\": \"{kind}\", \"rationale\": {{ \"why\": …, \"evidence\": … }}, \"{property}\": … }}, where '{property}' is {shape}\n\n"

@@ -47,8 +47,11 @@ public class SupervisorDecisionEvalTests
     [Fact]
     public void Fails_when_the_payload_check_rejects_and_passes_when_it_holds()
     {
-        // The mixed-results teeth: a retry must target the FAILED subtask (s2), not blindly retry s1.
-        var scenario = Scenario(new[] { SupervisorDecisionKinds.Retry }, RetryTargets("s2"));
+        // The mixed-results teeth: a retry must target the FAILED subtask (s2), not blindly retry s1. Graded by the
+        // corpus's OWN grader, never a copy of it: a local re-implementation is a second authority that keeps
+        // reporting whatever the real one has stopped reporting — this test kept rendering an absent payload as
+        // "retry targeted ''" for exactly as long as it owned its own duplicate.
+        var scenario = Scenario(new[] { SupervisorDecisionKinds.Retry }, SupervisorDecisionGoldenScenarios.RetryTargets("s2"));
 
         SupervisorDecisionEval.Score(scenario, Retry("s1")).Pass.ShouldBeFalse("retrying the wrong subtask must fail");
         SupervisorDecisionEval.Score(scenario, Retry("s2")).Pass.ShouldBeTrue("retrying the failed subtask passes");
@@ -117,12 +120,6 @@ public class SupervisorDecisionEvalTests
         SupervisorDecisionEval.Aggregate(new[] { mixed[0] }).AllPassed.ShouldBeTrue("all-passed arms it");
         SupervisorDecisionEval.Aggregate(Array.Empty<SupervisorDecisionScore>()).AllPassed.ShouldBeFalse("an empty run never silently passes");
     }
-
-    private static Func<SupervisorDecision, (bool, string)> RetryTargets(string expectedSubtaskId) => decision =>
-    {
-        var subtaskId = JsonDocument.Parse(decision.PayloadJson).RootElement.TryGetProperty("subtaskId", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() : null;
-        return subtaskId == expectedSubtaskId ? (true, "ok") : (false, $"retry targeted '{subtaskId}', expected '{expectedSubtaskId}'");
-    };
 
     private static SupervisorDecision Retry(string subtaskId) =>
         new() { Kind = SupervisorDecisionKinds.Retry, PayloadJson = JsonSerializer.Serialize(new { subtaskId }) };
