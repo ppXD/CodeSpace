@@ -57,6 +57,18 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
+    public void The_projection_declares_the_whole_task_operator_floor_it_does_not_consume_as_unsupported()
+    {
+        Builder.OperatorAcceptance.AcceptsCommand.ShouldBe(false);
+        Builder.OperatorAcceptance.GradingKind.ShouldBeNull();
+        var withFloor = JsonSerializer.Serialize(Builder.Build(Context() with { AcceptanceChecks = new[] { "unique-task-oracle", "--check" } }));
+        withFloor.ShouldNotContain("unique-task-oracle");
+        // Seed identities vary, so compare actual node config, where an argv adapter would be emitted.
+        var nodes = Builder.Build(Context() with { AcceptanceChecks = new[] { "unique-task-oracle" } }).Nodes;
+        nodes.ShouldAllBe(n => !n.Config.GetRawText().Contains("unique-task-oracle"));
+    }
+
+    [Fact]
     public void Emits_the_planner_map_agent_synth_graph()
     {
         var def = Builder.Build(Context());

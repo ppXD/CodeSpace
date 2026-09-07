@@ -67,16 +67,18 @@ public class SupervisorDefinitionBuilderTests
     }
 
     [Fact]
-    public void The_acceptance_checks_floor_bakes_with_blanks_dropped_and_omits_when_empty()
+    public void The_advertised_operator_adapter_bakes_exact_argv_and_omits_a_blank_executable()
     {
         // The floor is a VERIFICATION control — it must not silently not-arrive (S4b review finding).
         var config = Builder.Build(Context(acceptanceChecks: new[] { "sh", " ", "check.sh", "" })).Nodes.Single(n => n.Id == "sup").Config;
 
-        config.GetProperty("acceptanceChecks").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" },
-            customMessage: "the argv floor bakes verbatim with blank entries dropped");
+        config.GetProperty("acceptanceChecks").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", " ", "check.sh", "" },
+            customMessage: "argument boundaries must survive the actual adapter");
+        Builder.OperatorAcceptance.AcceptsCommand.ShouldBe(true);
+        Builder.OperatorAcceptance.GradingKind.ToString().ShouldBe("TestsPass");
 
         Builder.Build(Context()).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("no floor ⇒ key omitted (byte-identical)");
-        Builder.Build(Context(acceptanceChecks: new[] { " ", "" })).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("an all-blank floor collapses to omitted");
+        Builder.Build(Context(acceptanceChecks: new[] { " ", "must-not-become-executable" })).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("an all-blank floor collapses to omitted");
     }
 
     [Fact]

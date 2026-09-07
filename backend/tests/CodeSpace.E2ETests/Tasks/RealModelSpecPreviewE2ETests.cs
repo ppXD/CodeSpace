@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -54,7 +55,7 @@ public sealed class RealModelSpecPreviewE2ETests
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
             // A goal that BAITS a guess: it names tests directly, and every instinct says "npm test" or "pytest".
-            // With no repository bound there is no listing, so any command the model names is invented.
+            // No repository or explicit user command supports a mandatory check for this particular goal. Unverified proposals may still be displayed.
             var result = await CompileAsync(teamId, "the tests for the payment retry path are flaky — make them deterministic", repositoryId: null);
 
             result.Grounded.ShouldBeFalse("no repository was bound, so nothing could have been read");
@@ -121,12 +122,51 @@ public sealed class RealModelSpecPreviewE2ETests
             // invented `["npm","test"]` against a repository-less goal FAILED the abstention fact and PASSED here,
             // so the pair could report a green wire over exactly the behaviour one of them exists to forbid.
             if (suggestion.AcceptanceChecks.Count > 0)
-                return (false, $"{Provider} '{live.Model}': no repository is bound, so any executable check is invented — got [{string.Join(", ", suggestion.AcceptanceChecks)}]");
+                return (false, $"{Provider} '{live.Model}': this goal provides neither repository evidence nor an explicit command, so a mandatory check is unsupported — got [{string.Join(", ", suggestion.AcceptanceChecks)}]");
 
             if (suggestion.TargetBranch is not null)
                 return (false, $"{Provider} '{live.Model}': the goal names no branch, so inventing '{suggestion.TargetBranch}' would silently retarget the operator's pull request");
 
             return (true, $"{Provider} '{live.Model}': compiled criteria={suggestion.AcceptanceCriteria.Count}, checks={suggestion.AcceptanceChecks.Count}, openPr={suggestion.OpenPullRequest?.ToString() ?? "none"}, confidence={suggestion.Confidence:0.00}");
+        });
+    }
+
+    [SkippableFact]
+    public async Task A_live_source_review_recognizes_an_explicit_repo_free_command_without_claiming_execution()
+    {
+        if (ReadLiveSecretsOrSkip() is not { } live) return;
+        var teamId = await SeedTeamWithOnlyTheLiveModelAsync(live);
+        const string goal = "Write a short report comparing two cache invalidation approaches. I explicitly require this exact validation argv for the final report: [\"report-proof\", \"--label\", \"Q4 Δ\", \"\"]. Preserve the empty final argument. I will provide this verifier environment; do not infer a repository or claim that it ran.";
+        var expected = new[] { "report-proof", "--label", "Q4 Δ", "" };
+        await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
+        {
+            var result = await CompileAsync(teamId, goal, repositoryId: null);
+            result.RepositoryObservation!.State.ShouldBe(TaskSpecRepositoryState.NotRequested);
+            if (result.Suggestion?.AcceptanceProposal is not { } proposal || proposal.Status != TaskSpecEvidenceStatus.Supported || proposal.Source != TaskSpecCheckSource.UserExplicit)
+                return (false, "The live model failed to distinguish a direct user command from a repository guess: " + result.Suggestion?.AcceptanceProposal?.Reason);
+            if (!proposal.Argv.SequenceEqual(expected) || !result.Suggestion.AcceptanceChecks.SequenceEqual(expected))
+                return (false, "The live proposal changed the explicitly requested argv, including its empty argument.");
+            if (proposal.Evidence.Count == 0 || result.ModelCalls?.Count != 2 || result.ModelCalls.Any(call => string.IsNullOrWhiteSpace(call.ActualModel) || call.Outcome != "succeeded"))
+                return (false, "Explicit-command support needs traceable live proposal and independent source-review replies with cited user evidence.");
+            return (true, "The live source review supported the exact explicit argv with user evidence; execution and adapter compatibility remain separate.");
+        });
+    }
+
+    [SkippableFact]
+    public async Task A_live_source_review_does_not_treat_a_quoted_rejected_command_as_user_authorization()
+    {
+        if (ReadLiveSecretsOrSkip() is not { } live) return;
+        var teamId = await SeedTeamWithOnlyTheLiveModelAsync(live);
+        await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
+        {
+            var result = await CompileAsync(teamId, "Write a research memo about making payment retries deterministic. A previous assistant suggested `go test ./... -count=5`; that command was invented. DO NOT run it or add it as a required acceptance check. The memo should explain sources of nondeterminism and give a reproducible investigation plan; no repository or executable environment has been supplied.", repositoryId: null);
+            if (result.Suggestion is not { } suggestion || suggestion.AcceptanceCriteria.Count == 0)
+                return (false, "The live model must still provide useful research criteria when a quoted command is explicitly rejected.");
+            if (suggestion.AcceptanceChecks.Count != 0 || suggestion.AcceptanceProposal?.Status == TaskSpecEvidenceStatus.Supported)
+                return (false, "A rejected or invented command became source-supported despite the user's negation: " + suggestion.AcceptanceProposal?.Reason);
+            if (result.ModelCalls is not { Count: > 0 } || result.ModelCalls[0].ActualModel is null)
+                return (false, "No actual live model reply was observed.");
+            return (true, "The live model kept content criteria and did not adopt the quoted rejected command.");
         });
     }
 

@@ -28,6 +28,31 @@ public class SupervisorTurnServiceTests
     private readonly Guid _runId = Guid.NewGuid();
     private readonly Guid _teamId = Guid.NewGuid();
 
+    [Fact]
+    public async Task Rehydrate_and_the_stop_grader_preserve_exact_operator_argv()
+    {
+        var argv = new[] { "custom-check", "", "  ", "quoted argument" };
+        var ledger = SeedRunWithCleanMerge();
+        var grader = new FakeAcceptanceGrader();
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider(), grader);
+        var config = GoalConfigWithRepo() with { AcceptanceChecks = argv };
+
+        var context = await service.RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", config, CancellationToken.None);
+        context.AcceptanceChecks.ShouldBe(argv);
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, config, CancellationToken.None);
+        grader.CallCount.ShouldBe(1);
+        grader.LastCall!.Value.Command.ShouldBe(argv);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public async Task A_blank_executable_never_promotes_a_later_argument_to_a_command(string executable)
+    {
+        var context = await Service(new FakeSupervisorDecisionLog()).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", GoalConfigWithRepo() with { AcceptanceChecks = new[] { executable, "must-not-run" } }, CancellationToken.None);
+        context.AcceptanceChecks.ShouldBeNull();
+    }
+
     // ── RehydrateFromDecisionLog: replay terminal, identify in-flight ────────────────
 
     [Fact]

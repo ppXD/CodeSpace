@@ -28,6 +28,24 @@ describe("route snapshot references", () => {
     hook.unmount();
   });
 
+  it("invalidates acceptance compatibility with controls and never revives it from a stale response", async () => {
+    const capable: TaskRoutePreviewResult = { ...reply("capable"), acceptanceCompatibility: { state: "Compatible", projectionKind: "single-agent", detail: "Current input adapter" } };
+    let resolveStale!: (value: TaskRoutePreviewResult) => void;
+    vi.mocked(tasksApi.routePreview).mockResolvedValueOnce(capable).mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve; })).mockResolvedValueOnce(reply("current-unknown"));
+    const hook = renderHook(({ value }) => useRoutePreview(value), { initialProps: { value: input } });
+    await settle();
+    expect(hook.result.current.acceptanceCompatibility?.state).toBe("Compatible");
+    hook.rerender({ value: { ...input, repositoryId: "other-repo" } });
+    expect(hook.result.current.acceptanceCompatibility).toBeNull();
+    await settle();
+    hook.rerender({ value: { ...input, effort: "standard" } });
+    await settle();
+    await act(async () => { resolveStale(capable); });
+    expect(hook.result.current.routeSnapshotId).toBe("current-unknown");
+    expect(hook.result.current.acceptanceCompatibility).toBeNull();
+    hook.unmount();
+  });
+
   it("refreshes an expired reference before treating the current route as answered", async () => {
     vi.mocked(tasksApi.routePreview).mockImplementationOnce(async () => reply("expired", 2_000)).mockImplementationOnce(async () => reply("renewed"));
     const hook = renderHook(() => useRoutePreview(input));

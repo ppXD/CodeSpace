@@ -23,6 +23,7 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
 public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, ISingletonDependency
 {
     public string ProjectionKind => TaskProjectionKinds.SingleAgent;
+    public TaskProjectionAcceptanceContract OperatorAcceptance => new(true, Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass);
 
     /// <summary>The repo-relative file a shape-derived contract grades. One conventional path, named in the goal, so an answer / report / findings run has a file the oracle can actually read.</summary>
     public const string DeliverableFileName = "DELIVERABLE.md";
@@ -32,7 +33,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
 
     /// <summary>The operator's EXECUTABLE floor, blanks dropped. Non-empty ⇒ the operator authored the oracle and it wins over any shape-derived one.</summary>
     private static IReadOnlyList<string>? OperatorArgv(TaskBuildContext context) =>
-        context.AcceptanceChecks?.Where(c => !string.IsNullOrWhiteSpace(c)).ToList() is { Count: > 0 } command ? command : null;
+        context.AcceptanceChecks is { Count: > 0 } command && !string.IsNullOrWhiteSpace(command[0]) && command.All(c => c is not null && !c.Contains('\0')) ? command.ToArray() : null;
 
     /// <summary>
     /// THIS agent's objective oracle. Precedence, and the whole point of the shape axis:

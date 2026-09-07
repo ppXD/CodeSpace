@@ -53,6 +53,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     public static int SynthesisPromptBudgetChars => SupervisorSynthesisBudget.Normalize(int.TryParse(Environment.GetEnvironmentVariable(SynthesisPromptBudgetCharsEnvVar), out var value) ? value : null);
 
     public string ProjectionKind => TaskProjectionKinds.Supervisor;
+    public TaskProjectionAcceptanceContract OperatorAcceptance => new(true, Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass);
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {
@@ -137,7 +138,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // The operator's EXECUTABLE acceptance floor (S4b) — an argv run against the reviewable head at the terminal
         // stop; a non-zero exit fails the stop + withholds the branch. Blank entries dropped; omitted when empty
         // (byte-identical). The free-text criteria above steer the model; this floor VERIFIES the result.
-        AddIfPresent(config, "acceptanceChecks", context.AcceptanceChecks?.Where(c => !string.IsNullOrWhiteSpace(c)).ToList() is { Count: > 0 } checks ? checks : null);
+        AddIfPresent(config, "acceptanceChecks", context.AcceptanceChecks is { Count: > 0 } checks && !string.IsNullOrWhiteSpace(checks[0]) && checks.All(c => c is not null && !c.Contains('\0')) ? checks.ToArray() : null);
         // The S3 plan-confirmation gate — every authored plan version parks for the operator's confirmation before any
         // agent is created. Omitted when off (byte-identical).
         AddIfPresent(config, "requirePlanConfirmation", context.RequirePlanConfirmation ? (object)true : null);

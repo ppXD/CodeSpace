@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { tasksApi, type RoutePlan, type RoutePreviewInput } from "@/api/tasks";
+import { tasksApi, type RoutePlan, type RoutePreviewInput, type TaskAcceptanceCompatibility } from "@/api/tasks";
 
 /** Fire after the goal has been stable this long — the classifier may be a model call; keystrokes must never race it. */
 export const ROUTE_PREVIEW_DEBOUNCE_MS = 700;
@@ -16,7 +16,7 @@ export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 3;
 /** Debounced routing preview bound to the full input. Responses are exposed only for the current key and
  * generation; an expiring reference triggers a refresh. A failed preview remains an explicit legacy-path fallback.
  * Routing advice is not consent. Actual launch authority is checked by the server on every request. */
-type PreviewReply = { key: string; generation: number; route: RoutePlan | null; deploymentAutonomyCeiling: string; routeSnapshotId?: string; refreshAfterMs?: number; launchAttempted?: boolean };
+type PreviewReply = { key: string; generation: number; route: RoutePlan | null; deploymentAutonomyCeiling: string; routeSnapshotId?: string; refreshAfterMs?: number; launchAttempted?: boolean; acceptanceCompatibility?: TaskAcceptanceCompatibility | null };
 
 export function useRoutePreview(input: RoutePreviewInput | null) {
   const [{ reply, generation }, setState] = useState<{ reply: PreviewReply | null; generation: number }>({ reply: null, generation: 0 });
@@ -42,10 +42,10 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
         if (seq.current !== mySeq) return;
         const lifetime = Date.parse(result.expiresAt ?? "") - Date.parse(result.createdAt ?? "");
         const refreshAfterMs = Number.isFinite(lifetime) ? Math.max(0, lifetime - (performance.now() - startedAt)) : undefined;
-        setState(previous => ({ ...previous, reply: { key, generation, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "", routeSnapshotId: result.routeSnapshotId, refreshAfterMs } }));
+        setState(previous => ({ ...previous, reply: { key, generation, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "", routeSnapshotId: result.routeSnapshotId, refreshAfterMs, acceptanceCompatibility: result.acceptanceCompatibility } }));
       } catch {
         // A failed preview is NOT a failed launch — record the miss (which counts as ANSWERED, so the gate
-        // opens) and leave the route null so no card renders and nothing is blocked.
+        // opens for ordinary launch) and leave compatibility unknown for mandatory command adoption.
         if (seq.current === mySeq) setState(previous => ({ ...previous, reply: { key, generation, route: null, deploymentAutonomyCeiling: previous.reply?.deploymentAutonomyCeiling ?? "" } }));
       } finally {
         if (seq.current === mySeq) setPendingKey(p => (p === key ? null : p));
@@ -68,6 +68,7 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
   return {
     route: current?.route ?? null,
     routeSnapshotId: current?.routeSnapshotId,
+    acceptanceCompatibility: current?.acceptanceCompatibility ?? null,
     /** Preserve an attempted reference through expiry until the server resolves whether it committed a run. */
     markLaunchAttempt: (snapshotId: string) => setState(previous => previous.reply?.routeSnapshotId === snapshotId ? { ...previous, reply: { ...previous.reply, launchAttempted: true } } : previous),
     /** Only a conclusive success or rejection ends this admission intent; transport failures keep the reference. */
@@ -79,8 +80,7 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
     answered: key === null || current !== null,
     /** This deployment's autonomy ceiling, read off the NEWEST reply rather than the current key's — deliberately
      *  un-keyed, because unlike a route it is a constant of the deployment, so the last observation can never be
-     *  stale for a different request. It therefore survives the operator switching to an explicit tier, which
-     *  disables the preview entirely. "" until some reply has carried it (the composer then states today's wording;
+     *  stale for a different request. Explicit tiers also request adapter metadata, without model classification. "" until some reply has carried it (the composer then states today's wording;
      *  the SERVER clamps either way). */
     deploymentAutonomyCeiling: reply?.deploymentAutonomyCeiling ?? "",
   };

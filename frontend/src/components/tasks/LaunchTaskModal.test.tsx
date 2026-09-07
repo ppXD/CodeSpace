@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { TaskSpecSuggestion, TaskSpecRepositoryObservation, TaskSpecModelCall, TaskAcceptanceCompatibility } from "@/api/tasks";
 
 const launchSpy = vi.fn();
 let lastInput: Record<string, unknown> | null = null;
@@ -16,7 +17,9 @@ vi.mock("@/hooks/use-model-credentials", () => ({
   useCredentialedModels: () => ({ data: [{ rowId: "m1", modelId: "gpt-5-codex", credentialId: "c1", credentialName: "Team OpenAI", provider: "openai" }] }),
 }));
 type SpecState = {
-  suggestion: { acceptanceChecks: string[]; acceptanceCriteria: string[]; rationale: string; confidence: number } | null;
+  suggestion: TaskSpecSuggestion | null;
+  repositoryObservation?: TaskSpecRepositoryObservation;
+  modelCalls?: TaskSpecModelCall[];
   grounded: boolean;
   loading: boolean;
 };
@@ -24,21 +27,23 @@ let specState: SpecState = { suggestion: null, grounded: false, loading: false }
 vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }));
 
 // B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `inputSeen` records
-// the payload the composer asked with, so a test can prove BOTH that an explicit tier is never previewed (null)
+// the payload the composer asked with, including an explicit tier's adapter preview,
 // and that the request carries the routing fields the launch itself would send.
-type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean; routeSnapshotId?: string };
+type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean; routeSnapshotId?: string; acceptanceCompatibility?: TaskAcceptanceCompatibility };
 // The default is ANSWERED with no route: the preview settled and had nothing to confirm, so Launch is open. Every
 // pre-B1 test in this file relies on that, and a test that wants the gate CLOSED must say so explicitly.
 const releaseReference = vi.fn();
 const markLaunchAttempt = vi.fn();
-const ROUTE_ANSWERED: RouteState = { route: null, failed: false, loading: false, answered: true };
+const COMPATIBLE: TaskAcceptanceCompatibility = { state: "Compatible", projectionKind: "agent.single", gradingKind: "TestsPass", requiresRepository: true, detail: "Route and repository support argv; execution has not been performed." };
+const ROUTE_ANSWERED: RouteState = { route: null, failed: false, loading: false, answered: true, acceptanceCompatibility: COMPATIBLE };
 let routeState: RouteState = ROUTE_ANSWERED;
 let inputSeen: (import("@/api/tasks").RoutePreviewInput | null)[] = [];
 vi.mock("@/hooks/use-route-preview", () => ({
   useRoutePreview: (input: import("@/api/tasks").RoutePreviewInput | null) => {
     inputSeen.push(input);
     // Disabled (null) reads as answered — exactly what the real hook returns, so the gate opens immediately.
-    return { ...(input === null ? { route: null, failed: false, loading: false, answered: true } : routeState), releaseReference, markLaunchAttempt };
+    const state = input && input.effort !== "auto" && routeState.route ? { ...routeState, route: { ...routeState.route, effortMode: input.effort!, wasAutoClassified: false, needsConfirmCard: false, confirm: null } } : routeState;
+    return { ...(input === null ? { route: null, failed: false, loading: false, answered: true } : state), releaseReference, markLaunchAttempt };
   },
 }));
 
@@ -423,12 +428,23 @@ describe("LaunchTaskModal — quality tier (P3.2)", () => {
 });
 
 describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
-  const SUGGESTION = {
+  const SUGGESTION: TaskSpecSuggestion = {
     acceptanceChecks: ["dotnet", "test"],
     acceptanceCriteria: ["Blank-line input no longer throws", "All 174 existing tests pass"],
     rationale: "tests/OrderService.Tests exists",
     confidence: 0.8,
+    acceptanceProposal: { version: 1, argv: ["dotnet", "test"], source: "repository-evidence", status: "Supported", reason: "Source review supports the proposed check", commandDigest: "command-digest", sourceDigest: "sources-digest", dependencies: [{ requirement: "test project exists", validationStrategy: "read its definition" }], evidence: [{ sourceId: "file:checks.md", kind: "repository-file", path: "checks.md", reference: "commit-123", contentDigest: "file-digest", quote: "Run dotnet test" }] },
   };
+
+  it("keeps a legacy suggestion with unknown evidence out of Apply all's mandatory command", () => {
+    specState = { suggestion: { ...SUGGESTION, acceptanceProposal: undefined }, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    fireEvent.click(screen.getByText("Apply all"));
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+    expect(lastInput?.acceptanceCriteria).toEqual(expect.arrayContaining(SUGGESTION.acceptanceCriteria));
+  });
 
   it("renders no card when the compiler suggests nothing", () => {
     renderBox();
@@ -442,7 +458,7 @@ describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
     typeTask("Fix the parser crash on blank lines");
 
     expect(screen.getByTestId("spec-suggestion-card")).toBeInTheDocument();
-    expect(screen.getByText("Grounded in repo layout")).toBeInTheDocument();
+    expect(screen.getByText(/Source assessed; not executed/)).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByText("Apply")[0]);
     fireEvent.click(screen.getByLabelText("Launch task"));
@@ -490,11 +506,11 @@ describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
     specState = { suggestion: SUGGESTION, grounded: false, loading: false };
     renderBox();
     typeTask("Fix the parser crash on blank lines");
-    expect(screen.getByText("Repo not read — verify the check")).toBeInTheDocument();
+    expect(screen.getByText("Repository observation unknown")).toBeInTheDocument();
   });
 
   it("a suggestion without checks shows the absence as its own row (the decision-relevant fact)", () => {
-    specState = { suggestion: { ...SUGGESTION, acceptanceChecks: [] }, grounded: true, loading: false };
+    specState = { suggestion: { ...SUGGESTION, acceptanceChecks: [], acceptanceProposal: undefined }, grounded: true, loading: false };
     renderBox();
     typeTask("Remove unused using directives everywhere");
 
@@ -504,14 +520,89 @@ describe("LaunchTaskModal (spec-preview suggestion card, P5-7)", () => {
     expect(screen.getAllByText("Apply")).toHaveLength(1);
   });
 
-  it("standard effort hides the checks row (that tier never sends the argv floor)", () => {
+  it.each(["Unknown", "Contradicted"] as const)("keeps a %s proposal visible and excludes it from Apply all", status => {
+    specState = { suggestion: { ...SUGGESTION, acceptanceChecks: [], acceptanceProposal: { ...SUGGESTION.acceptanceProposal!, status } }, grounded: false, loading: false, repositoryObservation: { state: "Unavailable", detail: "The credential could not read this repository." } };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    expect(screen.getByText('"dotnet"')).toBeInTheDocument();
+    expect(screen.getByText("Repository evidence unavailable")).toBeInTheDocument();
+    expect(screen.getAllByText("Apply")).toHaveLength(1);
+    fireEvent.click(screen.getByText("Apply all"));
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+  });
+
+  it("a source-supported explicit command without a compatible workspace stays visible without becoming mandatory", () => {
+    specState = { suggestion: { ...SUGGESTION, acceptanceProposal: { ...SUGGESTION.acceptanceProposal!, source: "user-explicit" } }, grounded: false, loading: false, repositoryObservation: { state: "NotRequested", detail: "No repository requested" } };
+    routeState = { ...ROUTE_ANSWERED, acceptanceCompatibility: { ...COMPATIBLE, state: "Incompatible", detail: "The selected TestsPass adapter requires a repository workspace." } };
+    renderBox({ surface: "chat", autofill: { effort: "quick" } });
+    typeTask("Write the report and run my explicit command");
+    expect(screen.getByText(/Source assessed; not executed/)).toBeInTheDocument();
+    expect(screen.getByTestId("spec-execution-compatibility")).toHaveTextContent("requires a repository workspace");
+    expect(screen.getAllByText("Apply")).toHaveLength(1);
+    fireEvent.click(screen.getByText("Apply all"));
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+    expect(lastInput?.acceptanceCriteria).toEqual(expect.arrayContaining(SUGGESTION.acceptanceCriteria));
+  });
+
+  it("blocks a previously applied command after route compatibility becomes unknown", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    fireEvent.click(screen.getByText("Apply all"));
+    routeState = { ...ROUTE_ANSWERED, acceptanceCompatibility: undefined };
+    typeTask("Fix the parser crash and add diagnostics");
+    const send = screen.getByLabelText("Launch task");
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute("title", expect.stringContaining("compatibility is unknown"));
+    fireEvent.click(send);
+    expect(launchSpy).not.toHaveBeenCalled();
+  });
+
+  it("retains an applied floor when switching to a lane that cannot consume it and allows explicit removal", () => {
+    specState = { suggestion: SUGGESTION, grounded: true, loading: false };
+    renderBox();
+    typeTask("Fix the parser crash on blank lines");
+    fireEvent.click(screen.getByText("Apply all"));
+    routeState = { ...ROUTE_ANSWERED, acceptanceCompatibility: { ...COMPATIBLE, state: "Incompatible", detail: "This route does not consume the operator floor." } };
+    fireEvent.click(screen.getByTitle("Model and effort"));
+    fireEvent.click(screen.getByText("Effort"));
+    fireEvent.click(screen.getByText("Standard", { selector: ".lt3-opt-t" }));
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Evaluation"));
+    fireEvent.click(screen.getByText("Acceptance checks"));
+    fireEvent.click(screen.getByText("Remove acceptance command"));
+    expect(screen.getByLabelText("Launch task")).not.toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+  });
+
+  it("shows failed review usage even when the compiler produces no suggestion", () => {
+    specState = { suggestion: null, grounded: false, loading: false, modelCalls: [{ phase: "semantic-review", outcome: "timed-out", selectedModel: "selected", actualModel: null, failedOver: ["first-provider"], inputTokens: null, outputTokens: null, usageMayBeIncomplete: true, elapsedMilliseconds: 45000 }] };
+    renderBox();
+    typeTask("Investigate the regression");
+    expect(screen.queryByTestId("spec-suggestion-card")).toBeNull();
+    expect(screen.getByTestId("spec-model-calls")).toHaveTextContent("usage partly unknown");
+    expect(screen.getByText(/Missing usage is not zero cost/)).toBeInTheDocument();
+    expect(screen.getByText(/Failover: first-provider/)).toBeInTheDocument();
+  });
+
+  it("an incompatible route keeps its source-supported proposal visible and applies only criteria", () => {
+    routeState = { ...ROUTE_ANSWERED, acceptanceCompatibility: { ...COMPATIBLE, state: "Incompatible", detail: "This route uses separate plan-item acceptance contracts." } };
     specState = { suggestion: SUGGESTION, grounded: true, loading: false };
     renderBox({ autofill: { repositoryId: "r1", repositoryLabel: "acme/api", effort: "standard" } });
     typeTask("Fix the parser crash on blank lines");
 
     expect(screen.getByTestId("spec-suggestion-card")).toBeInTheDocument();
-    expect(screen.queryByText("Checks")).toBeNull();
-    expect(screen.getByText("Criteria")).toBeInTheDocument();
+    expect(screen.getByText("Checks")).toBeInTheDocument();
+    expect(screen.getByTestId("spec-execution-compatibility")).toHaveTextContent("separate plan-item");
+    expect(screen.getAllByText("Apply")).toHaveLength(1);
+    fireEvent.click(screen.getByText("Apply all"));
+    fireEvent.click(screen.getByLabelText("Launch task"));
+    expect(lastInput?.acceptanceChecks).toBeUndefined();
+    expect(lastInput?.acceptanceCriteria).toEqual(expect.arrayContaining(SUGGESTION.acceptanceCriteria));
   });
 });
 
@@ -578,9 +669,9 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     // "Standard" is also the Permission pill's autonomy tier, and picking THAT would not answer the confirm.
     fireEvent.click(within(screen.getByTestId("route-confirm-card")).getByText("Standard"));
 
-    // Effort is no longer "auto", so the preview is not even asked (enabled=false) and no card can render.
+    // Explicit preview resolves the adapter without classifying the goal again.
     expect(screen.queryByTestId("route-confirm-card")).toBeNull();
-    expect(inputSeen.at(-1)).toBeNull();
+    expect(inputSeen.at(-1)).toMatchObject({ effort: "standard" });
 
     const send = screen.getByLabelText("Launch task");
     expect(send).not.toBeDisabled();
@@ -702,11 +793,11 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     });
   });
 
-  it("an explicitly chosen tier never asks for a preview at all", () => {
+  it("an explicitly chosen tier previews its adapter without an auto-routing advice card", () => {
     renderBox({ surface: "chat", autofill: { effort: "quick" } });
     typeTask("Fix the parser crash on blank lines");
 
-    expect(inputSeen.every(i => i === null)).toBe(true);
+    expect(inputSeen.at(-1)).toMatchObject({ effort: "quick" });
     expect(screen.queryByTestId("route-confirm-card")).toBeNull();
     expect(screen.queryByTestId("route-hint")).toBeNull();
   });

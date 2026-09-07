@@ -54,7 +54,7 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
         {
             var repo = await LoadTeamScopedAsync(repositoryId.Value, teamId, bounded.Token).ConfigureAwait(false);
 
-            if (repo == null) return null;
+            if (repo?.Credential is not { Status: CredentialStatus.Active, DeletedDate: null } credential || credential.TeamId != teamId || credential.ProviderInstanceId != repo.ProviderInstanceId || repo.ProviderInstance.TeamId != teamId || repo.ProviderInstance.DeletedDate is not null) return null;
 
             var entries = await ListRootAsync(repo, reference, bounded.Token).ConfigureAwait(false);
 
@@ -77,7 +77,7 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
 
     /// <summary>Loads the repo ONLY when it belongs to <paramref name="teamId"/> — a repo in another team yields null (fail-closed, no cross-team read), indistinguishable from missing.</summary>
     private async Task<Repository?> LoadTeamScopedAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
-        await _db.Repository
+        await _db.Repository.AsNoTracking()
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
             .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false);
@@ -85,12 +85,10 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
     /// <summary>Mirrors RepositorySourceService.ResolveAsync: credential check → source-read scope → capability + context → one root listing.</summary>
     private async Task<IReadOnlyList<RemoteTreeEntry>> ListRootAsync(Repository repo, string? reference, CancellationToken cancellationToken)
     {
-        if (repo.Credential == null) return Array.Empty<RemoteTreeEntry>();
-
-        _scopeChecker.EnsureCapability(repo.Credential, repo.ProviderInstance.Provider, typeof(IRepositorySourceCapability));
+        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IRepositorySourceCapability));
 
         var source = _registry.Require<IRepositorySourceCapability>(repo.ProviderInstance.Provider);
-        var context = new ProviderContext(repo.ProviderInstance, repo.Credential);
+        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
 
         // S2/S1: list at the caller's reference — the run's immutable base pin — so what the brain plans over
         // is the SAME tree every spawned agent materializes. Null → the provider's default-branch fold (legacy).

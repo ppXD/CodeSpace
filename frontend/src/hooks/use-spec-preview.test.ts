@@ -65,6 +65,23 @@ describe("useSpecPreview", () => {
     expect(result.current.suggestion).toEqual(SUGGESTION);
   });
 
+  it("binds source observations and model usage to the current goal and repository", async () => {
+    const repositoryObservation = { state: "ObservedEmpty", detail: "Observed at commit", reference: "commit-a" };
+    const modelCalls = [{ phase: "semantic-review", outcome: "failed", usageMayBeIncomplete: true }];
+    specPreviewSpy.mockResolvedValueOnce({ suggestion: SUGGESTION, grounded: true, repositoryObservation, modelCalls });
+    const hook = renderHook(({ repo }) => useSpecPreview("Write the migration guide", repo), { initialProps: { repo: "repo-a" } });
+    await act(() => vi.advanceTimersByTimeAsync(SPEC_PREVIEW_DEBOUNCE_MS));
+    expect(hook.result.current.repositoryObservation).toEqual(repositoryObservation);
+    expect(hook.result.current.modelCalls).toEqual(modelCalls);
+    hook.rerender({ repo: "repo-b" });
+    expect(hook.result.current.repositoryObservation).toBeNull();
+    expect(hook.result.current.modelCalls).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(SPEC_PREVIEW_DEBOUNCE_MS));
+    expect(hook.result.current.repositoryObservation).toBeNull();
+    expect(hook.result.current.modelCalls).toBeNull();
+    hook.unmount();
+  });
+
   it("a transport fault degrades to a null suggestion without surfacing", async () => {
     specPreviewSpy.mockRejectedValueOnce(new Error("boom"));
     const { result } = renderHook(() => useSpecPreview("Fix the parser crash", undefined));

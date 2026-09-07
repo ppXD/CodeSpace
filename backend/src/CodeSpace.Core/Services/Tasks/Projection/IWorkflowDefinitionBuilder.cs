@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.Core.Services.Tasks.Projection;
 
@@ -20,6 +21,11 @@ public interface IWorkflowDefinitionBuilder
     /// <summary>The projection kind this builder handles — the open string the registry indexes + resolves it by. Mirrors <c>IAgentHarness.Kind</c> / <c>ISandboxRunner.Kind</c>.</summary>
     string ProjectionKind { get; }
 
+    /// <summary>The operator-command adapter actually emitted by Build. An unadvertised adapter stays unknown; it is never assumed executable from a projection name.</summary>
+    TaskProjectionAcceptanceContract OperatorAcceptance => new(null, null);
+
     /// <summary>Build the (always-valid) workflow definition for <paramref name="context"/>. Throws nothing for a well-formed context; the output is guaranteed to pass <c>DefinitionValidator</c>.</summary>
     WorkflowDefinition Build(TaskBuildContext context);
 }
+
+public sealed record TaskProjectionAcceptanceContract(bool? AcceptsCommand, BenchmarkGradingKind? GradingKind);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { RoutePlan, TaskSpecSuggestion, TaskSurfaceKind } from "@/api/tasks";
+import type { RoutePlan, TaskSurfaceKind } from "@/api/tasks";
 import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, describeNetwork, effectiveAutonomy, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
@@ -14,6 +14,8 @@ import { useRepositories, useRepositoryBranches } from "@/hooks/use-repositories
 import { ApiError } from "@/api/request";
 import { useRoutePreview } from "@/hooks/use-route-preview";
 import { useSpecPreview } from "@/hooks/use-spec-preview";
+import { adoptableSpecChecks } from "@/lib/specProposal";
+import { SpecModelCalls, SpecSuggestionCard } from "@/components/tasks/SpecSuggestionCard";
 import { useLaunchTask } from "@/hooks/use-tasks";
 
 const BOOLEAN_OVERRIDE_OPTIONS: Option[] = [
@@ -191,11 +193,12 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Applied state is KEYED to the suggestion's content and derived at render (never reset via an effect — the
   // lint-enforced no-sync-setState-in-effect rule): a NEW suggestion reads un-applied automatically.
   const [specAppliedFor, setSpecAppliedFor] = useState<{ key: string; checks: boolean; criteria: boolean }>({ key: "", checks: false, criteria: false });
-  const specApplied = specAppliedFor.key === specKey ? specAppliedFor : { checks: false, criteria: false };
+  const specApplied = specAppliedFor.key === specKey ? { ...specAppliedFor, checks: specAppliedFor.checks && JSON.stringify(cfg.acceptanceChecks) === JSON.stringify(spec.suggestion?.acceptanceChecks) } : { checks: false, criteria: false };
   const showSpecCard = !!spec.suggestion && specKey !== specDismissedKey;
   const applySpecChecks = () => {
-    if (!spec.suggestion?.acceptanceChecks.length) return;
-    setC({ acceptanceChecks: [...spec.suggestion.acceptanceChecks] });
+    const checks = adoptableSpecChecks(spec.suggestion, routePreview.acceptanceCompatibility);
+    if (!checks.length) return;
+    setC({ acceptanceChecks: [...checks] });
     setSpecAppliedFor(p => ({ key: specKey, checks: true, criteria: p.key === specKey && p.criteria }));
   };
   const applySpecCriteria = () => {
@@ -259,9 +262,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     tier,
   };
 
-  // Auto preview records the complete input and returns a reusable routing reference. Explicit effort already
-  // chooses depth, so it uses the existing launch path. Neither choice supplies execution consent.
-  const routePreview = useRoutePreview(effort === "auto" ? buildRoutePreviewInput(formState) : null);
+  // Every effort previews its actual projection and acceptance adapter. Explicit effort does not call the
+  // classifier; the same durable reference still binds preview to launch without granting execution consent.
+  const routePreview = useRoutePreview(buildRoutePreviewInput(formState));
   const routeCard = routePreview.route?.needsConfirmCard ? routePreview.route : null;
   // Wait for the current preview to settle so launch can consume the decision being shown. A settled failure
   // allows the legacy launch path, where the server computes the route and checks authority normally.
@@ -320,14 +323,17 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // ANY tier (the same `effort !== "standard"` gate the Acceptance-checks row itself is already shown/sent under).
   if (tier !== "Prototype" && effort !== "standard" && cfg.acceptanceChecks.length === 0) missing.push("an acceptance check");
   // Routing advice is not consent; server authorization remains independent of the displayed confidence.
-  const canLaunch = missing.length === 0 && !routeUnanswered && !launch.isPending;
+  const acceptanceCompatibilityBlocked = cfg.acceptanceChecks.length > 0 && routePreview.acceptanceCompatibility?.state !== "Compatible";
+  const acceptanceCompatibilityReason = routePreview.acceptanceCompatibility?.detail ?? "Acceptance execution compatibility is unknown. Remove the command or obtain a compatible route preview before launching it as a requirement.";
+  const canLaunch = missing.length === 0 && !routeUnanswered && !acceptanceCompatibilityBlocked && !launch.isPending;
 
   // A disabled send button must say WHY. Missing inputs first (the operator can act on those immediately), then
   // the still-open preview — never a bare disabled button the operator reads as broken.
   const launchBlockedReason = canLaunch ? "Launch"
     : missing.length ? `Add ${missing.join(" and ")}`
       : routeUnanswered ? "Checking where this task will run…"
-        : "Launching…";
+        : acceptanceCompatibilityBlocked ? acceptanceCompatibilityReason
+          : "Launching…";
 
   const toggleRepo = (id: string) => {
     const short = repoName(id).split("/").pop() || "repo";
@@ -532,14 +538,17 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
         {showSpecCard && spec.suggestion && (
           <SpecSuggestionCard
             suggestion={spec.suggestion}
-            grounded={spec.grounded}
+            repositoryObservation={spec.repositoryObservation}
+            acceptanceCompatibility={routePreview.acceptanceCompatibility}
             applied={specApplied}
-            checksApplicable={effort !== "standard"}
             onApplyChecks={applySpecChecks}
             onApplyCriteria={applySpecCriteria}
             onDismiss={() => setSpecDismissedKey(specKey)}
           />
         )}
+
+        <SpecModelCalls calls={spec.modelCalls} />
+        {acceptanceCompatibilityBlocked && !routeUnanswered && <div className="lt3-spec-note" role="status">{acceptanceCompatibilityReason}</div>}
 
         {expanded && (
           <div className="lt3-cust">
@@ -687,7 +696,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
 
               {customizeTab === "evaluation" && <>
                 <div className="lt3-cnote">How the result is judged. Criteria STEER on every tier — Deep renders them into the supervisor, Standard into the planner (the plan's per-item contracts target them), Quick into the agent's goal. Checks VERIFY — a command that must exit 0, or the result fails: Deep at the terminal stop, Quick against the produced branch; Standard verifies per item via the plan's own contracts.</div>
-                {effort === "standard" && <TierRow label="Acceptance checks" tier="Per item — the plan authors each subtask's check" />}
+                {effort === "standard" && cfg.acceptanceChecks.length === 0 && <TierRow label="Acceptance checks" tier="Per item — the plan authors each subtask's check" />}
                 <RowPop label="Acceptance criteria" value={cfg.acceptance.length ? cfg.acceptance.join(" · ") : "None"}>
                   <div className="lt3-chips2">
                     {cfg.acceptance.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptance: cfg.acceptance.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
@@ -701,7 +710,8 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                       }} />
                   </div>
                 </RowPop>
-                {effort !== "standard" && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : (tier !== "Prototype" ? "Required — add a check" : "None")}>
+                {(effort !== "standard" || cfg.acceptanceChecks.length > 0) && <RowPop label="Acceptance checks" value={cfg.acceptanceChecks.length ? cfg.acceptanceChecks.join(" ") : (tier !== "Prototype" ? "Required — add a check" : "None")}>
+                  {cfg.acceptanceChecks.length > 0 && <button type="button" onClick={() => setC({ acceptanceChecks: [] })}>Remove acceptance command</button>}
                   <div className="lt3-chips2">
                     {cfg.acceptanceChecks.map((v, i) => <span key={i} className="lt3-chip2">{v}<button type="button" onClick={() => setC({ acceptanceChecks: cfg.acceptanceChecks.filter((_, idx) => idx !== i) })}><Ic.X size={11} /></button></span>)}
                     <input className="lt3-chip2-add" placeholder="+ command, e.g. sh check.sh" value={checksDraft} onChange={e => setChecksDraft(e.target.value)}
@@ -891,76 +901,6 @@ function RouteHint({ route }: { route: RoutePlan }) {
   return (
     <div className="lt3-route-quiet" data-testid="route-hint">
       Auto → <b>{titleCase(route.effortMode)}</b>{why && <> · {why}</>}
-    </div>
-  );
-}
-
-/** P5-7 — the spec-preview suggestion card: editable PROPOSALS between the box and Customize. Applying writes
- *  the SAME cfg fields the Evaluation tab edits (no parallel state); dismissing is keyed to the suggestion's
- *  content upstream, so it leaves no trace; a null suggestion never mounts this at all. Checks hide on
- *  Standard (that tier verifies per plan item and never sends the argv floor — an Apply there would be a lie).
- *  When the model suggested NO check, that absence is shown as its own row (the most decision-relevant fact on
- *  the card) and the model's note below carries its own why. */
-function SpecSuggestionCard({ suggestion, grounded, applied, checksApplicable, onApplyChecks, onApplyCriteria, onDismiss }: {
-  suggestion: TaskSpecSuggestion;
-  grounded: boolean;
-  applied: { checks: boolean; criteria: boolean };
-  checksApplicable: boolean;
-  onApplyChecks: () => void;
-  onApplyCriteria: () => void;
-  onDismiss: () => void;
-}) {
-  const hasChecks = checksApplicable && suggestion.acceptanceChecks.length > 0;
-  const noChecks = checksApplicable && suggestion.acceptanceChecks.length === 0;
-  const hasCriteria = suggestion.acceptanceCriteria.length > 0;
-  const allApplied = (!hasChecks || applied.checks) && (!hasCriteria || applied.criteria);
-  const band = suggestion.confidence >= 0.75 ? "high" : suggestion.confidence >= 0.5 ? "mid" : "low";
-  if (!hasChecks && !hasCriteria) return null;
-  return (
-    <div className="lt3-spec" data-testid="spec-suggestion-card">
-      <div className="lt3-spec-h">
-        <Ic.Sparkles size={14} />
-        <span>Suggested contract</span>
-        <span className="lt3-spec-badge" data-band={band}>{Math.round(suggestion.confidence * 100)}% confident</span>
-        {grounded
-          ? <span className="lt3-spec-badge">Grounded in repo layout</span>
-          : <span className="lt3-spec-badge" data-warn="true">Repo not read — verify the check</span>}
-        <button type="button" className="lt3-spec-x" aria-label="Dismiss suggestion" onClick={onDismiss}><Ic.X size={13} /></button>
-      </div>
-
-      {hasChecks && (
-        <div className="lt3-spec-row">
-          <span className="lt3-spec-l">Checks</span>
-          <span className="lt3-spec-v">
-            <span className="lt3-spec-cmd">{suggestion.acceptanceChecks.map((t, i) => <code key={i} className="lt3-spec-chip">{t}</code>)}</span>
-            <span className="lt3-spec-sub">Runs after the work — exit 0 or the result fails{applied.checks && <span className="lt3-spec-went"> · filled into Evaluation → Acceptance checks</span>}</span>
-          </span>
-          <button type="button" className="lt3-spec-apply" disabled={applied.checks} title="Fills Evaluation → Acceptance checks (editable there)" onClick={onApplyChecks}>{applied.checks ? <><Ic.Check size={11} /> Applied</> : "Apply"}</button>
-        </div>
-      )}
-      {noChecks && (
-        <div className="lt3-spec-row">
-          <span className="lt3-spec-l">Checks</span>
-          <span className="lt3-spec-v lt3-spec-none">None suggested — the model's note below says why. Add your own under Evaluation if you know the command.</span>
-        </div>
-      )}
-      {hasCriteria && (
-        <div className="lt3-spec-row">
-          <span className="lt3-spec-l">Criteria</span>
-          <span className="lt3-spec-v">
-            <ul className="lt3-spec-list">{suggestion.acceptanceCriteria.map((crit, i) => <li key={i}>{crit}</li>)}</ul>
-            <span className="lt3-spec-sub">Steers the work — rendered into the agent's brief{applied.criteria && <span className="lt3-spec-went"> · filled into Evaluation → Acceptance criteria</span>}</span>
-          </span>
-          <button type="button" className="lt3-spec-apply" disabled={applied.criteria} title="Fills Evaluation → Acceptance criteria (editable there)" onClick={onApplyCriteria}>{applied.criteria ? <><Ic.Check size={11} /> Applied</> : "Apply"}</button>
-        </div>
-      )}
-
-      {suggestion.rationale && <div className="lt3-spec-note">{suggestion.rationale}</div>}
-
-      <div className="lt3-spec-f">
-        <span className="lt3-spec-r">Kept suggestions launch as your own fields · dismissing leaves no trace</span>
-        <button type="button" className="lt3-spec-all" disabled={allApplied} onClick={() => { if (hasChecks) onApplyChecks(); if (hasCriteria) onApplyCriteria(); }}>Apply all</button>
-      </div>
     </div>
   );
 }
