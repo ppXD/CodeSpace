@@ -1475,7 +1475,7 @@ jobs:
       # 1200s default would let ONE wedged arm eat two thirds of this 30-minute job and take its siblings down at the
       # cut. Each arm is priced at ~30-90s (see the lane header), so 300s truncates nothing healthy.
       CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
-      CODESPACE_STOP_HOOK_EVIDENCE_DIRECTORY: backend/TestResults/stop-hook-evidence
+      CODESPACE_STOP_HOOK_EVIDENCE_DIRECTORY: ${{ github.workspace }}/backend/TestResults/stop-hook-evidence
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-stop-hook-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
