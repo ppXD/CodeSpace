@@ -125,7 +125,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests
         (await db.AgentRunLogVerification.AsNoTracking().SingleAsync(value => value.StreamId == world.Complete.StreamId)).NextSegmentOrdinal.ShouldBe(3);
     }
 
-    private sealed class LoseCheckpointAck(string connectionString, Guid streamId) : DbTransactionInterceptor
+    private sealed class LoseCheckpointAck(string connectionString, Guid streamId, bool seal = false) : DbTransactionInterceptor
     {
         public bool Dropped { get; private set; }
         public override async Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
@@ -133,26 +133,28 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests
             if (Dropped) return;
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = new NpgsqlCommand("SELECT next_segment_ordinal FROM agent_run_log_verification WHERE stream_id = @stream", connection);
+            await using var command = new NpgsqlCommand("SELECT next_segment_ordinal, sealed_at IS NOT NULL FROM agent_run_log_verification WHERE stream_id = @stream", connection);
             command.Parameters.AddWithValue("stream", streamId);
-            if (await command.ExecuteScalarAsync(cancellationToken) is not long ordinal || ordinal != 2) return;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || (seal ? !reader.GetBoolean(1) : reader.GetInt64(0) != 2)) return;
             Dropped = true;
             throw new IOException("Injected lost acknowledgement AFTER the real checkpoint transaction committed.");
         }
     }
 
-    private sealed class ManifestReadFault(IArtifactCasRuntimeCoordinator inner, string fault) : IArtifactCasRuntimeCoordinator
+    private sealed class ManifestReadFault(IArtifactCasRuntimeCoordinator inner, string fault, Func<CancellationToken, Task>? afterEof = null) : IArtifactCasRuntimeCoordinator
     {
         public bool Disposed { get; private set; }
+        public bool ReadStarted { get; private set; }
         public Task<ArtifactCasTransferResult> PutAsync(ArtifactCasTransferRequest request, CancellationToken cancellationToken) => inner.PutAsync(request, cancellationToken);
         public async Task<ArtifactCasReadResult> OpenReadAsync(ArtifactCasReadRequest request, CancellationToken cancellationToken)
         {
             var result = await inner.OpenReadAsync(request, cancellationToken);
-            return result is ArtifactCasReadResult.Opened opened ? opened with { Content = new FaultyManifestStream(opened.Content, fault, () => Disposed = true) } : result;
+            return result is ArtifactCasReadResult.Opened opened ? opened with { Content = new FaultyManifestStream(opened.Content, fault, () => Disposed = true, () => ReadStarted = true, afterEof) } : result;
         }
     }
 
-    private sealed class FaultyManifestStream(Stream inner, string fault, Action disposed) : Stream
+    private sealed class FaultyManifestStream(Stream inner, string fault, Action disposed, Action readStarted, Func<CancellationToken, Task>? afterEof) : Stream
     {
         private bool _read;
         private bool _extended;
@@ -163,9 +165,12 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests
         public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            readStarted();
+            if (fault == "stall") await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             if (fault == "short" && _read) return 0;
             var read = await inner.ReadAsync(fault == "short" ? buffer[..Math.Min(buffer.Length, 10)] : buffer, cancellationToken);
             _read = true;
+            if (read == 0 && afterEof != null) await afterEof(cancellationToken);
             if (read > 0 && fault == "changed-bytes") buffer.Span[0] ^= 1;
             if (read == 0 && fault == "long" && !_extended) { _extended = true; buffer.Span[0] = 1; return 1; }
             return read;

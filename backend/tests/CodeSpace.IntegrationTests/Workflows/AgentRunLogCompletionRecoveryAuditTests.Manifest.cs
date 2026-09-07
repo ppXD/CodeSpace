@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.StorageTestWorker;
@@ -15,6 +16,51 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 public sealed partial class AgentRunLogCompletionRecoveryAuditTests
 {
+    [Fact]
+    public async Task Old_v2_binary_cannot_create_a_new_stream_or_append_to_a_v3_claim()
+    {
+        var world = await SeedAsync(declareRecovery: false);
+        using (var rejectedScope = fixture.BeginScope())
+        {
+            var db = rejectedScope.Resolve<CodeSpaceDbContext>();
+            var now = DateTimeOffset.UtcNow;
+            db.AgentRunLogStream.Add(new AgentRunLogStream
+            {
+                Id = Guid.NewGuid(), TeamId = world.Complete.TeamId, AgentRunId = world.Complete.AgentRunId,
+                WorkerFenceEpoch = 7, CaptureSessionId = Guid.NewGuid(), StreamKind = AgentRunLogKinds.StandardError,
+                ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1",
+                Retention = ArtifactRetention.Run, SchemaVersion = 2, CreatedAt = now, LastModifiedAt = now,
+            });
+            var rejected = await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            rejected.InnerException.ShouldBeOfType<PostgresException>().SqlState.ShouldBe(PostgresErrorCodes.RaiseException);
+        }
+        using var scope = fixture.BeginScope();
+        var logs = Logs(scope, scope.Resolve<IArtifactCasRuntimeCoordinator>());
+        var session = Guid.NewGuid();
+        var next = (await logs.OpenAsync(new AgentRunLogOpenRequest
+        {
+            TeamId = world.Complete.TeamId, AgentRunId = world.Complete.AgentRunId, WorkerFenceEpoch = 7,
+            CaptureSessionId = session, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain",
+            ContentEncoding = "utf-8", CaptureSource = "test-spool/v1",
+        }, CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        var database = scope.Resolve<CodeSpaceDbContext>();
+        var observed = DateTimeOffset.UtcNow;
+        database.AgentRunLogSegment.Add(new AgentRunLogSegment
+        {
+            Id = Guid.NewGuid(), TeamId = world.Complete.TeamId, AgentRunId = world.Complete.AgentRunId, StreamId = next.Metadata.StreamId,
+            CaptureSessionId = session, WorkerFenceEpoch = 7, SegmentOrdinal = world.Segments + 1,
+            StartOffsetBytes = next.Metadata.TotalBytes, LengthBytes = world.SegmentSize,
+            SourceStartOffsetBytes = next.Metadata.SourceOffsetBytes, SourceLengthBytes = world.SegmentSize,
+            ArtifactObjectId = world.ObjectIds[0], SchemaVersion = 2, FirstObservedAt = observed, LastObservedAt = observed, CreatedAt = observed,
+        });
+        var stale = await Should.ThrowAsync<DbUpdateException>(() => database.SaveChangesAsync());
+        stale.InnerException.ShouldBeOfType<PostgresException>().Message.ShouldContain("next ordinal/offset/schema");
+        using var checkScope = fixture.BeginScope();
+        var check = checkScope.Resolve<CodeSpaceDbContext>();
+        (await check.AgentRunLogStream.CountAsync()).ShouldBe(1);
+        (await check.AgentRunLogSegment.CountAsync()).ShouldBe(world.Segments);
+    }
+
     private static void AssertManifest(World world, AgentRunLogMetadata metadata)
     {
         metadata.Sha256.ShouldBeNull();
