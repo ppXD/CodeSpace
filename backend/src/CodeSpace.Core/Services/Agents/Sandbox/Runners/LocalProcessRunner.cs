@@ -94,6 +94,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
     public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
     {
+        if (spec.CaptureBudget is not null) return await RunWithBoundedCaptureAsync(new BoundedCommandRequest(spec, null), cancellationToken).ConfigureAwait(false);
         await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
         using var process = new Process { StartInfo = invocation.StartInfo };
 
@@ -123,6 +124,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
     public async Task<SandboxResult> RunStreamingAsync(SandboxSpec spec, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
     {
+        if (spec.CaptureBudget is not null) return await RunWithBoundedCaptureAsync(new BoundedCommandRequest(spec, onStdoutLine), cancellationToken).ConfigureAwait(false);
         await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
         using var process = new Process { StartInfo = invocation.StartInfo };
 

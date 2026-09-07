@@ -285,6 +285,109 @@ public class AgentRunCommandNodeTests
         result.Outputs["stdout"].GetString()!.Length.ShouldBeLessThan(5000, "the inline preview is intact");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_incomplete_runner_capture_is_preserved_only_as_an_excerpt_with_honest_source_byte_counts(bool eof)
+    {
+        var text = new string('x', 5000);
+        var observed = new SandboxStreamObservation { ObservedBytes = 12000, ReachedEndOfStream = eof, CaptureComplete = false };
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = text, Stderr = "", Observation = new SandboxObservation { Stdout = observed } } };
+        var artifacts = new FakeArtifactStore();
+        var context = ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("npm"), ["maxOutputChars"] = JsonSerializer.SerializeToElement(200) }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) });
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(context, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["status"].GetString().ShouldBe("Success");
+        result.Outputs["exitCode"].GetInt32().ShouldBe(0);
+        stub.Calls.ShouldBe(1, "capture loss must never retry the completed command");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse("an excerpt cannot satisfy the full-output artifact contract");
+        result.Outputs.ContainsKey("stdoutCapturedArtifactId").ShouldBeTrue();
+        result.Outputs["stdoutBytes"].GetInt64().ShouldBe(12000);
+        result.Outputs["stdoutBytesIsLowerBound"].GetBoolean().ShouldBe(!eof);
+        result.Outputs["stdoutCaptureComplete"].GetBoolean().ShouldBeFalse();
+        result.Outputs["stdoutCapturedBytes"].GetInt64().ShouldBe(5000);
+        artifacts.Puts.ShouldHaveSingleItem().Bytes.ShouldBe(System.Text.Encoding.UTF8.GetBytes(text));
+    }
+
+    [Fact]
+    public async Task Reaching_the_capture_budget_before_EOF_is_incomplete_even_if_every_observed_byte_was_kept()
+    {
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "prefix", Stderr = "", Observation = new SandboxObservation { Stdout = new SandboxStreamObservation { ObservedBytes = 6, ReachedEndOfStream = false, CaptureComplete = true } } } };
+        var artifacts = new FakeArtifactStore();
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("npm") }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) }), CancellationToken.None);
+
+        result.Outputs["stdoutCaptureComplete"].GetBoolean().ShouldBeFalse();
+        result.Outputs["stdoutBytesIsLowerBound"].GetBoolean().ShouldBeTrue();
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse();
+        result.Outputs.ContainsKey("stdoutCapturedArtifactId").ShouldBeTrue("the captured prefix is preserved even without a second inline cap");
+    }
+
+    [Fact]
+    public async Task Empty_unfinished_capture_is_not_reported_as_a_complete_empty_stream()
+    {
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = "", Observation = new SandboxObservation { Stderr = new SandboxStreamObservation { ObservedBytes = 0, ReachedEndOfStream = false, CaptureComplete = false } } } };
+        var artifacts = new FakeArtifactStore();
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(Context(), CancellationToken.None);
+
+        result.Outputs["status"].GetString().ShouldBe("TimedOut");
+        result.Outputs["stderrCaptureComplete"].GetBoolean().ShouldBeFalse();
+        result.Outputs["stderrBytesIsLowerBound"].GetBoolean().ShouldBeTrue();
+        result.Outputs["stderrBytes"].GetInt64().ShouldBe(0);
+        artifacts.Puts.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Legacy_full_text_reports_UTF8_bytes_instead_of_UTF16_character_count()
+    {
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "漢😀", Stderr = "é" } };
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
+
+        result.Outputs["stdoutBytes"].GetInt64().ShouldBe(7);
+        result.Outputs["stderrBytes"].GetInt64().ShouldBe(2);
+        result.Outputs["stdoutBytesIsLowerBound"].GetBoolean().ShouldBeFalse();
+        result.Outputs["stdoutCaptureComplete"].GetBoolean().ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("artifact")]
+    [InlineData("gap")]
+    public async Task Capture_loss_is_reported_without_overwriting_the_completed_command_when_storage_or_gap_reporting_fails(string failure)
+    {
+        var observer = new LossObserver { ThrowOnNotice = failure == "gap" };
+        var artifacts = new FakeArtifactStore { ThrowOnPut = failure == "artifact" ? new IOException("store offline") : null };
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Failed, ExitCode = 9, Stdout = "captured-sensitive-content", Stderr = "", Observation = new SandboxObservation { Stdout = new SandboxStreamObservation { ObservedBytes = 100, ReachedEndOfStream = false, CaptureComplete = false } } } };
+        var context = ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("npm") }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) }) with { Observability = observer };
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(context, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["status"].GetString().ShouldBe("Failed");
+        result.Outputs["exitCode"].GetInt32().ShouldBe(9);
+        stub.Calls.ShouldBe(1);
+        observer.Notices.ShouldNotBeEmpty("persisting an excerpt cannot repair the missing source content");
+        observer.Notices.ShouldContain(n => n.Contains("stdout") && n.Contains("incomplete") && n.Contains("lower bound"));
+        observer.Notices.ShouldAllBe(n => !n.Contains("captured-sensitive-content"), "loss diagnostics contain capture facts, never command output");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse();
+        result.Outputs.ContainsKey("stdoutCapturedArtifactId").ShouldBe(failure != "artifact");
+    }
+
+    private sealed class LossObserver : INodeObservability, INodeLossReporting
+    {
+        public List<string> Notices { get; } = [];
+        public bool ThrowOnNotice { get; init; }
+        public Task NoticeContentNotStoredAsync(string detail, CancellationToken cancellationToken = default)
+        {
+            Notices.Add(detail);
+            return ThrowOnNotice ? Task.FromException(new IOException("gap store offline")) : Task.CompletedTask;
+        }
+        public Task<TResult> TraceExternalCallAsync<TResult>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, Task<TResult>> action, Func<TResult, ExternalCallCompletion>? completionExtractor = null, CancellationToken cancellationToken = default) => action(cancellationToken);
+        public IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, CancellationToken cancellationToken = default) => stream(cancellationToken);
+        public Task<JsonElement> PersistArtifactAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
     private sealed class FakeArtifactStore : IArtifactStore
     {
         public readonly List<(Guid TeamId, byte[] Bytes, string ContentType)> Puts = new();

@@ -71,6 +71,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         WorkingDirectory = workingDirectory,
         Environment = request.Environment,
         TimeoutSeconds = request.TimeoutSeconds,
+        CaptureBudget = new SandboxCaptureBudget(),
         AllowNetwork = request.AllowNetwork && AgentAutonomyPolicy.Derive(AgentAutonomyPolicy.DeploymentCeiling).Network == AgentNetworkAccess.On,
         MaxProcesses = request.MaxProcesses,
         MaxFileSizeMb = request.MaxFileSizeMb,

@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -199,6 +200,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"Could not read the workspace base revision (exit {result.ExitCode}): {Summarize(result.Stderr)}");
 
+        SandboxOutputCompleteness.RequireStdout(result);
         return result.Stdout.Trim();
     }
 
@@ -222,6 +224,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             if (result.Status != SandboxStatus.Success)
                 throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {Summarize(result.Stderr)}");
 
+            SandboxOutputCompleteness.RequireStdout(result);
             return result.Stdout;
         }
 
@@ -436,8 +439,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             throw new WorkspaceException($"the pinned base commit '{pin}' could not be checked out (exit {checkout.ExitCode}): {Redact(Summarize(checkout.Stderr), request.Token)} — the pin guarantees every participant sees the SAME immutable base; a stale or unpushed pin must fail the provision, never silently fall back to the tip");
     }
 
-    private async Task<bool> IsShallowAsync(RepositoryCommandContext context, CancellationToken cancellationToken) =>
-        (await RunGitAsync(new[] { "-C", context.Directory, "rev-parse", "--is-shallow-repository" }, context, cancellationToken).ConfigureAwait(false)).Stdout.Trim() == "true";
+    private async Task<bool> IsShallowAsync(RepositoryCommandContext context, CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(new[] { "-C", context.Directory, "rev-parse", "--is-shallow-repository" }, context, cancellationToken).ConfigureAwait(false);
+        SandboxOutputCompleteness.RequireStdout(result);
+        return result.Stdout.Trim() == "true";
+    }
 
     private async Task<bool> CommitExistsLocallyAsync(RepositoryCommandContext context, string sha, CancellationToken cancellationToken) =>
         (await RunGitAsync(new[] { "-C", context.Directory, "rev-parse", "--verify", "--quiet", $"{sha}^{{commit}}" }, context, cancellationToken).ConfigureAwait(false)).Status == SandboxStatus.Success;
@@ -475,6 +482,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         var result = await RunGitAsync(new[] { "ls-remote", url, @ref }, context, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success) return (true, null);
+        SandboxOutputCompleteness.RequireStdout(result);
         if (string.IsNullOrWhiteSpace(result.Stdout)) return (false, null);
 
         var tip = result.Stdout.TrimStart().Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
@@ -704,22 +712,31 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// </summary>
         private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string authedUrl, string branchName, CancellationToken cancellationToken)
         {
-            var localTip = (await RunGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
-
-            var readback = await RunGitAsync(repo, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
-
-            if (readback.Status != SandboxStatus.Success || readback.ExitCode != 0)
+            try
             {
-                _logger.LogWarning("Push readback for '{Branch}' could not query the remote (exit {ExitCode}); arrival stays unconfirmed", branchName, readback.ExitCode);
+                var localTip = (await RunGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
+
+                var readback = await RunGitAsync(repo, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+
+                if (readback.Status != SandboxStatus.Success || readback.ExitCode != 0)
+                {
+                    _logger.LogWarning("Push readback for '{Branch}' could not query the remote (exit {ExitCode}); arrival stays unconfirmed", branchName, readback.ExitCode);
+                    return null;
+                }
+
+                SandboxOutputCompleteness.RequireStdout(readback);
+                var remoteTip = readback.Stdout.Split('\t', '\n')[0].Trim();
+
+                if (remoteTip == localTip && localTip.Length > 0) return localTip;
+
+                _logger.LogWarning("Push readback for '{Branch}' saw remote tip '{Remote}' != local tip '{Local}'; arrival stays unconfirmed", branchName, remoteTip, localTip);
                 return null;
             }
-
-            var remoteTip = readback.Stdout.Split('\t', '\n')[0].Trim();
-
-            if (remoteTip == localTip && localTip.Length > 0) return localTip;
-
-            _logger.LogWarning("Push readback for '{Branch}' saw remote tip '{Remote}' != local tip '{Local}'; arrival stays unconfirmed", branchName, remoteTip, localTip);
-            return null;
+            catch (IncompleteSandboxOutputException)
+            {
+                _logger.LogWarning("Push readback for '{Branch}' has incomplete output; the successful push is preserved and arrival stays unconfirmed", branchName);
+                return null;
+            }
         }
 
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
@@ -729,6 +746,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             if (result.Status == SandboxStatus.Success) return true;
 
+            SandboxOutputCompleteness.RequireStdout(result);
+            SandboxOutputCompleteness.RequireStderr(result);
             var output = $"{result.Stdout}\n{result.Stderr}";
 
             if (output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) || output.Contains("working tree clean", StringComparison.OrdinalIgnoreCase))
@@ -756,6 +775,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
                 // Redact any echoed token (the push argv embeds the authed URL) so it never reaches a log / exception.
                 throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 
+            SandboxOutputCompleteness.RequireStdout(result);
             return result.Stdout;
         }
 

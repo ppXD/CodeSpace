@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -34,9 +35,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// part of this in-flight agent-run cap.</para>
 ///
 /// Inputs: repositoryId? · command (required) · args · branch? · network? · timeoutSeconds? · runnerKind? · maxOutputChars?
-/// Outputs: exitCode · status · stdout · stderr · stdoutBytes · stderrBytes (the original sizes, even when stdout/stderr are capped)
-///          · stdoutArtifactId? · stderrArtifactId? (D5 — when the cap DROPPED content, the FULL stream is preserved in the
-///          artifact store and its id surfaces here; the inline stdout/stderr stay the preview, so no truncation data-loss)
+/// Outputs: command status and exit code; captured stdout/stderr; observed source-byte counts with explicit lower-bound
+/// flags; captured UTF-8 sizes and completeness. Full-output artifact IDs are reserved for complete captures; partial
+/// content uses separate CapturedArtifactId outputs and records a completeness gap even when excerpt storage succeeds.
 /// </summary>
 public sealed class AgentRunCommandNode : INodeRuntime
 {
@@ -78,7 +79,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600.", "x-spotlight": 3 },
                 "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default, set by the Agents:DefaultRunnerKind configuration key (Agents__DefaultRunnerKind in the environment); \"local\" when that is unset." },
-                "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap stdout/stderr to this many characters (a head+tail preview is kept, the rest dropped). Leave empty for the full output. Use it to keep a noisy build/test log from bloating the run — the exact byte size is always reported on stdoutBytes/stderrBytes." }
+                "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap the captured stdout/stderr to this many characters (a head+tail preview is kept). Leave empty to keep the returned capture. Source byte counts and lower-bound flags report whether the runner reached EOF; capture completeness states whether output was lost before this inline cap." }
               },
               "required": ["command"]
             }
@@ -93,6 +94,14 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "stderr":      { "type": "string" },
                 "stdoutBytes": { "type": "integer" },
                 "stderrBytes": { "type": "integer" },
+                "stdoutBytesIsLowerBound": { "type": "boolean", "description": "True when stdout EOF was not observed; stdoutBytes is not a known total." },
+                "stderrBytesIsLowerBound": { "type": "boolean", "description": "True when stderr EOF was not observed; stderrBytes is not a known total." },
+                "stdoutCapturedBytes": { "type": "integer", "description": "UTF-8 size of the returned capture before the inline cap; not a durability receipt." },
+                "stderrCapturedBytes": { "type": "integer", "description": "UTF-8 size of the returned capture before the inline cap; not a durability receipt." },
+                "stdoutCaptureComplete": { "type": "boolean", "description": "The runner retained the full stdout through EOF before any inline cap." },
+                "stderrCaptureComplete": { "type": "boolean", "description": "The runner retained the full stderr through EOF before any inline cap." },
+                "stdoutCapturedArtifactId": { "type": "string", "format": "uuid", "description": "Artifact holding only the captured stdout excerpt; missing source content is not recoverable from this artifact." },
+                "stderrCapturedArtifactId": { "type": "string", "format": "uuid", "description": "Artifact holding only the captured stderr excerpt; missing source content is not recoverable from this artifact." },
                 "stdoutArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stdout was capped — the artifact id holding the FULL stdout (fetch via /api/artifacts/{id}). Absent when nothing was dropped." },
                 "stderrArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stderr was capped — the artifact id holding the FULL stderr. Absent when nothing was dropped." }
               }
@@ -140,67 +149,63 @@ public sealed class AgentRunCommandNode : INodeRuntime
 
         context.Logger.LogInformation("Ran command '{Command}' (repo {RepoId}) → status {Status}, exit {Exit}", command, request.RepositoryId, result.Status, result.ExitCode);
 
-        // Optional output cap keeps a noisy log from bloating the run state; the full byte size is always reported.
+        // The inline cap applies to the returned capture, which may already be only an excerpt.
         var maxOutputChars = TryReadPositiveInt(context, "maxOutputChars", out var cap) ? cap : 0;
-        var stdout = OutputCap.Apply(result.Stdout, maxOutputChars);
-        var stderr = OutputCap.Apply(result.Stderr, maxOutputChars);
-
-        // D5 — when the cap DROPPED content, preserve the FULL stream in the artifact store so the complete
-        // output is durably recoverable (no truncation data-loss). The inline stdout/stderr stay the preview.
-        var teamScope = hasTeam ? teamId : (Guid?)null;
-        var stdoutArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stdout, result.Stdout, context.Logger, context.Observability as INodeLossReporting, cancellationToken).ConfigureAwait(false);
-        var stderrArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stderr, result.Stderr, context.Logger, context.Observability as INodeLossReporting, cancellationToken).ConfigureAwait(false);
-
+        var captures = new[]
+        {
+            new CommandOutputCapture("stdout", result.Stdout, OutputCap.Apply(result.Stdout, maxOutputChars), result.Observation?.Stdout),
+            new CommandOutputCapture("stderr", result.Stderr, OutputCap.Apply(result.Stderr, maxOutputChars), result.Observation?.Stderr),
+        };
         var outputs = new Dictionary<string, JsonElement>
         {
             ["exitCode"] = JsonSerializer.SerializeToElement(result.ExitCode),
             ["status"] = JsonSerializer.SerializeToElement(result.Status.ToString()),
-            ["stdout"] = JsonSerializer.SerializeToElement(stdout.Text),
-            ["stderr"] = JsonSerializer.SerializeToElement(stderr.Text),
-            ["stdoutBytes"] = JsonSerializer.SerializeToElement(stdout.OriginalLength),
-            ["stderrBytes"] = JsonSerializer.SerializeToElement(stderr.OriginalLength)
         };
+        foreach (var capture in captures)
+        {
+            outputs[capture.Name] = JsonSerializer.SerializeToElement(capture.Inline.Text);
+            outputs[capture.Name + "Bytes"] = JsonSerializer.SerializeToElement(capture.ObservedBytes);
+            outputs[capture.Name + "BytesIsLowerBound"] = JsonSerializer.SerializeToElement(capture.Observation is { ReachedEndOfStream: false });
+            outputs[capture.Name + "CapturedBytes"] = JsonSerializer.SerializeToElement(Encoding.UTF8.GetByteCount(capture.Text));
+            outputs[capture.Name + "CaptureComplete"] = JsonSerializer.SerializeToElement(capture.Complete);
 
-        if (stdoutArtifactId is { } sa) outputs["stdoutArtifactId"] = JsonSerializer.SerializeToElement(sa);
-        if (stderrArtifactId is { } se) outputs["stderrArtifactId"] = JsonSerializer.SerializeToElement(se);
+            if (!capture.Complete)
+                await NoticeOutputLossAsync(context, $"Command {capture.Name} capture is incomplete; {capture.ObservedBytes} source bytes were observed{(capture.Observation is { ReachedEndOfStream: false } ? " (a lower bound; EOF was not observed)" : "")}. Only a captured excerpt is available.").ConfigureAwait(false);
+            var artifactId = await PreserveOutputAsync(hasTeam ? teamId : null, capture, context, cancellationToken).ConfigureAwait(false);
+            if (artifactId is { } id) outputs[capture.Name + (capture.Complete ? "ArtifactId" : "CapturedArtifactId")] = JsonSerializer.SerializeToElement(id);
+        }
 
         return NodeResult.Ok(outputs);
     }
 
-    /// <summary>
-    /// When the output cap DROPPED content, store the FULL stream in the content-addressed artifact store so the
-    /// run keeps the small inline preview AND the complete output stays durably recoverable (D5 — no truncation
-    /// data-loss). Stores UNCONDITIONALLY on truncation (not size-gated like <c>IArtifactOffloader</c>): a value
-    /// larger than the cap but under the inline threshold would otherwise still be silently lost. An ephemeral run
-    /// with no team scope can't store under a tenant → skip; the preview is the only record, exactly as before.
-    ///
-    /// <para>BEST-EFFORT: a finished command always yields a SUCCESSFUL node (this node fails only on a COMMAND
-    /// infrastructure error — clone/runner). A storage hiccup is not that, so a <c>PutAsync</c> failure is logged
-    /// and swallowed (no artifact id surfaces, the inline preview remains) rather than failing an otherwise-good
-    /// command — preserving the node's "command completed → node succeeds" contract.</para>
-    /// </summary>
-    private async Task<Guid?> PreserveFullIfTruncatedAsync(Guid? teamId, OutputCap.Result capped, string? full, ILogger logger, INodeLossReporting? loss, CancellationToken cancellationToken)
+    /// <summary>Preserve the bytes we actually have; a partial capture never receives the full-output artifact key.</summary>
+    private async Task<Guid?> PreserveOutputAsync(Guid? teamId, CommandOutputCapture capture, NodeRunContext context, CancellationToken cancellationToken)
     {
-        if (!capped.Truncated || teamId is not { } tid || string.IsNullOrEmpty(full)) return null;
-
+        if ((!capture.Inline.Truncated && capture.Complete) || teamId is not { } tid || string.IsNullOrEmpty(capture.Text)) return null;
         try
         {
-            var bytes = System.Text.Encoding.UTF8.GetBytes(full);
-            return await _artifacts.PutAsync(tid, bytes, "text/plain", cancellationToken).ConfigureAwait(false);
+            return await _artifacts.PutAsync(tid, Encoding.UTF8.GetBytes(capture.Text), "text/plain", cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            // The capped preview survives and the node still succeeds -- the command DID complete, and failing it over
-            // a lost copy of its own output would be worse. But this was the ONLY copy of the untruncated stream, so
-            // the loss is reported rather than left as a log line nobody queries: a run that lost it must not also
-            // report complete data.
-            logger.LogWarning(ex, "Failed to preserve the full command output to the artifact store; keeping the capped preview only.");
-
-            if (loss is { } reporter)
-                await reporter.NoticeContentNotStoredAsync($"The full command output could not be stored ({ex.GetType().Name}); only the capped preview was kept.", CancellationToken.None).ConfigureAwait(false);
-
+            context.Logger.LogWarning(ex, "Failed to preserve captured command {Stream} to the artifact store; keeping the inline preview only", capture.Name);
+            await NoticeOutputLossAsync(context, $"Command {capture.Name} capture could not be stored ({ex.GetType().Name}); only the inline preview was kept.").ConfigureAwait(false);
             return null;
         }
+    }
+
+    private static async Task NoticeOutputLossAsync(NodeRunContext context, string detail)
+    {
+        context.Logger.LogWarning("{CommandOutputCaptureGap}", detail);
+        if (context.Observability is not INodeLossReporting reporter) return;
+        try { await reporter.NoticeContentNotStoredAsync(detail, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception ex) { context.Logger.LogWarning(ex, "Command output capture loss could not be recorded; the command outcome is unchanged"); }
+    }
+
+    private sealed record CommandOutputCapture(string Name, string Text, OutputCap.Result Inline, SandboxStreamObservation? Observation)
+    {
+        public bool Complete => Observation is null or { ReachedEndOfStream: true, CaptureComplete: true };
+        public long ObservedBytes => Observation?.ObservedBytes ?? Encoding.UTF8.GetByteCount(Text);
     }
 
     private static bool TryReadNonEmpty(NodeRunContext context, string key, out string text)
