@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Credentials;
@@ -17,30 +18,14 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
-/// THE live behavioral proof of P3.3's in-loop verify (the harness-native Stop hook, the Claude Code half): a REAL
-/// <c>claude</c> CLI, authenticated by a seeded encrypted <see cref="ModelCredential"/>, is given a goal that does
-/// NOT mention creating a file, but carries an <see cref="AgentTask.Acceptance"/> command that only passes once a
-/// specific file exists. The model's natural first stop attempt is GUARANTEED to fail that check (nothing in the
-/// goal asked for the file), so the injected Stop hook is GUARANTEED to fire at least once — this is the live proof
-/// that the settings.json this arc generates actually gets read + invoked by the real binary, not just a shape the
-/// harness's own unit tests assert about a string. If in-loop verify does its job, the model reads the hook's
-/// block reason (which carries the check's OWN failure output, not a generic notice) and creates the file before
-/// its FINAL stop.
-///
-/// <para><b>Gate policy:</b> the run REACHING a terminal outcome without a gateway/wire fault is the deterministic
-/// half — a malformed settings.json would either crash the CLI outright or leave it permanently blocked, and either
-/// shows up as a non-Succeeded, non-gateway-infra status, which this test treats as a REAL miss (never a silent
-/// skip), mirroring <see cref="RealModelAgentInjectionE2ETests"/>'s exact classification. Whether the LIVE MODEL
-/// actually acts on the feedback is a capability-dependent behavior — reported (<c>gating: false</c>), never
-/// blocking main, the same report-only posture the skill-usage test uses for the same reason. A no-creds / no-CLI
-/// run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the real-model
-/// lane.</para>
-///
-/// <para><b>This does NOT prove the control plane is bypassed — the opposite.</b> The task's <c>Acceptance</c>
-/// contract is the SAME field the control-plane grader independently re-verifies after the run settles; nothing
-/// here short-circuits that. This test only proves the IN-LOOP half fires and can help; <c>InLoopAcceptanceHook</c>'s
-/// own doc comment states the invariant, and a grep-level check (no code path from the hook into
-/// <c>AcceptancePassed</c>) is the structural proof that the control plane's verdict is untouched.</para>
+/// Live stop-hook measurement for the real <c>claude</c> CLI, authenticated by a seeded encrypted
+/// <see cref="ModelCredential"/>. The goal does not ask for a file, while the acceptance command requires it.
+/// The arm reports whether the file exists after successful execution; it does not independently attest that
+/// <c>settings.json</c>'s hook fired or caused the model to create it.
+/// <para>Model behavior remains report-only (<c>gating: false</c>). A normally returning assessment must carry
+/// persisted native CLI session evidence and positive model output usage. Known provider/wire failures and
+/// absent credentials/CLI retain the existing explicit skip policy; skipped or informational misses are never
+/// qualification success. The control-plane acceptance check still runs independently.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -57,20 +42,18 @@ public sealed class RealModelStopHookE2ETests : IDisposable
     [SkippableFact]
     public async Task A_real_claude_agent_reacts_to_the_stop_hooks_feedback_and_creates_the_missing_file()
     {
+        using var evidence = new StopHookExecutionEvidence("claude");
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
-        // REPORT-ONLY (gating: false), the same posture the skill-usage E2E uses: whether the LIVE MODEL reacts to
-        // the hook's feedback is a capability-dependent behavior, not a deterministic wiring guarantee — never blocks
-        // main. A wiring-level regression (a malformed settings.json breaking the CLI outright) would surface as a
-        // repeated non-completing, non-gateway-infra verdict across runs — reviewed manually against the real log,
-        // the same process this arc uses for every RealModel check, rather than a hard in-test assertion here.
-        await RealModelGate.AssessLiveAsync(Provider, () => DriveOnceAsync(live), gating: false);
+        // Model behavior remains report-only. The instrument must still prove that its real CLI/model ran;
+        // admission/startup faults cannot masquerade as successful measurement through the soft gate.
+        await evidence.AssessAsync(() => DriveOnceAsync(live, evidence));
     }
 
     // ─── shared drive ──────────────────────────────────────────────────────────
 
-    /// <summary>Seed a fresh credential + workspace and run ONE real claude agent whose acceptance check only passes once a file the goal never mentions exists — the natural first stop attempt is guaranteed to fail it, guaranteeing the Stop hook fires. Returns whether the file was created by the time the run settled, plus a diagnostic verdict. A run that did not COMPLETE is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip), never a false miss.</summary>
-    private async Task<(bool Created, string Verdict)> DriveOnceAsync(LiveContext live)
+    /// <summary>Run one real CLI arm and retain execution evidence before applying the existing behavior and infrastructure classifications.</summary>
+    private async Task<(bool Created, string Verdict)> DriveOnceAsync(LiveContext live, StopHookExecutionEvidence evidence)
     {
         var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
         var workspace = NewGitWorkspace();
@@ -97,12 +80,14 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         Guid runId;
         using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, live.TeamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+        evidence.Admitted(runId);
 
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(runId, CancellationToken.None);
 
         using var read = _fixture.BeginScope();
         var run = await read.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        evidence.Capture(run, await read.Resolve<IAgentRunService>().GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None));
 
         if (run.Status != AgentRunStatus.Succeeded)
         {
@@ -135,7 +120,8 @@ public sealed class RealModelStopHookE2ETests : IDisposable
         if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
-        if (OperatingSystem.IsWindows()) return null;
+        if (OperatingSystem.IsWindows()) throw RealModelGate.ReportSkipped(Provider, "the stop-hook arm requires a POSIX runtime");
+        Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar).ShouldBeNullOrEmpty("a real stop-hook measurement cannot use a command override or fake CLI");
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)");
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);

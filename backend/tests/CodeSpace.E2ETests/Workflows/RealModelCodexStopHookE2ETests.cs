@@ -18,22 +18,14 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
-/// THE live behavioral proof of P3.3's in-loop verify — the CODEX half, the exact counterpart to
-/// <see cref="RealModelStopHookE2ETests"/> (Claude). A REAL <c>codex</c> CLI, authenticated by a seeded encrypted
-/// <see cref="ModelCredential"/>, is given a goal that does NOT mention creating a file, but carries an
-/// <see cref="AgentTask.Acceptance"/> command that only passes once a specific file exists — the model's natural
-/// first stop attempt is GUARANTEED to fail that check, guaranteeing the injected <c>hooks.json</c> Stop hook fires.
-/// If in-loop verify does its job, the model reads the block reason (the check's own failure output, via
-/// <c>InLoopAcceptanceHook</c>'s actionable-output feature) and creates the file before its FINAL stop.
-///
-/// <para><b>Why REPORT-ONLY, not a hard gate:</b> same wire mismatch as
-/// <see cref="RealModelCodexInjectionE2ETests"/> — Codex talks the OpenAI <c>responses</c> wire, which the shared
-/// gateway may not serve, so a live Codex run may not COMPLETE at all; that is a wire/infra fact, never a behavior
-/// miss. <see cref="RealModelGate.AssessLiveAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, bool)"/>
-/// runs it and REPORTS (<c>gating: false</c>), the same posture <see cref="RealModelStopHookE2ETests"/> uses for the
-/// SAME reason (whether a live model reacts to feedback is capability-dependent, not deterministic). A no-creds /
-/// no-CLI run self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the
-/// real-model lane.</para>
+/// Live stop-hook measurement for the real <c>codex</c> CLI, authenticated by a seeded encrypted
+/// <see cref="ModelCredential"/>. The goal does not ask for a file, while the acceptance command requires it.
+/// The arm reports whether the file exists after successful execution; it does not independently attest that
+/// <c>hooks.json</c>'s hook fired or caused the model to create it.
+/// <para>Model behavior remains report-only (<c>gating: false</c>). A normally returning assessment must carry
+/// persisted native CLI session evidence and positive model output usage. Known provider/wire failures and
+/// absent credentials/CLI retain the existing explicit skip policy; skipped or informational misses are never
+/// qualification success. The control-plane acceptance check still runs independently.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -52,15 +44,16 @@ public sealed class RealModelCodexStopHookE2ETests : IDisposable
     [SkippableFact]
     public async Task A_real_codex_agent_reacts_to_the_stop_hooks_feedback_and_creates_the_missing_file()
     {
+        using var evidence = new StopHookExecutionEvidence("codex");
         if (await EnsureLiveOrSkipAsync() is not { } live) return;   // skip ≠ pass (surfaced loudly)
 
-        await RealModelGate.AssessLiveAsync(Provider, () => DriveOnceAsync(live), gating: false);
+        await evidence.AssessAsync(() => DriveOnceAsync(live, evidence));
     }
 
     // ─── shared drive ──────────────────────────────────────────────────────────
 
-    /// <summary>Seed a fresh credential + workspace and run ONE real codex agent whose acceptance check only passes once a file the goal never mentions exists. Returns whether the file was created by the time the run settled, plus a diagnostic verdict. A run that did not COMPLETE is gateway/exec/wire infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip), never a false miss.</summary>
-    private async Task<(bool Created, string Verdict)> DriveOnceAsync(LiveContext live)
+    /// <summary>Run one real CLI arm and retain execution evidence before applying the existing behavior and infrastructure classifications.</summary>
+    private async Task<(bool Created, string Verdict)> DriveOnceAsync(LiveContext live, StopHookExecutionEvidence evidence)
     {
         var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
         var workspace = NewGitWorkspace();
@@ -87,12 +80,14 @@ public sealed class RealModelCodexStopHookE2ETests : IDisposable
         Guid runId;
         using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, live.TeamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+        evidence.Admitted(runId);
 
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(runId, CancellationToken.None);
 
         using var read = _fixture.BeginScope();
         var run = await read.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        evidence.Capture(run, await read.Resolve<IAgentRunService>().GetEventsAsync(runId, live.TeamId, 0, CancellationToken.None));
 
         if (run.Status != AgentRunStatus.Succeeded)
         {
@@ -124,7 +119,8 @@ public sealed class RealModelCodexStopHookE2ETests : IDisposable
         if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip green proving nothing.");
 
-        if (OperatingSystem.IsWindows()) return null;
+        if (OperatingSystem.IsWindows()) throw RealModelGate.ReportSkipped(Provider, "the stop-hook arm requires a POSIX runtime");
+        Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar).ShouldBeNullOrEmpty("a real stop-hook measurement cannot use a command override or fake CLI");
         if (!await CodexReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `codex` coding-agent CLI is not installed — the in-loop verify E2E needs the harness binary (skip ≠ pass)");
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);

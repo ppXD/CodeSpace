@@ -1438,20 +1438,19 @@ jobs:
   real-model-stop-hook:
     name: real model (in-loop acceptance stop-hook)
     runs-on: ubuntu-latest
-    # THE live behavioral proof of P3.3 (loop-engineer in-loop verify): a REAL claude AND a REAL codex agent are each
+    # Live measured file-outcome coverage for P3.3 (loop-engineer in-loop verify): a REAL claude AND a REAL codex agent are each
     # given a goal that never mentions creating a file, but the task's Acceptance command only passes once that file
-    # exists — the model's natural first stop attempt is GUARANTEED to fail the check, guaranteeing the injected Stop
-    # hook (settings.json for Claude, hooks.json for Codex) actually fires against the real binary. REPORT-ONLY on
+    # exists. Each arm records native CLI/model execution and the file outcome; it does not independently attest
+    # that the injected Stop hook (settings.json for Claude, hooks.json for Codex) fired. REPORT-ONLY on
     # both wires (gating: false): whether a live model ACTS on the hook's feedback is capability-dependent, not a
-    # deterministic wiring guarantee, so this never blocks main — only a run that fails to COMPLETE at all (and isn't
-    # gateway/wire infra) is treated as a genuine miss worth a manual log review. One attempt each (~30-90s), so the
-    # 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets / a CLI are absent (skip ≠ pass; a
-    # fork stays green at zero cost).
+    # deterministic wiring guarantee. Admission/startup without CLI/model evidence is an instrument failure,
+    # distinct from an informational behavior miss; permitted gateway/wire skips are explicitly unmeasured. One
+    # attempt each (~30-90s), so the 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets /
+    # a CLI are absent (skip ≠ pass; a fork stays green at zero cost).
     timeout-minutes: 30
 
-    # Same UNCONFINED rationale as the injection lane: this gate's signal is whether the Stop hook fires + the model
-    # reacts, not sandbox confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner
-    # is flaky.
+    # Same UNCONFINED rationale as the injection lane: this gate measures CLI/model execution and the file outcome;
+    # confinement is tested separately in the dedicated sandbox lane, since bwrap on a plain runner is flaky.
     services:
       postgres:
         image: postgres:18-alpine
@@ -1475,6 +1474,7 @@ jobs:
       # 1200s default would let ONE wedged arm eat two thirds of this 30-minute job and take its siblings down at the
       # cut. Each arm is priced at ~30-90s (see the lane header), so 300s truncates nothing healthy.
       CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '300'
+      CODESPACE_STOP_HOOK_EVIDENCE_DIRECTORY: ${{ github.workspace }}/backend/TestResults/stop-hook-evidence
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-stop-hook-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'
       CODESPACE_AGENT_MAX_FILE_MB: '0'
@@ -1520,13 +1520,15 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
       - name: Test (a real claude + a real codex agent react to the in-loop acceptance Stop hook's feedback)
-        run: >
-          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
-          --no-restore
-          --filter "FullyQualifiedName~StopHookE2ETests"
-          --logger "console;verbosity=normal"
-          --logger "trx;LogFileName=real-model-stop-hook.trx"
-          --results-directory backend/TestResults
+        run: |
+          # Only this job's measurement outputs: a failed/no-test process cannot reuse an earlier receipt.
+          rm -f backend/TestResults/stop-hook-evidence/claude.json backend/TestResults/stop-hook-evidence/codex.json backend/TestResults/real-model-stop-hook.trx backend/TestResults/stop-hook-census.json backend/TestResults/stop-hook-census.trx
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj \
+            --no-restore \
+            --filter "FullyQualifiedName~StopHookE2ETests" \
+            --logger "console;verbosity=normal" \
+            --logger "trx;LogFileName=real-model-stop-hook.trx" \
+            --results-directory backend/TestResults
 
       - name: Assert the stop-hook gates actually ran (no silent skip)
         # Checked PER CLAUSE by the shared script, not as a total: `dotnet test --filter` exits 0 on zero
@@ -1541,6 +1543,18 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-stop-hook.trx \
             StopHookE2ETests
+
+      - name: Census the real stop-hook executions
+        if: always()
+        # Report-only behavior and permitted wire skips retain their policy. A Passed row must still carry
+        # native CLI/model evidence; missing arms or a pre-admission false green fail this instrument check.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-build
+          --filter "FullyQualifiedName~StopHookQualificationCensusE2ETests"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=stop-hook-census.trx"
+          --results-directory backend/TestResults
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
       # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
