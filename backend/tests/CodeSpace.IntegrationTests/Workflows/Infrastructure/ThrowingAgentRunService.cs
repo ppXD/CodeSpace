@@ -23,6 +23,8 @@ public sealed class ThrowingAgentRunService : IAgentRunService
     /// <summary>The message the injected fault carries — asserted by the test so the throw can't be confused with a real failure.</summary>
     public const string FaultMessage = "injected fault: simulated crash mid spawn fan-out";
 
+    public Task<AgentRun> CreateReviewAsync(CodeSpace.Core.Services.Agents.Review.AgentReviewCreation request, CancellationToken cancellationToken) => throw new NotSupportedException();
+
     public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
     {
         if (++_calls == _throwOnCall) throw new InvalidOperationException(FaultMessage);

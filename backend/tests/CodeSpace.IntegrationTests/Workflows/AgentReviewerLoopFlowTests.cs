@@ -53,7 +53,7 @@ public sealed class AgentReviewerLoopFlowTests
 
         using var reviewerCli = new ReviewVerdictFakeCli();   // the REVIEWER binary (codex-cli lane)
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedBaseAsync();
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
@@ -70,7 +70,7 @@ public sealed class AgentReviewerLoopFlowTests
             ReviewerAgent = true,
         };
 
-        var runId = await CreateRunAsync(teamId, task);
+        var runId = await CreateRunAsync(teamId, userId, task);
 
         await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
 
@@ -81,7 +81,8 @@ public sealed class AgentReviewerLoopFlowTests
         producer.Status.ShouldBe(AgentRunStatus.Succeeded, "the revision removed the flaw and the SECOND review agent approved it");
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(producer.ResultJson!, AgentJson.Options)!;
-        result.ReviseRounds.ShouldBe(1, "the agent reviewer's disapproval bought exactly one revise round");
+        var reviewDiagnostics = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, afterSequence: 0, CancellationToken.None);
+        result.ReviseRounds.ShouldBe(1, "the agent reviewer's disapproval bought exactly one revise round; recorded events: " + string.Join("\n", reviewDiagnostics.Select(item => item.Text)));
         result.ReviewFeedback.ShouldBeNull("the final review APPROVED — no flag stands");
 
         (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt"))
@@ -109,7 +110,7 @@ public sealed class AgentReviewerLoopFlowTests
 
         using var reviewerCli = new ReviewVerdictFakeCli();
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var criticRowId = (await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag)).RowId;
         ResetCriticScript();
 
@@ -132,7 +133,7 @@ public sealed class AgentReviewerLoopFlowTests
             ReviewerModelId = criticRowId,
         };
 
-        var runId = await CreateRunAsync(teamId, task);
+        var runId = await CreateRunAsync(teamId, userId, task);
 
         await ExecuteAsync(runId, new ReviseAwareHarness(DraftScript, RevisedScript));
 
@@ -152,14 +153,14 @@ public sealed class AgentReviewerLoopFlowTests
 
     // ─── plumbing (the S6 revise-loop test's proven fixtures) ────────────────
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentTask task)
+    private async Task<Guid> CreateRunAsync(Guid teamId, Guid userId, AgentTask task)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 
-    private async Task<Guid> SeedTeamAsync()
+    private async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync()
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -172,7 +173,7 @@ public sealed class AgentReviewerLoopFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
-        return teamId;
+        return (teamId, userId);
     }
 
     private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps)

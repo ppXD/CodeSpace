@@ -590,7 +590,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         private readonly CriticVerdict _verdict;
         public FakeAgentReviewer(CriticVerdict verdict) { _verdict = verdict; }
-        public Task<CriticVerdict> ReviewAsync(AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken) => Task.FromResult(_verdict);
+        public Task<CriticVerdict> ReviewAsync(AgentRunOwnerToken parentOwner, AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken) => Task.FromResult(_verdict);
     }
 
     /// <summary>The offloader carried on the pushed scope. Never exercised here (the fake critic short-circuits before any decorator) — it only needs to be resolvable and non-null so the scope can be constructed.</summary>
@@ -703,6 +703,7 @@ public sealed class AgentRunExecutorOutputReviewTests
 
         public Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
         public Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRun> CreateReviewAsync(CodeSpace.Core.Services.Agents.Review.AgentReviewCreation request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken) => throw new NotSupportedException();

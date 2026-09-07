@@ -13,6 +13,6 @@ namespace CodeSpace.Core.Services.Agents.Review;
 /// </summary>
 public interface IAgentOutputReviewer
 {
-    /// <summary>Run one independent review agent over <paramref name="result"/>'s produced branch and return its verdict. NEVER throws (cancellation aside) — any failure returns <c>CriticVerdict.ReviewFailed</c> so the caller can ladder down to the model critic.</summary>
-    Task<CriticVerdict> ReviewAsync(AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken);
+    /// <summary>Run one independent review agent over <paramref name="result"/>'s produced branch and return its verdict. Authority and ownership refusal propagate; other failures return <c>CriticVerdict.ReviewFailed</c> so the caller can ladder down to the model critic.</summary>
+    Task<CriticVerdict> ReviewAsync(AgentRunOwnerToken parentOwner, AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken);
 }

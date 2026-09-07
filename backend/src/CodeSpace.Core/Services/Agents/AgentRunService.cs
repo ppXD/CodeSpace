@@ -41,6 +41,9 @@ public interface IAgentRunService
     /// <summary>Complete under an active matching owner and lease. A repeated terminal call fails closed; claim ACK recovery does not imply terminal notification recovery.</summary>
     Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken);
 
+    /// <summary>Admit a read-only child from this worker's live parent token in an independent, clean scope. Caller task receipts grant nothing.</summary>
+    Task<AgentRun> CreateReviewAsync(Review.AgentReviewCreation request, CancellationToken cancellationToken);
+
     /// <summary>Persist a new run in <see cref="AgentRunStatus.Queued"/> with <paramref name="task"/> as its envelope. workflowRunId/nodeId/iterationKey soft-link the owning workflow CELL — iterationKey is the spawning node's cell key (empty for a top-level node or a standalone run), so the N branches a map/loop fan-out spawns under one node stay distinguishable (D4 correlation spine).</summary>
     Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default);
 
@@ -199,32 +202,47 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         var agentRunId = Guid.NewGuid();
         task = await _authority.AdmitAgentAsync(new AgentAuthorityAdmission(task, teamId, agentRunId, workflowRunId), cancellationToken).ConfigureAwait(false);
+        return await PersistCreatedAsync(new AgentRunCreation { Task = task, TeamId = teamId, RunId = agentRunId, WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<AgentRun> PersistCreatedAsync(AgentRunCreation creation, CancellationToken cancellationToken)
+    {
         var run = new AgentRun
         {
-            Id = agentRunId,
-            TeamId = teamId,
-            WorkflowRunId = workflowRunId,
-            NodeId = nodeId,
-            IterationKey = iterationKey,
-            Harness = task.Harness,
-            AgentDefinitionId = task.AgentDefinitionId,   // promoted from task_jsonb to a column so the runs index can filter by agent
+            Id = creation.RunId,
+            TeamId = creation.TeamId,
+            WorkflowRunId = creation.WorkflowRunId,
+            NodeId = creation.NodeId,
+            IterationKey = creation.IterationKey,
+            Harness = creation.Task.Harness,
+            AgentDefinitionId = creation.Task.AgentDefinitionId,   // promoted from task_jsonb to a column so the runs index can filter by agent
             Status = AgentRunStatus.Queued,
 
             // The task envelope is NOT all our own words: the P5-2 retry path folds the prior attempt's acceptance
             // check output — a raw subprocess tail — into task.Goal, so the incident's own retry can arrive here
             // carrying the very byte that killed the first attempt. Sanitized at THIS seam rather than at the splice
             // because this is where the bytes meet the column.
-            TaskJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(task, AgentJson.Options))!,
+            TaskJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(creation.Task, AgentJson.Options))!,
         };
 
         _db.AgentRun.Add(run);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("Agent run created. RunId={RunId} Harness={Harness} TeamId={TeamId}", run.Id, run.Harness, teamId);
+        _logger.LogInformation("Agent run created. RunId={RunId} Harness={Harness} TeamId={TeamId}", run.Id, run.Harness, creation.TeamId);
 
-        await StakeWorkflowAgentObligationsAsync(task, teamId, workflowRunId, nodeId, iterationKey, cancellationToken).ConfigureAwait(false);
+        await StakeWorkflowAgentObligationsAsync(creation.Task, creation.TeamId, creation.WorkflowRunId, creation.NodeId, creation.IterationKey, cancellationToken).ConfigureAwait(false);
 
         return run;
+    }
+
+    private sealed record AgentRunCreation
+    {
+        public required AgentTask Task { get; init; }
+        public required Guid TeamId { get; init; }
+        public required Guid RunId { get; init; }
+        public Guid? WorkflowRunId { get; init; }
+        public string? NodeId { get; init; }
+        public required string IterationKey { get; init; }
     }
 
     /// <summary>
