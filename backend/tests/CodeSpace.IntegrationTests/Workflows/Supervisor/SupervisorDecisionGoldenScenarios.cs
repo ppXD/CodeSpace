@@ -388,9 +388,9 @@ public static class SupervisorDecisionGoldenScenarios
     };
 
     /// <summary>
-    /// The SAME loop one turn later, at the point the first cut of the steer could not see: the co-sign happened,
-    /// and then a re-plan DISCARDED it (MAJOR-8 anchors an approved amendment to the newest plan). s2 is back on the
-    /// check that could not run, holding a repair the run has already thrown away once.
+    /// The SAME loop one turn later, at the point the first cut of the steer could not see: the co-signs happened,
+    /// and then a re-plan DISCARDED them (MAJOR-8 anchors an approved amendment to the newest plan). Both units are
+    /// back on the check that could not run, holding repairs the run has already thrown away once.
     ///
     /// <para>The wrong answer this measures is <c>plan</c> AGAIN — and it is the answer the pre-fix prompt actively
     /// invited, because after the re-plan the unit's standing fell back to "never co-signed" and its verdict line
@@ -402,6 +402,14 @@ public static class SupervisorDecisionGoldenScenarios
     /// <para>The accepted set names <c>amend_acceptance</c> beside <c>ask_human</c> because that is the verb the
     /// MODEL authors; the projector rewrites it into the ask card (<see cref="SupervisorAmendAcceptance.IntoAskHuman"/>),
     /// so the kind that reaches the scorer is always <c>ask_human</c>.</para>
+    ///
+    /// <para>BOTH units are unrunnable and both co-signs are discarded, and that is the fixture's whole load-bearing
+    /// shape: with one clean sibling the tape carries a mergeable result, the recitation truthfully offers
+    /// "'merge' will include them", and <c>merge</c> becomes a defensible move — which is exactly what the live
+    /// eval returned on BOTH wires when this scenario shipped with s1 accepted, scoring a corpus point against a
+    /// prompt that really did admit two answers. A golden must leave one. Nothing here is mergeable
+    /// (<see cref="SupervisorOutcome.IsWithheldFromHead"/> withholds every rejected unit), nothing is retryable
+    /// (no co-sign is in force), and nothing is pending — so the amendment is the only door left.</para>
     /// </summary>
     private static SupervisorGoldenScenario AmendedOracleDiscardedByReplan() => new()
     {
@@ -410,10 +418,11 @@ public static class SupervisorDecisionGoldenScenarios
         {
             Plan("s1", "s2"),
             Spawn(new[] { "s1", "s2" },
-                Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1"),
+                Unrunnable(Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1")),
                 Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
-            AmendApproved("s2"),
-            RePlan(3, "s1", "s2"),
+            AmendApproved("s1", sequence: 2),
+            AmendApproved("s2", sequence: 3),
+            RePlan(4, "s1", "s2"),
         }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.AmendAcceptance, SupervisorDecisionKinds.AskHuman },
     };
@@ -430,8 +439,8 @@ public static class SupervisorDecisionGoldenScenarios
     private static SupervisorAgentResult Unrunnable(SupervisorAgentResult result) =>
         result with { AcceptancePassed = false, AcceptanceDetail = "grade-error: npm not found", AcceptanceEvidenceId = null };
 
-    /// <summary>An amend card the human APPROVED — built from the production card builder (so the marker sentence and the structured proposal are exactly what the co-sign overlay and the retry obligation read back) with a FIXED token for byte-stable prompts.</summary>
-    private static SupervisorPriorDecision AmendApproved(string subtaskId)
+    /// <summary>An amend card the human APPROVED — built from the production card builder (so the marker sentence and the structured proposal are exactly what the co-sign overlay and the retry obligation read back) with a per-target FIXED token for byte-stable prompts. The sequence is explicit because a tape carrying TWO co-signs must order them, and <see cref="SupervisorAmendObligation.StandingFor"/> decides on that order.</summary>
+    private static SupervisorPriorDecision AmendApproved(string subtaskId, long sequence = 2)
     {
         var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
         {
@@ -439,9 +448,9 @@ public static class SupervisorDecisionGoldenScenarios
             Reason = "the authored check shells out to a package manager this repository does not have, so it fails before it can grade anything",
             Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } },
         });
-        var outcome = JsonSerializer.Serialize(new { question = $"amend {subtaskId}'s acceptance", askHumanToken = "fixed-amend-token", answer = "approve" }, AgentJson.Options);
+        var outcome = JsonSerializer.Serialize(new { question = $"amend {subtaskId}'s acceptance", askHumanToken = $"fixed-amend-token-{subtaskId}", answer = "approve" }, AgentJson.Options);
 
-        return PriorDecision(SupervisorDecisionKinds.AskHuman, 2, card.PayloadJson, outcome);
+        return PriorDecision(SupervisorDecisionKinds.AskHuman, sequence, card.PayloadJson, outcome);
     }
 
     /// <summary>The S3 gate's own confirmation card, already ANSWERED — built from the production card builder (so the question is exactly what the gate injects) with a FIXED token for byte-stable prompts.</summary>
