@@ -231,7 +231,9 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             }, cancellationToken).ConfigureAwait(false);
             if (read is SandboxDurableLogReadResult.Unavailable unavailable)
             {
-                if (!final && unavailable.Problem.IsRetryable) return;
+                // Final drain uses the same source contract. A transient read consumes no bytes and leaves the
+                // durable cursor open; the caller bounds retries and a later observer can reopen that identity.
+                if (unavailable.Problem.IsRetryable) return;
                 await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"source-{Code(unavailable.Problem.Code)}", "The durable sandbox log source became unavailable before capture completed."), cancellationToken).ConfigureAwait(false);
                 return;
             }
