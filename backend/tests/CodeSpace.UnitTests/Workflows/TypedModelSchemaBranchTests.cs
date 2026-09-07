@@ -61,6 +61,27 @@ public sealed class TypedModelSchemaBranchTests
         JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, AcceptanceSchema()).ShouldBeEmpty();
 
     [Fact]
+    public void The_acceptance_type_stays_object_because_a_nullable_one_faults_less_legibly_rather_than_more()
+    {
+        // Why `acceptance` keeps `"type": "object"` even though the runtime contract now DEGRADES a non-object one.
+        // The schema is the model's instruction sheet, so declaring null acceptable would tell it to author a value
+        // the contract refuses. And it would not buy a cleaner fault: `required` and `properties` are both skipped
+        // for a non-object instance, so each per-kind branch reduces to its `not` — which a null instance trips. The
+        // single "expected type 'object' but got null" the advisory explains becomes an unmatched-oneOf spill.
+        var schema = AcceptanceSchema();
+        schema.GetProperty("type").GetString().ShouldBe("object");
+        JsonSchemaValidator.Validate(JsonDocument.Parse("null").RootElement, schema).ShouldHaveSingleItem().ShouldContain("expected type 'object' but got null");
+
+        var fields = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(schema.GetRawText())!;
+        fields["type"] = JsonDocument.Parse("""["object","null"]""").RootElement;
+
+        var violations = JsonSchemaValidator.Validate(JsonDocument.Parse("null").RootElement, JsonSerializer.SerializeToElement(fields));
+
+        violations.ShouldNotBeEmpty("a nullable acceptance is still not a valid acceptance — the widening only changes which keyword complains");
+        violations.ShouldContain(violation => violation.Contains("matches a forbidden schema"), customMessage: "every branch's `not` trips on a non-object, so the reply is faulted for a payload it never authored");
+    }
+
+    [Fact]
     public void A_non_executable_task_can_explicitly_decline_a_literal_source_reference()
     {
         var schema = TaskSpecCompilerSchema.ResponseSchema.GetProperty("properties").GetProperty("acceptanceArgvSource");
