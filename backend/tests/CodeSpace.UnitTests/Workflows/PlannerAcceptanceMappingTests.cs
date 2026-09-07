@@ -64,6 +64,7 @@ public sealed class PlannerAcceptanceMappingTests
     [InlineData("{\"formatVersion\":2,\"argv\":[\"true\"]}")]
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"],\"artifactPaths\":[\"report.md\"]}")]
     [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"artifactPaths\":[]}")]   // an EMPTY other payload is still the reinterpretable shape — rejected before "the right payload is absent" is ever considered
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"\",\"true\"]}")]
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",null]}")]
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",\"x\\u0000y\"]}")]
@@ -127,10 +128,10 @@ public sealed class PlannerAcceptanceMappingTests
     }
 
     [Fact]
-    public void A_dropped_acceptance_reaches_the_node_output_as_its_own_readable_fact()
+    public void A_dropped_acceptance_serializes_as_a_named_wire_fact()
     {
-        // The node stamps this as a TOP-LEVEL output key, not only inside `json`, because a large plan's `json` is
-        // offloaded to the artifact store — a defect readable only there disappears exactly when the plan is big.
+        // The record's own wire shape (the node's TOP-LEVEL output key is pinned end-to-end in
+        // PlanAuthorNodeFlowTests, against the real node's OutputsJson — this arm is the DTO half only).
         var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"TestsPass\"}"));
 
         var drop = JsonSerializer.SerializeToElement(plan, AgentJson.Options).GetProperty("droppedAcceptances")[0];
@@ -138,6 +139,50 @@ public sealed class PlannerAcceptanceMappingTests
         drop.GetProperty("subtaskId").GetString().ShouldBe("item");
         drop.GetProperty("kind").GetString().ShouldBe("TestsPass", "the wire kind is the same vocabulary the acceptance contract uses");
         drop.GetProperty("reason").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
+    [Theory]
+    [InlineData("[{\"subtaskId\":\"ghost\",\"kind\":\"TestsPass\",\"reason\":\"invented\"}]")]
+    [InlineData("[{}]")]
+    [InlineData("[]")]
+    [InlineData("\"not even an array\"")]
+    public void A_model_authored_drop_record_is_discarded_rather_than_believed_or_fatal(string authored)
+    {
+        // droppedAcceptances is SERVER-stamped, like authoredByModel beside it — the model schema does not declare it.
+        // But the schema check is deliberately lenient on additionalProperties and these read options disallow no
+        // unmapped member, so a reply that invents the field would BIND: a fabricated defect report about a plan that
+        // has none. `[{}]` was worse still — a required-member bind failure, i.e. a NEW plan-killer inside the very
+        // change that exists to stop plans dying over model-quality misses.
+        var plan = LlmWorkflowPlanner.Deserialize(ReplyWith("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}", authored));
+
+        plan.Subtasks[0].Acceptance.ShouldNotBeNull("the plan itself is untouched — only the model's claim about defects is refused");
+        plan.DroppedAcceptances.ShouldBeNull("a clean bind stamps null unconditionally; the model's authored value is never carried");
+    }
+
+    [Fact]
+    public void The_plain_read_options_still_bind_a_model_authored_drop_record_which_is_why_the_stamp_is_unconditional()
+    {
+        // Two mechanisms guard one server-stamped field, and this pins WHY both stay. The response boundary's own
+        // options refuse to read the field at all (so `[{}]` cannot fail a required-member bind and kill the plan);
+        // the options they are LAYERED ON bind it happily, as this proves — which is why Deserialize stamps the field
+        // unconditionally, like its AuthoredByModel / LessonArm siblings, rather than trusting one read path. If this
+        // test ever fails, the hazard is gone and the redundancy can be reconsidered on purpose.
+        const string authored = "{\"goal\":\"verify\",\"subtasks\":[{\"id\":\"item\",\"title\":\"Item\",\"instruction\":\"Do the work\"}],"
+                              + "\"droppedAcceptances\":[{\"subtaskId\":\"ghost\",\"kind\":\"TestsPass\",\"reason\":\"invented\"}]}";
+
+        var bound = JsonSerializer.Deserialize<PlannedWorkflow>(authored, PlannerSchema.Options);
+
+        bound!.DroppedAcceptances.ShouldHaveSingleItem().SubtaskId.ShouldBe("ghost",
+            "the schema check is lenient on additionalProperties and these options disallow no unmapped member — a model CAN author this field on the wire");
+    }
+
+    [Fact]
+    public void The_server_stamp_overwrites_a_model_authored_drop_record_rather_than_merging_it()
+    {
+        var plan = LlmWorkflowPlanner.Deserialize(ReplyWith("{\"formatVersion\":2,\"kind\":\"TestsPass\"}", "[{\"subtaskId\":\"ghost\",\"kind\":\"LlmJudge\",\"reason\":\"invented\"}]"));
+
+        plan.DroppedAcceptances.ShouldHaveSingleItem().SubtaskId.ShouldBe("item",
+            "the stamp is the server's OWN bind — a merge would let a model add defect reports for subtasks that graded fine");
     }
 
     [Theory]
@@ -171,9 +216,12 @@ public sealed class PlannerAcceptanceMappingTests
     private static PlannedSubtask Parse(JsonElement acceptance) => LlmWorkflowPlanner.Deserialize(JsonSerializer.SerializeToElement(new { goal = "verify", subtasks = new[] { new { id = "item", title = "Item", instruction = "Do the work", acceptance } } })).Subtasks.Single();
 
     /// <summary>A two-subtask reply: the first carries <paramref name="acceptance"/> verbatim, the second a well-formed contract — so a test can tell "this item degraded" apart from "the plan collapsed".</summary>
-    private static JsonElement Reply(string acceptance) => JsonDocument.Parse(
+    private static JsonElement Reply(string acceptance) => ReplyWith(acceptance, null);
+
+    /// <summary>The same reply with a model-authored <c>droppedAcceptances</c> appended verbatim — the server-stamped key a reply must never be able to speak for.</summary>
+    private static JsonElement ReplyWith(string acceptance, string? droppedAcceptances) => JsonDocument.Parse(
         "{\"goal\":\"verify\",\"subtasks\":["
       + "{\"id\":\"item\",\"title\":\"Item\",\"instruction\":\"Do the work\",\"acceptance\":" + acceptance + "},"
       + "{\"id\":\"sibling\",\"title\":\"Sibling\",\"instruction\":\"Do the other work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}}"
-      + "]}").RootElement;
+      + "]" + (droppedAcceptances is null ? "" : ",\"droppedAcceptances\":" + droppedAcceptances) + "}").RootElement;
 }
