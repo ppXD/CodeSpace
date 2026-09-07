@@ -55,6 +55,13 @@ public static class PlannerSchema
                       "description": { "type": "string", "description": "Optional human-readable description of the subtask's acceptance check." }
                     },
                     "required": ["formatVersion", "kind"],
+                    "oneOf": [
+                      { "properties": { "kind": { "enum": ["TestsPass"] } }, "required": ["argv"], "not": { "required": ["artifactPaths"] } },
+                      { "properties": { "kind": { "enum": ["ArtifactPresent"] } }, "required": ["artifactPaths"], "not": { "required": ["argv"] } },
+                      { "properties": { "kind": { "enum": ["CitationsResolve"] } }, "required": ["artifactPaths"], "not": { "required": ["argv"] } },
+                      { "properties": { "kind": { "enum": ["LlmJudge"] } }, "required": ["artifactPaths", "rubric"], "not": { "required": ["argv"] } },
+                      { "properties": { "kind": { "enum": ["ArtifactSchema"] } }, "required": ["artifactPaths", "schema"], "not": { "required": ["argv"] } }
+                    ],
                     "description": "Optional per-subtask acceptance — the unit's objective definition of done, authored WITH the task so the evaluation layer grades against the plan's own contract."
                   }
                 },
