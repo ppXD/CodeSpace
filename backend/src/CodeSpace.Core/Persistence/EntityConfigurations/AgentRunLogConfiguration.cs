@@ -18,7 +18,7 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
             table.HasCheckConstraint("ck_agent_run_log_stream_identity", "stream_kind ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND capture_source ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND content_type ~ '^[^[:space:]/]+/[^[:space:]]+$' AND (content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$')");
             table.HasCheckConstraint("ck_agent_run_log_stream_retention", "retention IN ('Ephemeral', 'Run', 'Team', 'Compliance', 'Permanent') AND (expires_at IS NULL OR expires_at > created_at) AND (retention <> 'Ephemeral' OR expires_at IS NOT NULL) AND (retention <> 'Permanent' OR expires_at IS NULL)");
             table.HasCheckConstraint("ck_agent_run_log_stream_state", "state IN ('Open', 'Completed', 'Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed')");
-            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "((state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)) AND (state <> 'Completed' OR (capture_finalized_at IS NOT NULL AND (schema_version = 1 OR (content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32))))");
+            table.HasCheckConstraint("ck_agent_run_log_stream_terminal", "((state = 'Open' AND completed_at IS NULL AND error_code IS NULL) OR (state = 'Completed' AND completed_at IS NOT NULL AND error_code IS NULL) OR (state IN ('Truncated', 'Unavailable', 'Corrupt', 'CaptureFailed') AND completed_at IS NOT NULL AND error_code IS NOT NULL)) AND (state <> 'Completed' OR (capture_finalized_at IS NOT NULL AND (schema_version = 1 OR (schema_version = 2 AND content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32) OR (schema_version = 3 AND manifest_digest IS NOT NULL AND octet_length(manifest_digest) = 32 AND content_digest IS NULL AND content_digest_algorithm IS NULL))))");
         });
         builder.HasKey(stream => stream.Id);
         builder.HasAlternateKey(stream => new { stream.TeamId, stream.Id, stream.AgentRunId }).HasName("ak_agent_run_log_stream_scope");
@@ -30,6 +30,7 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
         builder.Property(stream => stream.State).HasConversion<string>().HasMaxLength(24);
         builder.Property(stream => stream.ContentDigestAlgorithm).HasConversion<string>().HasMaxLength(16);
         builder.Property(stream => stream.ContentDigest).HasColumnType("bytea");
+        builder.Property(stream => stream.ManifestDigest).HasColumnType("bytea");
         builder.Property(stream => stream.ErrorCode).HasMaxLength(128);
         builder.Property(stream => stream.ErrorMessage).HasMaxLength(2048);
         builder.Property(stream => stream.Xmin).HasColumnName("xmin").HasColumnType("xid").ValueGeneratedOnAddOrUpdate().IsConcurrencyToken();

@@ -25,14 +25,14 @@ namespace CodeSpace.IntegrationTests.Workflows;
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
 [Trait("Audit", "LogCompletionResume")]
-public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixture, ITestOutputHelper output) : IDisposable
+public sealed partial class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixture, ITestOutputHelper output) : IDisposable
 {
     private const int SegmentBytes = 1024 * 1024;
     private const int SegmentCount = 4;
     private readonly List<string> _roots = [];
 
     [Fact]
-    public async Task Uninterrupted_completion_computes_the_actual_concatenated_sha_with_bounded_reads()
+    public async Task Uninterrupted_v3_completion_verifies_all_content_with_an_explicit_manifest_identity()
     {
         var world = await SeedAsync(declareRecovery: false);
         using var scope = fixture.BeginScope();
@@ -40,7 +40,7 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
         var completed = (await Logs(scope, probe).CompleteAsync(world.Complete, CancellationToken.None)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
 
         completed.Metadata.State.ShouldBe(AgentRunLogStreamState.Completed);
-        completed.Metadata.Sha256.ShouldBe(world.WholeSha256);
+        AssertManifest(world, completed.Metadata);
         AssertReads(probe.Reads.ToArray(), world.ObjectIds);
     }
 
@@ -59,7 +59,7 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
         using var resumedScope = fixture.BeginScope();
         var resumed = new LogCompletionReadProbe(resumedScope.Resolve<IArtifactCasRuntimeCoordinator>());
         var completed = (await Logs(resumedScope, resumed).CompleteAsync(world.Complete, deadline.Token)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
-        completed.Metadata.Sha256.ShouldBe(world.WholeSha256, "resumability cannot substitute concatenated part hashes for SHA-256 of the whole byte stream");
+        AssertManifest(world, completed.Metadata);
         var reads = resumed.Reads.ToArray();
         output.WriteLine($"mode={(killProcess ? "SIGKILL" : "cancellation")}; retry read ordinals={Ordinals(world, reads)}; retry bytes={reads.Sum(value => value.BytesRead)}; prefix verified before interruption=1,2");
         reads.ShouldAllBe(value => value.MaximumRequestedBytes <= 128 * 1024 && value.EofCount == 1 && value.Disposed);
@@ -115,7 +115,7 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
             using var healthyScope = fixture.BeginScope();
             var healthy = new LogCompletionReadProbe(healthyScope.Resolve<IArtifactCasRuntimeCoordinator>());
             var completed = (await Logs(healthyScope, healthy).CompleteAsync(world.Complete, deadline.Token)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
-            completed.Metadata.Sha256.ShouldBe(world.WholeSha256);
+            AssertManifest(world, completed.Metadata);
             AssertReads(healthy.Reads.ToArray(), world.ObjectIds);
         }
 
@@ -170,7 +170,7 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
         }
     }
 
-    private async Task<World> SeedAsync(bool declareRecovery)
+    private async Task<World> SeedAsync(bool declareRecovery, int segmentCount = SegmentCount, int segmentBytes = SegmentBytes)
     {
         var teamId = Guid.NewGuid();
         var actorId = Guid.NewGuid();
@@ -208,23 +208,23 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
         }
         var metadata = (await logs.OpenAsync(new AgentRunLogOpenRequest { TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1" }, CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var segment = new byte[SegmentBytes];
+        var segment = new byte[segmentBytes];
         var objects = new List<Guid>();
-        for (var index = 0; index < SegmentCount; index++)
+        for (var index = 0; index < segmentCount; index++)
         {
             segment.AsSpan().Fill((byte)('a' + index));
             hash.AppendData(segment);
             var appended = (await logs.AppendAsync(new AgentRunLogAppendRequest
             {
                 TeamId = teamId, AgentRunId = runId, StreamId = metadata.StreamId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId,
-                ExpectedSegmentOrdinal = index + 1, ExpectedOffsetBytes = (long)index * SegmentBytes, ExpectedSourceOffsetBytes = (long)index * SegmentBytes, SourceLengthBytes = SegmentBytes,
+                ExpectedSegmentOrdinal = index + 1, ExpectedOffsetBytes = (long)index * segmentBytes, ExpectedSourceOffsetBytes = (long)index * segmentBytes, SourceLengthBytes = segmentBytes,
                 StorageProfileId = profileId, StorageProfileRevision = 1, ActorId = actorId, Bytes = segment,
             }, CancellationToken.None)).ShouldBeOfType<AgentRunLogAppendResult.Appended>();
             metadata = appended.Metadata;
             objects.Add(appended.Segment.ArtifactObjectId);
         }
-        metadata = (await logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest { TeamId = teamId, AgentRunId = runId, StreamId = metadata.StreamId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, ExpectedRevision = metadata.Revision, ExpectedSourceOffsetBytes = SegmentBytes * SegmentCount }, CancellationToken.None)).ShouldBeOfType<AgentRunLogFinalizeSourceResult.Finalized>().Metadata;
-        return new World(new AgentRunLogCompleteRequest { TeamId = teamId, AgentRunId = runId, StreamId = metadata.StreamId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, ExpectedRevision = metadata.Revision }, objects.ToArray(), Convert.ToHexStringLower(hash.GetHashAndReset()));
+        metadata = (await logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest { TeamId = teamId, AgentRunId = runId, StreamId = metadata.StreamId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, ExpectedRevision = metadata.Revision, ExpectedSourceOffsetBytes = (long)segmentBytes * segmentCount }, CancellationToken.None)).ShouldBeOfType<AgentRunLogFinalizeSourceResult.Finalized>().Metadata;
+        return new World(new AgentRunLogCompleteRequest { TeamId = teamId, AgentRunId = runId, StreamId = metadata.StreamId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, ExpectedRevision = metadata.Revision }, objects.ToArray(), Convert.ToHexStringLower(hash.GetHashAndReset()), segmentBytes, segmentCount);
     }
 
     private async Task AssertUncommittedHeadAsync(World world)
@@ -266,5 +266,5 @@ public sealed class AgentRunLogCompletionRecoveryAuditTests(PostgresFixture fixt
         reads.ShouldAllBe(value => value.BytesRead == SegmentBytes && value.EofCount == 1 && value.Disposed && value.MaximumRequestedBytes <= 128 * 1024);
     }
     public void Dispose() { foreach (var root in _roots) if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
-    private sealed record World(AgentRunLogCompleteRequest Complete, Guid[] ObjectIds, string WholeSha256);
+    private sealed record World(AgentRunLogCompleteRequest Complete, Guid[] ObjectIds, string WholeSha256, int SegmentSize, int Segments);
 }

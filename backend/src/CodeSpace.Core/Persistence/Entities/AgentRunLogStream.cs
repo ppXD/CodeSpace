@@ -32,7 +32,8 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     public DateTimeOffset? CaptureFinalizedAt { get; set; }
     public ArtifactDigestAlgorithm? ContentDigestAlgorithm { get; set; }
     public byte[]? ContentDigest { get; set; }
-    public int SchemaVersion { get; set; } = 2;
+    public byte[]? ManifestDigest { get; set; }
+    public int SchemaVersion { get; set; } = 3;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset LastModifiedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }

@@ -20,6 +20,10 @@ public sealed class AgentRunLogCaptureIntent : IEntity<Guid>
     public AgentRunLogCaptureIntentState State { get; set; } = AgentRunLogCaptureIntentState.Expected;
     public long Revision { get; set; } = 1;
     public int RecoveryAttemptCount { get; set; }
+    public long VerificationProgressOrdinal { get; set; }
+    public int VerificationStalledAttempts { get; set; }
+    public long VerificationClaimMarker { get; set; }
+    public DateTimeOffset? LastVerificationProgressAt { get; set; }
     public DateTimeOffset? RecoveryStartedAt { get; set; }
     public DateTimeOffset NextRecoveryAt { get; set; }
     public Guid? RecoveryOwnerId { get; set; }

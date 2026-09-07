@@ -41,7 +41,7 @@ public sealed class ListAgentRunLogsQueryHandler : IRequestHandler<ListAgentRunL
                 StreamId = stream.Id, AgentRunId = stream.AgentRunId, StreamKind = stream.StreamKind,
                 ContentType = stream.ContentType, ContentEncoding = stream.ContentEncoding, CaptureSource = stream.CaptureSource,
                 Retention = stream.Retention, State = stream.State, Revision = stream.Revision, SegmentCount = stream.SegmentCount,
-                TotalBytes = stream.TotalBytes, ContentDigest = stream.ContentDigest, CreatedAt = stream.CreatedAt,
+                TotalBytes = stream.TotalBytes, ContentDigest = stream.ContentDigest, ManifestDigest = stream.ManifestDigest, SchemaVersion = stream.SchemaVersion, CreatedAt = stream.CreatedAt,
                 LastModifiedAt = stream.LastModifiedAt, CompletedAt = stream.CompletedAt, ErrorCode = stream.ErrorCode,
             }).ToListAsync(cancellationToken).ConfigureAwait(false);
         var hasMore = rows.Count > take;
@@ -118,6 +118,7 @@ internal static class AgentRunLogWire
         SegmentCount = value.SegmentCount,
         TotalBytes = value.TotalBytes,
         Sha256 = value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest),
+        Integrity = AgentRunLogService.ProjectIntegrity(value.SchemaVersion, value.ManifestDigest, value.SegmentCount, value.TotalBytes, value.CompletedAt),
         CreatedAt = value.CreatedAt,
         LastModifiedAt = value.LastModifiedAt,
         CompletedAt = value.CompletedAt,
@@ -138,6 +139,7 @@ internal static class AgentRunLogWire
         SegmentCount = value.SegmentCount,
         TotalBytes = value.TotalBytes,
         Sha256 = value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest),
+        Integrity = AgentRunLogService.ProjectIntegrity(value.SchemaVersion, value.ManifestDigest, value.SegmentCount, value.TotalBytes, value.CompletedAt),
         CreatedAt = value.CreatedAt,
         LastModifiedAt = value.LastModifiedAt,
         CompletedAt = value.CompletedAt,
@@ -158,6 +160,7 @@ internal static class AgentRunLogWire
         SegmentCount = value.SegmentCount,
         TotalBytes = value.TotalBytes,
         Sha256 = value.Sha256,
+        Integrity = value.Integrity,
         CreatedAt = value.CreatedAt,
         LastModifiedAt = value.LastModifiedAt,
         CompletedAt = value.CompletedAt,
@@ -228,6 +231,8 @@ internal sealed class AgentRunLogListRow
     public long SegmentCount { get; init; }
     public long TotalBytes { get; init; }
     public byte[]? ContentDigest { get; init; }
+    public byte[]? ManifestDigest { get; init; }
+    public int SchemaVersion { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset LastModifiedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
