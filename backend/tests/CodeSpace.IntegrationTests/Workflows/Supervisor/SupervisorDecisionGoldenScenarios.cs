@@ -51,6 +51,8 @@ public static class SupervisorDecisionGoldenScenarios
         // S3 plan-confirmation gate — the answered confirmation card is in the tape; the brain must REACT to it.
         ConfirmationApproved(),           // plan + card answered "approve"  → spawn (release, don't re-plan)
         ConfirmationFeedback(),           // plan + revision feedback        → plan (a REVISED version, never spawn)
+        // Item 4.3's own residual: the FIRST time a check comes back unrunnable, before any re-plan or co-sign.
+        FirstInfraFailure(),              // fresh infra-classed failure     → plan/ask, amend_acceptance ALSO offered
         // B5 co-sign loop — the human repaired a unit's ORACLE; only a retry consumes it, and a re-plan destroys it.
         AmendedOracleAwaitingRetry(),     // infra-failed unit + co-signed   → retry s2, NEVER re-plan
         AmendedOracleDiscardedByReplan(), // the re-plan already ATE it      → amend again / ask, NEVER another plan
@@ -362,6 +364,45 @@ public static class SupervisorDecisionGoldenScenarios
         Name = "confirmation-feedback",
         Context = Context(turn: 2, new[] { Plan("s1", "s2"), ConfirmationAnswered("revise: merge both steps into ONE subtask and verify with ./check.sh") }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.Plan },
+    };
+
+    /// <summary>
+    /// Arc-3 item 4.3's own residual, closed as a golden rather than a prompt edit: the FIRST time a subtask's check
+    /// comes back UNRUNNABLE — infra-classed, no re-plan authored over the verdict yet, no amendment ever proposed.
+    /// <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s <c>None</c>/<c>None</c> arm renders
+    /// <see cref="LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck"/> here — "Re-plan this item with a check
+    /// its agent can satisfy, or ask a human to rule" — and that copy is UNIT-pinned as deliberately unmoving
+    /// (<c>SupervisorDeciderTests.An_unrun_re_plan_is_steered_at_the_staging_it_is_waiting_for</c> and its sibling:
+    /// "the FIRST time a check comes back unrunnable, authoring a satisfiable one is honest advice — and its wording
+    /// must not move"). What no test exercised until this scenario is the SAME state through the golden corpus the
+    /// real-model gate actually scores: a live regression in this arm — the commonest infra shape a run will ever
+    /// hit, reached before any of the co-sign or re-plan-fixed-point arms below — had no way to surface.
+    ///
+    /// <para>Both units are UNRUNNABLE, not one clean and one infra-failed, for the reason
+    /// <see cref="AmendedOracleDiscardedByReplan"/> and <see cref="ReplanLeftTheVerdictUnchanged"/> already paid for:
+    /// a mergeable sibling makes 'merge' a live decision-eval answer against a prompt that truthfully offers it
+    /// (run 34085079257), and a golden must leave one right move.</para>
+    ///
+    /// <para>The accepted set is exactly the two verbs <see cref="LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck"/>
+    /// names — <c>plan</c> and <c>ask_human</c> — never <c>amend_acceptance</c>, even though
+    /// <see cref="SupervisorAmendPrecondition.AnyAmendableUnit"/> admits a proposal here too and the roster
+    /// therefore OFFERS the verb (<see cref="SupervisorGoldenPromptFidelityTests.Exactly_the_amendable_tapes_offer_the_amend_verb"/>
+    /// grows by this scenario's name). Offered-but-not-preferred is not a contradiction — <c>plan</c>/<c>ask_human</c>/
+    /// <c>stop</c> are offered on nearly every tape without every tape's steer naming them as the best move — and
+    /// forcing the FIRST occurrence straight at a human co-sign, before the free self-service re-plan gets a turn,
+    /// is exactly what the pinned unit test above refuses to do.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario FirstInfraFailure() => new()
+    {
+        Name = "first-infra-failure",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Unrunnable(Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1")),
+                Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.AskHuman },
     };
 
     /// <summary>

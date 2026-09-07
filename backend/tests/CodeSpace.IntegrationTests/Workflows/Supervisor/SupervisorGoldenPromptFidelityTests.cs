@@ -113,6 +113,33 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>
+    /// Arc-3 item 4.3's residual, one screen before the co-sign loop it feeds: <c>first-infra-failure</c> is graded
+    /// on <c>plan</c> or <c>ask_human</c> — never <c>amend_acceptance</c>, even though the menu genuinely offers it.
+    /// The FIRST-time infra copy is pinned at the unit level as deliberately unmoving
+    /// (<c>SupervisorDeciderTests.An_unrun_re_plan_is_steered_at_the_staging_it_is_waiting_for</c> and its sibling),
+    /// so this is the golden-corpus half of that same fact: the menu and the steer must keep disagreeing on
+    /// PREFERENCE without disagreeing on AVAILABILITY, or a live model reading both would be reading a
+    /// contradiction rather than a judgement call.
+    /// </summary>
+    [Fact]
+    public void The_first_infra_failure_is_steered_at_the_first_time_copy_while_the_menu_still_offers_the_repair()
+    {
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "first-infra-failure");
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
+            "the FIRST time a check comes back unrunnable, the un-amended first-time copy must render byte-identically to every other tape that reaches it");
+        prompt.ShouldNotContain("Propose 'amend_acceptance'", Case.Sensitive,
+            "no re-plan or co-sign is on this tape yet, so the steer must not (yet) prefer the human-gated repair over the free self-service one");
+
+        OfferedInPrompt(prompt).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "the precondition never required a prior re-plan, only a graded infra-classed failure — so the menu already offers the verb the steer does not (yet) prefer");
+
+        SupervisorMergeContributors.Resolve(scenario.Context.PriorDecisions).AgentRunIds
+            .ShouldBeEmpty("both units are unrunnable — a mergeable sibling would make 'merge' a live decision-eval answer against a prompt that truthfully offers it (the amended-oracle-discarded-by-replan lesson), and this golden must leave one right move");
+    }
+
+    /// <summary>
     /// The sibling contradiction, one arc later: <c>amended-oracle-awaiting-retry</c> is graded on <c>retry</c>, so
     /// its prompt must offer the retry that CONSUMES the human's co-sign and must not offer the re-plan that
     /// DISCARDS it. Run 34066916864 is what a prompt saying both looks like — eight accepted plans, nothing spawned,
@@ -440,7 +467,7 @@ public class SupervisorGoldenPromptFidelityTests
     private static readonly HashSet<string> MissingARequiredStage = new(StringComparer.Ordinal)
     {
         "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "amended-oracle-awaiting-retry",
-        "amended-oracle-discarded-by-replan", "five-subtask-middle-failed", "four-subtask-all-succeeded",
+        "amended-oracle-discarded-by-replan", "first-infra-failure", "five-subtask-middle-failed", "four-subtask-all-succeeded",
         "four-subtask-two-failed", "merge-conflict", "mixed-results",
         "multi-file-conflict", "re-plan-left-the-verdict-unchanged", "resolve-cap-spent",
         "retried-failure-succeeded", "retried-still-failed",
@@ -517,25 +544,40 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// LAST RE-PIN: corpus GROWTH and nothing else — <c>re-plan-left-the-verdict-unchanged</c> joined it, a 26th
-    /// decision point for the re-plan fixed point with no co-sign in it (a re-plan spent on an unrunnable check
-    /// whose verdict did not move: the shape arm
+    /// LAST RE-PIN: corpus GROWTH and nothing else — <c>first-infra-failure</c> joined it (arc-3 item 4.3's
+    /// residual), a 27th decision point for the FIRST time a subtask's check comes back UNRUNNABLE, before any
+    /// re-plan or co-sign is on the tape. No rendering changed: <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s
+    /// <c>None</c>/<c>None</c> arm renders <see cref="LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck"/>,
+    /// pinned at the unit level as deliberately unmoving copy (<c>SupervisorDeciderTests</c>: "the FIRST time a
+    /// check comes back unrunnable, authoring a satisfiable one is honest advice — and its wording must not
+    /// move") — what this scenario adds is the FIRST exercise of that exact arm through the corpus the real-model
+    /// gate actually scores; no prior scenario reached it (every earlier "Failed" tape is WORK-classed, not infra).
+    ///
+    /// <para>The corpus's numbers stay comparable because NO pre-existing scenario's prompt moved, and that is
+    /// DERIVED rather than claimed: <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes today's
+    /// rendering over the 25 scenarios that predate the roster pin and requires <see cref="StaticVerbRosterCorpusDigest"/>
+    /// back through its wind-back, and over the 23 older ones for the two pins beneath it — both exclusion sets
+    /// (<see cref="AddedSinceTheRosterPin"/>, <see cref="AddedSinceTheSupersededPins"/>) now exclude this scenario
+    /// too, the same way they already excluded the prior growth. The new scenario's own roster OFFERS
+    /// <c>amend_acceptance</c> (<see cref="SupervisorAmendPrecondition.AnyAmendableUnit"/> never required a prior
+    /// re-plan, only a graded infra-classed failure), so <see cref="AmendOfferedScenarios"/> grows to three even
+    /// though its accepted kinds do not include the verb; its tape leaves the same Required stage unevidenced as
+    /// its co-sign-loop siblings, so <see cref="MissingARequiredStage"/> grows too.</para>
+    ///
+    /// <para>PREVIOUS RE-PIN: corpus GROWTH and nothing else — <c>re-plan-left-the-verdict-unchanged</c> joined it,
+    /// a 26th decision point for the re-plan fixed point with no co-sign in it (a re-plan spent on an unrunnable
+    /// check whose verdict did not move: the shape arm
     /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> failed ~25-40% of its attempts on,
     /// <c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2). Its tape is
     /// <c>plan→spawn→re-plan→re-spawn</c>: the RE-SPAWN is what makes the accepted pair the only defensible answer,
     /// because a re-plan nobody has run yet is a plan whose honest next move is to STAGE it, and a golden must leave
     /// one right move (<see cref="SupervisorReplanStanding"/> splits those two tapes; the unrun one is pinned at the
-    /// unit level, where the ambiguity does not exist).
+    /// unit level, where the ambiguity does not exist). The new steer is derived from a re-plan whose re-graded
+    /// verdict came back identical (<see cref="SupervisorReplanStanding"/>), and the corpus's only other tape with a
+    /// re-plan on it carries co-signs, so its units read <see cref="SupervisorAmendStanding.Discarded"/> and keep
+    /// the steer they already had.</para>
     ///
-    /// <para>The corpus's numbers stay comparable because NO pre-existing scenario's prompt moved, and that is
-    /// DERIVED rather than claimed: <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes today's
-    /// rendering over the 25 scenarios that predate this pin and requires <see cref="StaticVerbRosterCorpusDigest"/>
-    /// back through its wind-back, and over the 23 older ones for the two pins beneath it. The new steer is derived
-    /// from a re-plan whose re-graded verdict came back identical (<see cref="SupervisorReplanStanding"/>), and the
-    /// corpus's only other tape with a re-plan on it carries co-signs, so its units read
-    /// <see cref="SupervisorAmendStanding.Discarded"/> and keep the steer they already had.</para>
-    ///
-    /// <para>PREVIOUS RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the
+    /// <para>EARLIER RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the
     /// whole tape (<c>SupervisorAmendPrecondition</c>), so <c>amend_acceptance</c> moved from the roster's WITHHELD
     /// half to its OFFERED half on <c>amended-oracle-discarded-by-replan</c> — the one tape in the corpus whose
     /// re-plan closed the window over the infra grade an amendment answers. That scenario grades
@@ -544,7 +586,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "6771ae60585875a7e55399ffa8d7d08b29ba3084b51750a305a4eaf2dec817d4";
+    private const string GoldenPromptDigest = "8f66578a085c85d58b0242296933f95eafe2df59c708d4772703e1b5054bfd2d";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -675,7 +717,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// </summary>
     private static readonly HashSet<string> AmendOfferedScenarios = new(StringComparer.Ordinal)
     {
-        "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged",
+        "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged", "first-infra-failure",
     };
 
     /// <summary>
@@ -688,6 +730,15 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>It is a TWO-element set now: <c>re-plan-left-the-verdict-unchanged</c> is the same unrunnable-check
     /// evidence with no co-sign on it, so the gate admits an amendment there too — and its steer names the verb,
     /// which is only honest while the menu offers it.</para>
+    ///
+    /// <para>THREE now: <c>first-infra-failure</c> (arc-3 item 4.3) is the SAME graded-infra-with-no-co-sign evidence
+    /// one turn earlier — before any re-plan has been authored over the verdict at all. The gate's admission test
+    /// (<see cref="SupervisorAmendPrecondition.AnyAmendableUnit"/>) never required a prior re-plan, only a graded
+    /// infra-classed failure, so the menu already offered the verb here; nothing in this fact changed, only the
+    /// corpus's coverage of it. Its steer does NOT name the verb (<see cref="LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck"/>
+    /// pins that first-time copy as deliberately unmoving), so this is the one member of the set whose accepted
+    /// kinds do not include <c>amend_acceptance</c> — offered on the menu without being the preferred move, which is
+    /// the ordinary relationship every never-masked verb already has to every steer that does not name it.</para>
     /// </summary>
     [Fact]
     public void Exactly_the_amendable_tapes_offer_the_amend_verb()
@@ -749,7 +800,7 @@ public class SupervisorGoldenPromptFidelityTests
     public void The_digest_covers_every_scenario_in_the_corpus()
     {
         // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
-        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(26, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(27, "a scenario was added or dropped — re-pin this count together with the digest");
         SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
@@ -815,13 +866,13 @@ public class SupervisorGoldenPromptFidelityTests
     /// </summary>
     private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
     {
-        "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged",
+        "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged", "first-infra-failure",
     };
 
     /// <summary>Scenarios added after <see cref="StaticVerbRosterCorpusDigest"/> was taken. That pin measured 25 scenarios — the two co-sign ones INCLUDED, which is why they are absent here and why this cannot be folded into the 23-scenario set above.</summary>
     private static readonly HashSet<string> AddedSinceTheRosterPin = new(StringComparer.Ordinal)
     {
-        "re-plan-left-the-verdict-unchanged",
+        "re-plan-left-the-verdict-unchanged", "first-infra-failure",
     };
 
     private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);
