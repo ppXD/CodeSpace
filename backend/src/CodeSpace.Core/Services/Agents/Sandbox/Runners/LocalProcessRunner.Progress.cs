@@ -39,7 +39,7 @@ public sealed partial class LocalProcessRunner
     internal static string ProgressLeaseDirectoryFor(Guid runId) => Path.Combine(SpoolDirectoryFor(runId.ToString("N")), ProgressLeaseDir);
 
     /// <summary>The RUN-scoped progress lease a host-side renewer writes. The layout OWNER hands it out, so <see cref="AgentProgressLease"/> itself stays layout-free and a second durable runner can host the same lease type over its own spool. One expression over <see cref="ProgressLeaseDirectoryFor"/>, so a renewer and the observer cannot resolve different directories. Note that <c>AgentMcpEndpoint</c> and <c>AgentRunExecutor</c> — both at the concern root — call these two statics DIRECTLY, so Rule 18.3's boundary is not held today (see the <see cref="AgentProgressLease"/> remarks).</summary>
-    internal static AgentProgressLease ProgressLeaseFor(Guid runId) => new(ProgressLeaseDirectoryFor(runId));
+    internal static AgentProgressLease ProgressLeaseFor(Guid runId, TimeProvider? timeProvider = null) => new(ProgressLeaseDirectoryFor(runId), timeProvider);
 
     /// <summary>
     /// The observer's progress-lease watch for ONE attach: it polls every <see cref="AgentProgressSignal"/> it can
@@ -52,27 +52,29 @@ public sealed partial class LocalProcessRunner
         private readonly string _stdoutPath;
         private readonly string _stderrPath;
         private readonly TimeSpan _window;
+        private readonly TimeProvider _timeProvider;
 
         private long _spoolBytes;
         private DateTimeOffset _renewedAt;
 
-        internal ProgressWatch(SandboxHandle handle, TimeSpan window)
+        internal ProgressWatch(SandboxHandle handle, TimeSpan window, TimeProvider? timeProvider = null)
         {
-            _lease = LeaseFor(handle);
+            _timeProvider = timeProvider ?? TimeProvider.System;
+            _lease = LeaseFor(handle, _timeProvider);
             _stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
             _stderrPath = Path.Combine(handle.SpoolDirectory, StderrFile);
             _window = window;
 
             // A fresh attach starts the window now: re-attaching is a fresh observation, never an inherited stale clock.
             _spoolBytes = SpoolBytes();
-            _renewedAt = DateTimeOffset.UtcNow;
+            _renewedAt = _timeProvider.GetUtcNow();
         }
 
         /// <summary>The signal that last renewed the lease — the honest answer to "why is this run still alive?". Null until one does. Internal rather than private so a test pins WHICH signal kept a run alive, not merely that something did (an accidentally-renewing signal would otherwise pass unnoticed).</summary>
         internal AgentProgressSignal? RenewedBy { get; private set; }
 
         /// <summary>Whether NO signal has renewed the lease for the whole window — the one question the observe loop asks before concluding <see cref="SandboxStatus.Stalled"/>.</summary>
-        internal bool NoProgress => DateTimeOffset.UtcNow - _renewedAt >= _window;
+        internal bool NoProgress => _timeProvider.GetUtcNow() - _renewedAt >= _window;
 
         internal void Observe()
         {
@@ -89,11 +91,11 @@ public sealed partial class LocalProcessRunner
         /// cannot collect a run whose observer is still heartbeating. So in that configuration the watch keeps exactly
         /// its pre-lease form: spool bytes only, i.e. today's bound, unchanged.
         /// </summary>
-        private static AgentProgressLease? LeaseFor(SandboxHandle handle)
+        private static AgentProgressLease? LeaseFor(SandboxHandle handle, TimeProvider timeProvider)
         {
             if (handle.Deadline == DateTimeOffset.MaxValue) return null;
 
-            return handle.ProgressLeaseDirectory is { Length: > 0 } directory ? new AgentProgressLease(directory) : null;
+            return handle.ProgressLeaseDirectory is { Length: > 0 } directory ? new AgentProgressLease(directory, timeProvider) : null;
         }
 
         /// <summary>Bytes on EITHER spool (stderr-only output and a not-yet-complete line both count — the question is silence, and an emitting run is never silent).</summary>
@@ -114,7 +116,7 @@ public sealed partial class LocalProcessRunner
 
         private long SpoolBytes() => SafeFileLength(_stdoutPath) + SafeFileLength(_stderrPath);
 
-        private void Renew(AgentProgressSignal signal) => RenewAt(signal, DateTimeOffset.UtcNow);
+        private void Renew(AgentProgressSignal signal) => RenewAt(signal, _timeProvider.GetUtcNow());
 
         private void RenewAt(AgentProgressSignal signal, DateTimeOffset renewedAt)
         {
