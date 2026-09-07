@@ -20,6 +20,15 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// <c>SupervisorArbiterDrainFlowTests</c>; this lane adds ONLY the live-wire verdict signal. Self-skips when the
 /// <c>CODESPACE_LLM_*</c> secrets are absent (CI/forks stay green at zero cost). A gateway timeout is non-gating infra
 /// via <see cref="RealModelGate.AssessLiveAsync"/>; the blessed wire (Anthropic) GATES, OpenAI is informational.</para>
+///
+/// <para>The arbiter itself NEVER throws (<see cref="LlmDecisionArbiter.DecideAsync"/>'s own contract — a blocked
+/// decision must always get SOME verdict), so a GATEWAY fault during the live call still comes back as a normal
+/// escalate verdict, just tagged <see cref="ArbiterEscalateCause.GatewayInfra"/>. Left alone, that would read as a
+/// FAILED attempt ("the arbiter punted an obvious decision") exactly as it did on real run 34108260233 (a 429 storm
+/// scored as a behavioural miss). This closure re-raises a GatewayInfra-tagged verdict as
+/// <see cref="ArbiterGatewayInfraException"/> so it routes through <see cref="RealModelGate.IsGatewayInfraFailure"/>'s
+/// SAME non-gating infra skip as every other gateway fault — a genuine "the model looked at this and chose to
+/// escalate" still counts as a behavioural miss.</para>
 /// </summary>
 [Trait("Category", "RealModel")]
 [Trait("Surface", "Engine")]
@@ -51,6 +60,11 @@ public sealed class RealModelSupervisorArbiterFlowTests
             // A non-null brain model id → the arbiter actually calls the live brain (a null would short-circuit to escalate).
             var verdict = await arbiter.DecideAsync(decision, TeamId, supervisorModelId: Guid.NewGuid(), "ship a small, well-tested change", CancellationToken.None);
 
+            // The arbiter never throws — a gateway fault comes back as an escalate verdict tagged GatewayInfra, not an
+            // exception. Re-raise it as the exception the gate already recognises so it is a non-gating infra skip, not
+            // a scored "the arbiter punted an obvious decision" (real run 34108260233).
+            if (verdict.Cause == ArbiterEscalateCause.GatewayInfra) throw new ArbiterGatewayInfraException(verdict.Rationale);
+
             var validOptions = decision.Options.Select(o => o.Id).ToHashSet();
             var ok = verdict.IsAnswer && verdict.SelectedOptions.Count > 0 && verdict.SelectedOptions.All(validOptions.Contains);
 
@@ -81,4 +95,18 @@ public sealed class RealModelSupervisorArbiterFlowTests
     };
 
     private static string Truncate(string s) => s.Length <= 160 ? s : s[..160] + "…";
+}
+
+/// <summary>
+/// Raised by the arbiter live-eval closure when the arbiter's escalate verdict carries
+/// <see cref="ArbiterEscalateCause.GatewayInfra"/> — the brain call itself failed for a GATEWAY reason (rate limit /
+/// transient / auth), not a decision anyone made. <see cref="LlmDecisionArbiter.DecideAsync"/> itself never throws (a
+/// blocked decision must always get SOME verdict), so this eval-side wrapper re-raises the SAME fact as an exception
+/// <see cref="RealModelGate.IsGatewayInfraFailure"/> already recognises, routing it to the non-gating infra skip
+/// instead of scoring it as "the arbiter punted an obvious decision" — exactly the real run 34108260233
+/// misclassification (a 429 storm) this exists to fix.
+/// </summary>
+public sealed class ArbiterGatewayInfraException : Exception
+{
+    public ArbiterGatewayInfraException(string message) : base(message) { }
 }

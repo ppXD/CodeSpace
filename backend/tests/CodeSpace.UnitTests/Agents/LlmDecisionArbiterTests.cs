@@ -136,6 +136,44 @@ public sealed class LlmDecisionArbiterTests
         verdict.Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
     }
 
+    // ── Escalate cause: a GATEWAY fault is tagged, so a consumer can tell it apart from a model-side miss ──────────
+
+    [Theory]
+    [InlineData(LlmErrorCategory.RateLimited, ArbiterEscalateCause.GatewayInfra)]
+    [InlineData(LlmErrorCategory.Transient, ArbiterEscalateCause.GatewayInfra)]
+    [InlineData(LlmErrorCategory.AuthFailed, ArbiterEscalateCause.GatewayInfra)]
+    [InlineData(LlmErrorCategory.Malformed, ArbiterEscalateCause.Unspecified)]
+    [InlineData(LlmErrorCategory.ContextLengthExceeded, ArbiterEscalateCause.Unspecified)]
+    [InlineData(LlmErrorCategory.ContentFiltered, ArbiterEscalateCause.Unspecified)]
+    [InlineData(LlmErrorCategory.BadRequest, ArbiterEscalateCause.Unspecified)]
+    public async Task A_gateway_category_marks_the_escalate_cause_infra_a_model_capability_miss_stays_unspecified(LlmErrorCategory category, ArbiterEscalateCause expectedCause)
+    {
+        // Real run 34108260233: a 429 RateLimited storm read as "the arbiter could not produce a valid decision" — a
+        // behavioural fail, not a gateway fault. The verdict must carry WHICH kind of failure this was so a consumer
+        // (the eval gate, the run log) can tell them apart without parsing the rationale prose.
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new ThrowingArbiterClient(category: category)), FakeSelector.WithModel());
+
+        var verdict = await arbiter.DecideAsync(Pending("x"), TeamId, Guid.NewGuid(), "goal", CancellationToken.None);
+
+        verdict.IsAnswer.ShouldBeFalse("every category here still escalates to a human — only WHY differs");
+        verdict.Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+        verdict.Cause.ShouldBe(expectedCause);
+    }
+
+    [Theory]
+    [InlineData(LlmErrorCategory.RateLimited, "rate limited")]
+    [InlineData(LlmErrorCategory.AuthFailed, "authentication failed")]
+    [InlineData(LlmErrorCategory.Transient, "gateway unavailable")]
+    public async Task A_gateway_infra_escalate_names_which_fault_in_the_rationale(LlmErrorCategory category, string expectedPhrase)
+    {
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new ThrowingArbiterClient(category: category)), FakeSelector.WithModel());
+
+        var verdict = await arbiter.DecideAsync(Pending("x"), TeamId, Guid.NewGuid(), "goal", CancellationToken.None);
+
+        verdict.Rationale.ShouldContain(expectedPhrase);
+        verdict.Rationale.ShouldContain("could not reach the model", customMessage: "an operator reading the run log must see it was the GATEWAY, not a decision the model made");
+    }
+
     [Fact]
     public async Task Cancellation_propagates_it_is_not_swallowed_into_an_escalation()
     {
@@ -188,12 +226,18 @@ public sealed class LlmDecisionArbiterTests
     private sealed class ThrowingArbiterClient : ILLMClient, IStructuredLLMClient
     {
         private readonly bool _cancel;
-        public ThrowingArbiterClient(bool cancel = false) => _cancel = cancel;
+        private readonly LlmErrorCategory _category;
+
+        public ThrowingArbiterClient(bool cancel = false, LlmErrorCategory category = LlmErrorCategory.Transient)
+        {
+            _cancel = cancel;
+            _category = category;
+        }
 
         public string Provider => "TestArbiter";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            _cancel ? throw new OperationCanceledException() : throw new LlmApiException("TestArbiter", null, LlmErrorCategory.Transient, "boom");
+            _cancel ? throw new OperationCanceledException() : throw new LlmApiException("TestArbiter", null, _category, "boom");
     }
 
     private sealed class FakeSelector : IModelPoolSelector

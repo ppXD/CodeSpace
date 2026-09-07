@@ -653,6 +653,21 @@ public sealed class RealModelGateTests
         RealModelGate.IsGatewayInfraFailure(new InvalidOperationException("a real engine bug")).ShouldBeFalse("a logic bug must gate, never read as execution infra");
     }
 
+    // ── Arbiter gateway-infra escalate: a GatewayInfra-tagged verdict is a non-gating skip, not a behavioural miss ──
+
+    [Fact]
+    public void An_arbiter_gateway_infra_escalate_is_recognised_as_non_gating_infra_but_a_real_bug_still_gates()
+    {
+        // LlmDecisionArbiter.DecideAsync never throws (a blocked child decision must always get SOME verdict), so a
+        // gateway fault comes back as an ArbiterVerdict.Cause = GatewayInfra escalate, not an exception. The arbiter
+        // eval re-raises that tag as ArbiterGatewayInfraException so it routes through the SAME non-gating infra skip
+        // as every other gateway fault — real run 34108260233 (a 429 storm) scored this as a behavioural miss before
+        // this existed ("the arbiter could not produce a valid decision", not a gateway fault).
+        RealModelGate.IsGatewayInfraFailure(new ArbiterGatewayInfraException("The arbiter could not reach the model (rate limited) — escalated to a human.")).ShouldBeTrue();
+        RealModelGate.IsGatewayInfraFailure(new AggregateException(new ArbiterGatewayInfraException("boom"))).ShouldBeTrue("the await chain can wrap it");
+        RealModelGate.IsGatewayInfraFailure(new InvalidOperationException("a real engine bug")).ShouldBeFalse("a logic bug must gate, never read as arbiter infra");
+    }
+
     /// <summary>
     /// The precondition BOTH other classifiers assume and neither checks: that the agents ran the FAKE. ANY off-stub
     /// run loses control — an all-or-nothing predicate would be disarmed by a single surviving stubbed run, and the
