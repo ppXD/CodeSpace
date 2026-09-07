@@ -535,6 +535,7 @@ jobs:
             RealModelAnswerReview \
             RealModelDeliveryGate \
             RealModelPlanner \
+            Live_planner_keeps_executable_content_checks_separate_from_file_obligations_and_the_real_oracle_rejects_wrong_content \
             RealModelSession \
             RealModelSpecPreview \
             With_no_repository_to_ground_on_the_live_compiler_refuses_to_invent_an_acceptance_check \

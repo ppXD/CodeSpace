@@ -65,7 +65,8 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
                     id = "n1", title = "Write the report", instruction = "write the research report", kind = "research",
                     acceptance = new
                     {
-                        command = new[] { RubricDeliverablePath },
+                        formatVersion = 2,
+                        artifactPaths = new[] { RubricDeliverablePath },
                         kind = "LlmJudge",
                         description = "the report satisfies the rubric",
                         rubric = new
@@ -84,7 +85,7 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
             subtasks = new object[]
             {
                 new { id = "s1", title = "First", instruction = "do the first thing", kind = "research" },
-                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { command = AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
+                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { formatVersion = 2, argv = AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
             };
         else if (_script.Instructions is { Count: > 0 } custom)
             subtasks = custom.Select((instruction, i) => (object)new { id = $"c{i + 1}", title = instruction, instruction }).ToArray();
