@@ -192,7 +192,7 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
         // usable JSON degrades to the prompt-only floor below; a 200 WITH a result returns here carrying its own usage.
         var (funcJson, funcParsed) = await TryStructuredViaFunctionAsync(request, system, cancellationToken).ConfigureAwait(false);
         if (funcJson is { } viaFunction)
-            return BuildCompletion(viaFunction, funcParsed!, request.Model);
+            return BuildCompletion(viaFunction, funcParsed!, request);
 
         var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
         var useCompletionTokens = LlmModelCapabilities.UsesMaxCompletionTokens(request.Model);
@@ -227,7 +227,7 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
         }
 
         var totalUsage = (funcParsed is null ? LlmUsage.None : UsageFrom(funcParsed)).Add(UsageFrom(parsed), string.Equals(funcParsed?.Model, parsed.Model, StringComparison.OrdinalIgnoreCase));
-        return BuildCompletion(result, parsed, request.Model) with { Usage = totalUsage };
+        return BuildCompletion(result, parsed, request) with { Usage = totalUsage };
     }
 
     /// <summary>
@@ -274,10 +274,11 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
         return (json, parsed);
     }
 
-    private static StructuredLLMCompletion BuildCompletion(JsonElement json, OpenAiChatResponse parsed, string fallbackModel) => new()
+    private static StructuredLLMCompletion BuildCompletion(JsonElement json, OpenAiChatResponse parsed, StructuredLLMCompletionRequest request) => new()
     {
         Json = json,
-        Model = parsed.Model ?? fallbackModel,
+        Model = parsed.Model ?? request.Model,
+        ObservedModel = ObservedLlmModel.FromWire(parsed.Model, request.Credential),
         Usage = UsageFrom(parsed)
     };
 

@@ -75,12 +75,12 @@ public class CriticPlannerDecoratorTests
     }
 
     [Theory]
-    [InlineData("claude-sonnet-4-6", "Independent review on claude-sonnet-4-6 — approved")]
-    [InlineData(null, "Independent review — approved")]
+    [InlineData("claude-sonnet-4-6", "Review on claude-sonnet-4-6 — approved")]
+    [InlineData(null, "Review — approved")]
     public async Task The_annotated_risk_header_names_the_reviewing_model_when_the_critic_named_one(string? reviewerModel, string expectedHeader)
     {
-        // D5: the risks line is where a human reads the verdict, so it is where "independent" has to be checkable
-        // against the plan's own authoring model. A verdict that names no reviewer leaves the header byte-identical.
+        // The annotation has no established producer comparison. Both named and unknown reviewers stay neutral,
+        // and the same path can also annotate an agent verdict without falsely calling it a model review.
         var planner = new FakePlanner();
         var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "sound", ReviewerModel = reviewerModel } };
         var decorator = new CriticPlannerDecorator(planner, critic, new NoAgentPlanReviewer());
@@ -88,6 +88,7 @@ public class CriticPlannerDecoratorTests
         var result = await decorator.PlanAsync(Request(ReviewMode.Gate), CancellationToken.None);
 
         result.Risks.ShouldContain(r => r.StartsWith(expectedHeader));
+        result.Risks.ShouldNotContain(r => r.Contains("Independent review"));
     }
 
     [Fact]

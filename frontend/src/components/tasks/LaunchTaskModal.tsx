@@ -691,7 +691,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                       </HelpTip>
                     </div>
                   : <TierRow label="Plan critic" tier="Quick runs without a plan" />}
-                <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · independent", desc: "Prefers a different model than the producer; a one-model pool falls back to the same model, independently prompted" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
+                <Combo label="Reviewer model" value={cfg.reviewerModel} options={[{ value: "", label: "Auto · reviewer", desc: "Prefers a different configured model; aliases and fallback do not guarantee independence" }, ...allModels.map(o => ({ value: o.rowId, label: o.modelId, desc: modelDesc(o) }))]} onChange={v => setC({ reviewerModel: v })} searchable />
               </>}
 
               {customizeTab === "evaluation" && <>

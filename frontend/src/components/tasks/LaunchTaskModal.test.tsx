@@ -322,6 +322,15 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(lastInput).toMatchObject({ effort: "deep" });
   });
 
+  it("describes automatic reviewer selection as a preference without promising independence", () => {
+    renderBox();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByText("Planning"));
+    expect(screen.queryByText("Auto · independent")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Auto · reviewer"));
+    expect(screen.getByText(/Prefers a different configured model; aliases and fallback do not guarantee independence/)).toBeInTheDocument();
+  });
+
   it("Advanced expands the settings tray into the named tabs (no repo scope list)", () => {
     renderBox();
     expect(screen.queryByText("Harness")).toBeNull();

@@ -1205,8 +1205,8 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
  *  so a run with several verdicts stays scannable; expanding reveals the evidence-attached issues and the independence
  *  line — "independent agent · claude-code" with a deep-link into the reviewer's OWN run, or "model critic —
  *  independently prompted" when the verdict came from the in-process critic. A model critic's line NAMES the model it
- *  ran on, and drops the word "independent" when the backend says that model IS the producer's — a one-model pool's
- *  legitimate fallback is an independently prompted call, not a second opinion, and the card may not blur the two.
+ *  reported. Unknown identity remains unknown, and different reported names alone do not establish independence.
+ *  A one-model pool's legitimate fallback stays an independently prompted call, not a second opinion.
  *  The WHOLE card toggles (open or closed) — clicking the expanded body collapses it again; only the deep-link button
  *  opts out. */
 export function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) {
@@ -1215,6 +1215,8 @@ export function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) 
   const [open, setOpen] = useState(false);
   const n = review.issues.length;
   const reviewerRunId = review.reviewerRunId ?? null;
+  const reviewerModel = review.reviewerModel?.trim() || null;
+  const sameModel = reviewerModel ? review.sameModelAsProducer : null;
   return (
     <div className={`room-jverdict room-jverdict-${review.approved ? "ok" : "warn"}`} data-open={open} onClick={() => setOpen((v) => !v)}>
       <button type="button" className="room-jverdict-head" aria-expanded={open}>
@@ -1232,10 +1234,12 @@ export function ReviewVerdictCard({ review }: { review: JournalReviewVerdict }) 
                 <span className="room-jmodel-x"> — a real {review.scope === "plan" ? "grounded plan" : "output"} review</span>
               </>
             : <>
-                <span className="room-jmodel-model">{review.reviewerModel ?? "a second AI"}</span>
-                <span className="room-jmodel-x"> — {review.sameModelAsProducer
-                  ? `the producer's own model, independently prompted — not a second opinion`
-                  : `an independent ${review.scope} review`}</span>
+                <span className="room-jmodel-model">{reviewerModel ?? "model identity unavailable"}</span>
+                <span className="room-jmodel-x"> — {sameModel == null
+                  ? `${reviewerModel ? "model identity comparison unavailable — " : ""}independence not established`
+                  : sameModel
+                    ? "the producer's own model, independently prompted — not a second opinion"
+                    : "a review with a different reported model — independence not established"}</span>
               </>}
           {run && reviewerRunId && (
             <button className="room-jverdict-open" onClick={(e) => { e.stopPropagation(); openDrawer({ kind: "agent", agent: reviewerCard(review, reviewerRunId), runId: run.runId }); }}>

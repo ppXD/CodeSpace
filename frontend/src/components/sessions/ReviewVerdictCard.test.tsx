@@ -21,10 +21,11 @@ async function openCard(review: JournalReviewVerdict) {
 
 describe("ReviewVerdictCard independence line", () => {
   it("names the model a model critic ran on instead of 'a second AI'", async () => {
-    await openCard(verdict({ reviewerModel: "claude-sonnet-4-6" }));
+    await openCard(verdict({ reviewerModel: "claude-sonnet-4-6", sameModelAsProducer: false }));
 
     expect(screen.getByText("claude-sonnet-4-6")).toBeInTheDocument();
-    expect(screen.getByText(/an independent decision review/)).toBeInTheDocument();
+    expect(screen.getByText(/different reported model/)).toBeInTheDocument();
+    expect(screen.queryByText(/an independent decision review/)).not.toBeInTheDocument();
     expect(screen.queryByText("a second AI")).not.toBeInTheDocument();
   });
 
@@ -38,12 +39,22 @@ describe("ReviewVerdictCard independence line", () => {
     expect(screen.queryByText(/an independent decision review/)).not.toBeInTheDocument();
   });
 
-  it("falls back to the old copy for a verdict that names no reviewer", async () => {
-    // Every pre-existing verdict has no reviewer model — it must read exactly as before, never as a same-model claim.
-    await openCard(verdict());
+  it.each([undefined, null, false])("keeps an absent reviewer identity unknown even with a legacy comparison %s", async (comparison) => {
+    await openCard(verdict({ sameModelAsProducer: comparison }));
 
-    expect(screen.getByText("a second AI")).toBeInTheDocument();
-    expect(screen.getByText(/an independent decision review/)).toBeInTheDocument();
+    expect(screen.getByText("model identity unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/independence not established/)).toBeInTheDocument();
+    expect(screen.queryByText("a second AI")).not.toBeInTheDocument();
+    expect(screen.queryByText(/an independent decision review/)).not.toBeInTheDocument();
+  });
+
+  it.each([undefined, null])("does not infer a producer comparison from the reviewer name when comparison is %s", async (comparison) => {
+    await openCard(verdict({ reviewerModel: "observed-reviewer", sameModelAsProducer: comparison }));
+
+    expect(screen.getByText("observed-reviewer")).toBeInTheDocument();
+    expect(screen.getByText(/model identity comparison unavailable.*independence not established/)).toBeInTheDocument();
+    expect(screen.queryByText(/an independent decision review/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/different reported model/)).not.toBeInTheDocument();
   });
 
   it("keeps the agent-reviewer line, which carries its own harness attribution", async () => {

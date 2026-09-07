@@ -171,11 +171,26 @@ public class JournalStepDescriberRegistryTests
     [InlineData("claude-opus-4-8", "claude-opus-4-8", true)]
     [InlineData("CLAUDE-OPUS-4-8", "claude-opus-4-8", true)]   // case-insensitive, like every other model-id match
     [InlineData("claude-sonnet-4-6", "claude-opus-4-8", false)]
-    [InlineData(null, "claude-opus-4-8", false)]                // an un-attributed verdict reads as today's copy…
-    [InlineData("claude-opus-4-8", null, false)]                // …and so does an un-attributed producer
-    [InlineData("  ", "claude-opus-4-8", false)]
-    public void Same_model_as_producer_is_false_whenever_either_side_is_unknown(string? reviewerModel, string? producerModel, bool expected) =>
-        Core.Services.Sessions.Journal.FactsSources.DecisionReviewFactsSource.SameModel(reviewerModel, producerModel).ShouldBe(expected);
+    [InlineData(null, "claude-opus-4-8", null)]                // missing reviewer identity is not a different-model claim
+    [InlineData("claude-opus-4-8", null, null)]                // nor is missing producer identity
+    [InlineData("  ", "claude-opus-4-8", null)]
+    public void Same_model_as_producer_is_unknown_whenever_either_side_is_unknown(string? reviewerModel, string? producerModel, bool? expected) =>
+        ((bool?)Core.Services.Sessions.Journal.FactsSources.DecisionReviewFactsSource.SameModel(reviewerModel, producerModel)).ShouldBe(expected);
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("null", null)]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    public void Legacy_boolean_and_missing_review_comparisons_remain_readable_without_inventing_identity(string? comparison, bool? expected)
+    {
+        var json = "{\"approved\":true,\"rationale\":\"sound\",\"scope\":\"decision\"" + (comparison is null ? "" : ",\"sameModelAsProducer\":" + comparison) + "}";
+        var verdict = System.Text.Json.JsonSerializer.Deserialize<Messages.Dtos.Sessions.Journal.JournalReviewVerdict>(json, System.Text.Json.JsonSerializerOptions.Web).ShouldNotBeNull();
+
+        ((bool?)verdict.SameModelAsProducer).ShouldBe(expected);
+        var roundTrip = System.Text.Json.JsonSerializer.Deserialize<Messages.Dtos.Sessions.Journal.JournalReviewVerdict>(System.Text.Json.JsonSerializer.Serialize(verdict), System.Text.Json.JsonSerializerOptions.Web).ShouldNotBeNull();
+        ((bool?)roundTrip.SameModelAsProducer).ShouldBe(expected);
+    }
 
     [Fact]
     public void A_review_beat_names_the_model_it_ran_on_so_the_independence_claim_is_checkable()

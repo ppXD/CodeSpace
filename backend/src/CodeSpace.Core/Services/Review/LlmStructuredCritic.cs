@@ -15,8 +15,8 @@ namespace CodeSpace.Core.Services.Review;
 /// <c>LlmDecisionArbiter</c>'s independent-brain call EXACTLY — resolve the reviewer model row → match the structured
 /// client by THAT model's provider → schema-constrained completion — but for two review MODES, and FAILS CLOSED to a
 /// <see cref="CriticVerdict.Failed"/> verdict (never throws, cancellation aside), so the caller keeps the producer's
-/// original output. The reviewer is the operator-pinned model, else the team's auto-picked brain (so it is independent
-/// of a specific producer when the team has &gt; 1 model).
+/// original output. The reviewer is the operator-pinned model, else the team's auto-picked brain. A different configured
+/// name alone does not establish independence: gateways may alias the same backing model.
 /// </summary>
 public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 {
@@ -77,9 +77,9 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
             var verdict = Project(request.Mode, completion.Json);
 
-            // The reviewer's own model NAME rides every verdict that HAPPENED, so the reader can check the independence
-            // claim against the producer's model instead of taking "independent" on trust.
-            return verdict.Failed ? await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false) : verdict with { ReviewerModel = pick.ModelId };
+            // Only the provider-reported identity can accompany a completed review. A missing observation stays unknown;
+            // the selected alias and compatibility Model fallback cannot establish reviewer diversity.
+            return verdict.Failed ? await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false) : verdict with { ReviewerModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential) };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
