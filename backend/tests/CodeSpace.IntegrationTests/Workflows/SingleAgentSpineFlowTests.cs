@@ -194,6 +194,27 @@ public sealed class SingleAgentSpineFlowTests
     }
 
     [Fact]
+    public async Task A_patch_only_units_unpushable_grade_reads_unverified_not_failed()
+    {
+        // The real composer, over the real write-through bridge: a PATCH-ONLY repository never pushes, so the
+        // publish grades `no-branch-or-repo` with the agent's work sitting right there in ChangedFiles. Reading
+        // work-present off ProducedBranch alone made this receipt Failed → Verification=Failed → Unsolved →
+        // `completion-authority: honest failure`, while the supervisor decider had recited the very same grade to
+        // the model as UNVERIFIED (run 34068400279). The check could not run; the candidate is unmeasured.
+        var (teamId, _) = await SeedGradedSingleAgentRunAsync(acceptancePassed: false, withManifest: false, patchOnly: true);
+
+        using var scope = _fixture.BeginScope();
+        var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeAsync(RunId, teamId, CancellationToken.None);
+
+        composed!.Assessment.Verification.ShouldBe(VerificationDisposition.InfraUnknown, "an unrunnable publish is infra — the same classification the decider's verdict line already used");
+        composed.Assessment.Outcome.ShouldBe(OutcomeDisposition.Unknown, "an unmeasured candidate states no truth in EITHER direction — never a definite Unsolved");
+
+        (await scope.Resolve<ICompletionContractStore>().ListReceiptsAsync(RunId, teamId, CancellationToken.None))
+            .Single(r => r.Kind == ContractKinds.Acceptance).Disposition
+            .ShouldBe(VerificationDisposition.InfraUnknown, "the durable row, not just the fold — this is what the arbitration log prints");
+    }
+
+    [Fact]
     public async Task A_pushed_manifest_settles_delivery_and_output_on_this_lane()
     {
         var (teamId, userId) = await SeedGradedSingleAgentRunAsync(acceptancePassed: true, withManifest: true);
@@ -325,7 +346,8 @@ public sealed class SingleAgentSpineFlowTests
 
     private Guid RunId;
 
-    private async Task<(Guid TeamId, Guid UserId)> SeedGradedSingleAgentRunAsync(bool acceptancePassed, bool withManifest)
+    /// <summary><paramref name="patchOnly"/> seeds the shape a patch-only repository produces: real changed files, NO branch and no pushed commit, graded <c>no-branch-or-repo</c> because there was nothing to publish from.</summary>
+    private async Task<(Guid TeamId, Guid UserId)> SeedGradedSingleAgentRunAsync(bool acceptancePassed, bool withManifest, bool patchOnly = false)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         RunId = await SeedRunAsync(teamId, userId, WorkflowRunStatus.Running);
@@ -348,10 +370,11 @@ public sealed class SingleAgentSpineFlowTests
                 Status = AgentRunStatus.Succeeded,
                 ExitReason = "completed",
                 AcceptancePassed = acceptancePassed,
-                AcceptanceDetail = acceptancePassed ? "tests-passed" : "tests-failed-exit-1",
+                AcceptanceDetail = patchOnly ? "no-branch-or-repo" : acceptancePassed ? "tests-passed" : "tests-failed-exit-1",
                 AcceptanceEvidenceId = Guid.NewGuid(),
-                ProducedBranch = "codespace/agent/root",
-                PushedCommitSha = "c1",
+                ChangedFiles = patchOnly ? new[] { "src/parser.cs" } : Array.Empty<string>(),
+                ProducedBranch = patchOnly ? null : "codespace/agent/root",
+                PushedCommitSha = patchOnly ? null : "c1",
             }, AgentJson.Options);
 
             if (withManifest)

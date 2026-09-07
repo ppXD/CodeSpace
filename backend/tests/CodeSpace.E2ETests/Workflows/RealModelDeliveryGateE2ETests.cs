@@ -132,8 +132,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
             // ── Phase 1: the live model must have driven to a stop, and the gate must have PARKED it. ──
             var afterDrive = await SnapshotAsync(runId, teamId);
 
-            if (afterDrive.RunStatus == WorkflowRunStatus.Failure)
-                return (RealModelOutcome.CodeFault, $"the run FAILED mid-arc (error={afterDrive.RunError ?? "(none)"}) — an engine fault, not a model outcome");
+            if (afterDrive.RunStatus == WorkflowRunStatus.Failure) return FailedRunVerdict(afterDrive.RunError, "mid-arc");
 
             if (afterDrive.RunStatus == WorkflowRunStatus.Success)
                 return (RealModelOutcome.CodeFault,
@@ -170,8 +169,7 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
 
                 final = await SnapshotAsync(runId, teamId);
 
-                if (final.RunStatus == WorkflowRunStatus.Failure)
-                    return (RealModelOutcome.CodeFault, $"the run FAILED after an adjudication answer (error={final.RunError ?? "(none)"})");
+                if (final.RunStatus == WorkflowRunStatus.Failure) return FailedRunVerdict(final.RunError, "after an adjudication answer");
             }
 
             if (final.RunStatus != WorkflowRunStatus.Success)
@@ -249,6 +247,22 @@ public sealed class RealModelDeliveryGateE2ETests : IDisposable
         return anyAgentShowsWork
             ? (RealModelOutcome.CodeFault, $"agent results on the tape SHOW work but zero publish manifests were captured — the capture/publish pipeline swallowed it: '{Truncate(question)}'")
             : (RealModelOutcome.CapabilityMiss, $"the agents captured NO work at all (zero publish manifests, and no agent result shows work) — the gate's empty-publish card is honest; the live model never produced a diff to publish: '{Truncate(question)}' — reported, not gating");
+    }
+
+    /// <summary>
+    /// This arm's verdict for a run that ended <see cref="WorkflowRunStatus.Failure"/>, over the lane-wide rule
+    /// (<see cref="RealModelGate.ClassifyRunFailure"/>): the completion authority's own honest-failure terminal is
+    /// a CAPABILITY MISS the arm reports, everything else is the engine fault it gates on. The note says which,
+    /// because "the run FAILED" over a designed terminal is exactly how run 34068400279 reddened this REQUIRED lane
+    /// for a brain that had re-planned itself into an empty receipt set AFTER the human adjudicated the conflict.
+    /// </summary>
+    internal static (RealModelOutcome Outcome, string Note) FailedRunVerdict(string? runError, string where)
+    {
+        var outcome = RealModelGate.ClassifyRunFailure(runError);
+
+        return outcome == RealModelOutcome.CapabilityMiss
+            ? (outcome, $"the run reached the completion authority's own honest failure {where} (error={runError}) — the arbiter refusing to claim a success it cannot evidence is the protocol working, so this is a brain shortfall; reported, not gating")
+            : (outcome, $"the run FAILED {where} (error={runError ?? "(none)"}) — an engine fault, not a model outcome");
     }
 
     // ─── Tape/state snapshot ─────────────────────────────────────────────────────────

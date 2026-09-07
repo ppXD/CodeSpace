@@ -734,6 +734,30 @@ public static class RealModelGate
     }
 
     /// <summary>
+    /// The ONE rule every arm applies to a run that ended <see cref="WorkflowRunStatus.Failure"/>: a
+    /// <see cref="RealModelOutcome.CodeFault"/> (the engine could not execute the brain's decisions — gates the
+    /// blessed wire) UNLESS the terminal is the completion authority's own DESIGNED non-success, which is a
+    /// <see cref="RealModelOutcome.CapabilityMiss"/> (reported, never gating).
+    ///
+    /// <para>The arbiter stamps Failure on purpose: an Enforced-cohort run whose contract is not evidenced folds to
+    /// <c>TerminalDecision.HonestFailure</c> and the authority OVERRIDES the engine's Success with
+    /// <see cref="CodeSpace.Core.Services.Completion.CompletionTerminalAuthority.HonestFailureReasonPrefix"/>. That
+    /// is the protocol refusing to claim a success it cannot prove — the single most important thing it does — and
+    /// what put the run there is a BRAIN shortfall (a churned tape, an empty receipt set), the definition of a
+    /// capability miss. Run 34068400279 reached it after a human had adjudicated the patch-only delivery conflict,
+    /// and the delivery-gate arm reported "the engine FAULTED" over it.</para>
+    ///
+    /// <para>MARKER, never a word (the <see cref="RealModelRunClassifier"/> rule): the prefix is matched at the
+    /// START of the run's error, the slot only the arbiter writes. A run error that merely CONTAINS the phrase (an
+    /// agent quoting a park card in a failure message) is an unrecognised engine fault like any other and GATES —
+    /// conservative in the direction that cannot hide a regression.</para>
+    /// </summary>
+    public static RealModelOutcome ClassifyRunFailure(string? runError) =>
+        runError?.StartsWith(CodeSpace.Core.Services.Completion.CompletionTerminalAuthority.HonestFailureReasonPrefix, StringComparison.Ordinal) == true
+            ? RealModelOutcome.CapabilityMiss
+            : RealModelOutcome.CodeFault;
+
+    /// <summary>
     /// Whether a supervisor run's TERMINAL STOP payload is the model-plane park's own honest ending — the forced stop
     /// the node writes (<c>SupervisorStopReasons.ModelPlaneUnavailable</c>) once a brain-call outage has outlived the
     /// whole 24h park window. It is a clean <c>stop</c> that reaches a Success walk, so every whole-loop evaluator

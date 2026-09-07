@@ -57,7 +57,10 @@ public static class SupervisorGradedReceipts
                     WorkUnit = workUnitByAttempt?.GetValueOrDefault(results[i].AgentRunId),
                     Disposition = waived
                         ? VerificationDisposition.Waived
-                        : VerificationDispositions.Classify(results[i].AcceptancePassed, results[i].AcceptanceDetail, workPresent: !string.IsNullOrEmpty(results[i].ProducedBranch)),
+                        // Work-present is the SHARED read (AgentWorkPresence), never ProducedBranch alone: under a
+                        // patch-only policy nothing is ever pushed, so a branch-only test made this receipt say
+                        // Failed for the very grade the decider had just recited to the model as UNVERIFIED.
+                        : VerificationDispositions.Classify(results[i].AcceptancePassed, results[i].AcceptanceDetail, workPresent: SupervisorOutcome.ResultShowsWork(results[i])),
                     Authority = waived ? ContractAuthority.Operator : ContractAuthority.ServerPolicy,
                     EvidenceRef = results[i].AcceptanceEvidenceId,
                     EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,
