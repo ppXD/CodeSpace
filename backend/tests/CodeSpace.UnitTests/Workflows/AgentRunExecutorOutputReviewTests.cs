@@ -328,6 +328,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a broken co-check must not manufacture a flag — fail-open to the agent's approval");
         result.UnreviewedReason.ShouldBeNull("the AGENT'S OWN verdict stood — a broken co-check is not the run going unreviewed");
         critic.CallCount.ShouldBe(1);
+        critic.ObservedRequest!.AgentRunId.ShouldBe(runId, "the D② co-sign's request names the reviewed unit, so its review.skipped beat groups with a later review.completed beat for the SAME run instead of falling back to the ledger cell");
         runs.AppendedEvents.ShouldBeEmpty();
     }
 
@@ -357,6 +358,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.UnreviewedReason.ShouldBeNull("the LADDERED model call produced a real verdict — the run was reviewed, just not by the agent");
         critic.CallCount.ShouldBe(1, "the model call is the LADDER — a laddered model approval never co-signs itself");
+        critic.ObservedRequest!.AgentRunId.ShouldBe(runId, "the laddered model rung's request names the reviewed unit too, exactly like the co-sign's");
     }
 
     // ── C1: a TEXT-ONLY answer is graded like a deliverable ──

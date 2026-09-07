@@ -44,6 +44,16 @@ public sealed record CriticRequest
     /// check what this run produced?" must not be answered yes by either. Every kind is a const on the critic (Rule 8).
     /// </summary>
     public string? CallKind { get; init; }
+
+    /// <summary>
+    /// The AGENT RUN this review is ABOUT — set only by the OUTPUT review's two call sites (the model rung and the D②
+    /// co-sign), mirroring <c>AgentRunExecutor.RecordOutputReviewVerdictAsync</c>'s own <c>agentRunId</c>. Without it, a
+    /// <c>review.skipped</c> beat (which never otherwise names a unit) fell back to its ledger CELL while a
+    /// <c>review.completed</c> beat for the SAME run grouped by this id — one reviewed unit read as two in
+    /// <c>RoomProjector.FoldReviewVerdicts</c>, letting a stray skip outrank the run's own later verdict. A plan/decision
+    /// review names no unit (unchanged) — there is no single agent run an intention review is "about".
+    /// </summary>
+    public Guid? AgentRunId { get; init; }
 }
 
 /// <summary>

@@ -117,6 +117,10 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     /// both directions: a call outside any run (no ambient scope) records nothing, and a ledger write that faults is
     /// swallowed — saying a review was skipped may never itself break the run. Written on <see cref="CancellationToken.None"/>
     /// because the caller's token is commonly cancelled by the very failure being recorded.
+    ///
+    /// <para><c>agentRunId</c> rides the key regardless (null for a plan/decision review, valued for an OUTPUT
+    /// review) — the same "key always present" shape <c>reviewerModel</c> already uses, so a reader tells "no unit
+    /// named" from "the key was never written" off one stable payload instead of two.</para>
     /// </summary>
     private async Task RecordSkippedAsync(CriticRequest request, string reason)
     {
@@ -124,7 +128,7 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
         try
         {
-            var payload = JsonSerializer.SerializeToElement(new { kind = SkippedCallKind, mode = request.Mode.ToString(), artifact_kind = request.ArtifactKind, reason });
+            var payload = JsonSerializer.SerializeToElement(new { kind = SkippedCallKind, mode = request.Mode.ToString(), artifact_kind = request.ArtifactKind, reason, agentRunId = request.AgentRunId });
 
             await scope.Logger.RecordInteractionAsync(scope.RunId, WorkflowRunRecordTypes.ReviewSkipped, scope.NodeId, scope.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, CancellationToken.None).ConfigureAwait(false);
         }

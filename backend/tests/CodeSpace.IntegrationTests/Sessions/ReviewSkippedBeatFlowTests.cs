@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
@@ -66,8 +67,28 @@ public sealed class ReviewSkippedBeatFlowTests
         (await NarrativeAsync(run)).ShouldBeEmpty();
     }
 
-    /// <summary>Run the REAL critic against <paramref name="client"/> under a real ledger-writing scope bound to the seeded run.</summary>
-    private async Task<CriticVerdict> ReviewAsync(SeededRun run, ILLMClient client)
+    [Fact]
+    public async Task A_faulted_OUTPUT_review_names_the_reviewed_agent_run_on_its_skipped_beat()
+    {
+        // 5.6 residual: AgentRunExecutor.BuildReviewRequestAsync threads the reviewed unit's AgentRunId onto the
+        // OUTPUT review's request (the model rung + the D② co-sign). Before that thread existed, the critic's
+        // review.skipped beat never named a unit at all, so a faulted co-sign fell back to its ledger CELL while a
+        // review.completed beat for the SAME agent run grouped by the real id — RoomProjector.FoldReviewVerdicts
+        // read one reviewed unit as two, and the stray skip could outrank the run's own later approval.
+        var run = await SeedRunAsync();
+        var agentRunId = Guid.NewGuid();
+
+        await ReviewAsync(run, new ThrowingStructuredClient(new InvalidOperationException("the independent model co-check faulted")),
+            new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = "diff --git ...", Goal = "ship", CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = agentRunId });
+
+        var payload = await RawSkippedPayloadAsync(run);
+
+        payload.GetProperty("agentRunId").GetString().ShouldBe(agentRunId.ToString(),
+            "the same id AgentRunExecutor.RecordOutputReviewVerdictAsync stamps on a review.completed beat for this run, so the Room's fold groups both beats under ONE unit");
+    }
+
+    /// <summary>Run the REAL critic against <paramref name="client"/> under a real ledger-writing scope bound to the seeded run. <paramref name="request"/> defaults to a plain SUPERVISOR DECISION review (names no agent run).</summary>
+    private async Task<CriticVerdict> ReviewAsync(SeededRun run, ILLMClient client, CriticRequest? request = null)
     {
         using var scope = _fixture.BeginScope();
 
@@ -76,7 +97,7 @@ public sealed class ReviewSkippedBeatFlowTests
         using (LlmCallContext.Push(new LlmCallScope(run.RunId, run.TeamId, "sup", "sup#turn0", "supervisor.decision", scope.Resolve<IRunRecordLogger>(), Offloader: null!)))
         {
             return await critic.ReviewAsync(
-                new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.SupervisorDecision, Artifact = "spawn: {}", Goal = "ship" },
+                request ?? new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.SupervisorDecision, Artifact = "spawn: {}", Goal = "ship" },
                 run.TeamId, reviewerModelId: Guid.NewGuid(), CancellationToken.None);
         }
     }
@@ -89,6 +110,17 @@ public sealed class ReviewSkippedBeatFlowTests
         var events = await scope.Resolve<RunRecordTimelineSource>().ContributeAsync(new RunTimelineContext { RunId = run.RunId, TeamId = run.TeamId }, CancellationToken.None);
 
         return events.Where(e => e.Kind == WorkflowRunRecordTypes.ReviewSkipped).ToList();
+    }
+
+    /// <summary>The run's single review.skipped beat's RAW ledger payload — read off the row directly rather than through the narrative projection, so this proves what <see cref="LlmStructuredCritic"/> WROTE, independent of how the journal or the Room later reads it.</summary>
+    private async Task<JsonElement> RawSkippedPayloadAsync(SeededRun run)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var row = await db.WorkflowRunRecord.AsNoTracking().SingleAsync(r => r.RunId == run.RunId && r.RecordType == WorkflowRunRecordTypes.ReviewSkipped);
+
+        return JsonDocument.Parse(row.PayloadJson).RootElement;
     }
 
     private async Task<SeededRun> SeedRunAsync()

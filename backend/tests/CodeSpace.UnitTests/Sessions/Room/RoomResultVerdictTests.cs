@@ -242,16 +242,38 @@ public class RoomResultVerdictTests
     {
         // Improve mode: the first critic call could not resolve a reviewer; a later round's call succeeded and
         // approved. The unit's LATEST word is the approval, so the earlier skip must not keep the run flagged as
-        // unreviewed forever.
+        // unreviewed forever. The two beats land on DIFFERENT cells — tied together ONLY by sharing one real
+        // agentRunId — so this proves the fold groups by the id, not by an accidental cell match.
         var fold = RoomProjector.FoldReviewVerdicts(
             new[]
             {
-                (Cell("agent", ""), 10L, SkippedVerdict("no reviewer model")),
-                (Cell("agent", ""), 11L, Verdict(null, approved: true, "Clean on the second pass.")),
+                (Cell("agent", ""), 10L, SkippedVerdict("no reviewer model", Parser)),
+                (Cell("agent", "retry"), 11L, Verdict(Parser, approved: true, "Clean on the second pass.")),
             },
             UnitLabels);
 
         fold.ShouldBe((true, (string?)null, (string?)null));
+    }
+
+    [Fact]
+    public void A_completed_and_a_skipped_beat_sharing_ONE_agent_run_id_fold_to_a_SINGLE_unit()
+    {
+        // D② reachable in production: an agent reviewer's approval buys an independent model co-sign; the co-sign
+        // FAULTS and the critic's own review.skipped beat lands on the ledger — but the agent's approval still
+        // stands (fail-open), so a review.completed beat for the SAME reviewed unit follows it. Before the
+        // threading fix the skip carried no agentRunId and fell back to its ledger cell while the completed beat
+        // grouped by the real id: the fold read ONE reviewed unit as TWO, and the stray skip (Approved: null)
+        // could outrank a sibling's real verdict purely from being miscounted as a second unit.
+        var fold = RoomProjector.FoldReviewVerdicts(
+            new[]
+            {
+                (Cell("agent", ""), 10L, SkippedVerdict("the independent model co-check faulted", Parser)),
+                (Cell("agent", ""), 11L, Verdict(Parser, approved: true, "The reviewer agent approved.")),
+                (Cell("write-migration", ""), 12L, Verdict(Migration, approved: true, "Clean.")),
+            },
+            UnitLabels);
+
+        fold.ShouldBe((true, (string?)null, (string?)null), "TWO distinct reviewed units (parser, migration), both resolving to an approval — never three");
     }
 
     [Fact]
@@ -574,7 +596,12 @@ public class RoomResultVerdictTests
     private static string Verdict(string? agentRunId, bool approved, string reason) =>
         JsonSerializer.Serialize(new { kind = "critic.output", agentRunId, approved, reason });
 
-    /// <summary>One <c>review.skipped</c> payload, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it — no <c>agentRunId</c> key at all, so the fold always falls back to the ledger cell.</summary>
-    private static string SkippedVerdict(string reason) =>
-        JsonSerializer.Serialize(new { kind = "critic.skipped", mode = "Gate", artifact_kind = "agent change", reason });
+    /// <summary>
+    /// One <c>review.skipped</c> payload, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it.
+    /// <paramref name="agentRunId"/> defaults to absent — a plan/decision review, or an OUTPUT review beat recorded
+    /// before the 5.6 threading fix — so the fold falls back to the ledger cell; pass it to simulate an OUTPUT
+    /// review's skip, which now names the reviewed unit exactly as its <c>review.completed</c> sibling does.
+    /// </summary>
+    private static string SkippedVerdict(string reason, string? agentRunId = null) =>
+        JsonSerializer.Serialize(new { kind = "critic.skipped", mode = "Gate", artifact_kind = "agent change", reason, agentRunId });
 }

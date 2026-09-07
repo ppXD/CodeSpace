@@ -2517,15 +2517,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// render judged against the goal plus the task's own acceptance criteria (an answer's "done" is its contract, not
     /// its file list). BOTH shapes name <see cref="LlmStructuredCritic.OutputReviewCallKind"/>: this is the one review
     /// rung that examines a produced RESULT, and the Room's "did anything check this?" probe reads exactly that kind.
+    ///
+    /// <para><c>AgentRunId</c> rides too, for the SAME reason <see cref="RecordOutputReviewVerdictAsync"/> stamps
+    /// <c>run.Id</c> on its own beat: the memoized request here backs BOTH the model rung and the D② co-sign, so
+    /// whichever one lands a <c>review.skipped</c> beat (<see cref="LlmStructuredCritic.RecordSkippedAsync"/>) names the
+    /// same unit a later <c>review.completed</c> beat would — one reviewed unit, never two, in the Room's fold.</para>
     /// </summary>
     private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (HasDiff(result))
-            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind };
+            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id };
 
         var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
 
-        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind };
+        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id };
     }
 
     /// <summary>The goal the critic judges an ANSWER against — the task goal plus the acceptance criteria the operator/planner authored, so "is this done?" is asked against the stated contract rather than against the prose alone. No contract ⇒ the goal verbatim.</summary>
