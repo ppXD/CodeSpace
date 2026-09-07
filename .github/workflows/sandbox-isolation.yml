@@ -118,6 +118,24 @@ jobs:
             exit 1
           fi
 
+      - name: Assert batch and stream kernel coverage passed
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('backend/TestResults/sandbox.trx').getroot()
+          results = root.findall('.//{*}UnitTestResult')
+          methods = (
+              'Commands_can_write_their_workspace_but_cannot_read_other_workspaces_or_write_system_roots',
+              'Network_denial_blocks_a_real_host_listener_and_explicit_network_access_can_reach_it',
+              'File_size_caps_reach_the_real_command',
+              'Memory_caps_are_enforced_classified_from_the_kernel_and_reclaimed',
+          )
+          for method in methods:
+              cases = [r for r in results if 'CommandIsolationE2ETests.' + method + '(' in r.get('testName', '')]
+              assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both batch and stream must pass, skips are not evidence'
+          print('All 8 batch/stream kernel cases passed.')
+          PY
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
