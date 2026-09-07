@@ -1122,9 +1122,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
+        // The oracle anchor the helper's DEFAULT goal carries, restored on this arm's own goal. Opting out of it made
+        // this arm measure oracle AUTHORING instead of conflict handling: the live model authored per-subtask checks
+        // the marker-file fakes can never satisfy, both producers graded acceptance-REJECTED, and the un-amended infra
+        // steer asked for a re-plan that could not move those verdicts — plan→spawn→plan×6→stop on the no-progress
+        // guard, ~25-40% of attempts (runs 34104701023 and 34101026801 attempt 2). The steer now has its own exit ramp,
+        // but the arm should never have been spending its attempts on that question: its subject is conflict→resolve.
         const string goal = "The file shared.txt needs two improvements developed IN PARALLEL by two separate agents, each editing shared.txt: "
                           + "(1) add input validation, and (2) add error logging. Spawn one agent per improvement, integrate their branches, "
-                          + "and if the integration conflicts, resolve it into one reconciled version before finishing.";
+                          + "and if the integration conflicts, resolve it into one reconciled version before finishing. "
+                          + "For EVERY subtask, author its acceptance check as exactly the command `sh check.sh` (the repository's own seeded gate) "
+                          + "— this repository has NO other test tooling, so any other acceptance command will fail regardless of the work.";
 
         // Shadow: the arc ends on a deliberately CONFLICTED integration whose recovery card IS the subject — it
         // never reaches a clean head for the authority to arbitrate.

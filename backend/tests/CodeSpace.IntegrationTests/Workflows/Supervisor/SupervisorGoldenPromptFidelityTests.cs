@@ -128,7 +128,7 @@ public class SupervisorGoldenPromptFidelityTests
         SupervisorAmendObligation.FirstOutstanding(scenario.Context.PriorDecisions)
             .ShouldBe("s2", "the fixture must really carry an unconsumed co-sign, or the scenario measures nothing it claims to");
 
-        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.AwaitingRetry), Case.Sensitive,
+        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.AwaitingRetry, SupervisorReplanExit.None), Case.Sensitive,
             "the unit's own verdict line must steer at the retry its accepted set demands");
         prompt.ShouldNotContain("Re-plan this item", Case.Insensitive,
             "a scenario graded on 'retry' whose prompt asks for a re-plan measures obedience to a contradiction, not judgement");
@@ -155,7 +155,7 @@ public class SupervisorGoldenPromptFidelityTests
             SupervisorAmendObligation.StandingFor(scenario.Context.PriorDecisions, subtaskId).ShouldBe(SupervisorAmendStanding.Discarded,
                 $"'{subtaskId}' must really carry a co-sign a later plan discarded, or the scenario measures nothing it claims to");
 
-        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.Discarded), Case.Sensitive,
+        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.Discarded, SupervisorReplanExit.None), Case.Sensitive,
             "the unit's own verdict line must steer at the verb its accepted set demands");
         prompt.ShouldContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive,
             "…and the prompt must state, once, why the plan it just refused is the move that lost the repair");
@@ -165,6 +165,47 @@ public class SupervisorGoldenPromptFidelityTests
             "the plan-state recitation asks for the re-plan the verdict block forbids — one prompt, two verbs, and the model picks whichever it read last");
         prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive,
             "a discarded amendment owes no retry — the banner is outstanding-only, and this reading is steer-only");
+    }
+
+    /// <summary>
+    /// The same bond with no human in it: <c>re-plan-left-the-verdict-unchanged</c> is graded on the amendment or a
+    /// human ruling, so its prompt must say a re-plan already left the verdict where it found it and must NOT ask
+    /// for another plan — in the results block OR in the plan-state recitation, which otherwise recites "re-plan the
+    /// check" one screen from the steer that withdrew it.
+    ///
+    /// <para>This is the tape the ~25-40% attractor actually ran on: no co-sign, so every amended steer was
+    /// inapplicable and the un-amended one re-rendered verbatim after each of six plans (runs 34104701023 and
+    /// 34101026801 attempt 2). Derived from the decider's own ramp rather than restated, so a reword stays a
+    /// one-file change.</para>
+    /// </summary>
+    [Fact]
+    public void The_re_planned_scenario_is_steered_off_the_plan_it_already_spent()
+    {
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "re-plan-left-the-verdict-unchanged");
+
+        foreach (var subtaskId in new[] { "s1", "s2" })
+        {
+            SupervisorAmendObligation.StandingFor(scenario.Context.PriorDecisions, subtaskId).ShouldBe(SupervisorAmendStanding.None,
+                $"'{subtaskId}' must carry NO co-sign, or this scenario is the discarded one with a different name and measures the arm that already had a ramp");
+            SupervisorReplanStanding.ExitFor(scenario.Context.PriorDecisions, subtaskId).ShouldBe(SupervisorReplanExit.ToAmendment,
+                $"'{subtaskId}' must really have had a re-plan spent on it without its verdict moving, or the scenario measures nothing it claims to");
+        }
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToAmendment)!, Case.Sensitive,
+            "the unit's own verdict line must steer at the verbs its accepted set demands");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive,
+            "a scenario graded on amend/ask whose prompt asks for a re-plan is the pre-fix prompt with a new name");
+        prompt.ShouldNotContain("re-plan the check", Case.Insensitive,
+            "…and the plan-state recitation must not ask for it either — one prompt, two verbs, and the model picks whichever it read last");
+        prompt.ShouldNotContain(LlmSupervisorDecider.ReplanDiscardsTheCosign, Case.Sensitive,
+            "no human has co-signed anything on this tape, so there is no amendment a plan could discard — saying otherwise is a rule the model cannot act on");
+
+        OfferedInPrompt(prompt).ShouldContain(SupervisorDecisionKinds.AmendAcceptance, "the menu offers the verb the steer names");
+        WithheldInPrompt(prompt).ShouldNotContain(SupervisorDecisionKinds.AmendAcceptance, "…and never in the same breath");
+        SupervisorMergeContributors.Resolve(scenario.Context.PriorDecisions).AgentRunIds
+            .ShouldBeEmpty("a mergeable contributor makes 'merge' a defensible answer, and the accepted set does not admit it");
     }
 
     /// <summary>
@@ -401,7 +442,8 @@ public class SupervisorGoldenPromptFidelityTests
         "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "amended-oracle-awaiting-retry",
         "amended-oracle-discarded-by-replan", "five-subtask-middle-failed", "four-subtask-all-succeeded",
         "four-subtask-two-failed", "merge-conflict", "mixed-results",
-        "multi-file-conflict", "resolve-cap-spent", "retried-failure-succeeded", "retried-still-failed",
+        "multi-file-conflict", "re-plan-left-the-verdict-unchanged", "resolve-cap-spent",
+        "retried-failure-succeeded", "retried-still-failed",
         "subset-conflict-across-three", "three-subtask-all-succeeded", "three-subtask-partial-failure",
         "unverified-resolution",
     };
@@ -475,24 +517,30 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// LAST RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the whole tape
-    /// (<c>SupervisorAmendPrecondition</c>), so <c>amend_acceptance</c> moved from the roster's WITHHELD half to its
-    /// OFFERED half on <c>amended-oracle-discarded-by-replan</c> — the one tape in the corpus whose re-plan closed
-    /// the window over the infra grade an amendment answers. One verb, one scenario, one block; every other
-    /// scenario's prompt is byte-identical, and both halves of that claim are DERIVED rather than asserted in prose:
-    /// <see cref="The_rendered_corpus_matches_its_pinned_digest"/>'s wind-back anchors still reproduce (they undo the
-    /// roster wholesale, and <see cref="AsMaskedBeforeTheAmendArm"/> deletes the amend line from either rendering, so
-    /// they are blind to the arm by construction and would only move if a block OUTSIDE the roster had), and
-    /// <see cref="Only_the_discarded_cosign_scenario_offers_the_amend_verb"/> pins which scenario's roster moved —
-    /// the offered-amend set was EMPTY across all 25 before this change.
+    /// LAST RE-PIN: corpus GROWTH and nothing else — <c>re-plan-left-the-verdict-unchanged</c> joined it, a 26th
+    /// decision point for the re-plan fixed point with no co-sign in it (a re-plan spent on an unrunnable check
+    /// whose verdict did not move: the shape arm
+    /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> failed ~25-40% of its attempts on,
+    /// <c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2).
     ///
-    /// <para>The corpus's numbers stay comparable because no scenario's <c>AcceptedKinds</c> changed and the moved
-    /// verb moves TOWARD the answer key it already had: <c>amended-oracle-discarded-by-replan</c> grades
-    /// <c>amend_acceptance</c> and its Discarded steer names it. The prompt it was measured under contradicted
-    /// itself — steered at the verb, one screen under a menu reporting it unavailable — and the decision eval's model
-    /// answered with a third one (<c>merge</c>, run 34085079257 at 24/25).</para>
+    /// <para>The corpus's numbers stay comparable because NO pre-existing scenario's prompt moved, and that is
+    /// DERIVED rather than claimed: <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes today's
+    /// rendering over the 25 scenarios that predate this pin and requires <see cref="StaticVerbRosterCorpusDigest"/>
+    /// back through its wind-back, and over the 23 older ones for the two pins beneath it. The new steer is derived
+    /// from a spent re-plan on the tape (<see cref="SupervisorReplanStanding"/>), and the corpus's only other tape
+    /// with a re-plan on it carries co-signs, so its units read
+    /// <see cref="SupervisorAmendStanding.Discarded"/> and keep the steer they already had.</para>
+    ///
+    /// <para>PREVIOUS RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the
+    /// whole tape (<c>SupervisorAmendPrecondition</c>), so <c>amend_acceptance</c> moved from the roster's WITHHELD
+    /// half to its OFFERED half on <c>amended-oracle-discarded-by-replan</c> — the one tape in the corpus whose
+    /// re-plan closed the window over the infra grade an amendment answers. That scenario grades
+    /// <c>amend_acceptance</c> and its Discarded steer names it, while the prompt it had been measured under
+    /// reported the verb unavailable one screen below, and the decision eval's model answered with a third one
+    /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
+    /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "ec5fda2f0089995c9ed24def435bc63dff065ff81562b9d190018ce347613ada";
+    private const string GoldenPromptDigest = "a4eed5ee066f3b5664d732280123001aba06a48df378ded8e76f82202a514717";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -508,7 +556,8 @@ public class SupervisorGoldenPromptFidelityTests
     /// the mask block it grew out of (as that mask read before it could withhold <c>amend_acceptance</c>), the
     /// conflicted-integration block's cap-aware closing line replaced by the invitation it retired, and the prompt's
     /// cap-aware closing sentence replaced by the unconditional one — and this pin then reproduces itself over the
-    /// whole 25-scenario corpus, while the three 23-scenario anchors below reproduce theirs over the subset they
+    /// 25 scenarios it was taken at (<see cref="AddedSinceTheRosterPin"/> excludes the later ones), while the three
+    /// 23-scenario anchors below reproduce theirs over the subset they
     /// were each taken at. So the moved bytes are exactly those three blocks and nothing else: the roster on every
     /// scenario, and the closing line and closing sentence on the tapes that record a conflict with the resolve cap
     /// spent (<c>resolve-cap-spent</c>, <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and
@@ -573,13 +622,12 @@ public class SupervisorGoldenPromptFidelityTests
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()
     {
-        // THIS commit's receipt, and the only one the two co-sign scenarios get: wind the two blocks it moved back
-        // to what they replaced — the roster to the mask block it grew out of, the cap-aware closing line to the
-        // invitation it retired — and the whole-corpus pin that stood before them must return. Taken over EVERY
-        // scenario rather than the pre-co-sign subset because 25 IS the corpus this pin was measured at, per the
-        // per-pin-corpus rule on AddedSinceTheSupersededPins. A third block that drifted into this commit fails
-        // here, where the two named ones are still separable from it, instead of hiding inside the re-pin below.
-        Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context))).ShouldBe(StaticVerbRosterCorpusDigest,
+        // The roster commit's receipt: wind the two blocks it moved back to what they replaced — the roster to the
+        // mask block it grew out of, the cap-aware closing line to the invitation it retired — and the pin that
+        // stood before them must return, over the 25 scenarios that pin was measured at (AddedSinceTheRosterPin —
+        // the per-pin-corpus rule the set below states). A block that drifted into this commit fails here, where the named
+        // ones are still separable from it, instead of hiding inside the re-pin below.
+        Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context), PredatesTheRosterPin)).ShouldBe(StaticVerbRosterCorpusDigest,
             "undoing the roster and the cap-aware closing line no longer reproduces the pin this corpus carried before them — so those two blocks are not the whole delta, and the new pin below cannot be attributed to them");
 
         // This re-pin's receipt: over the scenarios that predate it, today's rendering still digests to the
@@ -623,18 +671,22 @@ public class SupervisorGoldenPromptFidelityTests
     /// </summary>
     private static readonly HashSet<string> AmendOfferedScenarios = new(StringComparer.Ordinal)
     {
-        "amended-oracle-discarded-by-replan",
+        "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged",
     };
 
     /// <summary>
-    /// WHICH scenario's roster block moved in the re-pin above. Before the amend gate's evidence read widened to the
-    /// whole tape this set was EMPTY across all 25 scenarios — the mask withheld the verb everywhere, the
-    /// discarded-co-sign tape included — so pinning the set today is what turns "one verb on one scenario" from a
+    /// WHICH scenarios' roster block offers the verb. Before the amend gate's evidence read widened to the whole
+    /// tape this set was EMPTY across all 25 scenarios — the mask withheld the verb everywhere, the
+    /// discarded-co-sign tape included — so pinning the set is what turns "these tapes and no others" from a
     /// sentence in a doc-comment into a fact a build can refute. The sibling anchors prove nothing outside the roster
     /// block moved; this proves whose roster block did.
+    ///
+    /// <para>It is a TWO-element set now: <c>re-plan-left-the-verdict-unchanged</c> is the same unrunnable-check
+    /// evidence with no co-sign on it, so the gate admits an amendment there too — and its steer names the verb,
+    /// which is only honest while the menu offers it.</para>
     /// </summary>
     [Fact]
-    public void Only_the_discarded_cosign_scenario_offers_the_amend_verb()
+    public void Exactly_the_amendable_tapes_offer_the_amend_verb()
     {
         SupervisorDecisionGoldenScenarios.All
             .Where(s => OfferedInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(s.Context)).Contains(SupervisorDecisionKinds.AmendAcceptance))
@@ -693,7 +745,7 @@ public class SupervisorGoldenPromptFidelityTests
     public void The_digest_covers_every_scenario_in_the_corpus()
     {
         // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
-        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(25, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(26, "a scenario was added or dropped — re-pin this count together with the digest");
         SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
@@ -751,18 +803,26 @@ public class SupervisorGoldenPromptFidelityTests
     ///
     /// <para>ONE set serves ALL THREE 23-scenario pins, and that is only sound while they were taken over the SAME
     /// corpus — they were: <see cref="DimensionsOnlyCorpusDigest"/>, <see cref="PreCosignScenarioCorpusDigest"/> and
-    /// <see cref="ConstantSteerCorpusDigest"/> all stood at the corpus's 23 pre-co-sign scenarios. (The fourth,
-    /// <see cref="StaticVerbRosterCorpusDigest"/>, was taken at 25 and is recomputed over the whole corpus, which is
-    /// why it does not use this set.) The moment a pin is taken at a different corpus size, split this into a
-    /// per-pin set: excluding from a pin a scenario it already covered would silently recompute that pin over a
-    /// corpus it never measured, which is exactly the degradation above.</para>
+    /// <see cref="ConstantSteerCorpusDigest"/> all stood at the corpus's 23 pre-co-sign scenarios. The fourth,
+    /// <see cref="StaticVerbRosterCorpusDigest"/>, was taken at 25, so it gets its OWN set
+    /// (<see cref="AddedSinceTheRosterPin"/>) — the split this comment demanded the moment a pin was taken at a
+    /// different corpus size, because excluding from a pin a scenario it already covered would silently recompute
+    /// that pin over a corpus it never measured, which is exactly the degradation above.</para>
     /// </summary>
     private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
     {
-        "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan",
+        "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged",
+    };
+
+    /// <summary>Scenarios added after <see cref="StaticVerbRosterCorpusDigest"/> was taken. That pin measured 25 scenarios — the two co-sign ones INCLUDED, which is why they are absent here and why this cannot be folded into the 23-scenario set above.</summary>
+    private static readonly HashSet<string> AddedSinceTheRosterPin = new(StringComparer.Ordinal)
+    {
+        "re-plan-left-the-verdict-unchanged",
     };
 
     private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);
+
+    private static bool PredatesTheRosterPin(SupervisorGoldenScenario scenario) => !AddedSinceTheRosterPin.Contains(scenario.Name);
 
     /// <summary>
     /// The conflicted-integration block's closing line as it read BEFORE it became cap-aware — the copy that
