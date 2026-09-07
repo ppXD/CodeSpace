@@ -709,7 +709,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         // already finished) into the NON-hashed outcome — never the payload, so none can drift the idempotency key —
         // so the journal can attribute how the decision was made, SHOW the adversarial middle, and distinguish a
         // decision authored outright from one that cost a second round-trip. Null usage / no reviews / no re-ask are no-ops.
-        var outcome = SupervisorOutcome.WriteRetryTargetReask(SupervisorOutcome.WritePayloadReask(SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), decision.Reviews), decision.PayloadReaskedFromKind), decision.RetryTargetReasked);
+        var outcome = SupervisorOutcome.WriteRetryTargetReask(SupervisorOutcome.WritePayloadReask(SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage(execution.OutcomeJson, decision.Usage), decision.Reviews), decision.PayloadReaskedFromKind, decision.PayloadReaskAttempts), decision.RetryTargetReasked);
 
         await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, outcome, error: null, cancellationToken).ConfigureAwait(false);
 

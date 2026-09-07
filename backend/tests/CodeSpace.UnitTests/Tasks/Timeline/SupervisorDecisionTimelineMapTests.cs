@@ -256,12 +256,23 @@ public class SupervisorDecisionTimelineMapTests
     [Fact]
     public void A_payload_re_asked_decision_names_the_kind_it_started_from_beside_its_own_summary()
     {
-        var reasked = SupervisorOutcome.WritePayloadReask(StopOutcome("completed", "shipped the endpoint"), SupervisorDecisionKinds.Plan);
+        var reasked = SupervisorOutcome.WritePayloadReask(StopOutcome("completed", "shipped the endpoint"), SupervisorDecisionKinds.Plan, attempts: 1);
 
         var summary = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Stop, outcome: reasked)).Summary;
 
         summary.ShouldContain("shipped the endpoint", customMessage: "the verb's own summary still leads — the re-ask is how the decision was authored, not what it did");
         summary.ShouldContain("re-asked from 'plan'", customMessage: "…and the step says the decision cost a second round-trip, and which verb it abandoned");
+    }
+
+    [Fact]
+    public void A_ladder_that_recovered_nothing_says_how_many_asks_it_spent_rather_than_going_silent()
+    {
+        // The decision the executor is about to refuse. Before the count, this row rendered identically to one whose
+        // model never omitted a payload at all — the operator saw a rejected verb and no reason for it.
+        var missed = SupervisorOutcome.WritePayloadReask("{}", reaskedFromKind: null, attempts: 2);
+
+        SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Retry, outcome: missed)).Summary
+            .ShouldBe("Payload re-asked 2 times without recovering one — the action was recorded as the model first wrote it, without its payload.");
     }
 
     [Fact]

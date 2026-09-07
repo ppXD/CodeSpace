@@ -428,16 +428,20 @@ public static class SupervisorOutcome
 
     /// <summary>
     /// Fold the payload RE-ASK onto a decision's OUTCOME — <c>payloadReasked: true</c> plus the kind the model's
-    /// payload-less first reply named — NON-hashed like <see cref="WriteModelUsage"/>, so replay identity never
-    /// drifts. A null / blank kind (no re-ask, or one that recovered nothing) returns the outcome unchanged and
-    /// BYTE-IDENTICAL: the marker only ever appears on a decision a second round-trip actually paid for.
+    /// payload-less first reply named, and <c>payloadReaskAttempts</c>, how many bounded re-asks were spent — NON-hashed
+    /// like <see cref="WriteModelUsage"/>, so replay identity never drifts. A decision that spent no re-ask and
+    /// recovered nothing returns the outcome unchanged and BYTE-IDENTICAL: the markers only ever appear on a decision
+    /// a round-trip was actually paid for.
     ///
-    /// <para>Both fields are written, not one derived from the other: a reader scanning the tape for how often the
-    /// brain needed asking twice looks for the FLAG, and a reader asking which verb it abandoned looks for the KIND.</para>
+    /// <para>The two RECOVERY fields keep their meaning exactly: they are written together, only when a re-ask
+    /// recovered the decision — a reader scanning the tape for how often the brain needed asking twice looks for the
+    /// FLAG, and a reader asking which verb it abandoned looks for the KIND. The COUNT is independent of both,
+    /// because a ladder that spent every attempt and recovered nothing is precisely the case the flag cannot
+    /// describe and the one a reader most needs to see.</para>
     /// </summary>
-    public static string WritePayloadReask(string? outcomeJson, string? reaskedFromKind)
+    public static string WritePayloadReask(string? outcomeJson, string? reaskedFromKind, int attempts)
     {
-        if (string.IsNullOrWhiteSpace(reaskedFromKind)) return outcomeJson ?? "{}";
+        if (string.IsNullOrWhiteSpace(reaskedFromKind) && attempts <= 0) return outcomeJson ?? "{}";
 
         System.Text.Json.Nodes.JsonNode? root;
 
@@ -446,8 +450,13 @@ public static class SupervisorOutcome
 
         if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
 
-        obj[PayloadReaskedField] = true;
-        obj[PayloadReaskedFromKindField] = reaskedFromKind;
+        if (!string.IsNullOrWhiteSpace(reaskedFromKind))
+        {
+            obj[PayloadReaskedField] = true;
+            obj[PayloadReaskedFromKindField] = reaskedFromKind;
+        }
+
+        if (attempts > 0) obj[PayloadReaskAttemptsField] = attempts;
 
         return obj.ToJsonString();
     }
@@ -455,8 +464,12 @@ public static class SupervisorOutcome
     /// <summary>The kind a decision's payload-less first reply named before one bounded re-ask recovered it, folded by <see cref="WritePayloadReask"/>. Null when the model got it right first time (or on a malformed outcome) — a pre-fold row reads exactly as before.</summary>
     public static string? ReadPayloadReaskedFromKind(string? outcomeJson) => ReadStringField(outcomeJson, PayloadReaskedFromKindField);
 
+    /// <summary>How many bounded payload re-asks a decision cost, recovered or not, folded by <see cref="WritePayloadReask"/>. Zero when none was spent, on a malformed outcome, and on every row written before the count existed.</summary>
+    public static int ReadPayloadReaskAttempts(string? outcomeJson) => ReadIntField(outcomeJson, PayloadReaskAttemptsField) ?? 0;
+
     private const string PayloadReaskedField = "payloadReasked";
     private const string PayloadReaskedFromKindField = "payloadReaskedFromKind";
+    private const string PayloadReaskAttemptsField = "payloadReaskAttempts";
 
     /// <summary>
     /// Fold the retry-TARGET re-ask onto a decision's OUTCOME — <c>retryTargetReasked: true</c> — NON-hashed like
@@ -611,6 +624,23 @@ public static class SupervisorOutcome
 
     private static int? ReadIntField(JsonElement obj, string field) =>
         obj.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
+
+    /// <summary>Best-effort read of a top-level int field from an outcome object (null when absent / malformed / not a number), the sibling of <see cref="ReadStringField"/>.</summary>
+    private static int? ReadIntField(string? outcomeJson, string field)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object ? ReadIntField(root, field) : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>Best-effort read of a top-level string field from an outcome object (null when absent / malformed / not a string).</summary>
     private static string? ReadStringField(string? outcomeJson, string field)

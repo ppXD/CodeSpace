@@ -93,11 +93,24 @@ public class SupervisorOutcomeFoldTests
     [Fact]
     public void The_payload_re_ask_fold_round_trips_and_preserves_the_keys_it_does_not_own()
     {
-        var folded = SupervisorOutcome.WritePayloadReask(SpawnOutcomeWithEscalation(Guid.Parse("33333333-3333-3333-3333-333333333333")), SupervisorDecisionKinds.Plan);
+        var folded = SupervisorOutcome.WritePayloadReask(SpawnOutcomeWithEscalation(Guid.Parse("33333333-3333-3333-3333-333333333333")), SupervisorDecisionKinds.Plan, attempts: 1);
 
         SupervisorOutcome.ReadPayloadReaskedFromKind(folded).ShouldBe(SupervisorDecisionKinds.Plan);
         folded.ShouldContain("\"payloadReasked\":true", customMessage: "the flag a reader scans for is written explicitly, not inferred from the kind's presence");
+        SupervisorOutcome.ReadPayloadReaskAttempts(folded).ShouldBe(1, "…and how many round-trips it cost, beside the flag that says one landed");
         SupervisorOutcome.ReadEscalation(folded).ShouldNotBeNull("every fold here runs post-barrier over an outcome someone else authored");
+    }
+
+    [Fact]
+    public void A_ladder_that_spent_its_attempts_and_recovered_nothing_records_the_count_without_claiming_a_recovery()
+    {
+        // The fail-open the count exists for: the executor is about to refuse a payload the model never wrote, and
+        // without the count that row reads exactly like one where the ladder never ran.
+        var folded = SupervisorOutcome.WritePayloadReask("""{"agentCount":1}""", reaskedFromKind: null, attempts: 2);
+
+        SupervisorOutcome.ReadPayloadReaskAttempts(folded).ShouldBe(2);
+        SupervisorOutcome.ReadPayloadReaskedFromKind(folded).ShouldBeNull("nothing was recovered, so the RECOVERY fields keep their meaning and stay off the row");
+        folded.ShouldNotContain("payloadReasked\":true", customMessage: "the pre-existing flag still means 'a re-ask produced this decision' — a reader scanning for it must not start seeing misses");
     }
 
     [Theory]
@@ -108,10 +121,13 @@ public class SupervisorOutcomeFoldTests
     {
         const string outcome = """{"agentCount":1}""";
 
-        SupervisorOutcome.WritePayloadReask(outcome, noReask).ShouldBe(outcome, "the overwhelmingly common path must not touch the outcome at all");
+        SupervisorOutcome.WritePayloadReask(outcome, noReask, attempts: 0).ShouldBe(outcome, "the overwhelmingly common path must not touch the outcome at all");
         SupervisorOutcome.ReadPayloadReaskedFromKind(outcome).ShouldBeNull();
         SupervisorOutcome.ReadPayloadReaskedFromKind("not json").ShouldBeNull();
         SupervisorOutcome.ReadPayloadReaskedFromKind(null).ShouldBeNull();
+        SupervisorOutcome.ReadPayloadReaskAttempts(outcome).ShouldBe(0, "a row written before the count existed reads as zero, never as a miss");
+        SupervisorOutcome.ReadPayloadReaskAttempts("not json").ShouldBe(0);
+        SupervisorOutcome.ReadPayloadReaskAttempts(null).ShouldBe(0);
     }
 
     [Fact]

@@ -82,6 +82,25 @@ public class SupervisorDecisionEvalTests
     }
 
     [Fact]
+    public void A_retry_that_authored_no_target_is_graded_as_an_absent_payload_not_as_an_empty_string_target()
+    {
+        // The live miss the note has to describe: the model answered {"kind":"retry"} with no 'retry' object, the
+        // bounded payload re-asks never recovered one, and SupervisorDecisionProjector substituted subtaskId "".
+        // Graded as "retry targeted ''" that reads as a model that named an empty string — sending whoever reads the
+        // scorecard after a real-model run hunting a targeting bug that is really a payload-shape one.
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "five-subtask-middle-failed");
+
+        var absent = SupervisorDecisionEval.Score(scenario, Retry(""));
+
+        absent.Pass.ShouldBeFalse("an unexecutable retry never passes, however it got that way");
+        absent.Note.ShouldContain("authored NO target", customMessage: "the note names the real defect — the payload was absent and the re-ask ladder missed");
+        absent.Note.ShouldNotContain("targeted ''", customMessage: "…and never renders the projector's substitute as if the model had written it");
+
+        // A genuinely misaimed retry keeps reading exactly as it did — the split is about an ABSENT payload only.
+        SupervisorDecisionEval.Score(scenario, Retry("s1")).Note.ShouldContain("retry targeted 's1'");
+    }
+
+    [Fact]
     public void Aggregate_is_the_kill_gate_only_all_passed_arms_it()
     {
         var mixed = new[]
