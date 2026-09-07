@@ -130,11 +130,20 @@ public static class SupervisorDependencyGate
     public static Guid? LatestAgentRunId(SupervisorTurnContext context, string subtaskId) =>
         LatestResultsBySubtask(SupervisorPlanWindow.Read(context.PriorDecisions).Decisions).TryGetValue(subtaskId, out var result) ? result.AgentRunId : null;
 
-    /// <summary>Every planned subtask id's LATEST folded result (a retry's result supersedes its original), read positionally off every prior spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>) — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive from.</summary>
-    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(SupervisorTurnContext context) =>
-        LatestResultsBySubtask(SupervisorPlanWindow.Read(context.PriorDecisions).Decisions);
-
-    private static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    /// <summary>
+    /// Every subtask id's LATEST folded result over the decisions HANDED IN (a retry's result supersedes its
+    /// original), read positionally off every spawn/retry/resolve decision (<c>subtaskIds[i] ↔ agentResults[i]</c>)
+    /// — the shared walk <see cref="SatisfiedSubtaskIds"/> and <see cref="LatestSucceededAgentRunIds"/> both derive
+    /// from.
+    ///
+    /// <para>The SCOPE is deliberately the caller's, not this walk's. This gate's own readers pass the active
+    /// <see cref="SupervisorPlanWindow"/> generation, because a dependency may only be built on inside the plan
+    /// that declared it; <see cref="SupervisorAmendPrecondition"/> passes the WHOLE tape, because an amendment
+    /// exists to re-anchor a repaired check to the NEW plan and its warrant is the pre-re-plan attempt the window
+    /// closes over. One walk, so the two can never disagree about WHICH attempt of a subtask speaks — only about
+    /// how far back they look.</para>
+    /// </summary>
+    internal static IReadOnlyDictionary<string, SupervisorAgentResult> LatestResultsBySubtask(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
         var latest = new Dictionary<string, SupervisorAgentResult>();
 

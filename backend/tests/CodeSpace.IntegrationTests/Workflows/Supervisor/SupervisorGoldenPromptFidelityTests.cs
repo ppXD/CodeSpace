@@ -52,9 +52,15 @@ public class SupervisorGoldenPromptFidelityTests
     /// substring test would read an offered verb as a withheld one, and the block's mere presence no longer means
     /// "resolve is masked" now that <c>amend_acceptance</c> can be the only line in it.
     /// </summary>
-    private static IReadOnlyList<string> WithheldInPrompt(string prompt)
+    private static IReadOnlyList<string> WithheldInPrompt(string prompt) => VerbsUnder(prompt, SupervisorActionMask.Header);
+
+    /// <summary>The verbs the rendered prompt OFFERS — the roster's own half, read the same way. Asserted BESIDE its withheld sibling wherever a verb's availability is the finding, so a change that offers and withholds the same verb fails on the pair rather than passing whichever half a test happened to look at.</summary>
+    private static IReadOnlyList<string> OfferedInPrompt(string prompt) => VerbsUnder(prompt, SupervisorActionRoster.Header);
+
+    /// <summary>The <c>- verb — …</c> lines directly under one block header, as verbs. Both halves render in that shape, three lines apart, so the header is the only thing that separates them and a bare substring test over the prompt reads one as the other.</summary>
+    private static IReadOnlyList<string> VerbsUnder(string prompt, string header)
     {
-        var start = prompt.IndexOf(SupervisorActionMask.Header, StringComparison.Ordinal);
+        var start = prompt.IndexOf(header, StringComparison.Ordinal);
 
         if (start < 0) return [];
 
@@ -185,44 +191,53 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>
-    /// The turn roster's <c>amend_acceptance</c> arm on the two co-sign scenarios, and — deliberately — the
-    /// CONTRADICTION it exposes rather than hides.
+    /// The turn roster's <c>amend_acceptance</c> arm on the two co-sign scenarios — now ONE answer per tape, across
+    /// the menu, the gate and the steer.
     ///
-    /// <para><c>amended-oracle-awaiting-retry</c> is coherent: a co-sign is outstanding, the precondition refuses a
-    /// second amend, the roster withholds the verb, the banner says RETRY, and the accepted set is {retry}. Every
-    /// surface agrees.</para>
+    /// <para><c>amended-oracle-awaiting-retry</c>: a co-sign is outstanding, the precondition refuses a second
+    /// amend, the roster withholds the verb, the banner says RETRY, and the accepted set is {retry}.</para>
     ///
-    /// <para><c>amended-oracle-discarded-by-replan</c> is NOT coherent, and this pins the disagreement so a future
-    /// change cannot resolve one side without noticing the other. Its accepted set names
-    /// <c>amend_acceptance</c> and <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s Discarded arm tells the model
-    /// to propose one — but <see cref="SupervisorAmendPrecondition"/> would REFUSE it synchronously with "has never
-    /// been attempted": that arm reads the graded evidence through <see cref="SupervisorPlanWindow"/>, and the
-    /// re-plan the scenario is built around closes the window over the attempt that produced the evidence. The
-    /// precondition's FIRST arm reads the whole tape, so the gate is internally split on scope, not merely strict.</para>
+    /// <para><c>amended-oracle-discarded-by-replan</c>: the accepted set names <c>amend_acceptance</c>,
+    /// <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s Discarded arm tells the model to propose one, and
+    /// <see cref="SupervisorAmendPrecondition"/> now ADMITS it — so the roster offers it. This test previously
+    /// pinned the opposite as a named CONTRADICTION: the gate read its graded evidence through
+    /// <see cref="SupervisorPlanWindow"/>, the re-plan this scenario is built around closes that window over the
+    /// attempt which produced the evidence, and the arm answered "has never been attempted" while the gate's own
+    /// FIRST arm, <see cref="SupervisorAmendObligation.StandingFor"/>, the steer and the answer key all read the
+    /// whole tape. The roster then honestly reported "unavailable" one screen under a steer saying "propose
+    /// amend_acceptance", and the decision eval's model answered with a third verb — <c>merge</c>, run
+    /// 34085079257 at 24/25. The gate widened, which is the arc's own design (a
+    /// <see cref="SupervisorAmendStanding.Discarded"/> repair is meant to be re-proposable, and re-anchoring the
+    /// repaired check to the NEW plan is what the verb does); the scenario's accepted set never moved.</para>
     ///
-    /// <para>The roster reports the SERVER's answer, because a menu that offered the verb here would be the exact
-    /// defect this block exists to remove — pointing the model at a move that cannot advance the run. Whether the
-    /// gate should widen (a discarded co-sign is designed to be re-proposable —
-    /// <see cref="SupervisorAmendStanding.Discarded"/>) or the scenario's accepted set should drop the verb is a
-    /// decision about the amend arc's admission rule, not about this block; either one turns this test red.</para>
+    /// <para>Both halves of the roster are asserted on the discarded tape, so a regression that re-withholds the
+    /// verb — or offers and withholds it at once — fails here rather than in a real-model score.</para>
     /// </summary>
     [Fact]
-    public void The_cosign_pair_gets_the_amend_arm_its_own_precondition_would_answer_with()
+    public void The_cosign_pair_gets_the_amend_arm_its_own_precondition_agrees_with()
     {
         var awaitingRetry = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-awaiting-retry");
         var discarded = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-discarded-by-replan");
 
         WithheldInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(awaitingRetry.Context))
             .ShouldContain(SupervisorDecisionKinds.AmendAcceptance, "a co-sign is outstanding here, so the precondition refuses a second amend — offering it invites the amend×5 loop of run 34066916864");
+        SupervisorAmendPrecondition.AnyAmendableUnit(awaitingRetry.Context)
+            .ShouldBeFalse("widening the evidence SCOPE must not reach past the outstanding-co-sign arm — that guard is what makes the amend×5 loop unreachable");
 
-        // The named collision. Both halves are asserted, so neither can move silently.
+        // One answer per tape. Every surface is asserted, so none of them can move alone.
         discarded.AcceptedKinds.ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
             "the scenario grades the verb, and the Discarded steer sends the model at it");
         SupervisorAmendPrecondition.Reject(discarded.Context, new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Waive = true, Reason = "the check could not run" })
-            .ShouldNotBeNull("…while the server's own gate refuses it on this tape — that disagreement is the finding, not this test's expectation")
-            .ShouldContain("never been attempted", customMessage: "and the reason is the plan window closing over the graded evidence, not the amendment being unwarranted");
-        WithheldInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(discarded.Context))
-            .ShouldContain(SupervisorDecisionKinds.AmendAcceptance, "so the roster reports the SERVER's answer — a menu offering a verb the gate refuses is the defect this block removes");
+            .ShouldBeNull("…and the server's own gate admits it: the re-plan discarded the repair, it did not un-grade the attempt that warrants one");
+        SupervisorAmendPrecondition.AnyAmendableUnit(discarded.Context)
+            .ShouldBeTrue("…so the roster's availability reader must answer the same as the arm above, off the same evidence");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(discarded.Context);
+
+        OfferedInPrompt(prompt).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "the menu must OFFER the verb the steer one screen below sends the model at — told to propose an amendment under a roster reporting it unavailable, the eval's model picked a third verb (34085079257, 24/25)");
+        WithheldInPrompt(prompt).ShouldNotContain(SupervisorDecisionKinds.AmendAcceptance,
+            "…and the withheld half must not name it in the same breath — that is the two-rosters defect this block was built to end");
     }
 
     [Fact]
@@ -459,7 +474,25 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "e3df9e15ffc302fb4a5b30e47ca17106652a8ad5cfb966b46f655309db8c7358";
+    /// <remarks>
+    /// LAST RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the whole tape
+    /// (<c>SupervisorAmendPrecondition</c>), so <c>amend_acceptance</c> moved from the roster's WITHHELD half to its
+    /// OFFERED half on <c>amended-oracle-discarded-by-replan</c> — the one tape in the corpus whose re-plan closed
+    /// the window over the infra grade an amendment answers. One verb, one scenario, one block; every other
+    /// scenario's prompt is byte-identical, and both halves of that claim are DERIVED rather than asserted in prose:
+    /// <see cref="The_rendered_corpus_matches_its_pinned_digest"/>'s wind-back anchors still reproduce (they undo the
+    /// roster wholesale, and <see cref="AsMaskedBeforeTheAmendArm"/> deletes the amend line from either rendering, so
+    /// they are blind to the arm by construction and would only move if a block OUTSIDE the roster had), and
+    /// <see cref="Only_the_discarded_cosign_scenario_offers_the_amend_verb"/> pins which scenario's roster moved —
+    /// the offered-amend set was EMPTY across all 25 before this change.
+    ///
+    /// <para>The corpus's numbers stay comparable because no scenario's <c>AcceptedKinds</c> changed and the moved
+    /// verb moves TOWARD the answer key it already had: <c>amended-oracle-discarded-by-replan</c> grades
+    /// <c>amend_acceptance</c> and its Discarded steer names it. The prompt it was measured under contradicted
+    /// itself — steered at the verb, one screen under a menu reporting it unavailable — and the decision eval's model
+    /// answered with a third one (<c>merge</c>, run 34085079257 at 24/25).</para>
+    /// </remarks>
+    private const string GoldenPromptDigest = "ec5fda2f0089995c9ed24def435bc63dff065ff81562b9d190018ce347613ada";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -482,7 +515,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// none acquired a menu entry for a verb its own tape cannot reach — which
     /// <see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>,
     /// <see cref="Every_scenario_renders_the_action_mask_arm_its_tape_implies"/> and
-    /// <see cref="The_cosign_pair_gets_the_amend_arm_its_own_precondition_would_answer_with"/> re-derive off the
+    /// <see cref="The_cosign_pair_gets_the_amend_arm_its_own_precondition_agrees_with"/> re-derive off the
     /// mask and the amend gate themselves.</para>
     /// </summary>
     private const string StaticVerbRosterCorpusDigest = "d4c31246c3aefb766e4e913dc8fbbf9dc25f428fc5a2b0805e9087a6963ee42c";
@@ -581,6 +614,34 @@ public class SupervisorGoldenPromptFidelityTests
         "merge-conflict", "multi-file-conflict", "resolve-cap-spent", "subset-conflict-across-three",
         "unverified-resolution", "verified-resolution",
     };
+
+    /// <summary>
+    /// The scenarios whose roster OFFERS <c>amend_acceptance</c> — the named receipt for the current
+    /// <see cref="GoldenPromptDigest"/>, exactly like <see cref="ConflictedScenarios"/> and
+    /// <see cref="MissingARequiredStage"/> are for theirs. It is a ONE-element set because a tape is only amendable
+    /// where a graded infra failure stands with no co-sign in force, and this corpus records that in one place.
+    /// </summary>
+    private static readonly HashSet<string> AmendOfferedScenarios = new(StringComparer.Ordinal)
+    {
+        "amended-oracle-discarded-by-replan",
+    };
+
+    /// <summary>
+    /// WHICH scenario's roster block moved in the re-pin above. Before the amend gate's evidence read widened to the
+    /// whole tape this set was EMPTY across all 25 scenarios — the mask withheld the verb everywhere, the
+    /// discarded-co-sign tape included — so pinning the set today is what turns "one verb on one scenario" from a
+    /// sentence in a doc-comment into a fact a build can refute. The sibling anchors prove nothing outside the roster
+    /// block moved; this proves whose roster block did.
+    /// </summary>
+    [Fact]
+    public void Only_the_discarded_cosign_scenario_offers_the_amend_verb()
+    {
+        SupervisorDecisionGoldenScenarios.All
+            .Where(s => OfferedInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(s.Context)).Contains(SupervisorDecisionKinds.AmendAcceptance))
+            .Select(s => s.Name)
+            .ShouldBe(AmendOfferedScenarios.ToList(), ignoreOrder: true,
+                "the set of scenarios whose menu offers 'amend_acceptance' must match the named receipt beside the digest — an unlisted one is a re-pin nobody attributed, and a missing one means the gate silently re-withheld the verb its own steer names");
+    }
 
     /// <summary>
     /// THE regression this corpus exists to catch from now on: no scenario's prompt may steer the brain toward a verb
