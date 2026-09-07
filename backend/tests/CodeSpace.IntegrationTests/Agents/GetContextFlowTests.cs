@@ -25,7 +25,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class GetContextFlowTests
+public partial class GetContextFlowTests
 {
     private readonly PostgresFixture _fixture;
 
