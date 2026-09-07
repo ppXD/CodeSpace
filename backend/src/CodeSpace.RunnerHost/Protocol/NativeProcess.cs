@@ -89,12 +89,14 @@ internal static class NativeProcess
 
     private static DarwinProcessInfo? ReadDarwinProcess(int pid)
     {
-        // Darwin's public proc_bsdinfo ABI (sys/proc_info.h, PROC_PIDTBSDINFO=3). Unlike Process.StartTime,
-        // this exposes SZOMB as well as the exact start timestamp while a dead process awaits reaping.
-        var read = proc_pidinfo(pid, 3, 0, out var info, Marshal.SizeOf<DarwinProcessInfo>());
+        // Darwin's proc_bsdinfo ABI (sys/proc_info.h, PROC_PIDTBSDINFO=3).
+        // A nonzero argument includes zombies (XNU proc_info.c, proc_pidinfo); without it a zombie returns
+        // ESRCH even though kill(pid, 0) succeeds. Keep unavailable/permission failures distinct from SZOMB.
+        var read = proc_pidinfo(pid, 3, 1, out var info, Marshal.SizeOf<DarwinProcessInfo>());
+        var error = Marshal.GetLastPInvokeError();
         if (read == Marshal.SizeOf<DarwinProcessInfo>() && info.Pid == pid) return info.Status == 5 ? null : info;
         if (IsAbsent(pid)) return null;
-        throw new IOException("Native process identity is unavailable; liveness cannot be assumed.");
+        throw new IOException($"Native process identity is unavailable (read={read}, errno={error}); liveness cannot be assumed.");
     }
 
     public static int Exec(NativeLaunchInvocation invocation)

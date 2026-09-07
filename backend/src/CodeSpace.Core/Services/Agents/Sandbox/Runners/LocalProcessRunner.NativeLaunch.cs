@@ -153,9 +153,14 @@ public sealed partial class LocalProcessRunner
 
     private static bool NativeDeadlineExpired(SandboxHandle handle)
     {
-        try { return NativeLaunchFiles.Read<NativeLaunchStop>(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.StopFile).Reason == "deadline"; }
-        catch (FileNotFoundException) { return false; }
-        catch (DirectoryNotFoundException) { return false; }
+        try
+        {
+            var stop = NativeLaunchFiles.Read<NativeLaunchStop>(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.StopFile);
+            return stop.Reason == "deadline" && stop.At != default;
+        }
+        // An older writer can expose a partial stop file, and a malformed hint is never a deadline receipt.
+        // Core request/commitment/execution receipt reads keep their separate strict integrity behavior.
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException) { return false; }
     }
 
     private sealed record BrokerStart(string SpoolKey, SandboxSpec Spec, string Spool, string Directory);
