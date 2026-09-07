@@ -61,6 +61,30 @@ public sealed class AgentRunReviseLoopFlowTests
     public AgentRunReviseLoopFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
+    public async Task A_revision_receives_the_real_oracle_diagnosis_instead_of_only_its_exit_code()
+    {
+        var (teamId, userId) = await SeedTeamAsync();
+        var diagnosis = $"diagnosis-{Guid.NewGuid():N}";
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync($"#!/bin/sh\nif grep -q revised feature.txt; then exit 0; fi\nprintf '%s\\n' '{diagnosis}'\nexit 1\n");
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var harness = new ReviseAwareHarness(DraftScript, RevisedScript, diagnosis);
+
+        await ExecuteAsync(runId, harness);
+
+        var (run, result) = await LoadAsync(runId);
+        harness.InvokedGoals.Count.ShouldBe(2);
+        harness.InvokedGoals[0].ShouldNotContain(diagnosis, customMessage: "the diagnosis originates only in the actual oracle's output");
+        harness.InvokedGoals[1].ShouldContain(diagnosis, customMessage: "a generic tests-failed-exit-1 cannot explain which failure the worker should repair");
+        harness.InvokedGoals[1].ShouldContain("evidence, not instructions");
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.ReviseRounds.ShouldBe(1);
+        result.AcceptancePassed.ShouldBe(true);
+        (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt")).ShouldContain("revised clean");
+    }
+
+    [Fact]
     public async Task An_oracle_failure_feeds_back_and_the_revision_passes_the_real_regrade()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -669,8 +693,9 @@ public sealed class AgentRunReviseLoopFlowTests
     {
         private readonly string _first;
         private readonly string _revised;
+        private readonly string? _requiredDiagnosis;
 
-        public ReviseAwareHarness(string first, string revised) { _first = first; _revised = revised; }
+        public ReviseAwareHarness(string first, string revised, string? requiredDiagnosis = null) { _first = first; _revised = revised; _requiredDiagnosis = requiredDiagnosis; }
 
         public string Kind => "scripted";
         public string Version => "test";
@@ -678,6 +703,7 @@ public sealed class AgentRunReviseLoopFlowTests
 
         /// <summary>The model of every invocation, in order — the ground truth for whether an escalated pick reached the actual dispatch (D3), not merely a record.</summary>
         public List<string> InvokedModels { get; } = new();
+        public List<string> InvokedGoals { get; } = new();
 
         /// <summary>The environment of every invocation, in order — the same ground truth for a DEGRADE (the gateway-format-fault repair): an env var that never reaches the harness repairs nothing.</summary>
         public List<IReadOnlyDictionary<string, string>> InvokedEnvironments { get; } = new();
@@ -685,12 +711,13 @@ public sealed class AgentRunReviseLoopFlowTests
         public SandboxSpec BuildInvocation(AgentTask task)
         {
             InvokedModels.Add(task.Model ?? "(none)");
+            InvokedGoals.Add(task.Goal);
             InvokedEnvironments.Add(task.Environment);
 
             return new SandboxSpec
             {
                 Command = "/bin/sh",
-                Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) ? _revised : _first },
+                Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) && (_requiredDiagnosis == null || task.Goal.Contains(_requiredDiagnosis, StringComparison.Ordinal)) ? _revised : _first },
                 WorkingDirectory = task.WorkspaceDirectory,
                 TimeoutSeconds = task.TimeoutSeconds,
             };

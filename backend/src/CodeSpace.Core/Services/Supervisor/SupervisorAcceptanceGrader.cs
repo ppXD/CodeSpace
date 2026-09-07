@@ -593,13 +593,13 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     }
 
     /// <summary>The inline diagnosis budget (P5-2): the trailing slice of the oracle's output kept on the grade for prompt/repair consumers. Small enough to ride the tape and the decider prompt per failed unit; the FULL text is always behind the CAS id.</summary>
-    public const int EvidenceTailMaxChars = 2_048;
+    public const int EvidenceTailMaxChars = Agents.AcceptanceEvidenceRenderer.TailMaxChars;
 
     /// <summary>Pure fold (P5-2): stamp the bounded TRAILING slice of <see cref="BenchmarkGrade.EvidenceText"/> onto <see cref="BenchmarkGrade.EvidenceTail"/> — the failure lives at the end of oracle output (the same convention the grader's own stdout/stderr tails use). No text → unchanged.</summary>
     internal static BenchmarkGrade WithClippedEvidenceTail(BenchmarkGrade grade) =>
         string.IsNullOrEmpty(grade.EvidenceText)
             ? grade
-            : grade with { EvidenceTail = grade.EvidenceText!.Length <= EvidenceTailMaxChars ? grade.EvidenceText : grade.EvidenceText[^EvidenceTailMaxChars..] };
+            : grade with { EvidenceTail = Agents.AcceptanceEvidenceRenderer.ClipTail(grade.EvidenceText) };
 
     /// <summary>
     /// P3.1 part 2: run the contract's OPTIONAL setup step in the SAME workspace before the check — a failure here
