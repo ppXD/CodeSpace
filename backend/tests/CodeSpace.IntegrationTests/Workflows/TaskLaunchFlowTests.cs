@@ -1614,11 +1614,10 @@ public class TaskLaunchFlowTests
             ReadSupervisorConfigString(run.DefinitionSnapshotJson!, "conversationId")
                 .ShouldBe(session.ConversationId.ToString(), "the frozen supervisor node carries the surface — every turn + replay reads the same channel");
 
-            // The executable acceptance floor reached the frozen config with the blank entry dropped (S4b) —
-            // a verification control must never silently not-arrive.
+            // Acceptance argv is executable intent: preserve even a whitespace argument through the frozen config.
             var sup = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
             sup.GetProperty("config").GetProperty("acceptanceChecks").EnumerateArray().Select(e => e.GetString())
-                .ShouldBe(new[] { "sh", "check.sh" });
+                .ShouldBe(new[] { "sh", " ", "check.sh" });
         }
         finally
         {
