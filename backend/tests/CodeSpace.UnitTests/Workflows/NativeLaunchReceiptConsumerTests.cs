@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.NativeLaunch;
 using Shouldly;
@@ -38,4 +40,78 @@ public sealed partial class NativeLaunchRegistryTests
         }
         NativeProcess.IsAlive(originalIdentity).ShouldBeTrue();
     }
+    [Theory]
+    [InlineData("receipt-corrupt")]
+    [InlineData("receipt-birth")]
+    [InlineData("request-hash")]
+    [InlineData("request-boot")]
+    [InlineData("registry-missing")]
+    public async Task Native_consumer_cannot_downgrade_unavailable_or_conflicting_receipt_to_PID_or_exit_marker(string damage)
+    {
+        await using var fixture = new Fixture();
+        var handle = await fixture.LaunchAsync();
+        await fixture.WaitAsync(() => fixture.StartCount == 1);
+        var directory = NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory);
+        var receiptPath = Path.Combine(directory, NativeLaunchProtocol.ReceiptFile);
+        var requestPath = Path.Combine(directory, NativeLaunchProtocol.RequestFile);
+        var originalReceipt = await File.ReadAllTextAsync(receiptPath);
+        var originalRequest = await File.ReadAllTextAsync(requestPath);
+        var receipt = fixture.ReadReceipt();
+        var request = JsonSerializer.Deserialize<NativeLaunchRecord>(originalRequest, NativeLaunchProtocol.Json)!;
+        try
+        {
+            switch (damage)
+            {
+                case "receipt-corrupt": await File.WriteAllTextAsync(receiptPath, "{"); break;
+                case "receipt-birth": await File.WriteAllTextAsync(receiptPath, JsonSerializer.Serialize(receipt with { Execution = receipt.Execution! with { StartKey = "other-birth" } }, NativeLaunchProtocol.Json)); break;
+                case "request-hash": await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request with { SpecHash = "other-spec" }, NativeLaunchProtocol.Json)); break;
+                case "request-boot": await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request with { BootId = "other-boot" }, NativeLaunchProtocol.Json)); break;
+                case "registry-missing": Directory.Move(directory, directory + "-retained-for-cleanup"); break;
+            }
+            await File.WriteAllTextAsync(Path.Combine(handle.SpoolDirectory, "exit"), "0");
+            (await fixture.Runner.ProbeAsync(handle, fixture.Token)).State.ShouldBe(SandboxRunState.Indeterminate, "neither a PID nor an unbound exit marker substitutes for the required native receipt");
+            await fixture.Runner.TerminateAsync(handle, fixture.Token);
+            NativeProcess.IsAlive(receipt.Execution!).ShouldBeTrue("invalid identity must also withhold the signal");
+        }
+        finally
+        {
+            if (damage == "registry-missing") Directory.Move(directory + "-retained-for-cleanup", directory);
+            await File.WriteAllTextAsync(receiptPath, originalReceipt);
+            await File.WriteAllTextAsync(requestPath, originalRequest);
+            File.Delete(Path.Combine(handle.SpoolDirectory, "exit"));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bound_native_handle_and_A_era_projection_observe_and_terminate_the_same_execution(bool aEraProjection)
+    {
+        await using var fixture = new Fixture();
+        var handle = await fixture.LaunchAsync();
+        handle.NativeLaunch.ShouldNotBeNull();
+        if (aEraProjection) handle = handle with { NativeLaunch = null };
+        var serialized = JsonSerializer.Serialize(handle, AgentJson.Options);
+        if (aEraProjection) serialized.ShouldNotContain("nativeLaunch", customMessage: "legacy JSON must not acquire a null field that changes existing canonical hashes");
+        handle = JsonSerializer.Deserialize<SandboxHandle>(serialized, AgentJson.Options)!;
+        await fixture.WaitAsync(() => fixture.StartCount == 1);
+        (await fixture.Runner.ProbeAsync(handle, fixture.Token)).State.ShouldBe(SandboxRunState.Running);
+        await fixture.Runner.TerminateAsync(handle, fixture.Token);
+        NativeProcess.IsAlive(fixture.ReadReceipt().Execution!).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("invalid\0path")]
+    public async Task Native_consumer_reports_malformed_locator_as_unknown_without_signalling(string? locator)
+    {
+        await using var fixture = new Fixture();
+        var handle = await fixture.LaunchAsync();
+        await fixture.WaitAsync(() => fixture.StartCount == 1);
+        var malformed = handle with { SpoolDirectory = locator! };
+        (await fixture.Runner.ProbeAsync(malformed, fixture.Token)).State.ShouldBe(SandboxRunState.Indeterminate);
+        await fixture.Runner.TerminateAsync(malformed, fixture.Token);
+        NativeProcess.IsAlive(fixture.ReadReceipt().Execution!).ShouldBeTrue();
+    }
+
 }

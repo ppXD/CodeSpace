@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -51,6 +53,10 @@ public sealed record SandboxHandle
 
     /// <summary>OS pid of the supervisor process owning the spool redirection. Probing it (e.g. <c>kill -0</c>) distinguishes a live run from a crashed one.</summary>
     public required int ProcessId { get; init; }
+
+    /// <summary>Retained native launch binding. Absent on formats issued before this binding; a present binding cannot fall back to PID-only behavior when its receipt is unavailable. This is identity, not an execution authority grant.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public NativeLaunchReference? NativeLaunch { get; init; }
 
     /// <summary>
     /// The supervisor's process start time (UTC), recorded at launch as a PID-reuse guard: a probe across a

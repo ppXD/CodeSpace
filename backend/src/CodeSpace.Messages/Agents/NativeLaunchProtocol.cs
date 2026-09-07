@@ -82,6 +82,9 @@ public sealed record NativeLaunchRecord
     public required DateTimeOffset Deadline { get; init; }
 }
 
+/// <summary>The immutable native identity projected into the app's durable handle. The receipt remains required; this does not turn check-then-signal into a kernel-atomic operation.</summary>
+public sealed record NativeLaunchReference(int Version, string SpecHash, SandboxLaunchIdentity? Identity, NativeProcessIdentity Execution);
+
 public sealed record NativeLaunchCommitment(string SpecHash, NativeProcessIdentity Broker);
 
 public sealed record NativeLaunchReceipt

@@ -421,8 +421,14 @@ public sealed partial class LocalProcessRunner
 
     public async Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
-        // The explicit kill (NOT the cancel-stops-observing path): reuse the same start-time-guarded tree-kill the
-        // timeout path uses, so a recycled pid is never killed and an already-exited run is a quiet no-op.
+        if (!TryResolveNativeHandle(handle, out var native)) return;
+        if (native is not null)
+        {
+            await TerminateNativeHandleAsync(handle, native, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Historical handles without native metadata retain the legacy observer behavior.
         await KillByIdAndWaitAsync(handle, cancellationToken).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
@@ -466,7 +472,10 @@ public sealed partial class LocalProcessRunner
 
     public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
-        // Marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
+        if (!TryResolveNativeHandle(handle, out var native)) return Task.FromResult(new SandboxProbe { State = SandboxRunState.Indeterminate });
+        if (native is not null) return Task.FromResult(ProbeNativeHandle(handle, native));
+
+        // Legacy marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
         // It is a FILE, so it stays authoritative from any host that can see the spool — which is why the host gate
         // below sits after it: a finished run's outcome is still salvageable off a shared spool volume.
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
