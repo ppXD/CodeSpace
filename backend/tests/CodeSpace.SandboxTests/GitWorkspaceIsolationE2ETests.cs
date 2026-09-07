@@ -23,8 +23,7 @@ public sealed class GitWorkspaceIsolationE2ETests
     public async Task Killing_the_worker_process_still_terminates_its_confined_command()
     {
         var directory = Directory.CreateTempSubdirectory("cs-worker-death-").FullName;
-        var info = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        foreach (var arg in new[] { typeof(SandboxTestHost).Assembly.Location, "--lifetime-host", directory }) info.ArgumentList.Add(arg);
+        var info = SandboxTestHost.StartSelf("--lifetime-host", directory);
         using var worker = Process.Start(info).ShouldNotBeNull();
         var stdout = worker.StandardOutput.ReadToEndAsync();
         var stderr = worker.StandardError.ReadToEndAsync();

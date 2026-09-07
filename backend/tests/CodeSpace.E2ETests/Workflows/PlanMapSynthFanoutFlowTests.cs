@@ -119,20 +119,25 @@ public class PlanMapSynthFanoutFlowTests
     }
 
     [Fact]
-    public async Task An_item_whose_acceptance_contract_cannot_be_graded_fails_closed_without_discarding_its_siblings_work()
+    public async Task A_repo_less_item_whose_real_acceptance_command_fails_preserves_its_siblings_work()
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // The rich-contract plan: s1 research-kinded, s2 carries an OBJECTIVE acceptance. This fan-out runs
-        // REPO-LESS, so s2's contract has no produced branch to grade — the S5 gate must fail it CLOSED (never a
-        // phantom pass) and the checklist must tell the whole truth per item.
+        // Repo-less acceptance executes the authored command in the actual invocation workspace. Use an explicit
+        // exit 1 with a fresh diagnostic; missing-script exits differ between POSIX shells (dash 2, bash 127).
         //
         // What CHANGED with continue-on-error: the flunked item no longer takes the run down with it. Under the
         // map's old terminate default, s2's failure skipped the reduce entirely — s1's real work existed only as
         // an agent row, and the run's own outputs were empty. Now the map completes, the reduce runs, and the run
         // reports Success WITH the failure counted and named. Fail-closed is a per-ITEM verdict; it was never
         // supposed to mean "throw away every sibling".
-        using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().AuthorContract = true;
+        var diagnosis = $"fanout-oracle-{Guid.NewGuid():N}";
+        using (var knob = _fixture.BeginScope())
+        {
+            var script = knob.Resolve<WorkPlanPlanScript>();
+            script.AuthorContract = true;
+            script.AcceptanceCommand = ["sh", "-c", $"printf '%s\\n' '{diagnosis}' >&2; exit 1"];
+        }
 
         try
         {
@@ -160,9 +165,17 @@ public class PlanMapSynthFanoutFlowTests
                 customMessage: $"continue-on-error: the flunked item marks itself failed and the map still finishes, so the surviving sibling's work reaches the reduce — error: {run.Error}");
 
             var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.IterationKey).ToListAsync();
+            agentRuns.Count(r => r.Status == AgentRunStatus.Failed).ShouldBe(1);
             var flunked = agentRuns.Single(r => r.Status == AgentRunStatus.Failed);
             flunked.ResultJson!.ShouldContain("acceptance-failed");
-            flunked.ResultJson!.ShouldContain("no-branch-or-repo");
+            var failedResult = JsonSerializer.Deserialize<AgentRunResult>(flunked.ResultJson!, AgentJson.Options)!;
+            failedResult.AcceptancePassed.ShouldBe(false);
+            failedResult.AcceptanceFailureClass.ShouldBe(CodeSpace.Messages.Agents.Benchmark.GradeFailureClass.Genuine);
+            failedResult.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
+            failedResult.AcceptanceEvidenceId.ShouldNotBeNull();
+            var evidence = await verify.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>().GetBytesAsync(teamId, failedResult.AcceptanceEvidenceId.Value, CancellationToken.None);
+            evidence.ShouldNotBeNull();
+            System.Text.Encoding.UTF8.GetString(evidence.Bytes).ShouldContain(diagnosis);
 
             agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded).ShouldBe(1,
                 customMessage: "the sibling item really ran and succeeded — it is exactly the work terminate-mode used to discard");
@@ -196,7 +209,7 @@ public class PlanMapSynthFanoutFlowTests
             states.ShouldContain(CodeSpace.Messages.Plans.WorkPlanItemStates.Failed);
             var failedItem = checklist.Items.Single(i => i.State == CodeSpace.Messages.Plans.WorkPlanItemStates.Failed);
             failedItem.AcceptancePassed.ShouldBe(false);
-            failedItem.AcceptanceDetail.ShouldBe("no-branch-or-repo");
+            failedItem.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
         }
         finally
         {

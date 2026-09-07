@@ -100,4 +100,5 @@ public static class FailureCodes
 
     /// <summary>A command observation is incomplete for a full-output consumer. Recover the observation without replaying the command's side effects.</summary>
     public const string SandboxOutputIncomplete = "sandbox_output_incomplete";
+    public const string NativeLaunchUnavailable = "native_launch_unavailable";
 }

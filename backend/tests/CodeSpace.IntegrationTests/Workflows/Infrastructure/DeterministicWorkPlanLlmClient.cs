@@ -85,7 +85,7 @@ public sealed class DeterministicWorkPlanLlmClient : ILLMClient, IStructuredLLMC
             subtasks = new object[]
             {
                 new { id = "s1", title = "First", instruction = "do the first thing", kind = "research" },
-                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { formatVersion = 2, argv = AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
+                new { id = "s2", title = "Second", instruction = "do the second thing", dependsOn = new[] { "s1" }, acceptance = new { formatVersion = 2, argv = _script.AcceptanceCommand ?? AcceptanceCommand, kind = "TestsPass", description = "the unit check" }, acceptanceCriteria = new[] { "covers edge cases" } },
             };
         else if (_script.Instructions is { Count: > 0 } custom)
             subtasks = custom.Select((instruction, i) => (object)new { id = $"c{i + 1}", title = instruction, instruction }).ToArray();
@@ -131,6 +131,9 @@ public sealed class WorkPlanPlanScript
     /// <summary>When true, subtask s2 authors dependsOn + an objective acceptance (the full contract).</summary>
     public bool AuthorContract { get; set; }
 
+    /// <summary>Optional exact argv for the authored contract; null retains the default fixture command.</summary>
+    public IReadOnlyList<string>? AcceptanceCommand { get; set; }
+
     /// <summary>The plan-level self-bypass the node surfaces as <c>executionNeeded = false</c>.</summary>
     public bool HasEnoughContext { get; set; }
 
@@ -152,6 +155,7 @@ public sealed class WorkPlanPlanScript
     public void Reset()
     {
         AuthorContract = false;
+        AcceptanceCommand = null;
         HasEnoughContext = false;
         AuthorInvalidDag = false;
         AuthorHeterogeneousKinds = false;

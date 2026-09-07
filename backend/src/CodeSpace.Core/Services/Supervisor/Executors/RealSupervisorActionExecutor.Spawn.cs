@@ -532,7 +532,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (AgentAcceptanceContract.IsInfraFailure(failed.AcceptanceDetail, SupervisorOutcome.ResultShowsWork(failed))) return task;
 
-        var fenced = string.Join('\n', failed.AcceptanceEvidenceTail!.Split('\n').Select(line => $"| {line.TrimEnd('\r')}"));
+        var fenced = AcceptanceEvidenceRenderer.Render(failed.AcceptanceEvidenceTail, failed.AcceptanceEvidenceId);
 
         // The closing directive matches the S3 differential the DECIDER saw (never two renderers disagreeing on the
         // same fact): a measured-red base means "make the check pass" is dishonest advice — the breakage pre-exists
