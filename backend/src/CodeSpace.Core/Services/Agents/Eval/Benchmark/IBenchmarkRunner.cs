@@ -18,12 +18,12 @@ public interface IBenchmarkRunner
 {
     /// <summary>
     /// Run <paramref name="task"/> through <paramref name="mode"/> against the workspace at
-    /// <paramref name="workspaceDirectory"/> (already staged to the fixture's failing start-state), grade it,
-    /// and return the result. The <paramref name="teamId"/> scopes the created agent run (multi-tenant). The
+    /// <see cref="BenchmarkExecutionContext.WorkspaceDirectory"/> (already staged to the fixture's failing start-state), grade it,
+    /// and return the result. The context's team scopes the created agent run (multi-tenant). The
     /// agent run is created + executed through the REAL <c>IAgentRunExecutor</c>. The optional
-    /// <paramref name="selection"/> chooses WHICH agent attempts it — harness, model, gateway credential, autonomy;
+    /// selection chooses WHICH agent attempts it — harness, model, gateway credential, autonomy;
     /// <c>null</c> ⇒ the task's own harness with no credential, i.e. the deterministic fake CLI whatever the
     /// environment's <c>CommandEnvVar</c> points at, and a real selection drives a LIVE agent on demand.
     /// </summary>
-    Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken);
+    Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken);
 }

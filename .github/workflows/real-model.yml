@@ -659,7 +659,8 @@ jobs:
         run: |
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-benchmark.trx \
-            RealModelBenchmark
+            RealModelBenchmark \
+            RealModelBenchmarkHiddenFixture
 
       # Does the REAL claude CLI actually load the MCP declaration the runner writes for it? The benchmark above answers
       # that only in aggregate (a cli-mcp cell whose fabric never handshook classifies InfraUnknown), and for 8

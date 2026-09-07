@@ -48,8 +48,11 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         _logger = logger;
     }
 
-    public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
+    public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
     {
+        var workspaceDirectory = context.WorkspaceDirectory;
+        var teamId = context.TeamId;
+        var selection = context.Selection;
         if (mode == BenchmarkMode.WorkflowMap)
             throw new NotSupportedException("BenchmarkMode.WorkflowMap is reserved and not yet wired: it runs through the composed planner→flow.map→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner does not orchestrate. Run the two harness-CLI modes here; the seed corpus ships only those.");
 
@@ -59,7 +62,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
         var mcpFullCatalog = AgentRunExecutor.UsesFullToolCatalog(agentTask);
 
-        var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, workspaceDirectory, teamId, cancellationToken).ConfigureAwait(false);
+        var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, context, cancellationToken).ConfigureAwait(false);
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
@@ -81,15 +84,16 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     /// <para>The respawn RE-STAGES the fixture first (see <see cref="RestageWorkspace"/>) — the grade is taken over the
     /// workspace, so without it the oracle would judge the UNION of both attempts.</para>
     /// </summary>
-    private async Task<IReadOnlyList<AgentRun>> RunWithFormatFaultRespawnAsync(BenchmarkTask task, AgentTask agentTask, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<AgentRun>> RunWithFormatFaultRespawnAsync(BenchmarkTask task, AgentTask agentTask, BenchmarkExecutionContext context, CancellationToken cancellationToken)
     {
+        var teamId = context.TeamId;
         var completed = await ExecuteOnceAsync(agentTask, teamId, cancellationToken).ConfigureAwait(false);
 
         if (RespawnFor(agentTask, completed.Error) is not { } mitigated) return new[] { completed };
 
         _logger.LogWarning("Benchmark cell agent run {RunId} died of {Cause} — re-staging fixture {FixtureRef} and respawning ONCE on a fresh conversation with extended thinking disabled; a second fault leaves the cell infra-dead", completed.Id, Supervisor.AgentRetryCauses.GatewayFormatFault, task.FixtureRef);
 
-        RestageWorkspace(task, workspaceDirectory);
+        RestageWorkspace(task, context);
 
         return new[] { completed, await ExecuteOnceAsync(mitigated, teamId, cancellationToken).ConfigureAwait(false) };
     }
@@ -106,15 +110,16 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     /// <para>FAIL-CLOSED: a stager throw propagates, so the cell is recorded as an infra error rather than graded over a
     /// tree we cannot vouch for — a polluted verdict is worse than a lost cell.</para>
     /// </summary>
-    private void RestageWorkspace(BenchmarkTask task, string workspaceDirectory)
+    private void RestageWorkspace(BenchmarkTask task, BenchmarkExecutionContext context)
     {
+        var workspaceDirectory = context.WorkspaceDirectory;
         // GetX, not EnumerateX: the lazy walk holds the directory open while we delete out from under it, which is
         // free to skip entries — and a leftover the wipe skipped is exactly what this method exists to remove.
         foreach (var directory in Directory.GetDirectories(workspaceDirectory)) Directory.Delete(directory, recursive: true);
 
         foreach (var file in Directory.GetFiles(workspaceDirectory)) File.Delete(file);
 
-        _stager.Stage(task.FixtureRef, workspaceDirectory);
+        (context.FixtureStager ?? _stager).Stage(task.FixtureRef, workspaceDirectory);
     }
 
     /// <summary>Create + drive ONE agent run to its terminal row — the single production seam both the cell's first attempt and its one mitigated respawn go through, so a respawn is a real second run with its own event log, never a re-labelled first.</summary>

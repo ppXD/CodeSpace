@@ -70,7 +70,8 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         var suite = _suite.Load()
             ?? throw new InvalidOperationException($"No hidden suite at '{HiddenSuiteLoader.DefaultSuiteDirectory}' — a qualification round without the owner-held sealed suite is a misconfiguration, never a silent pass");
 
-        var run = await _corpus.RunAsync(suite.Tasks, teamId, selection, cancellationToken).ConfigureAwait(false);
+        var request = new CorpusBenchmarkRequest { Tasks = suite.Tasks, TeamId = teamId, Selection = selection, FixtureStager = suite.FixtureStager, SuiteContentHash = suite.SuiteContentHash };
+        var run = await _corpus.RunAsync(request, cancellationToken).ConfigureAwait(false);
 
         var score = EvalSuite.Score(run.Cells ?? Array.Empty<CorpusCellOutcome>());
         var lowerBound = QualificationStatistics.WilsonLowerBound(score.Solved, score.Total);

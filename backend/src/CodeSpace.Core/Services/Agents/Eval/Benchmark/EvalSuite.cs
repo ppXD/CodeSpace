@@ -24,7 +24,7 @@ public static class EvalSuite
     public const string VersionAlgorithm = "sha256/corpus-v2";
 
     /// <summary>The immutable manifest for a corpus: content-derived version + the canonical cell universe (sorted by task id then mode, so authoring order never changes identity). FAIL-LOUD on a duplicate (task, mode) cell — two cells under one identity would alias every id-keyed read (the same strict-identity bar H2 set for plan subtask ids), and <see cref="Classify"/> keys on exactly that identity.</summary>
-    public static EvalSuiteManifest ManifestFor(IReadOnlyList<BenchmarkTask> corpus)
+    public static EvalSuiteManifest ManifestFor(IReadOnlyList<BenchmarkTask> corpus, string? suiteContentHash = null)
     {
         var duplicateId = corpus.GroupBy(t => t.Id, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1);
         if (duplicateId is not null) throw new ArgumentException($"the corpus declares task id '{duplicateId.Key}' more than once — BenchmarkTask.Id must be unique within a corpus (two cells under one identity would alias every id-keyed read)");
@@ -51,7 +51,10 @@ public static class EvalSuite
             canonical.Append(Rec);
         }
 
-        var version = $"{VersionAlgorithm}:{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))[..16]}";
+        if (suiteContentHash is not null) AppendField(canonical, suiteContentHash);
+        var algorithm = suiteContentHash is null ? VersionAlgorithm : "sha256/corpus-files-v1";
+        var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())));
+        var version = $"{algorithm}:{(suiteContentHash is null ? digest[..16] : digest)}";
 
         var cells = corpus
             .SelectMany(t => t.Modes.Select(m => new CorpusCellRef { TaskId = t.Id, Mode = m }))
