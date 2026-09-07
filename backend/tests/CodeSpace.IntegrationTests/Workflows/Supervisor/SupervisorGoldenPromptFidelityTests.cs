@@ -88,6 +88,28 @@ public class SupervisorGoldenPromptFidelityTests
         }
     }
 
+    /// <summary>
+    /// The sibling contradiction, one arc later: <c>amended-oracle-awaiting-retry</c> is graded on <c>retry</c>, so
+    /// its prompt must offer the retry that CONSUMES the human's co-sign and must not offer the re-plan that
+    /// DISCARDS it. Run 34066916864 is what a prompt saying both looks like — eight accepted plans, nothing spawned,
+    /// a no-progress force-stop with no integrated head. Derived from the decider's own steer rather than restated,
+    /// so a reword stays a one-file change.
+    /// </summary>
+    [Fact]
+    public void The_cosigned_scenario_is_steered_at_the_retry_that_consumes_the_cosign()
+    {
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-awaiting-retry");
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+        SupervisorAmendObligation.FirstOutstanding(scenario.Context.PriorDecisions)
+            .ShouldBe("s2", "the fixture must really carry an unconsumed co-sign, or the scenario measures nothing it claims to");
+
+        prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.AwaitingRetry), Case.Sensitive,
+            "the unit's own verdict line must steer at the retry its accepted set demands");
+        prompt.ShouldNotContain("Re-plan this item", Case.Insensitive,
+            "a scenario graded on 'retry' whose prompt asks for a re-plan measures obedience to a contradiction, not judgement");
+    }
+
     [Fact]
     public void An_answered_ask_human_reaches_the_model_as_the_answer_never_as_the_wait_token()
     {
@@ -151,6 +173,7 @@ public class SupervisorGoldenPromptFidelityTests
             ["mixed-results"] = "s2",
             ["three-subtask-partial-failure"] = "s2",
             ["five-subtask-middle-failed"] = "s3",
+            ["amended-oracle-awaiting-retry"] = "s2",
         };
 
         foreach (var (name, target) in graded)
@@ -245,8 +268,8 @@ public class SupervisorGoldenPromptFidelityTests
     /// </summary>
     private static readonly HashSet<string> MissingARequiredStage = new(StringComparer.Ordinal)
     {
-        "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "five-subtask-middle-failed",
-        "four-subtask-all-succeeded", "four-subtask-two-failed", "merge-conflict", "mixed-results",
+        "agent-reported-conflict-no-integration", "all-failed", "all-succeeded", "amended-oracle-awaiting-retry",
+        "five-subtask-middle-failed", "four-subtask-all-succeeded", "four-subtask-two-failed", "merge-conflict", "mixed-results",
         "multi-file-conflict", "resolve-cap-spent", "retried-failure-succeeded", "retried-still-failed",
         "subset-conflict-across-three", "three-subtask-all-succeeded", "three-subtask-partial-failure",
         "unverified-resolution",
@@ -276,7 +299,7 @@ public class SupervisorGoldenPromptFidelityTests
         var profile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
         var moved = new List<string>();
 
-        Digest(RenderedCorpus(DimensionsOnlyPrompt)).ShouldBe(DimensionsOnlyCorpusDigest,
+        Digest(RenderedCorpus(DimensionsOnlyPrompt, PredatesTheSupersededPins)).ShouldBe(DimensionsOnlyCorpusDigest,
             "the 'before' half of this receipt must be the corpus that was really pinned before the mirror carried the trace — if it is not, the per-scenario deltas below are a re-derivation comparing today's code with itself, and they would look clean across a drift that has nothing to do with the stage line");
 
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
@@ -320,7 +343,21 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "4b44d4d228bd23b4dfaad94cc0f403e641af82fc221db31f8b0d35772b4d4bea";
+    private const string GoldenPromptDigest = "b5015eb1e1316e6b787d21a79e42e55c014f9a269961c32438559a568c08d145";
+
+    /// <summary>
+    /// The pin this corpus carried while it held 23 scenarios — before <c>amended-oracle-awaiting-retry</c> joined
+    /// it. That scenario is the co-sign loop's own decision point: an infra-classed unit whose oracle a human has
+    /// APPROVED a replacement for, where the only move that consumes the co-sign is a retry and a re-plan destroys
+    /// it (real-model run 34066916864 re-planned eight times over two co-signed amendments and force-stopped with
+    /// nothing integrated).
+    ///
+    /// <para>The corpus's numbers stay comparable across the re-pin because NOTHING that was already in it moved:
+    /// the new steer is derived from a co-signed amendment on the tape, and no pre-existing scenario has one. That
+    /// is asserted rather than claimed — <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes
+    /// today's rendering over the 23 scenarios that predate this pin and requires exactly this value back.</para>
+    /// </summary>
+    private const string PreCosignScenarioCorpusDigest = "4b44d4d228bd23b4dfaad94cc0f403e641af82fc221db31f8b0d35772b4d4bea";
 
     /// <summary>
     /// The pin this corpus carried while the stopped-now block's steer was a CONSTANT ("Land that work, stop with
@@ -348,6 +385,12 @@ public class SupervisorGoldenPromptFidelityTests
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()
     {
+        // This re-pin's receipt: over the scenarios that predate it, today's rendering still digests to the
+        // superseded pin — so the move is corpus GROWTH and nothing else, and every score taken under the old pin
+        // remains comparable with one taken under the new one.
+        Digest(RenderedCorpus(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context), PredatesTheSupersededPins)).ShouldBe(PreCosignScenarioCorpusDigest,
+            "a pre-existing scenario's prompt moved in the same commit that grew the corpus — the growth is then not the whole story, and the digest below cannot be attributed to it");
+
         var digest = Digest(RenderedCorpus());
 
         digest.ShouldBe(GoldenPromptDigest,
@@ -419,7 +462,7 @@ public class SupervisorGoldenPromptFidelityTests
     public void The_digest_covers_every_scenario_in_the_corpus()
     {
         // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
-        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(23, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(24, "a scenario was added or dropped — re-pin this count together with the digest");
         SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
@@ -458,16 +501,29 @@ public class SupervisorGoldenPromptFidelityTests
     /// <summary>Every scenario's rendered prompt, name-ordered and name-labelled — deterministic over the corpus, so the digest moves only when the RENDERING moves.</summary>
     private static string RenderedCorpus() => RenderedCorpus(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context));
 
-    /// <summary>The same canonical corpus over an ALTERNATIVE rendering, so a historical digest is recomputed by exactly the concatenation that produced it — a second hand-rolled loop would be its own drift risk.</summary>
-    private static string RenderedCorpus(Func<SupervisorGoldenScenario, string> render)
+    /// <summary>The same canonical corpus over an ALTERNATIVE rendering, and optionally over a SUBSET, so a historical digest is recomputed by exactly the concatenation that produced it — over exactly the scenarios that existed when it was taken. A second hand-rolled loop would be its own drift risk.</summary>
+    private static string RenderedCorpus(Func<SupervisorGoldenScenario, string> render, Func<SupervisorGoldenScenario, bool>? include = null)
     {
         var builder = new StringBuilder();
 
-        foreach (var scenario in SupervisorDecisionGoldenScenarios.All.OrderBy(s => s.Name, StringComparer.Ordinal))
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All.Where(s => include?.Invoke(s) != false).OrderBy(s => s.Name, StringComparer.Ordinal))
             builder.Append("\u0000").Append(scenario.Name).Append("\u0000").Append(render(scenario));
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// Scenarios added AFTER the superseded pins below were taken. They are excluded from those pins' recomputation
+    /// rather than folded into a re-pin of them: a superseded digest re-pinned over today's corpus is a
+    /// re-derivation of today's code, and every receipt anchored to it silently degrades from "the before half is
+    /// the rendering that really shipped" to "the before half is whatever this build produces".
+    /// </summary>
+    private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
+    {
+        "amended-oracle-awaiting-retry",
+    };
+
+    private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);
 
     /// <summary>One scenario's prompt as this corpus rendered it BEFORE the mirror carried the trace: the stopped-now block from the assessment ALONE — no stage trace, no profile, no enforcement mode.</summary>
     private static string DimensionsOnlyPrompt(SupervisorGoldenScenario scenario) =>

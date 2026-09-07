@@ -51,6 +51,8 @@ public static class SupervisorDecisionGoldenScenarios
         // S3 plan-confirmation gate — the answered confirmation card is in the tape; the brain must REACT to it.
         ConfirmationApproved(),           // plan + card answered "approve"  → spawn (release, don't re-plan)
         ConfirmationFeedback(),           // plan + revision feedback        → plan (a REVISED version, never spawn)
+        // B5 co-sign loop — the human repaired a unit's ORACLE; only a retry consumes it, and a re-plan destroys it.
+        AmendedOracleAwaitingRetry(),     // infra-failed unit + co-signed   → retry s2, NEVER re-plan
         // A1.5 resolve NEGATIVE controls — the corpus proved resolve-WHEN-conflicted and nothing else. Naming the
         // verb in the rails (#1271) created the opposite risk, and the action mask (#1274) exists to cover it; only
         // a live model can settle whether it obeys a server fact over conflict-flavoured prose.
@@ -357,6 +359,50 @@ public static class SupervisorDecisionGoldenScenarios
         Context = Context(turn: 2, new[] { Plan("s1", "s2"), ConfirmationAnswered("revise: merge both steps into ONE subtask and verify with ./check.sh") }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.Plan },
     };
+
+    /// <summary>
+    /// The amend-acceptance co-sign loop's own decision point (B5): s2's CHECK could not RUN — an infra-classed
+    /// grade, a verdict on the oracle and not on the work — and a human has CO-SIGNED a replacement check. Nothing
+    /// has been staged since, so s2's recorded verdict was graded by the dead oracle and the only move that
+    /// consumes the co-sign is a RETRY of s2.
+    ///
+    /// <para>The wrong answer this measures is <c>plan</c>, and it is wrong in a way no other scenario can catch:
+    /// an approved amendment is anchored to the newest plan, so re-planning DISCARDS the human's ruling and hands
+    /// the unit back the check that could not run. Live run 34066916864 did exactly that eight times in a row —
+    /// with two amendments co-signed — until the no-progress bound force-stopped it with nothing integrated.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario AmendedOracleAwaitingRetry() => new()
+    {
+        Name = "amended-oracle-awaiting-retry",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1"),
+                Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
+            AmendApproved("s2"),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
+        PayloadCheck = RetryTargets("s2"),
+    };
+
+    /// <summary>A unit whose CHECK could not run: a FAILED grade whose detail classifies INFRA (<see cref="AgentAcceptanceContract.IsInfraFailure(string?, bool)"/>), which is the only verdict shape an amend proposal is admissible against. No evidence id — an oracle that never ran captured nothing to point at.</summary>
+    private static SupervisorAgentResult Unrunnable(SupervisorAgentResult result) =>
+        result with { AcceptancePassed = false, AcceptanceDetail = "grade-error: npm not found", AcceptanceEvidenceId = null };
+
+    /// <summary>An amend card the human APPROVED — built from the production card builder (so the marker sentence and the structured proposal are exactly what the co-sign overlay and the retry obligation read back) with a FIXED token for byte-stable prompts.</summary>
+    private static SupervisorPriorDecision AmendApproved(string subtaskId)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = subtaskId,
+            Reason = "the authored check shells out to a package manager this repository does not have, so it fails before it can grade anything",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } },
+        });
+        var outcome = JsonSerializer.Serialize(new { question = $"amend {subtaskId}'s acceptance", askHumanToken = "fixed-amend-token", answer = "approve" }, AgentJson.Options);
+
+        return PriorDecision(SupervisorDecisionKinds.AskHuman, 2, card.PayloadJson, outcome);
+    }
 
     /// <summary>The S3 gate's own confirmation card, already ANSWERED — built from the production card builder (so the question is exactly what the gate injects) with a FIXED token for byte-stable prompts.</summary>
     private static SupervisorPriorDecision ConfirmationAnswered(string answer)

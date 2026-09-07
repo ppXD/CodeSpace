@@ -990,6 +990,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                     ? $"    ESCALATED model for this retry: {escalation.From ?? "(unknown)"} → {to} — {escalation.Reason}"
                     : $"    Escalation was requested for this retry ({escalation.Reason}) but there is no stronger model in this team's pool — it re-ran on the SAME model ({escalation.From ?? "unknown"}); escalating again would change nothing.");
 
+            var amendStandings = AmendStandings(prior, agentResults.Count, options.LivePriors);
+
             for (var k = 0; k < agentResults.Count; k++)
             {
                 var r = agentResults[k];
@@ -999,7 +1001,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 // P5-2 prompt economy: the oracle-output tail renders ONLY on the latest spawn/retry of the LIVE
                 // prompt — the diagnosis the next action targets. Older rounds keep their one-line verdicts (state),
                 // never their stale tails; the summarizer path opts out entirely (its "latest" is stale by construction).
-                AppendUnitAcceptanceVerdict(builder, r, includeEvidenceTail: isLatestSpawn && includeEvidenceTails);
+                AppendUnitAcceptanceVerdict(builder, r, amendStandings[k], includeEvidenceTail: isLatestSpawn && includeEvidenceTails);
             }
 
             if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior, resolveExhausted);
@@ -1364,8 +1366,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// CHECK could not run, NOT that the work is wrong — a retry re-bills an agent and fails identically forever, the
     /// exact loop that marched a real run into its no-progress kill. Absent verdict (no per-unit contract / a deferred
     /// multi-repo unit) → nothing, byte-identical to before.
+    ///
+    /// <para>The infra arm's STEER is derived from <paramref name="amendStanding"/> rather than fixed
+    /// (<see cref="InfraSteerFor"/>): a unit whose oracle a human has already co-signed must never be told to
+    /// re-plan, because that is the one move that discards the co-sign.</para>
     /// </summary>
-    private static void AppendUnitAcceptanceVerdict(StringBuilder builder, SupervisorAgentResult result, bool includeEvidenceTail)
+    private static void AppendUnitAcceptanceVerdict(StringBuilder builder, SupervisorAgentResult result, SupervisorAmendStanding amendStanding, bool includeEvidenceTail)
     {
         // B2 (FATAL-1): the waived line renders BEFORE the bool guard — a waived unit's AcceptancePassed is null,
         // and silence here would let the decider read it as an ordinary ungraded pass-through.
@@ -1401,7 +1407,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         var baseAlsoFails = !infra && result.BaselinePassed == false && !Agents.AgentAcceptanceContract.IsInfraFailure(result.BaselineDetail, workPresent: true);
 
         builder.AppendLine(infra
-            ? $"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — the CHECK could not run (grader/spec/publish infrastructure), NOT a verdict on the work; the produced work is preserved on this unit. Do NOT retry the agent — another pass cannot fix the check. Re-plan this item with a check its agent can satisfy, or ask a human to rule."
+            ? $"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — the CHECK could not run (grader/spec/publish infrastructure), NOT a verdict on the work; the produced work is preserved on this unit. {InfraSteerFor(amendStanding)}"
             : baseAlsoFails
                 ? $"      acceptance FAILED ({result.AcceptanceDetail}) — but the unit's BASE tree ALSO FAILS this same check ({result.BaselineDetail}): pre-existing breakage this attempt did not cause, and a blind retry cannot fix it. Do not merge. Re-plan this item (fix its check, or re-scope the subtask to repairing the baseline first) or ask a human to rule."
                 : $"      acceptance FAILED — this unit's own check did NOT pass ({result.AcceptanceDetail}); its branch is NOT mergeable. RETRY this exact subtask (do not merge it).");
@@ -1411,8 +1417,43 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // The preamble follows the verdict's OWN directive — the live golden eval proved a model obediently picks
         // the verb off the copy (AppendResolutionVerdict's M0 note), so a tail under a "do not retry" verdict must
-        // never say "retry".
-        if (includeEvidenceTail) AppendAcceptanceEvidenceTail(builder, result, retryDirected: !infra && !baseAlsoFails);
+        // never say "retry". An infra verdict carrying an unconsumed co-sign IS retry-directed: the amended check
+        // is what the next attempt runs against, and the tail is what the retry's revisedInstruction targets.
+        if (includeEvidenceTail) AppendAcceptanceEvidenceTail(builder, result, retryDirected: infra ? amendStanding == SupervisorAmendStanding.AwaitingRetry : !baseAlsoFails);
+    }
+
+    /// <summary>
+    /// The infra verdict's STEER, and the ONE fact it may name a verb from: where the unit stands against the
+    /// co-signed amendments on its own tape (<see cref="SupervisorAmendObligation.StandingFor"/> — the same walk
+    /// <see cref="AppendOutstandingAmendments"/> banners from, so the results block and the banner cannot contradict
+    /// each other in one prompt).
+    ///
+    /// <para>The live miss (run 34066916864, arm <c>The_real_model_repairs_a_broken_oracle_through_the_cosign_loop</c>):
+    /// a human co-signed two amendments, the retries followed, and this line still read "Re-plan this item with a
+    /// check its agent can satisfy" for the same units. The brain re-planned eight times into the no-progress kill.
+    /// The steer was not merely redundant there — it was actively destructive, because an approved amendment is
+    /// anchored to the newest plan, so the re-plan it asked for is the one move that throws the co-sign away and
+    /// re-enters the unit on the oracle that could not run. That cost is named in the same breath as the verb, in
+    /// BOTH amended arms, because the model reads a directive and not an inference.</para>
+    /// </summary>
+    internal static string InfraSteerFor(SupervisorAmendStanding amendStanding) => amendStanding switch
+    {
+        SupervisorAmendStanding.AwaitingRetry => $"Its check was AMENDED by an approved human co-sign that is NOT yet consumed — RETRY this exact subtask so the amended check grades it. {ReplanDiscardsTheCosign}",
+        SupervisorAmendStanding.Consumed => $"Do NOT retry the agent — another pass cannot fix the check. Its check was already AMENDED by an approved human co-sign and this unit has ALREADY been re-staged under it, so propose 'amend_acceptance' once more or 'ask_human' to rule. {ReplanDiscardsTheCosign}",
+        _ => "Do NOT retry the agent — another pass cannot fix the check. Re-plan this item with a check its agent can satisfy, or ask a human to rule.",
+    };
+
+    /// <summary>What a re-plan costs once a human has co-signed this unit's oracle. Deliberately avoids the None arm's "Re-plan this item" phrasing: the two arms sit in one prompt, and a model that picks its verb off the copy must not be able to read the cost sentence as the instruction.</summary>
+    private const string ReplanDiscardsTheCosign = "Do NOT author a new plan for it: approved amendments are anchored to the CURRENT plan, so a new plan DISCARDS the co-signed check and this unit re-enters on the one that could not run.";
+
+    /// <summary>Each folded result's amend standing, joined to the decision's own staged subtask ids by the positional rule <see cref="SupervisorDependencyGate.SubtaskIdsOf"/> publishes (<c>subtaskIds[i] ↔ agentResults[i]</c>) — read through THAT method rather than a second copy of the join. <see cref="SupervisorAmendStanding.None"/> throughout on the summarizer path, which carries no tape to derive from, and for a resolve (which stages no plan-local unit) — so both render byte-identically to before.</summary>
+    private static IReadOnlyList<SupervisorAmendStanding> AmendStandings(SupervisorPriorDecision prior, int resultCount, IReadOnlyList<SupervisorPriorDecision>? livePriors)
+    {
+        var subtaskIds = livePriors is null ? Array.Empty<string>() : SupervisorDependencyGate.SubtaskIdsOf(prior);
+
+        return Enumerable.Range(0, resultCount)
+            .Select(i => i < subtaskIds.Count ? SupervisorAmendObligation.StandingFor(livePriors!, subtaskIds[i]) : SupervisorAmendStanding.None)
+            .ToList();
     }
 
     /// <summary>Render the failed check's own OUTPUT (the bounded tail the fold stamped, P5-2) under the verdict — the diagnosis that turns "tests-failed-exit-1" into a targetable fix. Fenced line-by-line with a data prefix so oracle output reads as evidence, never as instructions to this prompt. The preamble's verb MATCHES the verdict's directive: a retry-directed verdict points at the retry's revisedInstruction; a re-plan/ask-directed one (infra, measured-red base) points at authoring a satisfiable check or briefing the human — never the retry verb the verdict just forbade.</summary>
@@ -1534,6 +1575,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "plan (the default). " +
         "If a re-plan changes direction and the earlier plan's finished results are the WRONG work, set " +
         "'abandonEarlierResults': true on that plan — otherwise they stay mergeable and a later 'merge' includes them. " +
+        "A 'plan' also DISCARDS every approved acceptance amendment: an amendment is anchored to the plan it was " +
+        "co-signed against, so re-planning throws away a check a human has just repaired and the unit re-enters the " +
+        "run on the one that could not run. " +
         "When you 'stop', you MAY optionally author an objective 'acceptance' definition-of-done — an argv 'command' the " +
         "server RUNS against the integrated result to verify the goal is met (it is AND-ed with the operator's own " +
         "acceptance floor, never replaces it) — but author it ONLY when the goal itself names a concrete runnable check " +

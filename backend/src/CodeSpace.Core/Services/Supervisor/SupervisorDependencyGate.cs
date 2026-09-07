@@ -150,8 +150,8 @@ public static class SupervisorDependencyGate
         return latest;
     }
 
-    /// <summary>The plan-local subtask ids a spawn (positional fan-out) or retry (one) ran — the positional join key to its folded <c>agentResults</c>.</summary>
-    private static IReadOnlyList<string> SubtaskIdsOf(SupervisorPriorDecision decision) =>
+    /// <summary>The plan-local subtask ids a spawn (positional fan-out) or retry (one) ran — the positional join key to its folded <c>agentResults</c>. Internal, not private: the decider's per-unit verdict renderer joins its results by the SAME rule, and a second copy of it there is exactly the drift a per-unit steer must not be built on.</summary>
+    internal static IReadOnlyList<string> SubtaskIdsOf(SupervisorPriorDecision decision) =>
         decision.DecisionKind == SupervisorDecisionKinds.Spawn
             ? SupervisorOutcome.ReadSpawnSubtaskIds(decision.PayloadJson)
             : SupervisorOutcome.ReadRetrySubtaskId(decision.PayloadJson) is { } id ? new[] { id } : Array.Empty<string>();

@@ -95,4 +95,38 @@ public class SupervisorAmendObligationTests
         SupervisorAmendObligation.IsOutstanding(ctx, "s2").ShouldBeFalse();
         SupervisorAmendObligation.IsOutstanding(ctx, null).ShouldBeFalse();
     }
+
+    /// <summary>
+    /// The THIRD state <see cref="SupervisorAmendObligation.IsOutstanding"/> collapses away: a co-sign that was
+    /// already consumed still forbids a re-plan, because the amendment stays anchored to this plan. The decider's
+    /// infra steer is the only reader that needs it, and it must be able to tell that tape from one that never
+    /// carried a co-sign at all.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false, SupervisorAmendStanding.None)]
+    [InlineData(true, false, SupervisorAmendStanding.AwaitingRetry)]
+    [InlineData(true, true, SupervisorAmendStanding.Consumed)]
+    public void The_standing_separates_never_cosigned_from_cosigned_and_already_retried(bool cosigned, bool retried, SupervisorAmendStanding expected)
+    {
+        var tape = new List<SupervisorPriorDecision> { Plan(1), Spawn(2, "s1") };
+
+        if (cosigned) tape.Add(Card(3, "s1", waive: false, answer: "approve"));
+        if (retried) tape.Add(Retry(4, "s1"));
+
+        SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(expected);
+
+        // The one bit the prompt's banner reads is the AwaitingRetry reading of the same walk — never a second one.
+        SupervisorAmendObligation.IsOutstanding(tape, "s1").ShouldBe(expected == SupervisorAmendStanding.AwaitingRetry);
+    }
+
+    [Fact]
+    public void A_re_plan_resets_the_standing_to_none_because_it_discarded_the_amendment()
+    {
+        var tape = new List<SupervisorPriorDecision> { Plan(1), Spawn(2, "s1"), Card(3, "s1", waive: false, answer: "approve"), Retry(4, "s1"), Plan(5) };
+
+        SupervisorAmendObligation.StandingFor(tape, "s1").ShouldBe(SupervisorAmendStanding.None,
+            "MAJOR-8: the co-sign died with the plan it was anchored to — which is exactly why the infra steer must never ask for that plan");
+        SupervisorAmendObligation.StandingFor(tape, "s2").ShouldBe(SupervisorAmendStanding.None, "a subtask no card ever named carries no standing");
+        SupervisorAmendObligation.StandingFor(tape, null).ShouldBe(SupervisorAmendStanding.None);
+    }
 }
