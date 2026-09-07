@@ -262,40 +262,18 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken)
     {
-        // Tracking-free set-based UPDATE (like the reconciler's CAS). The executor pings this on a loop over
-        // a long-lived scope, so a load-mutate-save would keep a tracked entity + a stale xmin between pings —
-        // one lost optimistic-concurrency round would then silently kill every later heartbeat. A pure UPDATE
-        // never participates in optimistic concurrency; a missing row is a harmless 0-row no-op.
-        //
-        // Renews the lease alongside the heartbeat: a live worker pushes lease_expires_at forward every ping,
-        // so the reconciler's lease-expiry reclaim only fires once the worker stops pinging (it died/hung).
-        var now = DateTimeOffset.UtcNow;
-        await _db.AgentRun
-            .Where(r => r.Id == runId)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)now)
-                .SetProperty(r => r.LeaseExpiresAt, (DateTimeOffset?)(now + AgentRunLiveness.LeaseDuration)), cancellationToken)
-            .ConfigureAwait(false);
+        // Lock before sampling database time; UPDATE target expressions alone can be evaluated before a lock wait.
+        // A terminal row cannot acquire a fresh execution lease.
+        var duration = AgentRunLiveness.LeaseDuration;
+        await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)}", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken)
     {
-        // Tracking-free status-guarded CAS (like CompleteCoreAsync, NOT MarkRunningAsync's tracked load-save — a
-        // tracked save would attach a stale-xmin entity to the reconciler's shared DbContext and could fail
-        // optimistic concurrency against the executor's concurrent heartbeat). Atomic in-DB increment of the epoch
-        // (the column-expression SetProperty form) fences a revived original observer; the fresh lease + heartbeat
-        // take the run out of the stale sweep until the re-attaching worker keeps renewing it. 0 rows = the run is
-        // no longer Running (another replica reclaimed it, or it already landed terminal) → caller skips dispatch.
-        var now = DateTimeOffset.UtcNow;
-        var reclaimed = await _db.AgentRun
-            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(r => r.FenceEpoch, r => r.FenceEpoch + 1)
-                .SetProperty(r => r.ReattachAttempts, r => r.ReattachAttempts + 1)
-                .SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)now)
-                .SetProperty(r => r.LeaseExpiresAt, (DateTimeOffset?)(now + AgentRunLiveness.LeaseDuration)), cancellationToken)
-            .ConfigureAwait(false);
-
+        // Recheck expiry in the UPDATE itself. A stale candidate list is not authority to replace a
+        // renewed lease, and the first winner's fresh lease excludes concurrent contenders.
+        var duration = AgentRunLiveness.LeaseDuration;
+        var reclaimed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET fence_epoch = target.fence_epoch + 1, reattach_attempts = target.reattach_attempts + 1, heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
         return reclaimed == 1;
     }
 

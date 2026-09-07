@@ -66,4 +66,17 @@ public class AgentRunLivenessTests : IDisposable
 
         AgentRunLiveness.HeartbeatInterval.ShouldBeLessThan(AgentRunLiveness.Window);
     }
+
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("-00:01:00")]
+    [InlineData("00:00:01")]
+    [InlineData("00:00:09")]
+    [InlineData("00:00:15")]
+    public void A_lease_always_covers_three_heartbeat_intervals(string configured)
+    {
+        Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, configured);
+        AgentRunLiveness.LeaseDuration.ShouldBeGreaterThanOrEqualTo(AgentRunLiveness.HeartbeatInterval * 3,
+            "an aggressive stale sweep must not create immediately expired leases or reclaim a worker before its next heartbeat");
+    }
 }
