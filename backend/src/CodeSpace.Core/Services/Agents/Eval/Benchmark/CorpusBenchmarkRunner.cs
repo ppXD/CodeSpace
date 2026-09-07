@@ -32,19 +32,24 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
         _logger = logger;
     }
 
-    public async Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
+    public Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) => RunAsync(new CorpusBenchmarkRequest { Tasks = corpus, TeamId = teamId, Selection = selection }, cancellationToken);
+
+    public async Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken)
     {
+        if (request.FixtureStager is not null && string.IsNullOrWhiteSpace(request.SuiteContentHash))
+            throw new ArgumentException("A corpus fixture override requires its frozen content hash.", nameof(request));
         // M1a: the suite's immutable identity + FIXED cell universe are derived BEFORE anything runs, so the
         // denominator can never shrink to whatever happened to survive — a cell the loop never reaches is still
         // a cell (InfraUnknown), and the version names exactly what any reported percentage was measured over.
-        var manifest = EvalSuite.ManifestFor(corpus);
+        var manifest = EvalSuite.ManifestFor(request.Tasks, request.SuiteContentHash);
 
         var results = new List<BenchmarkResult>();
         var errored = new List<CorpusBenchmarkError>();
 
-        foreach (var task in corpus)
+        var execution = new CorpusExecution(request, manifest.Version, results, errored);
+        foreach (var task in request.Tasks)
             foreach (var mode in task.Modes)
-                await RunPairAsync(task, mode, teamId, selection, manifest.Version, results, errored, cancellationToken).ConfigureAwait(false);
+                await RunPairAsync(task, mode, execution, cancellationToken).ConfigureAwait(false);
 
         return new CorpusBenchmarkRun
         {
@@ -58,20 +63,25 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
     }
 
     /// <summary>Stage → run → grade → PERSIST ONE (task,mode) pair in an isolated workspace; a non-cancellation throw is recorded as an infra error (the pair is excluded from the score), never aborting the corpus. The workspace is always reclaimed.</summary>
-    private async Task RunPairAsync(BenchmarkTask task, BenchmarkMode mode, Guid teamId, BenchmarkAgentSelection? selection, string suiteVersion, List<BenchmarkResult> results, List<CorpusBenchmarkError> errored, CancellationToken cancellationToken)
+    private sealed record CorpusExecution(CorpusBenchmarkRequest Request, string SuiteVersion, List<BenchmarkResult> Results, List<CorpusBenchmarkError> Errored);
+
+    private async Task RunPairAsync(BenchmarkTask task, BenchmarkMode mode, CorpusExecution execution, CancellationToken cancellationToken)
     {
         var workspace = Path.Combine(Path.GetTempPath(), "cs-corpus-bench-" + Guid.NewGuid().ToString("N"));
 
         try
         {
             Directory.CreateDirectory(workspace);
-            _stager.Stage(task.FixtureRef, workspace);
+            var request = execution.Request;
+            var stager = request.FixtureStager ?? _stager;
+            stager.Stage(task.FixtureRef, workspace);
 
-            var result = await _runner.RunAsync(task, mode, workspace, teamId, selection, cancellationToken).ConfigureAwait(false);
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, Selection = request.Selection, FixtureStager = stager };
+            var result = await _runner.RunAsync(task, mode, context, cancellationToken).ConfigureAwait(false);
 
-            results.Add(result);
+            execution.Results.Add(result);
 
-            await PersistAsync(teamId, suiteVersion, result, selection, cancellationToken).ConfigureAwait(false);
+            await PersistAsync(request.TeamId, execution.SuiteVersion, result, request.Selection, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -80,7 +90,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Benchmark pair {TaskId}/{Mode} could not run (infra fault); recorded as errored + excluded from the score, continuing the corpus", task.Id, mode);
-            errored.Add(new CorpusBenchmarkError { TaskId = task.Id, Mode = mode, Error = ex.Message });
+            execution.Errored.Add(new CorpusBenchmarkError { TaskId = task.Id, Mode = mode, Error = ex.Message });
         }
         finally
         {
@@ -91,7 +101,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
     /// <summary>
     /// A4: append the cell's durable row so a solve rate is comparable across runs, commits, and model bundles
     /// instead of dying with the step summary. DELIBERATELY swallowed on failure and deliberately placed AFTER the
-    /// result joins <paramref name="results"/>: the gate's verdict is computed from that in-memory list, so a
+    /// result joins the in-memory results: the gate's verdict is computed from that list, so a
     /// persistence fault can neither red a passing corpus nor turn a failing cell into an infra error.
     /// </summary>
     private async Task PersistAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)

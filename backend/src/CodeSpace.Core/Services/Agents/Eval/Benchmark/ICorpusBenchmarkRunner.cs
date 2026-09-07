@@ -13,5 +13,7 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 public interface ICorpusBenchmarkRunner
 {
     /// <summary>Run <paramref name="corpus"/> end to end under team <paramref name="teamId"/>: stage → run → grade each (task,mode), aggregate. The optional <paramref name="selection"/> chooses WHICH agent attempts every pair (harness, model, gateway credential, autonomy); <c>null</c> ⇒ the deterministic fake CLI (the CI plumbing) — a real-model gate passes a live selection to measure the actual solve-rate. A pair whose plumbing throws is recorded in <see cref="CorpusBenchmarkRun.Errored"/> and excluded from the solve-rate, never aborting the corpus.</summary>
-    Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken);
+    Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) => RunAsync(new CorpusBenchmarkRequest { Tasks = corpus, TeamId = teamId, Selection = selection }, cancellationToken);
+
+    Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken);
 }

@@ -1,19 +1,18 @@
 using CodeSpace.Messages.Agents.Benchmark;
-using CodeSpace.Messages.Contracts;
-using System.Security.Cryptography;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers;
 using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
-/// <summary>One loaded hidden suite: the tasks plus the BYTES-level content hash the protocol manifest freezes.</summary>
-public sealed record HiddenSuite(IReadOnlyList<BenchmarkTask> Tasks, string SuiteContentHash);
+/// <summary>A frozen task list, file-manifest digest, and the per-suite source used for both initial staging and retry.</summary>
+public sealed record HiddenSuite(IReadOnlyList<BenchmarkTask> Tasks, string SuiteContentHash, IBenchmarkFixtureStager FixtureStager);
 
 /// <summary>
 /// The SEALED-suite mechanism (v4.2 Q contract / NOW-parallel track): loads an evaluation suite from a directory
 /// OUTSIDE the repository — sealed qualification content is held by the operator, never by the codebase the
 /// implementers and agents can read; the repo ships only this loader. Layout: <c>&lt;dir&gt;/tasks.json</c> (a
 /// <see cref="BenchmarkTask"/> array) plus <c>&lt;dir&gt;/fixtures/&lt;fixtureRef&gt;/**</c>. The suite hash covers
-/// BYTES — tasks.json and every fixture file's content, path-sorted — so an edited fixture under an unchanged ref
+/// BYTES, file modes and directories — path-sorted — so an edited fixture under an unchanged ref
 /// can never impersonate the frozen suite (the M1a fixture-content hole, closed for this lane). Fail-loud: a
 /// PRESENT-but-broken suite throws; only an ABSENT directory reads null (the lane self-skips). DEFAULT-ON by
 /// owner ruling: no env toggle — the suite lives at ONE conventional path outside the repo, and pointing
@@ -35,6 +34,9 @@ public static class HiddenSuiteLoader
         if (!File.Exists(tasksPath))
             throw new InvalidOperationException($"Hidden suite at '{suiteDirectory}' has no tasks.json — a configured suite must be loadable, never silently empty");
 
+        if ((File.GetAttributes(suiteDirectory) & FileAttributes.ReparsePoint) != 0 || (File.GetAttributes(tasksPath) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Hidden suite directories and task definitions cannot be symbolic links.");
+
         var tasksBytes = File.ReadAllBytes(tasksPath);
         var tasks = JsonSerializer.Deserialize<List<BenchmarkTask>>(tasksBytes, Agents.AgentJson.Options)
                     ?? throw new InvalidOperationException($"Hidden suite tasks.json at '{suiteDirectory}' deserialized to null");
@@ -42,24 +44,8 @@ public static class HiddenSuiteLoader
         if (tasks.Count == 0)
             throw new InvalidOperationException($"Hidden suite at '{suiteDirectory}' declares zero tasks — an empty qualification suite is a misconfiguration, not a pass");
 
-        return new HiddenSuite(tasks, HashSuiteBytes(suiteDirectory, tasksBytes));
-    }
-
-    /// <summary>Bytes over structure: tasks.json + every fixture file (relative path + content hash), ordinal path order — identical trees hash identically on every OS.</summary>
-    private static string HashSuiteBytes(string suiteDirectory, byte[] tasksBytes)
-    {
-        var entries = new List<(string Path, string Sha256)> { ("tasks.json", Convert.ToHexStringLower(SHA256.HashData(tasksBytes))) };
-        var fixturesRoot = Path.Combine(suiteDirectory, "fixtures");
-
-        if (Directory.Exists(fixturesRoot))
-            foreach (var file in Directory.EnumerateFiles(fixturesRoot, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
-            {
-                var relative = Path.GetRelativePath(suiteDirectory, file).Replace(Path.DirectorySeparatorChar, '/');
-                entries.Add((relative, Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(file)))));
-            }
-
-        var files = entries.OrderBy(e => e.Path, StringComparer.Ordinal).Select(e => new { path = e.Path, sha256 = e.Sha256 });
-
-        return ContractHashing.Hash(JsonDocument.Parse(JsonSerializer.Serialize(new { files })).RootElement);
+        var stager = HiddenSuiteFixtureStager.Capture(suiteDirectory, tasks.Select(t => t.FixtureRef).ToArray(), tasksBytes, out var hash);
+        var frozenTasks = tasks.Select(t => t with { Modes = Array.AsReadOnly(t.Modes.ToArray()), TestCommand = Array.AsReadOnly(t.TestCommand.ToArray()) }).ToList().AsReadOnly();
+        return new HiddenSuite(frozenTasks, hash, stager);
     }
 }

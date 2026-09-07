@@ -109,7 +109,7 @@ public class QualificationRunnerFlowTests
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells) =>
-        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite")), new FakeCorpusRunner(cells),
+        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells),
             scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
 
     private static QualificationSpec Spec(double minLowerBound) => new() { MinSolveRateLowerBound = minLowerBound, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
@@ -139,7 +139,7 @@ public class QualificationRunnerFlowTests
         private readonly IReadOnlyList<CorpusCellOutcome> _cells;
         public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells) => _cells = cells;
 
-        public Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) =>
+        public Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new CorpusBenchmarkRun
             {
                 Results = Array.Empty<BenchmarkResult>(),

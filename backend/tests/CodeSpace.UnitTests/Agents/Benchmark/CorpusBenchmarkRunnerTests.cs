@@ -207,6 +207,29 @@ public class CorpusBenchmarkRunnerTests
         broken.SuiteVersion.ShouldBe(healthy.SuiteVersion);
     }
 
+    [Fact]
+    public async Task A_suite_override_reaches_initial_staging_and_the_runner_context_and_persisted_identity()
+    {
+        var stager = new RecordingStager();
+        var runner = new StubRunner((_, _) => true);
+        var store = new RecordingResultStore();
+        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var tasks = new[] { MakeTask("private-fixture", TwoModes) };
+        var request = new CorpusBenchmarkRequest { Tasks = tasks, TeamId = Guid.NewGuid(), FixtureStager = stager, SuiteContentHash = "frozen-a" };
+
+        var first = await sut.RunAsync(request, CancellationToken.None);
+        var second = await sut.RunAsync(request with { SuiteContentHash = "frozen-b" }, CancellationToken.None);
+
+        first.Errored.ShouldBeEmpty();
+        second.Errored.ShouldBeEmpty();
+        stager.Staged.Count.ShouldBe(4);
+        runner.Stagers.ShouldAllBe(s => ReferenceEquals(s, stager));
+        first.SuiteVersion.ShouldNotBe(second.SuiteVersion);
+        first.SuiteVersion.ShouldNotBe(EvalSuite.ManifestFor(tasks).Version);
+        store.Recorded.Take(2).ShouldAllBe(r => r.SuiteVersion == first.SuiteVersion);
+        store.Recorded.Skip(2).ShouldAllBe(r => r.SuiteVersion == second.SuiteVersion);
+    }
+
     // ─── stubs ───
 
     private static BenchmarkTask MakeTask(string id, IReadOnlyList<BenchmarkMode> modes) => new()
@@ -230,18 +253,20 @@ public class CorpusBenchmarkRunnerTests
         private readonly Func<string, BenchmarkMode, bool>? _timedOutWhen;
         private readonly bool _cancel;
         public List<(string TaskId, BenchmarkMode Mode, string Workspace, BenchmarkAgentSelection? Selection)> Calls { get; } = new();
+        public List<IBenchmarkFixtureStager?> Stagers { get; } = new();
 
         public StubRunner(Func<string, BenchmarkMode, bool> passWhen, Func<string, BenchmarkMode, bool>? throwWhen = null, Func<string, BenchmarkMode, bool>? timedOutWhen = null, bool cancel = false)
         {
             _passWhen = passWhen; _throwWhen = throwWhen; _timedOutWhen = timedOutWhen; _cancel = cancel;
         }
 
-        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
+        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
         {
             if (_cancel) throw new OperationCanceledException();
             if (_throwWhen?.Invoke(task.Id, mode) == true) throw new InvalidOperationException($"runner blew up on {task.Id}/{mode}");
 
-            Calls.Add((task.Id, mode, workspaceDirectory, selection));
+            Calls.Add((task.Id, mode, context.WorkspaceDirectory, context.Selection));
+            Stagers.Add(context.FixtureStager);
 
             // A timed-out pair never reached Succeeded and never passed the grade — a terminal RUN outcome, distinct
             // from an infra plumbing throw (which the corpus runner records as Errored, not a Result at all).
