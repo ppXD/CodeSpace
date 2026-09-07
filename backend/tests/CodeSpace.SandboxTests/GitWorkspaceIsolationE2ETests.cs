@@ -44,8 +44,8 @@ public sealed class GitWorkspaceIsolationE2ETests
             sandbox.HasExited.ShouldBeFalse();
             worker.Kill(entireProcessTree: false);
             await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            for (var attempt = 0; attempt < 200 && !sandbox.HasExited; attempt++) await Task.Delay(25);
-            sandbox.HasExited.ShouldBeTrue("keeping the native launch thread alive must preserve bwrap's worker-death kill guarantee");
+            for (var attempt = 0; attempt < 200 && !HasTerminated(sandbox); attempt++) await Task.Delay(25);
+            HasTerminated(sandbox).ShouldBeTrue("keeping the native launch thread alive must preserve bwrap's worker-death kill guarantee; an unreaped zombie is terminated but a live process is not");
             var pulse = Path.Combine(directory, "pulse");
             var stoppedLength = new FileInfo(pulse).Length;
             await Task.Delay(300);
@@ -54,11 +54,25 @@ public sealed class GitWorkspaceIsolationE2ETests
         finally
         {
             if (!worker.HasExited) worker.Kill(entireProcessTree: true);
-            if (sandbox is { HasExited: false }) sandbox.Kill(entireProcessTree: true);
+            if (sandbox is not null && !HasTerminated(sandbox)) sandbox.Kill(entireProcessTree: true);
             sandbox?.Dispose();
             await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(5));
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    private static bool HasTerminated(Process process)
+    {
+        if (process.HasExited) return true;
+        try
+        {
+            // After its parent is killed this is not our child to reap. Container PID 1 can retain a zombie;
+            // kill(pid, 0), used by non-child Process observation, does not distinguish that from a live task.
+            var stat = File.ReadAllText($"/proc/{process.Id}/stat");
+            return stat[stat.LastIndexOf(')') + 2] is 'Z' or 'X';
+        }
+        catch (DirectoryNotFoundException) { return true; }
+        catch (FileNotFoundException) { return true; }
     }
 
     [KernelTheory]
