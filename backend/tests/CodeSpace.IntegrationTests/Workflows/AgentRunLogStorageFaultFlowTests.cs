@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
@@ -36,6 +37,80 @@ public sealed class AgentRunLogStorageFaultFlowTests : IDisposable
     private readonly List<string> _roots = [];
 
     public AgentRunLogStorageFaultFlowTests(PostgresFixture fixture) => _fixture = fixture;
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Final_source_read_obeys_retryability_and_reopens_the_same_durable_cursor_after_a_bounded_outage(int mode)
+    {
+        var world = await SeedWorldAsync();
+        await RepairCredentialAsync(world);
+        var runner = new LocalProcessRunner();
+        var secret = $"redact-{Guid.NewGuid():N}";
+        var stdout = $"before:{secret}:after";
+        var stderr = $"stderr-{Guid.NewGuid():N}";
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var handle = await runner.LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = ["-c", "printf '%s' \"$1\"; printf '%s' \"$2\" >&2", "_", stdout, stderr], WorkingDirectory = NewRoot(), TimeoutSeconds = 15 }, Guid.NewGuid().ToString("N"), deadline.Token);
+        _roots.Add(handle.SpoolDirectory);
+        var expected = await runner.AttachAsync(handle, (_, _) => Task.CompletedTask, deadline.Token);
+        expected.Status.ShouldBe(SandboxStatus.Success);
+        handle = handle with { AgentRunLogCaptureSessionId = Guid.NewGuid() };
+        var source = new FinalReadFaultSource(runner, mode == 1 ? int.MaxValue : 1, mode != 2);
+        var request = new AgentRunLogCaptureOpenRequest
+        {
+            TeamId = world.TeamId, AgentRunId = world.AgentRunId, ActorId = world.ActorId, WorkerFenceEpoch = 7,
+            Handle = handle, Source = source, Redactor = new SecretRedactor([secret]),
+        };
+        using var scope = _fixture.BeginScope();
+        var logs = LogService(scope);
+        var recovery = scope.Resolve<IAgentRunLogCaptureRecoveryService>();
+        var bridge = new AgentRunLogCaptureBridge(logs, new StubStorageResolver(world.StorageProfileId), recovery,
+            NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromSeconds(2), mode == 1 ? TimeSpan.FromMilliseconds(650) : TimeSpan.FromSeconds(8)));
+        var capture = await bridge.OpenAsync(request, deadline.Token);
+
+        (await capture.ObserveAsync((_, _) => Task.FromResult(expected), deadline.Token)).ShouldBeSameAs(expected);
+        source.FailedOffsets.ShouldNotBeEmpty();
+        source.FailedOffsets.ShouldAllBe(value => value == 0, "a failed source read cannot consume bytes or move the committed cursor");
+        var head = (await logs.ListCaptureHeadsAsync(world.TeamId, world.AgentRunId, deadline.Token)).Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput);
+        if (mode == 2)
+        {
+            head.Metadata.State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
+            head.Metadata.ErrorCode.ShouldBe("source-io-unavailable", "the problem's retryability governs recovery, not a guessed classification of the enum");
+            head.CaptureFinalizedAt.ShouldBeNull();
+            source.FailedOffsets.Count.ShouldBe(1);
+            return;
+        }
+        if (mode == 1)
+        {
+            head.Metadata.State.ShouldBe(AgentRunLogStreamState.Open, "a bounded transient outage must leave the original stream writable for a later observer");
+            head.CaptureFinalizedAt.ShouldBeNull();
+            head.Metadata.SourceOffsetBytes.ShouldBe(0);
+            // A new bridge and DB-facing service reopen the same capture identity. This is explicit same-host
+            // reobservation, not a claim that the recurring recovery job already retrieves native source bytes.
+            using var resumedScope = _fixture.BeginScope();
+            var resumedLogs = LogService(resumedScope);
+            var resumed = new AgentRunLogCaptureBridge(resumedLogs, new StubStorageResolver(world.StorageProfileId), resumedScope.Resolve<IAgentRunLogCaptureRecoveryService>(),
+                NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(8)));
+            var resumedCapture = await resumed.OpenAsync(request with { Source = runner }, deadline.Token);
+            (await resumedCapture.ObserveAsync((_, _) => Task.FromResult(expected), deadline.Token)).ShouldBeSameAs(expected);
+            (await resumedLogs.ListCaptureHeadsAsync(world.TeamId, world.AgentRunId, deadline.Token)).Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput).Metadata.StreamId.ShouldBe(head.Metadata.StreamId);
+        }
+
+        await bridge.CompleteRunAsync(world.TeamId, world.AgentRunId, 7, deadline.Token);
+        var heads = await logs.ListCaptureHeadsAsync(world.TeamId, world.AgentRunId, deadline.Token);
+        heads.Count.ShouldBe(2);
+        heads.ShouldAllBe(value => value.Metadata.State == AgentRunLogStreamState.Completed && value.CaptureFinalizedAt != null);
+        foreach (var item in heads)
+        {
+            var actual = (await logs.ReadRangeAsync(new AgentRunLogRangeRequest(world.TeamId, item.Metadata.StreamId, 0, checked((int)item.Metadata.TotalBytes)), deadline.Token)).ShouldBeOfType<AgentRunLogRangeResult.Available>();
+            var original = System.Text.Encoding.UTF8.GetBytes(item.Metadata.StreamKind == AgentRunLogKinds.StandardOutput ? stdout : stderr);
+            actual.Bytes.ShouldBe(new SecretRedactor([secret]).CreateUtf8Stream().Transform(original, final: true).Bytes.ToArray());
+            item.Metadata.SourceOffsetBytes.ShouldBe(original.LongLength);
+        }
+        var run = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(value => value.Id == world.AgentRunId, deadline.Token);
+        run.Status.ShouldBe(AgentRunStatus.Running, "log capture must not claim responsibility for the task's execution outcome");
+    }
 
     [Fact]
     public async Task An_unresolvable_storage_credential_terminalizes_the_stream_with_a_storage_cause_not_a_source_cause()
@@ -224,6 +299,24 @@ public sealed class AgentRunLogStorageFaultFlowTests : IDisposable
     }
 
     private sealed record World(Guid TeamId, Guid ActorId, Guid StorageProfileId, Guid CredentialId, Guid AgentRunId);
+
+    private sealed class FinalReadFaultSource(ISandboxDurableLogSource inner, int failures, bool retryable) : ISandboxDurableLogSource
+    {
+        private int _remaining = failures;
+        public List<long> FailedOffsets { get; } = [];
+        public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) => inner.DescribeLogs(handle);
+        public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!request.FinalDrain) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.NoData());
+            if (request.SourceKey == "stdout" && _remaining-- > 0)
+            {
+                FailedOffsets.Add(request.OffsetBytes);
+                return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.IoUnavailable, retryable)));
+            }
+            return inner.ReadAsync(request, cancellationToken);
+        }
+    }
 
     private sealed class StubStorageResolver(Guid profileId) : IAgentRunLogStorageResolver
     {
