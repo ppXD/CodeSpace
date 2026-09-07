@@ -255,16 +255,16 @@ jobs:
         # can drive a live model to author a real solution.sh + have the goal-relevance oracle grade whether it SOLVED the
         # task. ClaudeCodeHarness resolves `claude` on PATH + projects the seeded gateway credential onto its env
         # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
-        # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
+        # the worker image's exact version; every qualification lane must exercise that same binary.
         #
         # FATAL install (was continue-on-error during the report-only rollout): the_real_coding_agent_solves arm is now a
         # GATING best-of-N solve-rate gate, so a missing `claude` binary must RED the lane, never let the gating arm self-skip
-        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The v2.1.x pin is confirmed-installable by the
+        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The exact pin is confirmed-installable by the
         # prior report-only runs; a future pinned-version miss is a real lane break to fix, not a silent skip.
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -434,16 +434,16 @@ jobs:
         # can drive a live model to author a real solution.sh + have the goal-relevance oracle grade whether it SOLVED the
         # task. ClaudeCodeHarness resolves `claude` on PATH + projects the seeded gateway credential onto its env
         # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
-        # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
+        # the worker image's exact version; every qualification lane must exercise that same binary.
         #
         # FATAL install (was continue-on-error during the report-only rollout): the_real_coding_agent_solves arm is now a
         # GATING best-of-N solve-rate gate, so a missing `claude` binary must RED the lane, never let the gating arm self-skip
-        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The v2.1.x pin is confirmed-installable by the
+        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The exact pin is confirmed-installable by the
         # prior report-only runs; a future pinned-version miss is a real lane break to fix, not a silent skip.
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -613,7 +613,7 @@ jobs:
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -793,7 +793,7 @@ jobs:
 
       - name: Install the real coding-agent CLI (Claude Code)
         run: |
-          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -913,7 +913,7 @@ jobs:
 
       - name: Install the real coding-agent CLI (Claude Code)
         run: |
-          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
+          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
