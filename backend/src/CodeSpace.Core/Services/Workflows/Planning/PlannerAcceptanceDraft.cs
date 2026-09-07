@@ -90,7 +90,16 @@ internal sealed record PlannerAcceptanceDraft
         if (defect is not null) return null;
 
         var spec = new SupervisorAcceptanceSpec { Kind = kind, Command = payload!.ToArray(), OraclePaths = OraclePaths?.ToArray(), Description = Description, Rubric = Rubric, Schema = Schema };   // non-empty: the walk above passed
-        defect = AgentAcceptanceContract.ValidateAuthored(spec) is { } invalid ? $"Planner acceptance {invalid}" : null;
+
+        // ArtifactPresent's OWN companion (P2.6 — validated as whichever content oracle it pairs with, even though
+        // the spec's Kind itself stays ArtifactPresent here: ReconcileArtifactPresent is the one place that PROMOTES
+        // it, and only once the path is also an operator-declared deliverable).
+        var validationKind = kind != BenchmarkGradingKind.ArtifactPresent ? kind
+            : Rubric is not null ? BenchmarkGradingKind.LlmJudge
+            : Schema is not null ? BenchmarkGradingKind.ArtifactSchema
+            : kind;
+
+        defect = AgentAcceptanceContract.ValidateAuthored(spec with { Kind = validationKind }) is { } invalid ? $"Planner acceptance {invalid}" : null;
 
         return defect is null ? spec : null;
     }
@@ -111,8 +120,15 @@ internal sealed record PlannerAcceptanceDraft
         if (payload.Any(value => value is null || value.Contains('\0'))) return $"Planner acceptance requires a {name} array without null values or NUL characters.";
         if (commandOracle ? string.IsNullOrWhiteSpace(payload[0]) : payload.Any(string.IsNullOrWhiteSpace))
             return commandOracle ? "Planner acceptance argv requires a non-blank executable; remaining arguments are preserved exactly." : "Planner acceptance artifactPaths requires non-blank file paths.";
-        if (kind != BenchmarkGradingKind.LlmJudge && Rubric is not null || kind != BenchmarkGradingKind.ArtifactSchema && Schema is not null)
+        // P2.6: ArtifactPresent may additionally carry the OTHER kind's own payload as a content-oracle companion —
+        // still never both at once, and still never a payload neither the kind nor its companion role owns.
+        var rubricOwner = kind is BenchmarkGradingKind.LlmJudge or BenchmarkGradingKind.ArtifactPresent;
+        var schemaOwner = kind is BenchmarkGradingKind.ArtifactSchema or BenchmarkGradingKind.ArtifactPresent;
+
+        if (!rubricOwner && Rubric is not null || !schemaOwner && Schema is not null)
             return "Planner acceptance rubric/schema must belong to the selected oracle; unused requirements cannot be silently dropped.";
+        if (kind == BenchmarkGradingKind.ArtifactPresent && Rubric is not null && Schema is not null)
+            return "Planner acceptance ArtifactPresent may pair with an ArtifactSchema or an LlmJudge content check, never both.";
         if (Rubric?.Criteria?.Any(criterion => criterion is null) == true) return "Planner acceptance rubric criteria cannot contain null entries.";
         if (OraclePaths?.Any(value => string.IsNullOrWhiteSpace(value) || value.Contains('\0') || Path.IsPathRooted(value) || value.Split('/').Contains("..")) == true)
             return "Planner acceptance oraclePaths requires literal relative file paths without traversal.";
@@ -173,6 +189,72 @@ internal sealed record PlannerAcceptanceDraft
         var plan = response.Deserialize<PlannedWorkflow>(ResponseReadOptions);
         dropped = plan is null ? Array.Empty<DroppedAcceptance>() : DescribeUnboundAcceptances(response).Select(unbound => unbound.Drop).ToArray();
         return plan;
+    }
+
+    /// <summary>
+    /// P2.6: a planner-authored <c>ArtifactPresent</c> grades mere existence, and the SAME subtask usually also
+    /// instructs the agent to WRITE that path — so a bare check is self-certifying: nothing outside the agent's own
+    /// output ever contradicts it. Admissible only when the path is one the goal/operator declared
+    /// (<paramref name="declaredDeliverablePaths"/>) AND the acceptance pairs it with a content-oracle companion
+    /// (a <c>Rubric</c>/<c>Schema</c> authored alongside <c>ArtifactPresent</c> and already validated as complete
+    /// in <see cref="BindOracle"/>). Neither half alone is enough: a declared path with no companion still names
+    /// nothing an independent read has verified, and a companion on an undeclared path still lets the planner
+    /// bless whatever "deliverable" its own agent produced.
+    ///
+    /// <para>Admitted, the acceptance is PROMOTED to the companion's kind — the ArtifactPresent framing has nothing
+    /// left to check once its companion runs — which reuses the existing ArtifactSchema/LlmJudge graders untouched.
+    /// Refused, it is DROPPED exactly like a bind failure: the subtask keeps its work and loses only its oracle,
+    /// never fatal to the plan, matching the policy <see cref="ReadResponse"/> applies to every other unbindable
+    /// acceptance.</para>
+    /// </summary>
+    internal static PlannedWorkflow ReconcileArtifactPresent(PlannedWorkflow plan, IReadOnlyCollection<string>? declaredDeliverablePaths, out IReadOnlyList<DroppedAcceptance> dropped)
+    {
+        // Short-circuit ONLY when there is nothing to reconcile at all — an admitted (promoted) subtask changes its
+        // Acceptance.Kind without ever appearing in drops, so "no drops" is never the right test for "no changes".
+        if (plan.Subtasks.All(subtask => subtask.Acceptance is not { Kind: BenchmarkGradingKind.ArtifactPresent }))
+        {
+            dropped = Array.Empty<DroppedAcceptance>();
+            return plan;
+        }
+
+        var declared = (declaredDeliverablePaths ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
+        var drops = new List<DroppedAcceptance>();
+        var subtasks = plan.Subtasks.Select(subtask => ReconcileArtifactPresent(subtask, declared, drops)).ToList();
+
+        dropped = drops;
+        return plan with { Subtasks = subtasks };
+    }
+
+    /// <summary>One subtask's verdict — every kind but <c>ArtifactPresent</c> passes through untouched.</summary>
+    private static PlannedSubtask ReconcileArtifactPresent(PlannedSubtask subtask, HashSet<string> declared, List<DroppedAcceptance> drops)
+    {
+        if (subtask.Acceptance is not { Kind: BenchmarkGradingKind.ArtifactPresent } acceptance) return subtask;
+
+        var reason = InadmissibleArtifactPresentReason(acceptance, declared);
+
+        if (reason is null) return subtask with { Acceptance = acceptance with { Kind = acceptance.Rubric is not null ? BenchmarkGradingKind.LlmJudge : BenchmarkGradingKind.ArtifactSchema } };
+
+        drops.Add(new DroppedAcceptance { SubtaskId = subtask.Id, Kind = nameof(BenchmarkGradingKind.ArtifactPresent), Reason = reason });
+
+        return subtask with { Acceptance = null };
+    }
+
+    /// <summary>
+    /// The FIRST reason this ArtifactPresent cannot stand — undeclared before uncovered, so an operator sees the
+    /// more fundamental problem (the planner named a path nobody asked for) before the narrower one (a real
+    /// deliverable graded by nothing but its own existence). Null when the acceptance is admissible as authored.
+    /// </summary>
+    private static string? InadmissibleArtifactPresentReason(SupervisorAcceptanceSpec acceptance, HashSet<string> declared)
+    {
+        var undeclared = acceptance.Command.FirstOrDefault(path => !declared.Contains(path));
+
+        if (undeclared is not null)
+            return $"Planner acceptance ArtifactPresent for '{undeclared}' is self-certifying: the same plan both writes and grades that path, so mere existence proves nothing an independent read did not already assume. Declare '{undeclared}' as an operator deliverable and pair the acceptance with an ArtifactSchema or LlmJudge content check, or grade the subtask with TestsPass instead.";
+
+        if (acceptance.Rubric is null && acceptance.Schema is null)
+            return $"Planner acceptance ArtifactPresent for '{acceptance.Command[0]}' is declared but has no paired ArtifactSchema or LlmJudge content check — file existence alone does not verify what the agent produced.";
+
+        return null;
     }
 
     /// <summary>

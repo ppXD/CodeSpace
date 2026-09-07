@@ -71,8 +71,11 @@ public sealed class StructuredResponseContractTests
     [Theory]
     [InlineData("Anthropic", "TestsPass", "argv")]
     [InlineData("OpenAI", "TestsPass", "argv")]
-    [InlineData("Anthropic", "ArtifactPresent", "artifactPaths")]
-    [InlineData("OpenAI", "ArtifactPresent", "artifactPaths")]
+    // CitationsResolve, not ArtifactPresent: both share the plain artifactPaths shape, but P2.6 additionally drops a
+    // bare ArtifactPresent as self-certifying (PlannerAcceptanceMappingTests covers that gate) — an unrelated defect
+    // this arm is not about, which would otherwise mask the repair verdict this test actually asserts.
+    [InlineData("Anthropic", "CitationsResolve", "artifactPaths")]
+    [InlineData("OpenAI", "CitationsResolve", "artifactPaths")]
     public async Task The_actual_planner_request_repairs_missing_oracle_payload_through_the_existing_provider_path(string provider, string kind, string payloadName)
     {
         var bad = "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"" + kind + "\"}}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";

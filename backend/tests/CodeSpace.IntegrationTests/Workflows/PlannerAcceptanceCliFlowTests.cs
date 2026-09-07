@@ -28,10 +28,16 @@ public sealed class PlannerAcceptanceCliFlowTests
                 goal = "verify the report", subtasks = new object[]
                 {
                     new { id = "behavior", title = "Verify", instruction = "verify exact content", kind = "research", acceptance = new { formatVersion = 2, kind = "TestsPass", argv } },
-                    new { id = "file", title = "Presence", instruction = "require the file", kind = "code", acceptance = new { formatVersion = 2, kind = "ArtifactPresent", artifactPaths = new[] { "report.txt" } } },
+                    // P2.6: a bare ArtifactPresent from the planner is self-certifying and dropped — declared +
+                    // paired with a (permissive, never validated here) schema companion admits it. ArtifactPresentGrader
+                    // never reads Acceptance.Kind (only the Command path list, asserted below), so grading it directly
+                    // still proves the SAME existence-only pipeline the promoted spec's Kind no longer names.
+                    new { id = "file", title = "Presence", instruction = "require the file", kind = "code", acceptance = new { formatVersion = 2, kind = "ArtifactPresent", artifactPaths = new[] { "report.txt" }, schema = new { } } },
                 },
             });
-            var plan = LlmWorkflowPlanner.Deserialize(json);
+            var plan = LlmWorkflowPlanner.Deserialize(json, declaredDeliverablePaths: new[] { "report.txt" });
+            plan.DroppedAcceptances.ShouldBeNull("the file obligation is declared and paired — nothing here should be dropped");
+            plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "report.txt" }, "the promoted spec still names the same deliverable path");
             var runner = new LocalProcessRunner();
             var commandContext = BenchmarkGradingContext.ForAcceptance(plan.Subtasks[0].Acceptance!, Guid.NewGuid(), 15, directory, runner);
             var fileContext = BenchmarkGradingContext.ForAcceptance(plan.Subtasks[1].Acceptance!, Guid.NewGuid(), 15, directory, runner);

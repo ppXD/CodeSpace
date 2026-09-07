@@ -70,7 +70,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         // Stamped from the model that actually ANSWERED (a pool failover may have hopped past the resolved pick), so
         // the plan carries its own provenance.
-        return Deserialize(completion.Json) with
+        return Deserialize(completion.Json, request.DeclaredDeliverablePaths) with
         {
             AuthoredByModel = completion.Model,
             LessonArm = arm,
@@ -169,8 +169,14 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return builder.ToString();
     }
 
-    /// <summary>Internal (not private) so the DTO-bind boundary is unit-pinned directly — the failure it converts escaped as an unhandled crash for as long as nothing tested it.</summary>
-    internal static PlannedWorkflow Deserialize(JsonElement json)
+    /// <summary>
+    /// Internal (not private) so the DTO-bind boundary is unit-pinned directly — the failure it converts escaped as
+    /// an unhandled crash for as long as nothing tested it. <paramref name="declaredDeliverablePaths"/> defaults to
+    /// none, so every existing caller that does not carry an operator-declared deliverable list keeps its current
+    /// behavior — a bare planner-authored <c>ArtifactPresent</c> is then always self-certifying and always dropped
+    /// (see <see cref="PlannerAcceptanceDraft.ReconcileArtifactPresent(PlannedWorkflow, IReadOnlyCollection{string}?, out IReadOnlyList{DroppedAcceptance})"/>).
+    /// </summary>
+    internal static PlannedWorkflow Deserialize(JsonElement json, IReadOnlyCollection<string>? declaredDeliverablePaths = null)
     {
         PlannedWorkflow? plan;
         IReadOnlyList<DroppedAcceptance> dropped;
@@ -192,12 +198,18 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         if (plan == null || plan.Subtasks.Count == 0)
             throw new InvalidOperationException("The planner returned an empty plan (no subtasks). The response did not conform to the planner schema.");
 
+        // P2.6: a well-bound ArtifactPresent can still be self-certifying — reconciled AFTER the bind above (which
+        // only ever costs a subtask its oracle, never the plan) so this drop rides the exact same policy.
+        plan = PlannerAcceptanceDraft.ReconcileArtifactPresent(plan, declaredDeliverablePaths, out var selfCertifying);
+
+        var allDropped = selfCertifying.Count == 0 ? dropped : dropped.Concat(selfCertifying).ToList();
+
         // An acceptance the re-ask could not get authored is carried as a NAMED defect on the plan, not thrown away
         // silently and not thrown at all: the subtask keeps its work with no oracle (graded unverified downstream).
         // Stamped UNCONDITIONALLY, exactly like the AuthoredByModel / LessonArm / InjectedLessonIds siblings above: a
         // conditional stamp leaves a model-authored value standing on a clean plan, and this field is a DEFECT REPORT
         // — the one thing a model must never be able to write about its own reply.
-        return plan with { DroppedAcceptances = dropped.Count == 0 ? null : dropped };
+        return plan with { DroppedAcceptances = allDropped.Count == 0 ? null : allDropped };
     }
 
     // Internal (not private): the planner-cassette drift detector reconstructs the EXACT run-time request from
@@ -220,6 +232,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         "Choose the oracle for the required evidence independently of the subtask's kind; neither coding nor research determines the oracle. " +
         "Supply exactly one of argv or artifactPaths. A file-presence requirement names files in artifactPaths; executable checks belong in argv. " +
         "LlmJudge also requires its rubric, and ArtifactSchema its schema. Do not substitute existence for required content or behavioral verification. " +
+        "ArtifactPresent is kept only for an operator-declared deliverable path AND when you also give it a rubric or schema of its own; otherwise it is dropped, so prefer TestsPass, or ArtifactSchema/LlmJudge directly, to grade a subtask's own output. " +
         "A proposal is not evidence that a command ran or that an execution workspace or dependency is available. " +
         "Omit acceptance when no objective check exists. Add short subjective acceptanceCriteria a reviewer checks when they " +
         "add real signal. Use dependsOn to order subtasks that need another subtask's result; you MAY type each " +
