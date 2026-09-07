@@ -53,6 +53,7 @@ public class FailureTaxonomyTests
     {
         // A client routes a signed-in user to the password-rotation form on one of these strings, and
         // opens the identity-link modal on another. They are API, not identifiers.
+        FailureCodes.AgentAuthorityDenied.ShouldBe("agent.authority_denied");
         FailureCodes.Forbidden.ShouldBe("forbidden");
         FailureCodes.Unauthorized.ShouldBe("unauthorized");
         FailureCodes.InvalidCredentials.ShouldBe("invalid_credentials");

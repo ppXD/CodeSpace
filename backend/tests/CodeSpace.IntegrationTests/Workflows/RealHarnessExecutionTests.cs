@@ -1,4 +1,5 @@
 using Autofac;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -538,7 +539,7 @@ public class RealHarnessExecutionTests
 
     private async Task<Guid> CreateRunAsync(Guid teamId, string harnessKind, IReadOnlyDictionary<string, string> env, int timeoutSeconds = 1800, string? resumeFromSessionId = null, string? workspaceDirectory = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "fix the billing tests", Harness = harnessKind, Model = null, Environment = env, TimeoutSeconds = timeoutSeconds, ResumeFromSessionId = resumeFromSessionId, WorkspaceDirectory = workspaceDirectory },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);

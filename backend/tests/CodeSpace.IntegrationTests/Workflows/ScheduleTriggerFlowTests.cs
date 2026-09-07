@@ -41,7 +41,7 @@ public class ScheduleTriggerFlowTests
     public async Task Due_schedule_fires_one_run_with_schedule_payload()
     {
         var ctx = await SeedAsync();
-        await SeedScheduleActivationAsync(ctx.WorkflowId, EveryFiveMinutes);
+        await SeedScheduleActivationAsync(ctx, EveryFiveMinutes);
 
         var fired = await FireAsync(Now);
 
@@ -62,7 +62,7 @@ public class ScheduleTriggerFlowTests
         // Both ticks see the same now → same occurrence → same (SourceInstanceId, ExternalEventId)
         // tuple. The second fire must create zero new runs (the unique index collapses it).
         var ctx = await SeedAsync();
-        await SeedScheduleActivationAsync(ctx.WorkflowId, EveryFiveMinutes);
+        await SeedScheduleActivationAsync(ctx, EveryFiveMinutes);
 
         (await FireAsync(Now)).ShouldBe(1);
         (await FireAsync(Now)).ShouldBe(0, "the same scheduled occurrence must never fire a second run");
@@ -74,7 +74,7 @@ public class ScheduleTriggerFlowTests
     public async Task Disabled_activation_fires_nothing()
     {
         var ctx = await SeedAsync();
-        await SeedScheduleActivationAsync(ctx.WorkflowId, EveryFiveMinutes, enabled: false);
+        await SeedScheduleActivationAsync(ctx, EveryFiveMinutes, enabled: false);
 
         (await FireAsync(Now)).ShouldBe(0);
         await AssertRunCountAsync(ctx.WorkflowId, expected: 0);
@@ -84,12 +84,39 @@ public class ScheduleTriggerFlowTests
     public async Task Invalid_cron_fires_nothing_and_does_not_throw()
     {
         var ctx = await SeedAsync();
-        await SeedScheduleActivationAsync(ctx.WorkflowId, "not-a-cron");
+        await SeedScheduleActivationAsync(ctx, "not-a-cron");
 
         var fired = await FireAsync(Now);   // must not throw — one bad schedule can't break the sweep
 
         fired.ShouldBe(0);
         await AssertRunCountAsync(ctx.WorkflowId, expected: 0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_unauthorized_schedule_does_not_block_another_team_or_duplicate_a_valid_occurrence(bool unknownPublisher)
+    {
+        var denied = await SeedAsync();
+        await SeedScheduleActivationAsync(denied, EveryFiveMinutes);
+        var valid = await SeedAsync();
+        await SeedScheduleActivationAsync(valid, EveryFiveMinutes);
+        using (var revoke = _fixture.BeginScope())
+        {
+            var db = revoke.Resolve<CodeSpaceDbContext>();
+            if (unknownPublisher) await db.WorkflowActivation.Where(a => a.WorkflowId == denied.WorkflowId).ExecuteUpdateAsync(s => s.SetProperty(a => a.CreatedBy, SystemUsers.SeederId).SetProperty(a => a.LastModifiedBy, SystemUsers.SeederId));
+            else await db.TeamMembership.Where(m => m.TeamId == denied.TeamId && m.UserId == denied.UserId).ExecuteDeleteAsync();
+        }
+
+        await FireAsync(Now);
+        await FireAsync(Now);
+
+        await AssertRunCountAsync(denied.WorkflowId, 0);
+        await AssertRunCountAsync(valid.WorkflowId, 1);
+        using var verify = _fixture.BeginScope();
+        var verifyDb = verify.Resolve<CodeSpaceDbContext>();
+        (await verifyDb.WorkflowRunRequest.CountAsync(r => r.TeamId == denied.TeamId)).ShouldBe(0);
+        (await verifyDb.WorkflowRunExecutionAuthority.CountAsync(r => r.TeamId == valid.TeamId)).ShouldBe(1);
     }
 
     // ─── Infrastructure ─────────────────────────────────────────────────────────
@@ -120,19 +147,19 @@ public class ScheduleTriggerFlowTests
         return new SeedContext(teamId, userId, workflowId);
     }
 
-    private async Task SeedScheduleActivationAsync(Guid workflowId, string cron, bool enabled = true)
+    private async Task SeedScheduleActivationAsync(SeedContext context, string cron, bool enabled = true)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(context.UserId, context.TeamId);
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.WorkflowActivation.Add(new WorkflowActivation
         {
             Id = Guid.NewGuid(),
-            WorkflowId = workflowId,
+            WorkflowId = context.WorkflowId,
             TypeKey = "trigger.schedule",
             ConfigJson = JsonSerializer.Serialize(new { cron }),
             Enabled = enabled,
-            CreatedBy = SystemUsers.SeederId,
-            LastModifiedBy = SystemUsers.SeederId,
+            CreatedBy = context.UserId,
+            LastModifiedBy = context.UserId,
         });
         await db.SaveChangesAsync().ConfigureAwait(false);
     }

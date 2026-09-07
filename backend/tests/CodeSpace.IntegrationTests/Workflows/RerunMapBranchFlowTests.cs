@@ -988,7 +988,7 @@ public class RerunMapBranchFlowTests
         SuspendProbeNode.Reset(probeKey);
         var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendableBodyMapDef(probeKey));
         // The original parks on the suspendable body — that's fine; the body-scan gate refuses regardless.
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
         await RunEngineAsync(originalRunId);
 
         var before = await RunCountAsync(teamId);
@@ -1009,7 +1009,7 @@ public class RerunMapBranchFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "mapbranch-both-" + Guid.NewGuid().ToString("N");
         var workflowId = await CreateWorkflowAsync(teamId, userId, BothFlagsBodyMapDef(probeKey));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
         await RunEngineAsync(originalRunId);
 
         var before = await RunCountAsync(teamId);
@@ -1135,7 +1135,7 @@ public class RerunMapBranchFlowTests
         // original need only exist.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, LiveScopeItemsMapDef());
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
         await RunEngineAsync(originalRunId);
 
         var before = await RunCountAsync(teamId);
@@ -1518,7 +1518,7 @@ public class RerunMapBranchFlowTests
 
     private async Task<Guid> RunFreshAsync(Guid workflowId, Guid teamId, string payloadJson)
     {
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
+        var runId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
         await RunEngineAsync(runId);
         return runId;
     }

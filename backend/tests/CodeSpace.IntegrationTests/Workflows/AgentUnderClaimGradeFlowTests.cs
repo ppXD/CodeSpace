@@ -140,7 +140,7 @@ public sealed class AgentUnderClaimGradeFlowTests
 
     private async Task<Guid> CreateRunAsync(Guid teamId, AgentTask task)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

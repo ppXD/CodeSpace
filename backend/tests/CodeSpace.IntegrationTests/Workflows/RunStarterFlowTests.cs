@@ -93,6 +93,7 @@ public class RunStarterFlowTests
         // workflow_run_request.activation_id has an FK to workflow_activation; seed a real
         // activation row so the test exercises the production lineage rather than a fabricated id.
         Guid activationId;
+        string activationSnapshot;
         using (var setup = _fixture.BeginScope())
         {
             var db = setup.Resolve<CodeSpaceDbContext>();
@@ -104,10 +105,11 @@ public class RunStarterFlowTests
                 TypeKey = "trigger.pr.opened",
                 ConfigJson = "{}",
                 Enabled = true,
-                CreatedBy = SystemUsers.SeederId,
-                LastModifiedBy = SystemUsers.SeederId,
+                CreatedBy = userId,
+                LastModifiedBy = userId,
             });
             await db.SaveChangesAsync();
+            activationSnapshot = ActivationAuthoritySnapshot.Serialize(await db.WorkflowActivation.AsNoTracking().Include(a => a.Workflow).SingleAsync(a => a.Id == activationId));
         }
 
         Guid runId;
@@ -125,9 +127,9 @@ public class RunStarterFlowTests
                 ActorType = WorkflowRunActorTypes.Webhook,
                 ActorId = null,
                 NormalizedPayloadJson = """{"number":42}""",
-                CreatedBy = SystemUsers.SeederId,
+                CreatedBy = userId,
                 ActivationId = activationId,
-                ActivationSnapshotJson = """{"id":"...","typeKey":"trigger.pr.opened"}""",
+                ActivationSnapshotJson = activationSnapshot,
             }, CancellationToken.None);
 
             await db.SaveChangesAsync();

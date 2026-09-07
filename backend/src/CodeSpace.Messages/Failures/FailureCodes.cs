@@ -14,6 +14,7 @@ namespace CodeSpace.Messages.Failures;
 /// </summary>
 public static class FailureCodes
 {
+    public const string AgentAuthorityDenied = "agent.authority_denied";
     // ── Identity and access ────────────────────────────────────────────────────────
     public const string Unauthorized = "unauthorized";
     public const string InvalidCredentials = "invalid_credentials";

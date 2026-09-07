@@ -109,7 +109,7 @@ public class AgentRunExecutorTests
         var teamId = await SeedTeamAsync();
         Guid runId;
 
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var created = await scope.Resolve<IAgentRunService>().CreateAsync(
                 new AgentTask
@@ -146,7 +146,7 @@ public class AgentRunExecutorTests
         var teamId = await SeedTeamAsync();
         Guid runId;
 
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "text/plain", CancellationToken.None);
             var created = await scope.Resolve<IAgentRunService>().CreateAsync(
@@ -718,8 +718,10 @@ public class AgentRunExecutorTests
         // parent; a terminal parent cancels this run (never spawning a sandbox under a dead workflow) and resumes the
         // parent off the Cancelled state. The harness echoes "must-not-run" — its absence from the log proves no launch.
         var teamId = await SeedTeamAsync();
-        var parentRunId = await SeedParentWorkflowRunAsync(teamId, parentStatus);
+        var parentRunId = await SeedParentWorkflowRunAsync(teamId, WorkflowRunStatus.Suspended);
         var runId = await CreateBranchRunAsync(teamId, parentRunId);
+        using (var terminal = _fixture.BeginScope())
+            await terminal.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(r => r.Id == parentRunId).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, parentStatus));
 
         await ExecuteAsync(runId, new ScriptedHarness("printf 'must-not-run\\n'"));
 
@@ -753,7 +755,7 @@ public class AgentRunExecutorTests
     private async Task<Guid> SeedParentWorkflowRunAsync(Guid teamId, WorkflowRunStatus status)
     {
         Guid workflowId;
-        using (var scope = _fixture.BeginScopeAs(SystemUsers.SeederId, teamId, Roles.Admin))
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
             {
                 Name = "agent-parent-" + Guid.NewGuid().ToString("N")[..6],
@@ -777,7 +779,7 @@ public class AgentRunExecutorTests
 
     private async Task<Guid> CreateBranchRunAsync(Guid teamId, Guid parentRunId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "branch", Harness = "scripted", Model = "test-model" },
             teamId, parentRunId, "map#0", iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1268,7 +1270,7 @@ public class AgentRunExecutorTests
 
     private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1277,7 +1279,7 @@ public class AgentRunExecutorTests
 
     private async Task<Guid> CreateRunWithCredentialAsync(Guid teamId, Guid modelCredentialId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1287,7 +1289,7 @@ public class AgentRunExecutorTests
     /// <summary>A credentialed run whose task ALSO carries author-supplied environment — the second injection carrier the run's redactor must cover.</summary>
     private async Task<Guid> CreateRunWithCredentialAndEnvAsync(Guid teamId, Guid modelCredentialId, IReadOnlyDictionary<string, string> environment)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId, Environment = environment },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1296,7 +1298,7 @@ public class AgentRunExecutorTests
 
     private async Task<Guid> CreateUnpinnedRunWithCredentialAsync(Guid teamId, Guid modelCredentialId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = null, ModelCredentialId = modelCredentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1768,7 +1770,7 @@ public class AgentRunExecutorTests
 
     private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = timeoutSeconds },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1778,7 +1780,7 @@ public class AgentRunExecutorTests
     /// <summary>Create a run whose task carries a multi-repo <see cref="WorkspaceSpec"/> (so the executor can resolve each per-repo result's RepositoryId from the authoring spec), optionally opting into branch push.</summary>
     private async Task<Guid> CreateMultiRepoRunAsync(Guid teamId, bool push, params (string alias, Guid repoId, WorkspaceAccess access, bool primary)[] repos)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
 
         var spec = new WorkspaceSpec
         {
@@ -1804,7 +1806,7 @@ public class AgentRunExecutorTests
     /// <summary>A run that declares it REQUIRES a stored transcript, so the executor must resolve it before the harness is built.</summary>
     private async Task<Guid> CreateResumeRunAsync(Guid teamId, Guid transcriptArtifactId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var created = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask
             {

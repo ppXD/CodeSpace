@@ -4,8 +4,12 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
+using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
@@ -31,6 +35,48 @@ public class AgentRunServiceTests
 
     public AgentRunServiceTests(PostgresFixture fixture) { _fixture = fixture; }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateAsync_rejects_unverifiable_standalone_actors_without_persisting_a_run(bool seeder)
+    {
+        var teamId = await SeedTeamAsync();
+        using var scope = _fixture.BeginScopeAs(seeder ? SystemUsers.SeederId : null, teamId);
+
+        var exception = await Should.ThrowAsync<AgentAuthorityDeniedException>(() => scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, cancellationToken: CancellationToken.None));
+
+        exception.Reason.ShouldBe("actor-unverifiable");
+        (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.TeamId == teamId)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_another_teams_operator_without_persisting_a_run()
+    {
+        var teamId = await SeedTeamAsync();
+        var otherTeamId = await SeedTeamAsync();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, otherTeamId);
+
+        var exception = await Should.ThrowAsync<AgentAuthorityDeniedException>(() => scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, cancellationToken: CancellationToken.None));
+
+        exception.Reason.ShouldBe("membership-revoked");
+        (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.TeamId == teamId)).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateAsync_rejects_a_missing_or_foreign_workflow_parent_without_persisting_a_run(bool foreignParent)
+    {
+        var teamId = await SeedTeamAsync();
+        var parentRunId = foreignParent ? await SeedWorkflowRunAsync(await SeedTeamAsync()) : Guid.NewGuid();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+
+        var exception = await Should.ThrowAsync<AgentAuthorityDeniedException>(() => scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, parentRunId, "agent", cancellationToken: CancellationToken.None));
+
+        exception.Reason.ShouldBe("unknown-workflow-run");
+        (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.TeamId == teamId)).ShouldBe(0);
+    }
+
     [Fact]
     public async Task CreateAsync_persists_the_owning_cell_iteration_key()
     {
@@ -38,11 +84,12 @@ public class AgentRunServiceTests
         // verbatim (a map/loop branch key) and default to "" for a top-level / standalone run.
         var teamId = await SeedTeamAsync();
 
+        var workflowRunId = await SeedWorkflowRunAsync(teamId);
         Guid branchRunId, topLevelRunId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
-            branchRunId = (await svc.CreateAsync(BuildTask(), teamId, Guid.NewGuid(), "agent", iterationKey: "map#2", cancellationToken: CancellationToken.None)).Id;
+            branchRunId = (await svc.CreateAsync(BuildTask(), teamId, workflowRunId, "agent", iterationKey: "map#2", cancellationToken: CancellationToken.None)).Id;
             topLevelRunId = (await svc.CreateAsync(BuildTask(), teamId, null, null, cancellationToken: CancellationToken.None)).Id;
         }
 
@@ -60,7 +107,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
             run.Status.ShouldBe(AgentRunStatus.Queued);
@@ -108,7 +155,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
         Guid runId;
         long fence;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var runs = scope.Resolve<IAgentRunService>();
             runId = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -159,7 +206,7 @@ public class AgentRunServiceTests
     {
         var teamId = await SeedTeamAsync();
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
@@ -189,7 +236,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -228,7 +275,7 @@ public class AgentRunServiceTests
     {
         var teamId = await SeedTeamAsync();
         Guid runId;
-        using (var setup = _fixture.BeginScope())
+        using (var setup = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         var payload = JsonSerializer.SerializeToElement(new { marker = Guid.NewGuid(), blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
@@ -254,7 +301,7 @@ public class AgentRunServiceTests
     {
         var teamId = await SeedTeamAsync();
         Guid runId;
-        using (var setup = _fixture.BeginScope())
+        using (var setup = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         var artifactId = Guid.NewGuid();
@@ -280,7 +327,7 @@ public class AgentRunServiceTests
     {
         var teamId = await SeedTeamAsync();
         Guid runId;
-        using (var setup = _fixture.BeginScope())
+        using (var setup = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         var payload = JsonSerializer.SerializeToElement(new { marker = Guid.NewGuid(), blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
@@ -305,7 +352,7 @@ public class AgentRunServiceTests
     {
         var teamId = await SeedTeamAsync();
         Guid runId;
-        using (var setup = _fixture.BeginScope())
+        using (var setup = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await setup.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         var payloadA = JsonSerializer.SerializeToElement(new { marker = $"A-{Guid.NewGuid():N}", blob = new string('a', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
@@ -351,7 +398,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
         Guid runA;
         Guid runB;
-        using (var setup = _fixture.BeginScope())
+        using (var setup = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var runs = setup.Resolve<IAgentRunService>();
             runA = (await runs.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -387,7 +434,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -426,7 +473,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -464,7 +511,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -497,7 +544,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runA, runB;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runA = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -547,7 +594,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -573,7 +620,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid goodRun;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             goodRun = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -615,7 +662,7 @@ public class AgentRunServiceTests
         const int perRun = batches * perBatch;   // 240
 
         var runIds = new Guid[runCount];
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             for (var r = 0; r < runCount; r++)
@@ -674,7 +721,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId, noise1, noise2;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -765,7 +812,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -836,7 +883,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -896,7 +943,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -960,7 +1007,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1005,7 +1052,7 @@ public class AgentRunServiceTests
         Guid fullArtifactId;
         Guid runId;
 
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             fullArtifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(fullPatch), "text/x-diff", CancellationToken.None);
             var runs = scope.Resolve<IAgentRunService>();
@@ -1042,7 +1089,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1075,7 +1122,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1128,7 +1175,7 @@ public class AgentRunServiceTests
         Guid fullArtifactId;
         Guid runId;
 
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             fullArtifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(fullPatch), "text/x-diff", CancellationToken.None);
             var runs = scope.Resolve<IAgentRunService>();
@@ -1178,7 +1225,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1219,7 +1266,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1256,7 +1303,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1288,7 +1335,7 @@ public class AgentRunServiceTests
         var otherTeam = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, ownerTeam))
         {
             var svc = scope.Resolve<IAgentRunService>();
             var run = await svc.CreateAsync(BuildTask(), ownerTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1310,7 +1357,7 @@ public class AgentRunServiceTests
     public async Task Completing_a_queued_run_is_illegal()
     {
         var teamId = await SeedTeamAsync();
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var svc = scope.Resolve<IAgentRunService>();
 
         var run = await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1324,7 +1371,7 @@ public class AgentRunServiceTests
     public async Task Completing_with_a_nonterminal_status_is_rejected()
     {
         var teamId = await SeedTeamAsync();
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var svc = scope.Resolve<IAgentRunService>();
 
         var run = await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1340,7 +1387,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
             runId = run.Id;
@@ -1360,7 +1407,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         long epoch;
@@ -1386,7 +1433,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         long claimedEpoch;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1415,7 +1462,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
@@ -1447,7 +1494,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         long claimedEpoch;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1479,7 +1526,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         long epoch;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1508,7 +1555,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         long originalEpoch;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1541,7 +1588,7 @@ public class AgentRunServiceTests
 
         await SeedInflightRunsAsync(teamId, queued: 1, running: 1);   // 2 in flight → AT the cap
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var svc = scope.Resolve<IAgentRunService>();
 
         var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
@@ -1562,7 +1609,7 @@ public class AgentRunServiceTests
 
         await SeedInflightRunsAsync(teamId, queued: 2, running: 1);   // 3 in flight, cap 5 → headroom
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
         run.Status.ShouldBe(AgentRunStatus.Queued, "a sub-cap run is admitted + persisted Queued");
@@ -1582,14 +1629,12 @@ public class AgentRunServiceTests
         await SeedInflightRunsAsync(fullTeam, queued: 1, running: 1);   // fullTeam is AT its cap
         await SeedInflightRunsAsync(otherTeam, queued: 1, running: 0);  // otherTeam has plenty of headroom
 
-        using var scope = _fixture.BeginScope();
-        var svc = scope.Resolve<IAgentRunService>();
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, fullTeam))
+            await Should.ThrowAsync<AgentRunAdmissionException>(() => scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), fullTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
 
-        await Should.ThrowAsync<AgentRunAdmissionException>(() =>
-            svc.CreateAsync(BuildTask(), fullTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
-
-        // The OTHER team, well under its own cap, is admitted normally despite the first team being full.
-        var run = await svc.CreateAsync(BuildTask(), otherTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        // The OTHER team's own operator is admitted despite the first team being full.
+        using var otherScope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, otherTeam);
+        var run = await otherScope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), otherTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Queued, "a different team under its own cap is unaffected by a full team");
     }
 
@@ -1608,7 +1653,7 @@ public class AgentRunServiceTests
         await SeedInflightRunsAsync(teamA, queued: 1, running: 1);   // 2
         await SeedInflightRunsAsync(teamB, queued: 1, running: 0);   // +1 = 3 global → AT the global cap
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamC);
         var svc = scope.Resolve<IAgentRunService>();
 
         var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
@@ -1631,7 +1676,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1663,7 +1708,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1693,7 +1738,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1719,7 +1764,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1745,7 +1790,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1771,7 +1816,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1804,7 +1849,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1834,7 +1879,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -1930,7 +1975,7 @@ public class AgentRunServiceTests
         var teamId = await SeedTeamAsync();
         var agentDefinitionId = Guid.NewGuid();
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             BuildTask() with { AgentDefinitionId = agentDefinitionId }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
@@ -1944,7 +1989,7 @@ public class AgentRunServiceTests
         // D1 retry-resume: the lookup finds the prior attempt of a SPECIFIC subtask in the same supervisor run (by the
         // spawned agent's task SubtaskId), so a retry continues that subtask's conversation — never a sibling subtask's.
         var teamId = await SeedTeamAsync();
-        var supervisorRunId = Guid.NewGuid();   // same-run agent scan — no WorkflowRun row needed
+        var supervisorRunId = await SeedWorkflowRunAsync(teamId);
 
         await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sa", "sess-sa", "alpha convo\n");
         await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-sb", "beta convo\n");
@@ -1967,7 +2012,7 @@ public class AgentRunServiceTests
         // Both-or-neither: an attempt that captured a session id but NO transcript is not resumable — it must not mask an
         // older resumable attempt of the same subtask (the retried agent continues the conversation that actually exists).
         var teamId = await SeedTeamAsync();
-        var supervisorRunId = Guid.NewGuid();
+        var supervisorRunId = await SeedWorkflowRunAsync(teamId);
 
         await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-resumable", "the beta conversation\n");
         await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-no-transcript", inlineTranscript: "");
@@ -1990,7 +2035,7 @@ public class AgentRunServiceTests
         // Retry-of-retry: attempt1 → retry(attempt2, which resumed attempt1) → retry AGAIN. The third attempt must resume
         // the NEWEST resumable prior attempt (attempt2, carrying the accumulated history), never the stale attempt1.
         var teamId = await SeedTeamAsync();
-        var supervisorRunId = Guid.NewGuid();
+        var supervisorRunId = await SeedWorkflowRunAsync(teamId);
 
         var attempt1 = await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-attempt1", "attempt 1 convo\n");
         var attempt2 = await SeedSubtaskAttemptAsync(teamId, supervisorRunId, "sb", "sess-attempt2", "attempt 1 + 2 convo\n");
@@ -2028,6 +2073,13 @@ public class AgentRunServiceTests
         await svc.CompleteAsync(run.Id, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = sessionId, SessionTranscript = inlineTranscript }, CancellationToken.None);
 
         return run.Id;
+    }
+
+    private async Task<Guid> SeedWorkflowRunAsync(Guid teamId)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var userId = scope.Resolve<ICurrentUser>().Id!.Value;
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(WorkflowsTestSeed.MinimalDefinition(), teamId, userId, "{}", [], null, null, CancellationToken.None);
     }
 
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>

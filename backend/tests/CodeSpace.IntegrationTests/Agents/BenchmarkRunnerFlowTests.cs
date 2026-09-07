@@ -33,6 +33,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 public sealed class BenchmarkRunnerFlowTests
 {
     private readonly PostgresFixture _fixture;
+    private readonly Dictionary<Guid, Guid> _operators = new();
 
     public BenchmarkRunnerFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
@@ -314,7 +315,7 @@ public sealed class BenchmarkRunnerFlowTests
 
     private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDir, Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(_operators[teamId], teamId);
         return await scope.Resolve<IBenchmarkRunner>().RunAsync(task, mode, new BenchmarkExecutionContext { WorkspaceDirectory = workspaceDir, TeamId = teamId }, CancellationToken.None);
     }
 
@@ -370,6 +371,7 @@ public sealed class BenchmarkRunnerFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
+        _operators.Add(teamId, userId);
         return teamId;
     }
 

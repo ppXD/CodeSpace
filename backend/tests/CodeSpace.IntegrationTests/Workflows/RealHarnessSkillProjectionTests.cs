@@ -1,4 +1,5 @@
 using Autofac;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -54,7 +55,7 @@ public class RealHarnessSkillProjectionTests
 
     private async Task<Guid> CreateRunWithSkillAsync(Guid teamId, string harnessKind, AgentSkill skill, IReadOnlyDictionary<string, string> env)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "demonstrate the skill", Harness = harnessKind, Model = null, Skills = new[] { skill }, Environment = env, TimeoutSeconds = 120 },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);

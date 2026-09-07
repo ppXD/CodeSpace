@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -18,6 +19,15 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// </summary>
 public static class WorkflowsTestSeed
 {
+    /// <summary>Explicit operator scope for fixtures that seeded exactly one real Owner. Never changes the fixture's background scope.</summary>
+    public static async Task<ILifetimeScope> BeginSeedOperatorScopeAsync(PostgresFixture fixture, Guid teamId)
+    {
+        Guid userId;
+        using (var read = fixture.BeginScope())
+            userId = await read.Resolve<CodeSpaceDbContext>().TeamMembership.AsNoTracking().Where(m => m.TeamId == teamId && m.Role == TeamRole.Owner && !m.User.IsBot && m.User.DeletedDate == null && m.User.DeactivatedAt == null).Select(m => m.UserId).SingleAsync().ConfigureAwait(false);
+        return fixture.BeginScopeAs(userId, teamId);
+    }
+
     /// <summary>
     /// Seeds a fresh user + team + Owner membership. Returns ids the caller scopes mediator
     /// calls under via <see cref="PostgresFixture.BeginScopeAs"/>. The seeded user has the
@@ -175,6 +185,17 @@ public static class WorkflowsTestSeed
     public static JsonElement EmptyJson() => JsonDocument.Parse("{}").RootElement.Clone();
     public static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
+    /// <summary>Admit a current manual run through production authority, then enqueue it for a fixture-driven engine walk.</summary>
+    public static async Task<Guid> SeedAdmittedManualRunAsync(PostgresFixture fixture, Guid workflowId, Guid teamId, int workflowVersion = 1, string payloadJson = "{}")
+    {
+        using var scope = await BeginSeedOperatorScopeAsync(fixture, teamId).ConfigureAwait(false);
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var operatorId = await db.TeamMembership.Where(m => m.TeamId == teamId && m.Role == TeamRole.Owner).Select(m => m.UserId).SingleAsync().ConfigureAwait(false);
+        var runId = await scope.Resolve<IRunStarter>().StartAsync(new RunSourceEnvelope { TeamId = teamId, WorkflowId = workflowId, WorkflowVersion = workflowVersion, SourceType = WorkflowRunSourceTypes.Manual, ActorType = WorkflowRunActorTypes.User, ActorId = operatorId, CreatedBy = operatorId, NormalizedPayloadJson = payloadJson }, CancellationToken.None).ConfigureAwait(false);
+        await db.WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Enqueued)).ConfigureAwait(false);
+        return runId;
+    }
+
     /// <summary>
     /// Insert a <c>workflow_run_request</c> + <c>workflow_run</c> pair simulating a manual
     /// run, return the run id. <paramref name="payloadJson"/> becomes
@@ -185,6 +206,8 @@ public static class WorkflowsTestSeed
     {
         using var scope = fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var actorUserId = await db.TeamMembership.Where(m => m.TeamId == teamId && m.Role == TeamRole.Owner).Select(m => m.UserId).SingleAsync().ConfigureAwait(false);
 
         var requestId = Guid.NewGuid();
         var runId = Guid.NewGuid();
@@ -207,7 +230,7 @@ public static class WorkflowsTestSeed
             WorkflowId = workflowId,
             SourceType = WorkflowRunSourceTypes.Manual,
             ActorType = "user",
-            ActorId = SystemUsers.SeederId,
+            ActorId = actorUserId,
             NormalizedPayloadJson = payloadJson,
             Status = WorkflowRunRequestStatus.Consumed,
             ReceivedAt = now,
@@ -243,8 +266,8 @@ public static class WorkflowsTestSeed
             // its own policy-null row explicitly (CompletionPolicyStampFlowTests does).
             CompletionPolicyVersion = CodeSpace.Core.Services.Completion.CompletionPolicy.CurrentVersion,
             CompletionEnforcementMode = enforcementMode.ToString(),
-            CreatedBy = SystemUsers.SeederId,
-            LastModifiedBy = SystemUsers.SeederId,
+            CreatedBy = actorUserId,
+            LastModifiedBy = actorUserId,
         });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
@@ -253,7 +276,7 @@ public static class WorkflowsTestSeed
         // see the complete lifecycle ledger that production produces. Without this,
         // RunLifecycleLedgerFlowTests' sequence assertion would have a gap.
         var recordLogger = scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>();
-        await recordLogger.RunQueuedAsync(runId, CodeSpace.Messages.Constants.WorkflowRunSourceTypes.Manual, SystemUsers.SeederId, CancellationToken.None).ConfigureAwait(false);
+        await recordLogger.RunQueuedAsync(runId, CodeSpace.Messages.Constants.WorkflowRunSourceTypes.Manual, actorUserId, CancellationToken.None).ConfigureAwait(false);
 
         return runId;
     }

@@ -493,7 +493,7 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
 
     private async Task<SeededRun> CreateAgentRunAsync(Guid teamId, Guid? workflowRunId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var runs = scope.Resolve<IAgentRunService>();
         var created = await runs.CreateAsync(
             new AgentTask { Goal = "record the process it launched", Harness = ClaudeCodeHarness.HarnessKind, Model = PricedModel, TimeoutSeconds = 1800 },

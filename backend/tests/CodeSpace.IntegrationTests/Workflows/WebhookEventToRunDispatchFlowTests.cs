@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
@@ -73,7 +74,7 @@ public class WebhookEventToRunDispatchFlowTests
     {
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.opened", configJson);
+        await SeedActivationAsync(ctx, "trigger.pr.opened", configJson);
 
         var ev = BuildOpenedEvent(ctx.RepositoryId, labels: new[] { "bug", "needs-review" });
         await PublishAndCommitAsync(ev);
@@ -104,7 +105,7 @@ public class WebhookEventToRunDispatchFlowTests
         // misalignment at the unit tier; this test catches dispatch-time payload drift.
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.updated", configJson);
+        await SeedActivationAsync(ctx, "trigger.pr.updated", configJson);
 
         var ev = BuildSynchronizedEvent(ctx.RepositoryId, labels: new[] { "wip" });
         await PublishAndCommitAsync(ev);
@@ -135,7 +136,7 @@ public class WebhookEventToRunDispatchFlowTests
         // payload drift at dispatch time fails here, complementing the unit-tier drift detector.
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.merged", configJson);
+        await SeedActivationAsync(ctx, "trigger.pr.merged", configJson);
 
         var ev = BuildMergedEvent(ctx.RepositoryId, labels: new[] { "release" });
         await PublishAndCommitAsync(ev);
@@ -163,7 +164,7 @@ public class WebhookEventToRunDispatchFlowTests
     {
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositoryId": "{{ctx.RepositoryId}}", "branches": ["main"] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson);
+        await SeedActivationAsync(ctx, "trigger.push", configJson);
 
         var ev = BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/main");
         await PublishAndCommitAsync(ev);
@@ -189,7 +190,7 @@ public class WebhookEventToRunDispatchFlowTests
         // main-only activation, but the dispatcher still audits (activation existed, config excluded).
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositoryId": "{{ctx.RepositoryId}}", "branches": ["main"] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson);
+        await SeedActivationAsync(ctx, "trigger.push", configJson);
 
         await PublishAndCommitAsync(BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/develop"));
 
@@ -201,7 +202,7 @@ public class WebhookEventToRunDispatchFlowTests
     public async Task Push_with_no_branch_filter_fires_on_any_branch()
     {
         var ctx = await SeedAsync();
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson: $$"""{ "repositoryId": "{{ctx.RepositoryId}}" }""");
+        await SeedActivationAsync(ctx, "trigger.push", configJson: $$"""{ "repositoryId": "{{ctx.RepositoryId}}" }""");
 
         await PublishAndCommitAsync(BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/any-feature"));
 
@@ -216,7 +217,7 @@ public class WebhookEventToRunDispatchFlowTests
         // case; this proves the true value survives publish → dispatch → NormalizedPayloadJson write.
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.opened", configJson);
+        await SeedActivationAsync(ctx, "trigger.pr.opened", configJson);
 
         await PublishAndCommitAsync(BuildOpenedEvent(ctx.RepositoryId, isDraft: true));
 
@@ -235,7 +236,7 @@ public class WebhookEventToRunDispatchFlowTests
         var ctx = await SeedAsync();
         var (typeKey, ev) = BuildForTrigger(trigger, ctx.RepositoryId);
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson);
+        await SeedActivationAsync(ctx, typeKey, configJson);
 
         await PublishAndCommitAsync(ev);
 
@@ -262,7 +263,7 @@ public class WebhookEventToRunDispatchFlowTests
         var ctx = await SeedAsync();
         var (typeKey, ev) = BuildForTrigger(trigger, ctx.RepositoryId);
         var configJson = $$"""{ "repositoryId": "{{ctx.RepositoryId}}" }""";
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson);
+        await SeedActivationAsync(ctx, typeKey, configJson);
 
         await PublishAndCommitAsync(ev);
 
@@ -283,7 +284,7 @@ public class WebhookEventToRunDispatchFlowTests
         // Event from a DIFFERENT repository than the seeded one — still must fire because
         // the activation didn't scope to anything.
         var (typeKey, ev) = BuildForTrigger(trigger, repositoryId: Guid.NewGuid());
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson: "{}");
+        await SeedActivationAsync(ctx, typeKey, configJson: "{}");
 
         await PublishAndCommitAsync(ev);
 
@@ -304,7 +305,7 @@ public class WebhookEventToRunDispatchFlowTests
         // operator can see "your PR was detected but no workflow listened".
         var ctx = await SeedAsync();
         var (typeKey, ev) = BuildForTrigger(trigger, ctx.RepositoryId);
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson: """{ "repositories": [] }""");
+        await SeedActivationAsync(ctx, typeKey, configJson: """{ "repositories": [] }""");
 
         await PublishAndCommitAsync(ev);
 
@@ -324,7 +325,7 @@ public class WebhookEventToRunDispatchFlowTests
         var ctx = await SeedAsync();
         var (typeKey, ev) = BuildForTrigger(trigger, ctx.RepositoryId);
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson, enabled: false);
+        await SeedActivationAsync(ctx, typeKey, configJson, enabled: false);
 
         await PublishAndCommitAsync(ev);
 
@@ -346,7 +347,7 @@ public class WebhookEventToRunDispatchFlowTests
         var configJson = $$"""
             { "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}", "labels": ["bug", "wip"] }] }
             """;
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson);
+        await SeedActivationAsync(ctx, typeKey, configJson);
 
         await PublishAndCommitAsync(ev);
 
@@ -364,7 +365,7 @@ public class WebhookEventToRunDispatchFlowTests
         var configJson = $$"""
             { "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}", "labels": ["bug", "wip"] }] }
             """;
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson);
+        await SeedActivationAsync(ctx, typeKey, configJson);
 
         await PublishAndCommitAsync(ev);
 
@@ -386,7 +387,7 @@ public class WebhookEventToRunDispatchFlowTests
         var ctx = await SeedAsync();
         var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
         var (typeKey, _) = BuildForTrigger(trigger, ctx.RepositoryId);
-        await SeedActivationAsync(ctx.WorkflowId, typeKey, configJson);
+        await SeedActivationAsync(ctx, typeKey, configJson);
 
         var deliveryId = $"replay-{Guid.NewGuid():N}";
         var first = BuildForTrigger(trigger, ctx.RepositoryId, providerEventId: deliveryId).ev;
@@ -399,6 +400,62 @@ public class WebhookEventToRunDispatchFlowTests
     }
 
     // ─── Test fixture infrastructure ───────────────────────────────────────────
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_refused_activation_is_durably_audited_without_blocking_another_team_or_repeating_its_run(bool unknownPublisher)
+    {
+        var denied = await SeedAsync();
+        var valid = await SeedAsync();
+        var config = JsonSerializer.Serialize(new { repositories = new[] { new { repositoryId = valid.RepositoryId } } });
+        await SeedActivationAsync(denied, "trigger.pr.opened", config);
+        await SeedActivationAsync(valid, "trigger.pr.opened", config);
+        using (var revoke = _fixture.BeginScope())
+        {
+            var db = revoke.Resolve<CodeSpaceDbContext>();
+            if (unknownPublisher) await db.WorkflowActivation.Where(a => a.WorkflowId == denied.WorkflowId).ExecuteUpdateAsync(s => s.SetProperty(a => a.CreatedBy, SystemUsers.SeederId).SetProperty(a => a.LastModifiedBy, SystemUsers.SeederId));
+            else await db.TeamMembership.Where(m => m.TeamId == denied.TeamId && m.UserId == denied.UserId).ExecuteDeleteAsync();
+        }
+        var delivery = BuildOpenedEvent(valid.RepositoryId, []);
+
+        await PublishAndCommitAsync(delivery);
+        await PublishAndCommitAsync(delivery);
+
+        await AssertRunCountAsync(denied.WorkflowId, 0);
+        await AssertRunCountAsync(valid.WorkflowId, 1);
+        using var verify = _fixture.BeginScope();
+        var audits = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking().Where(r => r.TeamId == denied.TeamId && r.Status == WorkflowRunRequestStatus.Rejected && r.ExternalEventId == delivery.ProviderEventId).ToListAsync();
+        var audit = audits.ShouldHaveSingleItem();
+        audit.Error.ShouldContain("agent.authority_denied");
+        audit.Error.ShouldContain(denied.WorkflowId.ToString());
+    }
+
+    [Fact]
+    public async Task A_webhook_infrastructure_failure_propagates_and_the_callers_transaction_rolls_back_staged_runs()
+    {
+        var first = await SeedAsync();
+        var second = await SeedAsync();
+        var config = JsonSerializer.Serialize(new { repositories = new[] { new { repositoryId = first.RepositoryId } } });
+        await SeedActivationAsync(first, "trigger.pr.opened", config);
+        await SeedActivationAsync(second, "trigger.pr.opened", config);
+        using (var scope = _fixture.BeginScope(b => b.Register(c => new FailSecondStarter(c.Resolve<RunStarter>())).As<IRunStarter>().InstancePerLifetimeScope()))
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            var error = await Should.ThrowAsync<IOException>(() => scope.Resolve<IMediator>().Publish(BuildOpenedEvent(first.RepositoryId, [])));
+            error.Message.ShouldBe("injected-admission-infrastructure-failure");
+            await transaction.RollbackAsync();
+        }
+        await AssertRunCountAsync(first.WorkflowId, 0);
+        await AssertRunCountAsync(second.WorkflowId, 0);
+    }
+
+    private sealed class FailSecondStarter(IRunStarter inner) : IRunStarter
+    {
+        private int _calls;
+        public Task<Guid> StartAsync(RunSourceEnvelope envelope, CancellationToken cancellationToken) => ++_calls == 2 ? throw new IOException("injected-admission-infrastructure-failure") : inner.StartAsync(envelope, cancellationToken);
+    }
 
     private sealed record SeedContext(Guid TeamId, Guid UserId, Guid WorkflowId, Guid RepositoryId);
 
@@ -534,19 +591,19 @@ public class WebhookEventToRunDispatchFlowTests
         }).ConfigureAwait(false);
     }
 
-    private async Task SeedActivationAsync(Guid workflowId, string typeKey, string configJson, bool enabled = true)
+    private async Task SeedActivationAsync(SeedContext context, string typeKey, string configJson, bool enabled = true)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(context.UserId, context.TeamId);
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.WorkflowActivation.Add(new WorkflowActivation
         {
             Id = Guid.NewGuid(),
-            WorkflowId = workflowId,
+            WorkflowId = context.WorkflowId,
             TypeKey = typeKey,
             ConfigJson = configJson,
             Enabled = enabled,
-            CreatedBy = SystemUsers.SeederId,
-            LastModifiedBy = SystemUsers.SeederId,
+            CreatedBy = context.UserId,
+            LastModifiedBy = context.UserId,
         });
         await db.SaveChangesAsync().ConfigureAwait(false);
     }

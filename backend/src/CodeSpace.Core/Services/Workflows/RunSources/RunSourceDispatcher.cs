@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -97,17 +98,33 @@ public sealed class RunSourceDispatcher :
         }
 
         var firedRunIds = new List<Guid>();
+        var authorityRefused = false;
         foreach (var activation in activations)
         {
             var matcher = candidateMatchers.First(m => m.TypeKey == activation.TypeKey);
-            var runId = await FireIfMatchesAsync(activation, matcher, normalizedEvent, cancellationToken).ConfigureAwait(false);
-            if (runId.HasValue) firedRunIds.Add(runId.Value);
+            try
+            {
+                var runId = await FireIfMatchesAsync(activation, matcher, normalizedEvent, cancellationToken).ConfigureAwait(false);
+                if (runId.HasValue) firedRunIds.Add(runId.Value);
+            }
+            catch (AgentAuthorityDeniedException ex)
+            {
+                authorityRefused = true;
+                _logger.LogWarning("Webhook activation authority refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Code={Code} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Code, ex.Reason);
+                await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+                {
+                    TeamId = activation.Workflow.TeamId, RepositoryId = normalizedEvent.RepositoryId, SourceType = activation.TypeKey,
+                    ExternalEventId = normalizedEvent.ProviderEventId, Reason = ex.Code,
+                    Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {ex.Reason}",
+                    DedupKey = $"rejected:authority:{activation.Id:N}:{normalizedEvent.ProviderEventId}",
+                }, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         // All activations of the right type existed, but their CONFIG filters (e.g.
         // repositoryId scope) excluded this event. Audit the no-fire outcome so the operator
         // can see "your activation didn't match because its repositoryId filter excluded this PR".
-        if (firedRunIds.Count == 0)
+        if (firedRunIds.Count == 0 && !authorityRefused)
             await WriteNoMatchAuditAsync(normalizedEvent, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -210,7 +227,7 @@ public sealed class RunSourceDispatcher :
             NormalizedPayloadJson = payload.GetRawText(),
             CreatedBy = SystemUsers.SeederId,                   // engine-initiated row; no user identity
             ActivationId = activation.Id,
-            ActivationSnapshotJson = SerializeActivationSnapshot(activation),
+            ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
             ExternalEventId = normalizedEvent.ProviderEventId,
             IdempotencyKey = SynthesiseProviderIdempotencyKey(matcher.TypeKey, normalizedEvent.ProviderEventId, activation.Id),
         }, cancellationToken).ConfigureAwait(false);
@@ -238,17 +255,5 @@ public sealed class RunSourceDispatcher :
     private static string SynthesiseProviderIdempotencyKey(string sourceType, string deliveryId, Guid activationId) =>
         $"{sourceType}:{deliveryId}:{activationId:N}";
 
-    private static string SerializeActivationSnapshot(WorkflowActivation a)
-    {
-        // Capture the matched activation row verbatim. Replay tooling reads this to reproduce
-        // the original match decision even after the activation is edited or deleted.
-        var snapshot = new
-        {
-            id = a.Id,
-            typeKey = a.TypeKey,
-            config = JsonDocument.Parse(a.ConfigJson).RootElement,
-            enabled = a.Enabled,
-        };
-        return JsonSerializer.Serialize(snapshot);
-    }
+
 }

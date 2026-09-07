@@ -96,7 +96,7 @@ public class AgentRunReconcileRepairFlowTests
 
     private async Task<Guid> CreateRunAsync(Guid teamId, string authoredHarness, Guid credentialId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "g", Harness = authoredHarness, Model = "test-model", ModelCredentialId = credentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
