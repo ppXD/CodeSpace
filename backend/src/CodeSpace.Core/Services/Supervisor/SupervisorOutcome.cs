@@ -795,8 +795,19 @@ public static class SupervisorOutcome
         (result.AcceptancePassed != false || Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, ResultShowsWork(result)))
         && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) || ResultShowsWork(result));
 
-    /// <summary>Whether the compact shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — the supervisor-side name for <see cref="Agents.AgentWorkPresence.ShowsWork(SupervisorAgentResult)"/>, the ONE definition the evidence fold, the decider's verdict line, the recitation AND both receipt-minting sites share for the infra classification, so none of them can drift on what "work exists" means.</summary>
+    /// <summary>Whether the compact shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — the supervisor-side name for <see cref="Agents.AgentWorkPresence.ShowsWork(SupervisorAgentResult)"/>, which the evidence fold, the decider's verdict line, the recitation and the baseline-capture spend gate all read for the infra classification. The two receipt-minting sites call the SAME definition by its own name (<c>AgentWorkPresence.ShowsWork</c>) because one of them holds the other result shape; none of the five can drift on what "work exists" means.</summary>
     public static bool ResultShowsWork(SupervisorAgentResult result) => Agents.AgentWorkPresence.ShowsWork(result);
+
+    /// <summary>
+    /// Whether a unit's candidate acceptance grade actually RAN — the negation of the SHARED infra classification
+    /// (<see cref="Agents.AgentAcceptanceContract.IsInfraFailure(Messages.Agents.Benchmark.BenchmarkGrade, bool)"/>)
+    /// over the SHARED work-present read above, so the differential's spend decision and the receipt the same unit
+    /// mints can never disagree about it. The precondition the baseline capture is gated on: a grade whose CHECK
+    /// never ran (clone/setup/timeout faults, a publish that failed with work in hand) has nothing a baseline could
+    /// be compared against, and measuring one anyway pays a second full clone and a second judge call for a pair
+    /// nothing can read.
+    /// </summary>
+    public static bool CandidateGradeRan(SupervisorAgentResult result, Messages.Agents.Benchmark.BenchmarkGrade grade) => !Agents.AgentAcceptanceContract.IsInfraFailure(grade, ResultShowsWork(result));
 
     /// <summary>
     /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4; B2
