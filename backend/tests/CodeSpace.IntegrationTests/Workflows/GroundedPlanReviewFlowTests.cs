@@ -49,7 +49,7 @@ public sealed class GroundedPlanReviewFlowTests
         await remote.SeedAsync(("hack.txt", ReviewVerdictFakeCli.FlawMarker + "\n"));   // the plan's broken assumption, IN the default branch
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var verdict = await scope.Resolve<IAgentPlanReviewer>().ReviewAsync(new PlanReviewRequest
         {
             PlanArtifact = "Goal: clean tree\nSubtasks:\n  - ship: build on the existing clean base",
@@ -82,7 +82,7 @@ public sealed class GroundedPlanReviewFlowTests
         await remote.SeedAsync();
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var verdict = await scope.Resolve<IAgentPlanReviewer>().ReviewAsync(new PlanReviewRequest
         {
             PlanArtifact = "Goal: clean tree\nSubtasks:\n  - ship: build on the existing clean base",
@@ -108,7 +108,7 @@ public sealed class GroundedPlanReviewFlowTests
         await remote.SeedAsync(("hack.txt", ReviewVerdictFakeCli.FlawMarker + "\n"));
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         scope.Resolve<CriticReviewScript>().Reset();
         var decorator = new CriticPlannerDecorator(new FixedPlanner(), scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(), scope.Resolve<IAgentPlanReviewer>());
 
