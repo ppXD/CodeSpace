@@ -23,11 +23,16 @@ namespace CodeSpace.E2ETests.Workflows;
 ///
 /// <para><b>Report-only (<c>gating: false</c>) until it has a passing history</b> — this repo's rule for a NEW arm, and
 /// this one has no passing run at all. Every live attempt so far has ended in the same place: the model's reply carried
-/// no acceptance <c>argv</c>, so #1827's typed contract rejected it (production's degrade for that is being fixed
-/// separately). An arm that has never once passed cannot tell a regression from its own unmet precondition, so gating
-/// it only reds the blessed wire for what the model has always done. The verdict is still REPORTED on every run — the
-/// contract-miss note included — so the moment the model starts binding, the passing history the rule asks for exists
-/// in the job summaries, and the arm can be promoted by a one-word change here.</para>
+/// no acceptance <c>argv</c> (and no <c>formatVersion</c>), so the typed contract refused to bind it. An arm that has
+/// never once passed cannot tell a regression from its own unmet precondition, so gating it only reds the blessed wire
+/// for what the model has always done. The verdict is still REPORTED on every run — the contract-miss note included —
+/// so the moment the model starts binding, the passing history the rule asks for exists in the job summaries, and the
+/// arm can be promoted by a one-word change here.</para>
+///
+/// <para>That precondition now arrives as DATA rather than as an exception: an acceptance the contract cannot bind is
+/// dropped and recorded on the plan instead of failing the planner. The miss is therefore read off
+/// <c>PlannedWorkflow.DroppedAcceptances</c> and returned as the same informational verdict — otherwise the very
+/// degrade that keeps live plans alive would turn this arm's oldest known precondition into a hard assertion red.</para>
 ///
 /// <para>Only its GATING is soft. Everything the arm asserts with Shouldly still reds: <c>RealModelGate</c> excludes a
 /// <c>ShouldAssertException</c> from the report-only catch deliberately, so the grader facts below — the oracle
@@ -81,6 +86,12 @@ public sealed class RealModelPlannerAcceptanceE2ETests(PostgresFixture fixture)
                 return (false, $"the live planner's reply never bound to the typed acceptance contract, even after the provider's bounded re-ask — {ex.GetType().Name}: {ex.Message}");
             }
 
+            // The same verdict, for the same miss, now that it no longer throws: an acceptance the typed contract
+            // could not bind is dropped and NAMED on the plan. Returning it keeps the arm's hard assertions about
+            // GRADING hard while leaving the model's own contract binding soft, which is the whole demotion.
+            if (plan.DroppedAcceptances is { Count: > 0 } dropped)
+                return (false, $"the live planner authored {dropped.Count} acceptance(s) the typed contract could not bind, even after the provider's bounded re-ask — {string.Join("; ", dropped.Select(drop => $"{drop.SubtaskId} ({drop.Kind}): {drop.Reason}"))}");
+
             plan.AuthoredByModel.ShouldNotBeNullOrWhiteSpace("the response must come from the pinned real provider path");
             plan.Subtasks.Count.ShouldBe(2);
             plan.Subtasks.ShouldAllBe(item => item.Acceptance != null);
@@ -117,12 +128,15 @@ public sealed class RealModelPlannerAcceptanceE2ETests(PostgresFixture fixture)
     }
 
     /// <summary>
-    /// Whether <paramref name="ex"/> is the live planner's REPLY failing the typed acceptance contract, rather than
-    /// infrastructure breaking underneath it. Two shapes, both meaning "the model could not author a conforming plan":
-    /// the provider's bounded re-ask spent with the second reply still invalid (a Malformed
-    /// <see cref="LlmApiException"/> — the categories the gate's own <c>IsGatewayInfraFailure</c> deliberately excludes
-    /// from infra), and <c>LlmWorkflowPlanner.Deserialize</c>'s <see cref="InvalidOperationException"/> wrapper over a
+    /// Whether <paramref name="ex"/> is the live planner's REPLY failing the PLAN contract, rather than infrastructure
+    /// breaking underneath it. Two shapes, both meaning "the model could not author a conforming plan": the provider's
+    /// bounded re-ask spent with the second reply still invalid (a Malformed <see cref="LlmApiException"/> — the
+    /// categories the gate's own <c>IsGatewayInfraFailure</c> deliberately excludes from infra), and
+    /// <c>LlmWorkflowPlanner.Deserialize</c>'s <see cref="InvalidOperationException"/> wrapper over a
     /// <see cref="JsonException"/> for a reply that is well-formed JSON yet binds to no <c>PlannedWorkflow</c>.
+    ///
+    /// <para>What no longer arrives here is an ACCEPTANCE miss: those are dropped and recorded on the plan, and the
+    /// caller reads them off <c>DroppedAcceptances</c>. Both clauses now mean a plan-SHAPE failure.</para>
     ///
     /// <para>Everything else PROPAGATES, deliberately. A gateway timeout / transport drop / rate limit / auth failure is
     /// routed by the gate to a non-gating infra skip, and a real regression reds — including the two brain-RESOLUTION
