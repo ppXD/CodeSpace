@@ -1093,7 +1093,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         /// <summary>The COMPLETE tape the plan's per-item state joins off, or null on the summarizer path (keep the plan payload verbatim).</summary>
         public IReadOnlyList<SupervisorPriorDecision>? LivePriors { get; init; }
 
-        /// <summary>Every unit's verdict-steer standings, resolved ONCE over <see cref="LivePriors"/> for the whole prompt (<see cref="UnitSteerStandings(IReadOnlyList{SupervisorPriorDecision})"/>) — the same seam, and set with it, because both readings walk the whole tape and a unit renders once per attempt it appears in.</summary>
+        /// <summary>Every unit's verdict-steer standings, resolved ONCE over <see cref="LivePriors"/> for the whole prompt (<see cref="UnitSteerStandings(IReadOnlyList{SupervisorPriorDecision}, IReadOnlyDictionary{string, SupervisorReplanExit})"/>) — the same seam, and set with it, because both readings walk the whole tape and a unit renders once per attempt it appears in.</summary>
         public IReadOnlyDictionary<string, (SupervisorAmendStanding Amend, SupervisorReplanExit ReplanExit)>? UnitStandings { get; init; }
     }
 
@@ -1673,7 +1673,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     internal static string? ReplanExitRampFor(SupervisorReplanExit replanExit) => replanExit switch
     {
         SupervisorReplanExit.ToStaging => "A plan for this item was ALREADY authored after this verdict and has never been run, so do NOT author another one — STAGE the plan this run already has: 'spawn' this item so its re-planned check grades it.",
-        SupervisorReplanExit.ToStagingBehindADependency => "A plan for this item was ALREADY authored after this verdict and has never been run, so do NOT author another one — it is the dependency ORDER that is still in the way: spawn what the dependency frontier above says this item waits on, then 'spawn' this item so its re-planned check grades it.",
+        SupervisorReplanExit.ToStagingBehindADependency => "A plan for this item was ALREADY authored after this verdict and has never been run, so do NOT author another one — it is the dependency ORDER that is still in the way: spawn what the dependency frontier says this item waits on, then 'spawn' this item so its re-planned check grades it.",
         SupervisorReplanExit.ToAmendment => "A re-plan ALREADY left this verdict unchanged, so do NOT author another plan for it — that is the move this run has already made here. Propose 'amend_acceptance' for this item's check, or 'ask_human' to rule.",
         SupervisorReplanExit.ToHuman => "A plan has ALREADY been authored over this verdict and it did not move, so do NOT author another one for this item — and repairing its check cannot move it either, so do not propose that: 'ask_human' to rule.",
         _ => null,
