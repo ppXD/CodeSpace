@@ -39,8 +39,8 @@ internal static class StructuredResponseValidation
     /// <see cref="LlmErrorCategory.Malformed"/> fault. A first reply that is only ADVISORY is already an answer its
     /// consumer degrades, so the re-ask can only improve on it: a second reply that is anything less than clean, or a
     /// second call that yields no JSON at all, returns the FIRST reply rather than trading a degradable answer for a
-    /// fault. That trade was not hypothetical — advice naming a payload to author can steer a model into authoring it
-    /// on the wrong oracle, which is fatal by design, so the re-ask itself could kill the plan it was sent to save.</para>
+    /// worse one. Advice naming what to author can steer a model into authoring it wrongly somewhere ELSE — a payload
+    /// on the wrong oracle — so an upgrade attempt that is not clean must never be allowed to replace the answer.</para>
     ///
     /// <para>The mirror of that rule applies to a FATAL first reply: a second one whose remaining defects are all
     /// degradable IS the answer, because an advisory defect is not a fault no matter which attempt carries it.</para>
@@ -84,9 +84,9 @@ internal static class StructuredResponseValidation
     /// Split ONE reply's defects into the two severities from a single definition of each. The
     /// <see cref="StructuredLLMCompletionRequest.ResponseAdvisor"/>'s findings are the degradable ones, and a SCHEMA
     /// violation at or under a path one of them CLAIMS is that same defect — the schema saying it too, not a second,
-    /// fatal problem. Attribution is by path and by the advisor's own verdict together: a violation inside an
-    /// acceptance the consumer never called degradable stays fatal, so a bad enum value or a wrong-payload shape is
-    /// untouched even though it sits at the very same depth.
+    /// fatal problem. Attribution is by path and by the advisor's own verdict together: a violation the consumer
+    /// claimed nothing about stays fatal, however deep it sits, so what degrades is only ever what some consumer has
+    /// said it can go on without.
     ///
     /// <para>The typed consumer check runs only once nothing fatal is left in the schema pass, exactly as before, so
     /// a reply is corrected on its worst defect rather than lectured about every one at once.</para>

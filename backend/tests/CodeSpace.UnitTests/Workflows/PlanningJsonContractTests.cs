@@ -32,12 +32,16 @@ public sealed class PlanningJsonContractTests
         var runtimeAcceptance = FullSubtask().Acceptance!;
         var serializedAcceptance = JsonSerializer.SerializeToElement(new PlannerAcceptanceDraft
         {
-            FormatVersion = 2, Kind = BenchmarkGradingKind.LlmJudge, Argv = new[] { "dotnet", "test" }, ArtifactPaths = new[] { "report.md" },
+            FormatVersion = 2, Kind = "LlmJudge", Argv = new[] { "dotnet", "test" }, ArtifactPaths = new[] { "report.md" },
             Description = runtimeAcceptance.Description, Rubric = runtimeAcceptance.Rubric, Schema = runtimeAcceptance.Schema,
         }, AgentJson.Options);
         var acceptanceSchema = subtaskSchema.GetProperty("properties").GetProperty("acceptance");
         AssertProperties(serializedAcceptance, acceptanceSchema);
-        AssertRequired<PlannerAcceptanceDraft>(acceptanceSchema, AgentJson.Options);
+
+        // `formatVersion` and `kind` are SCHEMA-required and deliberately NOT serializer-required: the model is still
+        // told it must author both, but the wire record binds without them so the contract can REPORT their absence
+        // (with whatever else the acceptance got wrong) instead of failing the whole reply on a required-member miss.
+        AssertRequired<PlannerAcceptanceDraft>(acceptanceSchema, AgentJson.Options, "formatVersion", "kind");
 
         var serializedRubric = serializedAcceptance.GetProperty("rubric");
         var rubricSchema = acceptanceSchema.GetProperty("properties").GetProperty("rubric");
@@ -91,7 +95,7 @@ public sealed class PlanningJsonContractTests
         AuthoredByModel = "model-row",
         // A server-stamped DEFECT report, deliberately outside the model schema: the planner records which acceptance
         // it could not bind an oracle from, and the model must never be able to author that field itself.
-        DroppedAcceptances = new[] { new DroppedAcceptance { SubtaskId = "s1", Kind = BenchmarkGradingKind.TestsPass, Reason = "no argv" } },
+        DroppedAcceptances = new[] { new DroppedAcceptance { SubtaskId = "s1", Kind = "TestsPass", Reason = "no argv" } },
         LessonArm = "injected",
         InjectedLessonIds = new[] { Guid.NewGuid() },
         RecommendedWorkflowKind = "coding",

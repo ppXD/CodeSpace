@@ -119,7 +119,8 @@ public sealed class StructuredResponseContractTests
         // The ADVICE's own wording, not merely the id: asserting on "s1" alone is satisfied by the echoed previous
         // reply, which quotes every id already. (The quoted id itself rides as 's1' — the request body's
         // JSON encoder escapes apostrophes — so the id-naming half is pinned at the advisor in PlannerAcceptanceMappingTests.)
-        handler.Bodies[1].ShouldContain($"chose acceptance kind {kind} but authored no payload for it");
+        handler.Bodies[1].ShouldContain("authored an acceptance this contract cannot bind");
+        handler.Bodies[1].ShouldContain($"requires a non-empty {payloadName} array");
 
         var plan = LlmWorkflowPlanner.Deserialize(response.Json);
         plan.Subtasks.Single().Acceptance.ShouldBeNull("no oracle, never a guessed one");
@@ -131,12 +132,12 @@ public sealed class StructuredResponseContractTests
     [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
-    public async Task A_reask_that_makes_an_advisory_reply_fatal_returns_the_first_reply_instead_of_the_fault(string provider)
+    public async Task A_reask_that_answers_with_a_different_unbindable_shape_returns_the_first_reply(string provider)
     {
-        // The trade this forbids: the first reply is schema-VALID and only advisory, so it is already an answer the
-        // planner degrades. Advice that names a payload to author can steer the model into authoring it on the WRONG
-        // oracle (argv on a file oracle), which is fatal BY DESIGN — so "re-ask, then trust the second reply" turned a
-        // degradable plan into a dead run. The upgrade attempt may only replace the answer, never destroy it.
+        // The trade this forbids: the first reply is already an answer the planner degrades, so the re-ask is an
+        // UPGRADE attempt. Advice that names a payload to author can steer the model into authoring it on the WRONG
+        // oracle (argv on a file oracle) — a second reply whose acceptance still does not bind, only for a new
+        // reason. Accepting it would swap one drop for another and discard a reply the consumer had already accepted.
         var worse = PlannerReply("ArtifactPresent").Replace("\"kind\":\"ArtifactPresent\"", "\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]");
         var handler = new WireHandler(provider, [PlannerReply("ArtifactPresent"), worse]);
 
@@ -174,35 +175,62 @@ public sealed class StructuredResponseContractTests
     }
 
     [Theory]
+    [InlineData("Anthropic", "{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}", "never both or the other payload")]
+    [InlineData("OpenAI", "{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}", "never both or the other payload")]
+    [InlineData("Anthropic", "{\"formatVersion\":2,\"kind\":\"NoSuchOracle\",\"argv\":[\"true\"]}", "'NoSuchOracle'")]
+    [InlineData("OpenAI", "{\"kind\":\"ArtifactPresent\",\"command\":[\"report.md\"]}", "command")]
+    public async Task An_acceptance_the_contract_refuses_to_bind_is_dropped_with_its_reason_rather_than_faulting(string provider, string acceptance, string reason)
+    {
+        // These three shapes were the last fatal ones: a payload the server would have to REINTERPRET (argv on a file
+        // oracle), an oracle no grader exists for, and the v1 `command` key. None is reinterpreted now either — the
+        // acceptance is dropped and the reason says which — but none of them costs the plan, because a live model
+        // authors these on subtasks whose WORK is perfectly good (lane run 34093741284).
+        var reply = PlannerReplyWithAcceptance(acceptance);
+        var handler = new WireHandler(provider, [reply, reply]);
+
+        var response = await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
+
+        handler.Bodies.Count.ShouldBe(2, "the re-ask stays bounded to one");
+        handler.Bodies[1].ShouldNotContain("did NOT conform", customMessage: "a reply the consumer is about to accept must not be told it was invalid");
+
+        var plan = LlmWorkflowPlanner.Deserialize(response.Json);
+        plan.Subtasks.Single().Acceptance.ShouldBeNull("nothing is reinterpreted — dropping is the only degrade");
+        plan.DroppedAcceptances.ShouldHaveSingleItem().Reason.ShouldContain(reason);
+    }
+
+    [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
-    public async Task A_fatal_planner_contract_violation_is_still_a_bounded_typed_fault(string provider)
+    public async Task The_live_four_subtask_reply_survives_its_reask_with_all_four_oracles_dropped(string provider)
     {
-        // The degrade is scoped to the ONE absent-payload shape. A payload the server would have to reinterpret
-        // (argv on a file oracle) stays fatal — the alternative is a silently mis-typed oracle.
-        var bad = "{\"goal\":\"g\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"t\",\"instruction\":\"i\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}}]}";
-        var handler = new WireHandler(provider, [bad, bad]);
+        // Lane run 34093741284 end to end over the real wire: four acceptances, none with `formatVersion`, three also
+        // missing their payload. The whole plan came back as `planner.Status == Failure`. It must now come back as a
+        // plan — with four subtasks, no oracles, and four named drops — after exactly one re-ask.
+        var handler = new WireHandler(provider, [LiveFourSubtaskReply, LiveFourSubtaskReply]);
 
-        var error = await Should.ThrowAsync<LlmApiException>(() => Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None));
+        var response = await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
 
-        error.Category.ShouldBe(LlmErrorCategory.Malformed);
         handler.Bodies.Count.ShouldBe(2);
+        handler.Bodies[1].ShouldContain("left part of itself unusable", customMessage: "four degradable defects are still four advisories, never a fault");
+
+        var plan = LlmWorkflowPlanner.Deserialize(response.Json);
+        plan.Subtasks.Count.ShouldBe(4, "the sibling subtasks were never evidence about each other's acceptance");
+        plan.Subtasks.ShouldAllBe(subtask => subtask.Acceptance == null);
+        plan.DroppedAcceptances.ShouldNotBeNull().Select(drop => drop.SubtaskId).ShouldBe(new[] { "s1", "s2", "s3", "s4" });
     }
 
     [Theory]
     [InlineData("Anthropic", "title")]
     [InlineData("OpenAI", "title")]
-    [InlineData("Anthropic", "kind")]
-    [InlineData("OpenAI", "kind")]
     [InlineData("Anthropic", "questions")]
     [InlineData("OpenAI", "questions")]
     public async Task A_schema_violation_the_consumer_has_no_degrade_for_is_still_a_bounded_typed_fault(string provider, string defect)
     {
-        // The degrade is scoped by the CONSUMER's own verdict on a named position, not by "this looked like a payload
-        // problem". Missing `title` faults `$.subtasks[0]` — outside the acceptance the advisory claims — while an
-        // unknown oracle `kind` faults INSIDE it and is still fatal, because the acceptance contract refuses to bind
-        // that acceptance at all and therefore never calls it droppable. Every reply here ALSO carries the degradable
-        // absent-payload shape, so this is the composition: one fatal defect outvotes any number of advisory ones.
+        // The degrade is scoped by the CONSUMER's own verdict on a named position, not by "this looked like an
+        // acceptance problem". Missing `title` faults `$.subtasks[0]` — outside the acceptance the advisory claims,
+        // and a subtask with no title is not something there is anything left to degrade TO. Every reply here ALSO
+        // carries a degradable acceptance, so this is the composition: one fatal defect outvotes any number of
+        // advisory ones.
         //
         // The `questions` arm is the one the SCHEMA alone can see — a question with no options binds fine (the record
         // defaults the list) and the typed consumer check passes it. It is therefore what makes a blanket "this reply
@@ -210,7 +238,6 @@ public sealed class StructuredResponseContractTests
         var reply = defect switch
         {
             "title" => PlannerReply("TestsPass").Replace("\"title\":\"result\",", ""),
-            "kind" => PlannerReply("NoSuchOracle"),
             _ => PlannerReply("TestsPass").Replace("\"successCriteria\":[]", "\"questions\":[{\"id\":\"q1\",\"question\":\"which shape?\"}],\"successCriteria\":[]"),
         };
         var handler = new WireHandler(provider, [reply, reply]);
@@ -239,7 +266,7 @@ public sealed class StructuredResponseContractTests
         var advisory = new WireHandler(provider, [PlannerReply("TestsPass"), PlannerReply("TestsPass")]);
         await Client(provider, advisory).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
 
-        advisory.Bodies[1].ShouldContain("left a required payload unauthored");
+        advisory.Bodies[1].ShouldContain("left part of itself unusable by its consumer");
         advisory.Bodies[1].ShouldContain("everything else in it is accepted as authored");
         advisory.Bodies[1].ShouldNotContain("did NOT conform", customMessage: "the reply is about to be accepted; the severity is the point, not which checker noticed");
         advisory.Bodies[1].ShouldNotContain("previous (invalid) response", customMessage: "a degradable reply is not invalid; calling it that is a lie the model then acts on");
@@ -247,7 +274,20 @@ public sealed class StructuredResponseContractTests
 
     /// <summary>The live regression shape: one subtask that names an oracle kind and authors NO payload for it — a consumer-contract defect the model-visible schema ALSO faults (no per-kind <c>oneOf</c> branch matches), which is why the two must be read as one severity. <paramref name="payload"/> appends raw acceptance keys, so an EMPTY payload can be authored too.</summary>
     private static string PlannerReply(string kind, string payload = "") =>
-        "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"" + kind + "\"" + payload + "}}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
+        PlannerReplyWithAcceptance("{\"formatVersion\":2,\"kind\":\"" + kind + "\"" + payload + "}");
+
+    /// <summary>The same one-subtask reply with an acceptance written verbatim, so an arm can post a shape the wire record itself cannot hold (a v1 <c>command</c> key).</summary>
+    private static string PlannerReplyWithAcceptance(string acceptance) =>
+        "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":" + acceptance + "}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
+
+    /// <summary>Lane run 34093741284's reply, transcribed from its violation list: four acceptances with no <c>formatVersion</c>, three of them also missing the payload their oracle needs. The reply that made <c>planner.Status == Failure</c>.</summary>
+    private const string LiveFourSubtaskReply =
+        "{\"goal\":\"produce the requested result\",\"subtasks\":["
+      + "{\"id\":\"s1\",\"title\":\"Judge\",\"instruction\":\"judge the writeup\",\"acceptance\":{\"kind\":\"LlmJudge\"}},"
+      + "{\"id\":\"s2\",\"title\":\"Test\",\"instruction\":\"run the tests\",\"acceptance\":{\"kind\":\"TestsPass\"}},"
+      + "{\"id\":\"s3\",\"title\":\"Test again\",\"instruction\":\"run the other tests\",\"acceptance\":{\"kind\":\"TestsPass\"}},"
+      + "{\"id\":\"s4\",\"title\":\"Deliver\",\"instruction\":\"write the report\",\"acceptance\":{\"kind\":\"ArtifactPresent\"}}"
+      + "],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
 
     /// <summary>The REAL planner request (schema + validator + advisor as production builds them) — never a stand-in, so these arms pin the wire the live run used.</summary>
     private static StructuredLLMCompletionRequest PlannerRequest(string provider) =>

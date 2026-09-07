@@ -1,6 +1,5 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Plans;
 
 namespace CodeSpace.Messages.Dtos.Workflows.Planning;
@@ -88,10 +87,10 @@ public sealed record PlannedWorkflow
     /// server-side like <see cref="AuthoredByModel"/>, never model input. Null-omitted, so a clean plan's bytes are
     /// unchanged.
     ///
-    /// <para>It exists because a model that names an oracle kind and authors no payload for it is a model-quality
-    /// miss, not an engine fault: the plan keeps the subtask with no oracle (graded as unverified downstream) instead
-    /// of the whole plan dying at planning. The drop is only honest if it is NAMED — an acceptance that silently
-    /// evaporates looks exactly like one the planner never wrote.</para>
+    /// <para>It exists because an acceptance a model authored wrongly is a model-quality miss, not an engine fault:
+    /// the plan keeps the subtask with no oracle (graded as unverified downstream) instead of the whole plan dying at
+    /// planning. The drop is only honest if it is NAMED — an acceptance that silently evaporates looks exactly like
+    /// one the planner never wrote.</para>
     /// </summary>
     [JsonPropertyName("droppedAcceptances"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<DroppedAcceptance>? DroppedAcceptances { get; init; }
@@ -104,11 +103,11 @@ public sealed record DroppedAcceptance
     [JsonPropertyName("subtaskId")]
     public required string SubtaskId { get; init; }
 
-    /// <summary>The oracle the model chose but did not equip — the kind bound fine; only its payload never did.</summary>
+    /// <summary>The oracle the model NAMED, echoed verbatim rather than typed: the kind itself is one of the things that can fail to bind (an oracle the instrument has no grader for), and <c>unbound</c> when the acceptance authored no readable kind at all.</summary>
     [JsonPropertyName("kind")]
-    public required BenchmarkGradingKind Kind { get; init; }
+    public required string Kind { get; init; }
 
-    /// <summary>Why the payload did not bind, in the acceptance contract's own words.</summary>
+    /// <summary>Why the acceptance did not bind, in the acceptance contract's own words.</summary>
     [JsonPropertyName("reason")]
     public required string Reason { get; init; }
 }
