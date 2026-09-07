@@ -209,15 +209,15 @@ public class CodeSpaceModule : Autofac.Module
         builder.Register(c => new PluginModuleCatalog(modules)).As<IPluginModuleCatalog>().SingleInstance();
 
         // Registries that consume the union of every plugin's contributions.
-        builder.RegisterType<NodeRegistry>().As<INodeRegistry>().SingleInstance();
+        builder.RegisterType<NodeRegistry>().As<INodeRegistry>().InstancePerLifetimeScope();
         builder.RegisterType<RunSourceMatcherRegistry>().As<IRunSourceMatcherRegistry>().SingleInstance();
     }
 
     private static void RegisterPluginModule(ContainerBuilder builder, IPluginModule module)
     {
-        // Nodes + matchers are singletons — stateless, manifest cached. Auxiliary services
-        // pick their lifetime via IDependency markers (RegisterDependency below).
-        foreach (var type in module.Nodes) builder.RegisterType(type).AsSelf().AsImplementedInterfaces().SingleInstance();
+        // A node may be stateless while its dependencies (DbContext, actor, scoped stores) are not.
+        // Resolve runtimes with their invocation scope; the immutable plugin module catalog remains shared.
+        foreach (var type in module.Nodes) builder.RegisterType(type).AsSelf().AsImplementedInterfaces().InstancePerLifetimeScope();
         foreach (var type in module.RunSourceMatchers) builder.RegisterType(type).AsSelf().AsImplementedInterfaces().SingleInstance();
         foreach (var type in module.AuxiliaryServices) builder.RegisterType(type).AsSelf().SingleInstance();
     }

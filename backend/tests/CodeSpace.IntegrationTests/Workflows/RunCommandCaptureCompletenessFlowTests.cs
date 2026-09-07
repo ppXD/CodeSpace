@@ -3,12 +3,9 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 using CodeSpace.Core.Services.Workflows.Engine;
-using CodeSpace.Core.Services.Workflows.Nodes;
-using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -23,7 +20,7 @@ using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
 
-/// <summary>Real engine → run-command service → process → Node output → filesystem artifact + PostgreSQL gap. Explicit storage-rebinding cases test component integration; only the default case retains the production singleton node registration.</summary>
+/// <summary>Production-registered engine and nodes → real command process → filesystem artifact + PostgreSQL gap. The storage override changes only the backend; no test registry or node construction bypasses production dependency lifetimes.</summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
 public sealed class RunCommandCaptureCompletenessFlowTests(PostgresFixture fixture)
@@ -88,16 +85,7 @@ public sealed class RunCommandCaptureCompletenessFlowTests(PostgresFixture fixtu
 
     private ILifetimeScope ScopeWithBlobRoot(string root)
     {
-        using var parent = fixture.BeginScope();
-        var existingNodes = parent.Resolve<INodeRegistry>().All;
-        return fixture.BeginScope(builder =>
-        {
-            builder.RegisterInstance(new LocalFileArtifactBlobBackend(root)).As<IArtifactBlobBackend>();
-            // Production plugin nodes are singletons and already hold the fixture's original store.
-            // Rebind this real node to this scope's real store so the filesystem failure reaches its write.
-            builder.Register(context => new NodeRegistry(existingNodes.Where(node => node.TypeKey != AgentRunCommandNode.NodeTypeKey)
-                .Append(new AgentRunCommandNode(context.Resolve<IRunCommandService>(), context.Resolve<IArtifactStore>())))).As<INodeRegistry>().InstancePerLifetimeScope();
-        });
+        return fixture.BeginScope(builder => builder.RegisterInstance(new LocalFileArtifactBlobBackend(root)).As<IArtifactBlobBackend>());
     }
 
     private static WorkflowDefinition Definition(string script) => new()
