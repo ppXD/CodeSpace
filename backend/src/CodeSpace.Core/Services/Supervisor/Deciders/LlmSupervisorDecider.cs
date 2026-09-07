@@ -1685,12 +1685,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         _ => null,
     };
 
-    /// <summary>Name the program file a PASSING grade ran WITHOUT protecting (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>) — silent, byte-identical, on every ordinary pass.</summary>
+    /// <summary>Name the program file a PASSING grade ran WITHOUT protecting (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>) — silent, byte-identical, on every ordinary pass. Renders <see cref="AcceptanceOracleProtection.SubjectClausePhrase"/> verbatim — the SAME neutral wording <see cref="SupervisorRecitation"/>'s compact renders, so the two prompt sections cannot disagree about a row, and true whichever half of the grader's collapsed list named the file.</summary>
     private static void AppendSubjectClause(StringBuilder builder, SupervisorAgentResult result)
     {
         if (AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is not { Length: > 0 } files) return;
 
-        builder.AppendLine($"      the check EXECUTES {files} — the SUBJECT under test, so this pass was graded on the candidate's OWN copy of it, not a protected judge.");
+        builder.AppendLine($"      {AcceptanceOracleProtection.SubjectClausePhrase(files)}.");
     }
 
     /// <summary>

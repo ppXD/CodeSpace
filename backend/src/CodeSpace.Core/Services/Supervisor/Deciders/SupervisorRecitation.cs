@@ -261,9 +261,9 @@ public static class SupervisorRecitation
         return -1;
     }
 
-    /// <summary>What an ACCEPTED row owes about a program file the check ran without protecting — empty on every ordinary pass, so the compact stays byte-identical. Reads the same clause the decider's verdict line does (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>), never a second derivation the two sections could disagree over.</summary>
+    /// <summary>What an ACCEPTED row owes about a program file the check ran without protecting — empty on every ordinary pass, so the compact stays byte-identical. Reads the same clause the decider's verdict line does (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>) and renders it through the SAME <see cref="AcceptanceOracleProtection.SubjectClausePhrase"/>, never a second derivation or a second wording the two sections could disagree over.</summary>
     private static string SubjectClause(SupervisorAgentResult result) =>
-        AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is { Length: > 0 } files ? $" — graded on the candidate's OWN {Truncate(files)}, not a protected judge" : "";
+        AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is { Length: > 0 } files ? $" — {AcceptanceOracleProtection.SubjectClausePhrase(Truncate(files))}" : "";
 
     private static string Truncate(string? detail) =>
         string.IsNullOrWhiteSpace(detail) ? "no detail" : detail.Length <= 160 ? detail : detail[..160] + "…";

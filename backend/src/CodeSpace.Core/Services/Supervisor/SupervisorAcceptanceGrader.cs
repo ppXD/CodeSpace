@@ -385,14 +385,14 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         // and told an operator floor with no base that its own check.sh was the subject rather than unanchored.
         if (string.IsNullOrEmpty(anchor.BaseSha))
             return AcceptanceOracleProtection.MayProtect(spec, anchor.FloorPrograms)
-                ? OracleProtectionOutcome.Unprotected("no base recorded")
+                ? OracleProtectionOutcome.Unprotected("no base recorded").WithSubject(UnanchoredSubject(spec, anchor))
                 : OracleProtectionOutcome.None.WithSubject(Subject(spec, anchor, Array.Empty<string>()));
 
         var runner = _runners.Resolve(GradingRunnerKind);
 
         var (paths, probeFailed) = await ResolveProtectedPathsAsync(runner, directory, spec, anchor, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
-        if (probeFailed) return OracleProtectionOutcome.Unprotected("base probe failed");
+        if (probeFailed) return OracleProtectionOutcome.Unprotected("base probe failed").WithSubject(UnanchoredSubject(spec, anchor));
 
         // No protected path is the QUIET case on purpose: either the contract names no judge file at all, the
         // program it names is absent at base (the CANDIDATE's own creation — "add a check" work), or the run owns
@@ -465,6 +465,18 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         return new SubjectAccount(string.Join("\n", lines.Where(l => l is not null)), SubjectDetailSuffix(ran));
     }
+
+    /// <summary>
+    /// The subject account for a judge that went UNPROTECTED with no base to check anything against (no base
+    /// recorded, or a base probe that failed) — <see langword="null"/> unless the run's OWN oracle inventory names
+    /// a file THIS command actually runs. Without that overlap the only reason the grade is protectable at all is
+    /// an AUTHORED path unrelated to what ran (a fixture, e.g.) — the run has decided nothing about the file that
+    /// executed, so speculating a subject clause for it alongside the "no base recorded" note would tell the reader
+    /// more than an unreadable base actually lets us know. With the overlap, the file that ran IS the run's own
+    /// derived judge candidate, so the same account <see cref="Subject"/> gives an actually-resolved grade applies.
+    /// </summary>
+    private static SubjectAccount? UnanchoredSubject(SupervisorAcceptanceSpec spec, OracleAnchor anchor) =>
+        AcceptanceOracleProtection.CommandOracleCandidates(spec, anchor.FloorPrograms).Count == 0 ? null : Subject(spec, anchor, Array.Empty<string>());
 
     /// <summary>The clause a PASSING grade carries on its DETAIL — bounded, because a check that runs a dozen scripts must not turn every verdict on the tape into a paragraph.</summary>
     private static string SubjectDetailSuffix(IReadOnlyList<string> ran)
