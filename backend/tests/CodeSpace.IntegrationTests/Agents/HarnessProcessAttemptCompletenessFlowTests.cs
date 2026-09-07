@@ -186,8 +186,11 @@ public sealed class HarnessProcessAttemptCompletenessFlowTests
         await OpenAsync(plane, run);
 
         using (var reclaimer = _fixture.BeginScope())
-            (await reclaimer.Resolve<IAgentRunService>().ReclaimForReattachAsync(run.AgentRunId, CancellationToken.None))
-                .ShouldBeTrue(customMessage: "the premise: the run is reclaimed, so the fence this worker holds is stale");
+        {
+            await reclaimer.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {run.AgentRunId}");
+            (await reclaimer.Resolve<IAgentRunService>().ReserveReattachAsync(run.AgentRunId, CancellationToken.None))
+                .ShouldNotBeNull(customMessage: "the premise: the expired run is reserved, so the fence this worker holds is stale");
+        }
 
         await Should.ThrowAsync<DbUpdateException>(() => OpenRawAsync(plane, run, run.FenceEpoch, Locator));
 

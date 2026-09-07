@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using System.Text;
 using System.Text.Json;
@@ -39,26 +40,19 @@ namespace CodeSpace.Core.Services.Agents;
 /// execution core a worker (the agent.run node's Hangfire job) invokes — substrate-neutral, driving
 /// everything through the harness + runner contracts so any harness/runner combination behaves the same.
 ///
-/// <para><b>Exactly-once:</b> the claim is a CAS (<see cref="IAgentRunService.MarkRunningAsync"/>); if the
-/// run is already Running or terminal (a re-claimed Hangfire job after a crash, a duplicate dispatch),
-/// the executor returns WITHOUT spawning the harness — so an agent never runs twice and tokens aren't
-/// re-spent. A worker torn down mid-run (pod shutdown) leaves the run Running for the reconciler / a
-/// re-claim; any other failure lands a clean Failed instead of a stuck Running.</para>
+/// <para>The initial claim grants one observer a UUID and epoch. Every subsequent worker write carries that
+/// identity; recovery requires a separately reserved one-time activation. These database fences do not make
+/// external process launch or remote effects exactly-once.</para>
 /// </summary>
 public interface IAgentRunExecutor
 {
     Task ExecuteAsync(Guid agentRunId, CancellationToken cancellationToken);
 
-    /// <summary>
-    /// Re-attach to an already-<see cref="AgentRunStatus.Running"/> durable run whose original worker vanished
-    /// (a backend restart) but whose detached supervisor is still alive — dispatched by the reconciler after it
-    /// re-claimed the run (bumped the fence epoch + re-leased). Unlike <see cref="ExecuteAsync"/> it does NOT
-    /// claim or launch: it resumes tailing the persisted spool from the handle's checkpoint offset (no duplicate
-    /// events), folds the result from the streamed events + exit code (NO git diff — the workspace clone didn't
-    /// survive the restart), and completes under the run's current (reclaim-bumped) epoch. A no-op if the run is
-    /// already terminal or carries no durable handle.
-    /// </summary>
+    /// <summary>Compatibility entry for old queued jobs. Never adopts persisted ownership; normal reconciliation can reserve a new job after the lease expires.</summary>
     Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken);
+
+    /// <summary>Activate the reconciler's frozen reservation once, then observe the existing durable process with the returned owner token. A duplicate, expired or superseded reservation performs no work.</summary>
+    Task ReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken);
 }
 
 public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
@@ -192,17 +186,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
-        long claimedEpoch;
+        AgentRunOwnerToken owner;
         try
         {
-            if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } epoch) return;
-            claimedEpoch = epoch;
+            if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } claimed) return;
+            owner = claimed;
         }
         catch (AgentAuthorityDeniedException ex)
         {
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, AuthorityRefusalResult(ex), run.FenceEpoch, cancellationToken).ConfigureAwait(false);
+            await RejectUnclaimedAndNotifyAsync(run, AuthorityRefusalResult(ex), cancellationToken).ConfigureAwait(false);
             return;
         }
+
+        var claimedEpoch = owner.Epoch;
+        using var observerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cancellationToken = observerCts.Token;
 
         // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
         // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
@@ -214,9 +212,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = HeartbeatLoop.RunAsync(
-            ct => heartbeatRuns.HeartbeatAsync(agentRunId, ct),
+            ct => RenewObservationAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
-            ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; will retry next interval", agentRunId),
+            ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
             heartbeatCts.Token);
 
         // Holds the run's resolved secret(s) once the credential is resolved (below), so the catch-all can scrub
@@ -240,7 +238,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // EXACTLY as before — only a terminal parent aborts the launch (the run, now Running, is cancelled instead). INSIDE
             // the try so a fault READING the parent status lands a clean terminal Failed with the real (redacted) error, instead
             // of escaping uncaught to leave the run Running for the reconciler to later abandon with a generic reason.
-            if (await AbortIfParentTerminalAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
+            if (await AbortIfParentTerminalAsync(owner, run.TeamId, run.WorkflowRunId, cancellationToken).ConfigureAwait(false)) return;
 
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
@@ -255,12 +253,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (reconciliation.Repaired)
             {
                 _logger.LogWarning("AgentRun {RunId}: {Note}", agentRunId, reconciliation.Note);
-                await _runs.AppendEventAsync(agentRunId, new AgentEvent { Kind = AgentEventKind.Warning, Text = reconciliation.Note! }, cancellationToken).ConfigureAwait(false);
+                await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = reconciliation.Note! }, cancellationToken).ConfigureAwait(false);
 
                 // Correct the stored harness so observability (the runs index, the eval scorecard's group-by) reflects
                 // the harness that ACTUALLY ran, not the impossible authored one.
-                await _db.AgentRun.Where(r => r.Id == agentRunId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.Harness, reconciliation.HarnessKind), cancellationToken).ConfigureAwait(false);
+                await PersistRuntimeIdentityAsync(owner, reconciliation.HarnessKind, null, cancellationToken).ConfigureAwait(false);
             }
 
             var runnerKind = string.IsNullOrWhiteSpace(task.RunnerKind) ? _defaultRunnerKind : task.RunnerKind;
@@ -306,7 +303,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // operator left it blank (a pin is already displayed); the resolved model is not a secret, so re-persisting the
             // stored task (the ORIGINAL, no injected env) with just its model filled is safe.
             if (string.IsNullOrWhiteSpace(task.Model) && !string.IsNullOrWhiteSpace(effectiveModel))
-                await PersistResolvedModelAsync(agentRunId, task with { Model = effectiveModel }, cancellationToken).ConfigureAwait(false);
+                await PersistResolvedModelAsync(owner, task with { Model = effectiveModel }, cancellationToken).ConfigureAwait(false);
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
 
@@ -328,12 +325,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             {
                 effectiveTask = ApplyEscalation(effectiveTask, escalation);
                 noStrongerModelNoted = escalation.To is null;
-                await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                await AppendEscalationEventAsync(owner, escalation, cancellationToken).ConfigureAwait(false);
 
                 // Surface the escalated model on the run the same way the resolved model is surfaced above — the
                 // identity strip must show what this attempt is ACTUALLY running, not the model it was authored with.
                 if (escalation.To is { Length: > 0 } escalated)
-                    await PersistResolvedModelAsync(agentRunId, task with { Model = escalated }, cancellationToken).ConfigureAwait(false);
+                    await PersistResolvedModelAsync(owner, task with { Model = escalated }, cancellationToken).ConfigureAwait(false);
             }
 
             // The escalation event's sibling, for the OTHER thing a dispatcher can decide a respawn owes: this
@@ -341,7 +338,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // so the note can never outlive the respawn it describes — and once, for BOTH retry lanes, because
             // both write the same degrade into the same envelope (AgentRetryCauses.ApplyFormatFaultMitigation).
             if (Supervisor.AgentRetryCauses.IsFormatFaultMitigated(effectiveTask))
-                await AppendMitigationEventAsync(agentRunId, cancellationToken).ConfigureAwait(false);
+                await AppendMitigationEventAsync(owner, cancellationToken).ConfigureAwait(false);
 
             // The model in force for the NEXT harness invocation, carried across revise rounds: an escalation won in
             // round 1 must not evaporate in round 2 just because round 2's own result asked for nothing further.
@@ -403,7 +400,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var runContext = new HarnessRunContext
             {
-                RunId = agentRunId, TeamId = run.TeamId, ActorId = run.CreatedBy, WorkerFenceEpoch = claimedEpoch,
+                Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
                 Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, Redactor = redactor,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
@@ -415,7 +412,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
             await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, CaptureExpectationsOf(effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            result = await VerifyProducedWorkAsync(agentRunId, run, harness, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            result = await VerifyProducedWorkAsync(new(owner, run, harness, effectiveTask, workspace), result, cancellationToken).ConfigureAwait(false);
 
             // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
             // Improve-mode critic flagged the output, feed the failure detail back to the SAME agent (same workspace;
@@ -439,11 +436,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // is NOT a stall signal — a later round may still land the fix, so the budget runs for oracle failures.
                 if (priorReason is not null && result.ExitReason == "output-flagged" && CriticConvergence.SameSignal(priorReason, reason))
                 {
-                    await AppendReviseStalledEventAsync(agentRunId, reason, round - 1, cancellationToken).ConfigureAwait(false);
+                    await AppendReviseStalledEventAsync(owner, reason, round - 1, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
-                await AppendReviseEventAsync(agentRunId, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
+                await AppendReviseEventAsync(owner, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
                 var reviseTask = BuildReviseTask(effectiveTask, result, reason) with { Model = dispatchedModel };
 
@@ -459,17 +456,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     if (escalation.To is { Length: > 0 })
                     {
                         dispatchedModel = reviseTask.Model;
-                        await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                        await AppendEscalationEventAsync(owner, escalation, cancellationToken).ConfigureAwait(false);
 
                         // Keep the PERSISTED envelope truthful per round, not just at launch: the identity strip
                         // reads it live, and it is the fallback floor a later attempt's escalation measures from
                         // when the harness's own stream never names a model.
-                        await PersistResolvedModelAsync(agentRunId, task with { Model = dispatchedModel }, cancellationToken).ConfigureAwait(false);
+                        await PersistResolvedModelAsync(owner, task with { Model = dispatchedModel }, cancellationToken).ConfigureAwait(false);
                     }
                     else if (!noStrongerModelNoted)
                     {
                         noStrongerModelNoted = true;
-                        await AppendEscalationEventAsync(agentRunId, escalation, cancellationToken).ConfigureAwait(false);
+                        await AppendEscalationEventAsync(owner, escalation, cancellationToken).ConfigureAwait(false);
                     }
                 }
 
@@ -488,7 +485,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
                 // wrapper (which quotes the failure and could bias or blind the reviewer).
-                result = await VerifyProducedWorkAsync(agentRunId, run, harness, reviseTask with { Goal = effectiveTask.Goal }, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = effectiveTask.Goal }, workspace), result, cancellationToken).ConfigureAwait(false);
 
                 priorReason = reason;
             }
@@ -519,7 +516,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // re-commit, never as a terminal run with an unresolved promise.
             await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result, effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentRunOwnershipLostException)
+        {
+            leaveWorkspaceForReattach = true;
+            observerCts.Cancel();
+            throw;
         }
         catch (OperationCanceledException)
         {
@@ -531,7 +534,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -539,13 +542,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             await heartbeat.ConfigureAwait(false);
 
             // Terminal exit (success / failure) owns the clone's cleanup; a worker tear-down leaves it for re-attach.
-            if (workspace is not null && !leaveWorkspaceForReattach)
+            if (workspace is not null && !leaveWorkspaceForReattach && await CanCleanOwnedWorkspaceAsync(owner, cancellationToken).ConfigureAwait(false))
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
 
-    public async Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken)
+    public Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken)
     {
+        _logger.LogWarning("Ignoring legacy reattach job for {RunId}: no reserved execution identity; the normal reconciler can recover it after lease expiry", agentRunId);
+        return Task.CompletedTask;
+    }
+
+    public async Task ReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken)
+    {
+        if (await _runs.ActivateReattachAsync(reservation, cancellationToken).ConfigureAwait(false) is not { } owner) return;
+        var agentRunId = owner.RunId;
+        using var observerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cancellationToken = observerCts.Token;
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
         if (run.Status != AgentRunStatus.Running) return;   // already landed terminal (completed/recovered) — nothing to re-attach
@@ -558,12 +571,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
             catch (AgentAuthorityDeniedException ex)
             {
+                // Only a won owned terminal CAS permits terminating this detached process.
+                await CompleteAndNotifyAsync(owner, run.TeamId, AuthorityRefusalResult(ex), cancellationToken).ConfigureAwait(false);
                 if (DeserializeHandle(run.RunnerHandleJson) is { } revokedHandle && _runners.All.FirstOrDefault(r => r.Kind == revokedHandle.Kind) is ISandboxDurableRunner revokedRunner)
                 {
                     try { await revokedRunner.TerminateAsync(revokedHandle, cancellationToken).ConfigureAwait(false); }
                     catch (Exception termination) when (termination is not OperationCanceledException) { _logger.LogError(termination, "Revoked agent run {RunId} could not terminate its detached process", agentRunId); }
                 }
-                await CompleteAndNotifyAsync(agentRunId, run.TeamId, AuthorityRefusalResult(ex), run.FenceEpoch, cancellationToken).ConfigureAwait(false);
                 return;
             }
         }
@@ -585,15 +599,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = HeartbeatLoop.RunAsync(
-            ct => heartbeatRuns.HeartbeatAsync(agentRunId, ct),
+            ct => RenewObservationAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
-            ex => _logger.LogWarning(ex, "Heartbeat ping failed for re-attached agent run {RunId}; will retry next interval", agentRunId),
+            ex => _logger.LogWarning(ex, "Heartbeat ping failed for re-attached agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
             heartbeatCts.Token);
 
-        // Complete under the run's CURRENT epoch — the reconciler's reclaim just bumped it, and its fresh lease
-        // blocks another reclaim for the lease window, so this is stably our epoch. A revived original observer
-        // (stale epoch) loses the completion CAS.
-        var expectedEpoch = run.FenceEpoch;
+        var expectedEpoch = owner.Epoch;
 
         // Resolve a redactor for the re-opened endpoint's tool-result text — fresh from the run's credential, in its
         // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
@@ -617,7 +628,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // diff (I1) via IWorkspacePathCapture — read-only, credential-free — even though nothing gets pushed here.
             var reattach = new ReattachFoldContext
             {
-                RunId = agentRunId, TeamId = run.TeamId, ActorId = run.CreatedBy, WorkerFenceEpoch = expectedEpoch,
+                Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
                 Durable = durable, Handle = handle, Task = task, Harness = harness,
             };
             var result = await ReattachAndFoldAsync(reattach, cancellationToken).ConfigureAwait(false);
@@ -644,7 +655,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result, task), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentRunOwnershipLostException)
+        {
+            observerCts.Cancel();
+            throw;
         }
         catch (OperationCanceledException)
         {
@@ -653,7 +669,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during re-attach", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, expectedEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -683,7 +699,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             redactor = WithMcpRunToken((await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, cancellationToken).ConfigureAwait(false)).Redactor, context.Handle.McpRunToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not re-resolve the credential to redact the re-attached tail; completing from the exit marker only to avoid leaking an echoed secret", context.RunId);
             return await CompleteFromMarkerWithCaptureGapAsync(context, "redactor-resolution-failed", "The durable native log could not be captured because its original redaction credential was unavailable after worker recovery.", cancellationToken).ConfigureAwait(false);
@@ -702,7 +718,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var folder = context.Harness.CreateFolder();   // BOUNDED, exactly as the live tail folds — a re-attached run must not be able to exhaust the heap either
         var facts = AgentRunFacts.For(context.Harness);   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
         await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
-        var writer = new BufferedEventWriter(_runs, context.RunId);   // same batched-append + flush-at-checkpoint path as the live tail
+        var writer = new BufferedEventWriter(_runs, context.Owner);   // same batched-append + flush-at-checkpoint path as the live tail
         var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
         var applicationSourceHead = context.Handle.StdoutOffset;
 
@@ -743,14 +759,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var handle = EnsureLogCaptureHandle(context.Handle, context.Durable);
         if (handle != context.Handle)
-            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
         if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
-            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
         var sandbox = await capture.ObserveAsync((capturedHandle, token) =>
         {
             var replayHandle = capturedHandle with { StdoutOffset = Math.Min(capturedHandle.StdoutOffset, native.ReplayStartOffset) };
-            return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.RunId, capturedHandle, new HarnessSinks(writer, native)));
+            return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, new HarnessSinks(writer, native)));
         }, cancellationToken).ConfigureAwait(false);
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
@@ -846,7 +862,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (result == null || _logCapture == null || context.Durable is not ISandboxDurableLogSource source) return result;
         var handle = EnsureLogCaptureHandle(context.Handle, context.Durable);
         if (handle != context.Handle)
-            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
         try
         {
             await _logCapture.RecordGapAsync(new AgentRunLogCaptureGapRequest
@@ -870,20 +886,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.run node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
-    private async Task CompleteAndNotifyAsync(Guid runId, Guid teamId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken)
+    /// <summary>Land the terminal result under this invocation's explicit owner, then notify. A lost owner does neither notification nor terminal cleanup. Terminal-write ACK recovery and durable notification are separate from claim/activation recovery.</summary>
+    private async Task CompleteAndNotifyAsync(AgentRunOwnerToken owner, Guid teamId, AgentRunResult result, CancellationToken cancellationToken)
     {
-        try
-        {
-            await _runs.CompleteAsync(runId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
-        }
-        catch (AgentRunTransitionException ex)
-        {
-            // The run is already terminal — the reconciler (or another worker) landed it first while this
-            // executor was mid-flight. Don't re-complete or throw; still notify below so the parent
-            // workflow resumes off whatever terminal state stuck.
-            _logger.LogWarning(ex, "Agent run {RunId} was already terminal at completion (likely reconciled); skipping re-complete, still notifying", runId);
-        }
+        var runId = owner.RunId;
+        var expectedEpoch = owner.Epoch;
+        await _runs.CompleteAsync(owner, result, cancellationToken).ConfigureAwait(false);
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
 
@@ -912,11 +920,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// Running only where nobody with authority closed it. Leaving it Running is not untidy but blocking: 0137 refuses
     /// to open a generation over a live predecessor, so the Agent Run's next execution would be unrepresentable.
     ///
-    /// <para>The fence is passed on, and it is why this is safe to reach from the branch above that swallows
-    /// <see cref="AgentRunTransitionException"/>. That branch cannot tell "the reconciler landed the run first" from "a
-    /// reclaim took the run away", because a lost completion CAS raises the same exception. The first must terminalize
-    /// and the second must not — this worker's process is not the one still running — so the plane refuses the write
-    /// under a superseded fence rather than this caller guessing which case it is in.</para>
+    /// <para>The epoch comes from the explicit owner token whose terminal CAS just succeeded. A superseded
+    /// observer never reaches this step.</para>
     ///
     /// <para>Best-effort and last, exactly like the shadow log's terminalization above: the run has already landed and
     /// been notified, and no failure here may change what it resolved to.</para>
@@ -1001,7 +1006,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     ? captured with { Model = model }
                     : captured;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not capture the session transcript for resume; a continue will cold-start", capture.RunId);
             return result;
@@ -1073,8 +1078,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static long ParseMaxSessionTranscriptBytes(string? raw, long fallback) =>
         long.TryParse(raw, out var value) && value > 0 ? value : fallback;
 
-    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(WorkspaceCaptureContext context, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var (owner, teamId, task, workspace) = context;
+        var runId = owner.RunId;
         // A scratch (repo-less) workspace has no git to diff — its residue is the typed artifact capture, not a patch.
         if (workspace is null || workspace.Repositories.Count == 0) return result;
 
@@ -1095,11 +1102,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
             // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
             if (workspace.Repositories.Count > 1)
-                result = await CaptureRepositoryResultsAsync(runId, teamId, task, result, workspace, changes, cancellationToken).ConfigureAwait(false);
+                result = await CaptureRepositoryResultsAsync(context, result, changes, cancellationToken).ConfigureAwait(false);
 
             return result;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             // Best-effort + defence-in-depth: ANY capture failure (a wrapped WorkspaceException, or a raw
             // infra exception that slipped the provider) is logged and the result kept — a git hiccup must
@@ -1139,7 +1146,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             return result with { PublishEvidenceId = await PutPublishEvidenceAsync(teamId, "primary", result.ProducedBranch, result.PushedCommitSha, result.BaseSha, result.PatchArtifactId, result.PublishError, cancellationToken).ConfigureAwait(false) };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to mint publish evidence; delivery attestations from this result honestly carry none", runId);
             return result;
@@ -1172,7 +1179,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             return ((await _offloader.OffloadIfLargeAsync(teamId, patch, "text/x-diff", cancellationToken).ConfigureAwait(false)).ArtifactId, null);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             // Deliverable-loss honesty: the refusal is NAMED — on the result/manifest (so the preview can say why a
             // listed file has no bytes) AND as a capture gap (so completeness never reports data it does not have).
@@ -1232,7 +1239,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var reattachOffload = await TryOffloadPatchAsync(runId, teamId, changes.Patch, "patch:primary", cancellationToken).ConfigureAwait(false);
             return result with { PatchArtifactId = reattachOffload.ArtifactId, PatchLossReason = reattachOffload.LossReason };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture workspace changes on re-attach (the clone may already be reclaimed); keeping the harness-reported file list", runId);
             return result;
@@ -1250,8 +1257,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// writable-repo identity set and makes downstream integration fail closed instead of silently shipping siblings.
     /// The primary's capture already succeeded (it's the top-level diff).</para>
     /// </summary>
-    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, Guid teamId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(WorkspaceCaptureContext context, AgentRunResult result, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
+        var (owner, teamId, task, _) = context;
+        var runId = owner.RunId;
+        var workspace = context.Workspace!;
         var repoIds = task.Workspace?.Repositories.ToDictionary(r => r.Alias, r => r.RepositoryId);
         var perRepo = new List<RepositoryRunResult>();
 
@@ -1259,7 +1269,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var changes = await CaptureOneRepoOrNullAsync(runId, repo, workspace, primaryChanges, cancellationToken).ConfigureAwait(false);
+            var changes = await CaptureOneRepoOrNullAsync(owner, repo, workspace, primaryChanges, cancellationToken).ConfigureAwait(false);
 
             if (changes is null)
             {
@@ -1299,30 +1309,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Capture one writable repo's changes (the primary's are already in hand, so reuse them). Returns null when a SECONDARY repo's capture fails — logged and durably warned, isolated, never aborting the agent run. Cancellation still propagates.</summary>
-    private async Task<WorkspaceChanges?> CaptureOneRepoOrNullAsync(Guid runId, WorkspaceRepositoryHandle repo, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    private async Task<WorkspaceChanges?> CaptureOneRepoOrNullAsync(AgentRunOwnerToken owner, WorkspaceRepositoryHandle repo, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         if (repo.Alias == workspace.PrimaryAlias) return primaryChanges;
 
         try
         {
             return await workspace.CaptureChangesAsync(repo.Alias, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture changes for repo '{Alias}'; recording an unavailable repo fact and keeping the others", runId, repo.Alias);
-            await AppendRepositoryCaptureFailureWarningAsync(runId, repo.Alias, cancellationToken).ConfigureAwait(false);
+            await AppendRepositoryCaptureFailureWarningAsync(owner, repo.Alias, cancellationToken).ConfigureAwait(false);
             return null;
         }
     }
 
     /// <summary>Persist a redacted timeline fact for a secondary-repository capture gap. Best-effort and shadow: observability failure never changes the harness result.</summary>
-    private async Task AppendRepositoryCaptureFailureWarningAsync(Guid runId, string alias, CancellationToken cancellationToken)
+    private async Task AppendRepositoryCaptureFailureWarningAsync(AgentRunOwnerToken owner, string alias, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not capture git changes for repository '{alias}'; the change set is incomplete and cannot be published as clean." }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not capture git changes for repository '{alias}'; the change set is incomplete and cannot be published as clean." }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the repository capture warning for '{Alias}'", runId, alias);
         }
@@ -1372,8 +1384,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
     /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
     /// </summary>
-    internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
+        var claimedEpoch = owner.Epoch;
         if (result.Status is not (AgentRunStatus.Succeeded or AgentRunStatus.TimedOut or AgentRunStatus.NeedsReview)) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
 
@@ -1386,21 +1400,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (!multiRepo && await EvaluatePublishGuardsAsync(task, task.RepositoryId, cancellationToken).ConfigureAwait(false) is { } verdict)
             return result with { PublishSkipReason = verdict.Reason };
 
-        // No-replay: a reclaimed run (epoch bumped) would lose the completion CAS anyway — don't fire the side
-        // effect. Read FRESH + untracked (GetAsync is AsNoTracking) so we see the reclaimer's bumped epoch.
-        var current = await _runs.GetAsync(runId, cancellationToken).ConfigureAwait(false);
-
-        if (!AgentRunFence.StillOwns(current.FenceEpoch, claimedEpoch))
-        {
-            _logger.LogWarning("Agent run {RunId}: {Note}", runId, AgentRunFence.RefusalNote("branch push", current.FenceEpoch, claimedEpoch));
-            return result;
-        }
+        await _runs.AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
 
         try
         {
-            if (multiRepo) return await PushRepositoryResultsAsync(runId, task, result, workspace, pushHandle, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            if (multiRepo) return await PushRepositoryResultsAsync(new(owner, task, workspace, pushHandle), result, cancellationToken).ConfigureAwait(false);
 
-            var branch = await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(BuildBranchName(runId, claimedEpoch), ct), cancellationToken).ConfigureAwait(false);
+            var branch = await PushWithRetryAsync(async ct => { await _runs.AssertOwnershipAsync(owner, ct).ConfigureAwait(false); return await pushHandle.PushChangesAsync(BuildBranchName(runId, claimedEpoch), ct).ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false);
 
             return branch is null ? result : result with { ProducedBranch = branch, PushedCommitSha = pushHandle.LastPushedCommitSha() };
         }
@@ -1409,7 +1415,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Best-effort: a push failure must never flip a Succeeded run to Failed. The exception message has the
             // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
             _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch after {Attempts} attempt(s); the run stays Succeeded with no branch output", runId, PushMaxAttempts);
-            await AppendPushFailureWarningAsync(runId, ex.Message, cancellationToken).ConfigureAwait(false);
+            await AppendPushFailureWarningAsync(owner, ex.Message, cancellationToken).ConfigureAwait(false);
             return result with { PublishError = ex.Message };
         }
     }
@@ -1448,8 +1454,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// catch returns the UNMODIFIED result, which would orphan already-pushed remote branches (live on the remote but
     /// recorded as no-branch). Cancellation still propagates (worker torn down).</para>
     /// </summary>
-    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> PushRepositoryResultsAsync(RepositoryPushContext context, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var (owner, task, workspace, pushHandle) = context;
+        var runId = owner.RunId;
+        var claimedEpoch = owner.Epoch;
         var branchName = BuildBranchName(runId, claimedEpoch);
         var updated = new List<RepositoryRunResult>(result.RepositoryResults.Count);
         string? primaryBranch = null;
@@ -1466,7 +1475,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 continue;
             }
 
-            var (pushed, error) = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
+            var (pushed, error) = await PushOneRepoOrNullAsync(owner, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
             updated.Add(repo with { ProducedBranch = pushed, PublishError = error, PushedCommitSha = pushed is null ? null : pushHandle.LastPushedCommitSha(repo.Alias) });
 
@@ -1477,43 +1486,49 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returned as the error half of the tuple, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
-    private async Task<(string? Branch, string? Error)> PushOneRepoOrNullAsync(Guid runId, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    private async Task<(string? Branch, string? Error)> PushOneRepoOrNullAsync(AgentRunOwnerToken owner, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            return (await PushWithRetryAsync(ct => pushHandle.PushChangesAsync(alias, branchName, ct), cancellationToken).ConfigureAwait(false), null);
+            return (await PushWithRetryAsync(async ct => { await _runs.AssertOwnershipAsync(owner, ct).ConfigureAwait(false); return await pushHandle.PushChangesAsync(alias, branchName, ct).ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false), null);
         }
         catch (WorkspaceException ex)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}' after {Attempts} attempt(s); keeping the other repos' branches in the change set", runId, alias, PushMaxAttempts);
-            await AppendPushFailureWarningAsync(runId, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
+            await AppendPushFailureWarningAsync(owner, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
             return (null, ex.Message);
         }
     }
 
     /// <summary>Append a Warning event so the operator sees on the timeline WHY no branch appeared — not only in an ILogger line. Best-effort: a failure to record the warning never masks the run's success.</summary>
-    private async Task AppendPushFailureWarningAsync(Guid runId, string redactedMessage, CancellationToken cancellationToken)
+    private async Task AppendPushFailureWarningAsync(AgentRunOwnerToken owner, string redactedMessage, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not push the agent's changes to a branch: {redactedMessage}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not push the agent's changes to a branch: {redactedMessage}" }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the branch-push failure warning event", runId);
         }
     }
 
     /// <summary>The post-harness verification chain — capture the session for resume, capture the diff, publish the branch, then the OBJECTIVE oracle and the SUBJECTIVE critic. One named unit because the S6 revise loop re-runs it after every round: a revision is only ever judged by the same full chain that judged the first attempt.</summary>
-    private async Task<AgentRunResult> VerifyProducedWorkAsync(Guid runId, AgentRun run, IAgentHarness harness, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> VerifyProducedWorkAsync(ProducedWorkContext context, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var (owner, run, harness, task, workspace) = context;
+        var runId = owner.RunId;
+        var claimedEpoch = owner.Epoch;
+        await _runs.AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
         result = await CaptureSessionTranscriptAsync(new SessionCapture(runId, task, harness, Handle: null), result, cancellationToken).ConfigureAwait(false);
 
-        result = await EnrichWithWorkspaceChangesAsync(runId, run.TeamId, task, result, workspace, cancellationToken).ConfigureAwait(false);
+        result = await EnrichWithWorkspaceChangesAsync(new(owner, run.TeamId, task, workspace), result, cancellationToken).ConfigureAwait(false);
 
         result = await CaptureDeclaredArtifactsAsync(runId, run, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-        result = await PushProducedBranchIfEnabledAsync(runId, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        result = await PushProducedBranchIfEnabledAsync(owner, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
         result = await MintPublishEvidenceAsync(runId, run.TeamId, result, cancellationToken).ConfigureAwait(false);
 
@@ -1521,14 +1536,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
-        result = await PublishFoldedUnderClaimAsync(runId, run, task, claimedOutcome, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        result = await PublishFoldedUnderClaimAsync(context, claimedOutcome, result, cancellationToken).ConfigureAwait(false);
 
         // Publish-or-park (I1/I2): record what this pass produced + published REGARDLESS of Status — a Failed or
         // TimedOut run's captured diff gets a row exactly like a Succeeded one. Idempotent (upserts), so an S6 revise
         // round's re-verification safely overwrites this same row with its own latest state.
         await PersistPublishManifestAsync(runId, run, task, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
-        return await ReviewOutputIfEnabledAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+        return await ReviewOutputIfEnabledAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1547,13 +1562,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// the push step keeps its own guards — the publish opt-in, the empty-diff gate, the fence epoch, the publish
     /// guard chain — so this buys no bypass, only the round the fold earned.</para>
     /// </summary>
-    private async Task<AgentRunResult> PublishFoldedUnderClaimAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult claimed, AgentRunResult graded, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> PublishFoldedUnderClaimAsync(ProducedWorkContext context, AgentRunResult claimed, AgentRunResult graded, CancellationToken cancellationToken)
     {
+        var (owner, run, _, task, workspace) = context;
+        var runId = owner.RunId;
         if (claimed.Status != AgentRunStatus.Failed || graded.Status != AgentRunStatus.Succeeded) return graded;
 
         _logger.LogInformation("Agent run {RunId}: the acceptance check overturned a self-reported failure — publishing the work the run had withheld", runId);
 
-        var pushed = await PushProducedBranchIfEnabledAsync(runId, task, graded, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        var pushed = await PushProducedBranchIfEnabledAsync(owner, task, graded, workspace, cancellationToken).ConfigureAwait(false);
 
         return await MintPublishEvidenceAsync(runId, run.TeamId, pushed, cancellationToken).ConfigureAwait(false);
     }
@@ -1601,7 +1618,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             await _manifests.UpsertForAgentRunAsync(runId, BuildManifestUpsert(run, "primary", task.RepositoryId, result.BaseSha, result.PatchArtifactId, result.ChangedFiles, result.ProducedBranch, result.PublishError, result.PublishSkipReason, result.AcceptancePassed, result.PushedCommitSha, result.PatchLossReason), claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to record the publish manifest; the captured diff is still on the result row", runId);
         }
@@ -1634,7 +1651,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             return result with { CapturedArtifactCount = captured, UndeclaredArtifactCount = walk.Captured, UncapturedScratchFileCount = walk.Refused };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture deliverable artifacts; the acceptance oracle still grades them on the produced branch", runId);
             await NoticeDeliverableLossAsync(runId, run.TeamId, "declared-deliverables", $"declared deliverables were not captured — {ex.GetType().Name}: {Truncate(ex.Message, 300)}").ConfigureAwait(false);
@@ -1855,26 +1872,28 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const string FormatFaultMitigationNote = "Gateway format fault — respawned with thinking disabled (fresh conversation: the mangled block lives in the prior transcript).";
 
     /// <summary>Announce the format-fault repair on the timeline — the operator sees WHY this attempt starts cold and runs degraded, instead of a silent second agent. Best-effort like the escalation event beside it.</summary>
-    private async Task AppendMitigationEventAsync(Guid runId, CancellationToken cancellationToken)
+    private async Task AppendMitigationEventAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = FormatFaultMitigationNote }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = FormatFaultMitigationNote }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the gateway-format-fault mitigation event", runId);
         }
     }
 
     /// <summary>Announce the escalation on the timeline — the operator sees the run reached for a stronger model and WHY, or that it wanted to and the team had nothing stronger. Best-effort like the other completion-tail events.</summary>
-    private async Task AppendEscalationEventAsync(Guid runId, AgentModelEscalation escalation, CancellationToken cancellationToken)
+    private async Task AppendEscalationEventAsync(AgentRunOwnerToken owner, AgentModelEscalation escalation, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = DescribeEscalation(escalation) }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = DescribeEscalation(escalation) }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the model-escalation event", runId);
         }
@@ -1957,13 +1976,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const string ReviseAnnouncementPrefix = "Verification failed — revising";
 
     /// <summary>Announce a revise round on the timeline — the operator sees WHY the run is taking another pass and which round of the budget this is. Best-effort like the other completion-tail events.</summary>
-    private async Task AppendReviseEventAsync(Guid runId, string reason, int round, int budget, CancellationToken cancellationToken)
+    private async Task AppendReviseEventAsync(AgentRunOwnerToken owner, string reason, int round, int budget, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseAnnouncementPrefix} (round {round} of {budget}). {reason}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseAnnouncementPrefix} (round {round} of {budget}). {reason}" }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-round event", runId);
         }
@@ -1973,13 +1993,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const string ReviseStalledPrefix = "Revision stalled — the same issue persisted";
 
     /// <summary>Announce that the revise loop stopped EARLY because the same problem re-surfaced unchanged — the operator sees the loop gave up on an unmovable issue rather than silently exhausting the budget. Best-effort.</summary>
-    private async Task AppendReviseStalledEventAsync(Guid runId, string reason, int roundsRun, CancellationToken cancellationToken)
+    private async Task AppendReviseStalledEventAsync(AgentRunOwnerToken owner, string reason, int roundsRun, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseStalledPrefix} after {roundsRun} round(s); stopping early. {reason}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseStalledPrefix} after {roundsRun} round(s); stopping early. {reason}" }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-stalled event", runId);
         }
@@ -2128,7 +2149,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, result.BaseSha, cancellationToken).ConfigureAwait(false)
                 : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: the acceptance grade failed unexpectedly; recording not-accepted", run.Id);
 
@@ -2174,7 +2195,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             grade = await grader.GradeDirectoryAsync(scratch.Directory, spec, run.TeamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: the scratch acceptance grade failed unexpectedly; recording not-accepted", run.Id);
             grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
@@ -2237,7 +2258,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
                 grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, target.BaseSha, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
             {
                 _logger.LogWarning(ex, "Agent run {RunId}: the acceptance grade for repo '{Alias}' failed unexpectedly; recording not-accepted", run.Id, target.Alias);
                 return AcceptanceFailed(result, $"repo '{target.Alias}': grade-error: {ex.Message}");
@@ -2279,13 +2300,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// least falsifiable. Such a result is rendered as an ANSWER and judged against the goal PLUS the task's
     /// acceptance criteria. A diff-bearing result is rendered byte-identically to before.</para>
     /// </summary>
-    internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (task.OutputReviewMode == ReviewMode.None) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (!HasReviewableOutput(result)) return result;
 
-        var runId = run.Id;
+        var runId = owner.RunId;
+        if (run.Id != runId) throw new AgentRunOwnershipLostException(runId);
+        await _runs.AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
 
         // Defer to the A1 completion gate: a run that left a decision.request unanswered will be re-graded to
         // NeedsReview(NeedsDecision) at the completion choke point WITH the specific decision linkage (the stronger
@@ -2337,7 +2360,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // the only surface its operator ever reads; the beat rides here for every agent run alike.
         if (verdict.Failed)
         {
-            await AppendReviewSkippedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
+            await AppendReviewSkippedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
 
             return result;
         }
@@ -2352,7 +2375,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (verdict.Approved) return result;   // a clean pass ⇒ byte-identical
 
-        await AppendOutputFlaggedWarningAsync(runId, verdict, cancellationToken).ConfigureAwait(false);
+        await AppendOutputFlaggedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
 
         return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = feedback };
     }
@@ -2389,7 +2412,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             await scope.ServiceProvider.GetRequiredService<IRunRecordLogger>()
                 .RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.ReviewCompleted, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-review verdict beat; the verdict is reported by the result alone", run.Id);
         }
@@ -2546,7 +2569,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             return read;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not read the captured deliverables for the output review; reviewing the summary alone", run.Id);
             return Array.Empty<(string, string)>();
@@ -2554,28 +2577,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Append a Warning event so the operator sees on the timeline WHY the run was flagged for review. Best-effort: a failure to record it never masks the run's terminal write.</summary>
-    private async Task AppendOutputFlaggedWarningAsync(Guid runId, CriticVerdict verdict, CancellationToken cancellationToken)
+    private async Task AppendOutputFlaggedWarningAsync(AgentRunOwnerToken owner, CriticVerdict verdict, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         var issues = verdict.Issues.Count > 0 ? $" Issues: {string.Join("; ", verdict.Issues)}." : "";
 
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Output flagged by the reviewer — a human should look before this is consumed: {verdict.Rationale}{issues}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Output flagged by the reviewer — a human should look before this is consumed: {verdict.Rationale}{issues}" }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-flagged warning event", runId);
         }
     }
 
     /// <summary>Append a Warning event saying the configured output review did NOT run, so a change that shipped ungated says so on the lane its operator actually reads (a standalone run has no workflow ledger for the critic's <c>review.skipped</c> beat). Best-effort, exactly like the flagged warning: reporting a skipped review may never mask the run's terminal write.</summary>
-    private async Task AppendReviewSkippedWarningAsync(Guid runId, CriticVerdict verdict, CancellationToken cancellationToken)
+    private async Task AppendReviewSkippedWarningAsync(AgentRunOwnerToken owner, CriticVerdict verdict, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Review skipped — the configured output review could not run, so this change was not gated: {verdict.Rationale}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Review skipped — the configured output review could not run, so this change was not gated: {verdict.Rationale}" }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the review-skipped warning event", runId);
         }
@@ -2953,9 +2978,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>
-    private async Task PersistResolvedModelAsync(Guid agentRunId, AgentTask taskWithModel, CancellationToken cancellationToken) =>
-        await _db.AgentRun.Where(r => r.Id == agentRunId)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.TaskJson, JsonSerializer.Serialize(taskWithModel, AgentJson.Options)), cancellationToken).ConfigureAwait(false);
+    private Task PersistResolvedModelAsync(AgentRunOwnerToken owner, AgentTask taskWithModel, CancellationToken cancellationToken) => PersistRuntimeIdentityAsync(owner, null, JsonSerializer.Serialize(taskWithModel, AgentJson.Options), cancellationToken);
+
+    private async Task PersistRuntimeIdentityAsync(AgentRunOwnerToken owner, string? harness, string? taskJson, CancellationToken cancellationToken)
+    {
+        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET harness = COALESCE({harness}, target.harness), task_jsonb = COALESCE(CAST({taskJson} AS jsonb), target.task_jsonb) FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+        if (changed != 1) throw new AgentRunOwnershipLostException(owner.RunId);
+    }
 
     /// <summary>
     /// When the run opted into <see cref="AgentEgressPolicy.Allowlist"/> egress (B3.3b), set the sandbox's egress
@@ -3023,8 +3052,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// uses for any outcome, which also notifies the parent — and returns true (abort the launch). This closes the TOCTOU
     /// the reconciler's still-Queued guard can't: the parent may flip terminal between that guard's read and this claim.
     /// </summary>
-    private async Task<bool> AbortIfParentTerminalAsync(Guid runId, Guid teamId, Guid? workflowRunId, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<bool> AbortIfParentTerminalAsync(AgentRunOwnerToken owner, Guid teamId, Guid? workflowRunId, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         if (workflowRunId is not { } parentId) return false;   // standalone run — no parent to gate on, proceed unchanged
 
         var parentStatus = await _db.WorkflowRun.AsNoTracking()
@@ -3036,7 +3066,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         _logger.LogInformation("Agent run {RunId}: parent workflow run {ParentId} is terminal ({Status}) at the claim point; cancelling instead of launching a sandbox", runId, parentId, parentStatus);
 
-        await CompleteAndNotifyAsync(runId, teamId, new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        await CompleteAndNotifyAsync(owner, teamId, new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }, cancellationToken).ConfigureAwait(false);
 
         return true;
     }
@@ -3045,12 +3075,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         ? new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }
         : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = exception.Message };
 
-    /// <summary>Claim the run (Queued → Running) and return the fencing epoch to complete under, or null when it's already claimed/terminal (the exactly-once guard).</summary>
-    private async Task<long?> TryClaimAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>Claim an unstarted run and return this invocation's owner token; a duplicate initial job returns null.</summary>
+    private async Task<AgentRunOwnerToken?> TryClaimAsync(Guid runId, CancellationToken cancellationToken)
     {
         try
         {
-            return await _runs.MarkRunningAsync(runId, cancellationToken).ConfigureAwait(false);
+            return await _runs.ClaimOwnershipAsync(runId, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunTransitionException)
         {
@@ -3061,9 +3091,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private async Task<AgentRunResult> RunHarnessAsync(HarnessRunContext context, CancellationToken cancellationToken)
     {
+        await _runs.AssertOwnershipAsync(context.Owner, cancellationToken).ConfigureAwait(false);
         var folder = context.Harness.CreateFolder();   // BOUNDED: the harness's OWN reductions, not the run's events — a long run must not be able to exhaust the heap here
         var facts = AgentRunFacts.For(context.Harness);   // the three facts a forced terminal reports without folding, read with THIS harness's declared spellings (or the fallback union when it declares none)
-        var writer = new BufferedEventWriter(_runs, context.RunId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
+        var writer = new BufferedEventWriter(_runs, context.Owner);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
         var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
 
         async Task PersistAsync(string line, SandboxOutputFrame? output)
@@ -3224,13 +3255,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private async Task<SandboxResult> RunSandboxAsync(HarnessRunContext context, Func<string, Task> persistLine, Func<SandboxOutputFrame, Task> persistFrame, HarnessSinks sinks, CancellationToken cancellationToken)
     {
+        await _runs.AssertOwnershipAsync(context.Owner, cancellationToken).ConfigureAwait(false);
         if (context.Runner is ISandboxDurableRunner durable)
             return await RunDurableAsync(context, durable, persistFrame, sinks, cancellationToken).ConfigureAwait(false);
 
         // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         // It applies no OS confinement at all, which is a posture in its own right — recorded so a reader is told
         // "nothing was attempted" rather than being left to assume the sandbox severed something.
-        await RecordConfinementAsync(context.RunId, new SandboxConfinement { Outcome = SandboxConfinementOutcome.NotApplicable }, cancellationToken).ConfigureAwait(false);
+        await RecordConfinementAsync(context.Owner, new SandboxConfinement { Outcome = SandboxConfinementOutcome.NotApplicable }, cancellationToken).ConfigureAwait(false);
 
         return await RunAndStreamAsync(context.Runner, context.Spec, persistLine, cancellationToken).ConfigureAwait(false);
     }
@@ -3241,11 +3273,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// for as long as its journal is. A runner that stamps nothing (an older handle) records nothing — the readers'
     /// no-record branch then keeps the hedged wording instead of inventing an enforced one.
     /// </summary>
-    private async Task RecordConfinementAsync(Guid runId, SandboxConfinement? confinement, CancellationToken cancellationToken)
+    private async Task RecordConfinementAsync(AgentRunOwnerToken owner, SandboxConfinement? confinement, CancellationToken cancellationToken)
     {
+        var runId = owner.RunId;
         if (confinement is null) return;
 
-        await _runs.SetSandboxConfinementAsync(runId, JsonSerializer.Serialize(confinement, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        await _runs.SetSandboxConfinementAsync(owner, JsonSerializer.Serialize(confinement, AgentJson.Options), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3277,15 +3310,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         };
         handle = EnsureLogCaptureHandle(handle, durable);
 
-        await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        await RecordConfinementAsync(context.RunId, handle.Confinement, cancellationToken).ConfigureAwait(false);
+        await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        await RecordConfinementAsync(context.Owner, handle.Confinement, cancellationToken).ConfigureAwait(false);
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
         if (capture.Handle != handle)
-            await _runs.SetRunnerHandleAsync(context.RunId, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (frame, _) => persistFrame(frame), token, CheckpointHandleOffset(context.RunId, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
+        var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (frame, _) => persistFrame(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
 
         // The stdout stream's terminal-drain frames and the checkpoint they complete must be durable BEFORE the
         // diagnostics fold resumes from that checkpoint — two openings of one execution advance one reduction, and
@@ -3441,12 +3474,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// durability invariant — the persisted offset must never run ahead of flushed events, so a re-attach at worst
     /// re-emits the last batch (never loses a line). A pure jsonb UPDATE for the offset; never blocks completion.
     /// </summary>
-    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle, HarnessSinks sinks) =>
+    private Func<long, CancellationToken, Task> CheckpointHandleOffset(AgentRunOwnerToken owner, SandboxHandle handle, HarnessSinks sinks) =>
         async (offset, ct) =>
         {
             await sinks.Events.FlushAsync(ct).ConfigureAwait(false);
             await sinks.Frames.FlushAsync(ct).ConfigureAwait(false);   // the frame plane rides the same checkpoint — best-effort, so a refused frame flush stops capture for the round rather than holding the offset back
-            await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, AgentJson.Options), ct).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(owner, JsonSerializer.Serialize(handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, AgentJson.Options), ct).ConfigureAwait(false);
         };
 
     /// <summary>
@@ -3454,14 +3487,45 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// record rather than two parameters because they are flushed together, at the same checkpoints, for the same
     /// reason — and because threading a second one through the observe path put its signatures over the parameter cap.
     /// </summary>
+    internal static async Task RenewObservationAsync(IAgentRunService runs, AgentRunOwnerToken owner, CancellationTokenSource observer, CancellationToken cancellationToken)
+    {
+        try { await runs.HeartbeatAsync(owner, cancellationToken).ConfigureAwait(false); }
+        catch (AgentRunOwnershipLostException) { observer.Cancel(); throw; }
+    }
+
+    private async Task<bool> CanCleanOwnedWorkspaceAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested) return false;
+        try
+        {
+            return await _db.AgentRun.AsNoTracking().AnyAsync(r => r.Id == owner.RunId && r.OwnerId == owner.OwnerId && r.FenceEpoch == owner.Epoch && r.Status != AgentRunStatus.Running && r.Status != AgentRunStatus.Queued, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} workspace cleanup deferred: this observer has no confirmed owned terminal result", owner.RunId);
+            return false;
+        }
+    }
+
+    private async Task RejectUnclaimedAndNotifyAsync(AgentRun run, AgentRunResult refusal, CancellationToken cancellationToken)
+    {
+        await _runs.RejectQueuedAsync(run.Id, refusal, cancellationToken).ConfigureAwait(false);
+        await _notifier.NotifyCompletedAsync(run.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record ProducedWorkContext(AgentRunOwnerToken Owner, AgentRun Run, IAgentHarness Harness, AgentTask Task, IWorkspaceHandle? Workspace);
+    private sealed record WorkspaceCaptureContext(AgentRunOwnerToken Owner, Guid TeamId, AgentTask Task, IWorkspaceHandle? Workspace);
+    private sealed record RepositoryPushContext(AgentRunOwnerToken Owner, AgentTask Task, IWorkspaceHandle Workspace, IWorkspacePushHandle PushHandle);
+
     private sealed record HarnessSinks(BufferedEventWriter Events, AgentNativeRecordPump Frames);
 
     private sealed record HarnessRunContext
     {
-        public required Guid RunId { get; init; }
+        public required AgentRunOwnerToken Owner { get; init; }
+        public Guid RunId => Owner.RunId;
         public required Guid TeamId { get; init; }
         public required Guid ActorId { get; init; }
-        public required long WorkerFenceEpoch { get; init; }
+        public long WorkerFenceEpoch => Owner.Epoch;
         public required IAgentHarness Harness { get; init; }
         public required ISandboxRunner Runner { get; init; }
         public required SandboxSpec Spec { get; init; }
@@ -3477,10 +3541,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private sealed record ReattachFoldContext
     {
-        public required Guid RunId { get; init; }
+        public required AgentRunOwnerToken Owner { get; init; }
+        public Guid RunId => Owner.RunId;
         public required Guid TeamId { get; init; }
         public required Guid ActorId { get; init; }
-        public required long WorkerFenceEpoch { get; init; }
+        public long WorkerFenceEpoch => Owner.Epoch;
         public required ISandboxDurableRunner Durable { get; init; }
         public required SandboxHandle Handle { get; init; }
         public required AgentTask Task { get; init; }
@@ -3512,13 +3577,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         private const int MaxBuffered = 256;   // memory cap; the per-poll checkpoint is the normal flush trigger
 
         private readonly IAgentRunService _runs;
-        private readonly Guid _runId;
+        private readonly AgentRunOwnerToken _owner;
         private readonly List<AgentEvent> _pending = new();
 
-        public BufferedEventWriter(IAgentRunService runs, Guid runId)
+        public BufferedEventWriter(IAgentRunService runs, AgentRunOwnerToken owner)
         {
             _runs = runs;
-            _runId = runId;
+            _owner = owner;
         }
 
         public async Task BufferAsync(AgentEvent @event, CancellationToken cancellationToken)
@@ -3535,7 +3600,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var batch = _pending.ToList();
             _pending.Clear();
 
-            await _runs.AppendEventsAsync(_runId, batch, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventsAsync(_owner, batch, cancellationToken).ConfigureAwait(false);
         }
     }
 

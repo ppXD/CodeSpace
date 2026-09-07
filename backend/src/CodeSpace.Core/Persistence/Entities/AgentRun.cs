@@ -108,6 +108,12 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// </summary>
     public long FenceEpoch { get; set; }
 
+    /// <summary>The activated observer, never the logical task or physical process identity. Null on legacy rows or while a reconciler reservation awaits activation.</summary>
+    public Guid? OwnerId { get; set; }
+
+    /// <summary>Server-minted, one-time dispatch reservation. Retained after activation to resolve an ambiguous acknowledgement against the exact locally minted owner.</summary>
+    public Guid? ReattachReservationId { get; set; }
+
     /// <summary>
     /// How many times the reconciler has re-claimed this run for a live re-attach (its detached process is
     /// alive but its worker vanished). Incremented in the SAME atomic UPDATE as each reclaim, so the count can

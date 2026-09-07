@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Authority;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence;
@@ -25,6 +26,21 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public interface IAgentRunService
 {
+    Task<AgentRunOwnerToken?> ClaimOwnershipAsync(Guid runId, CancellationToken cancellationToken);
+    Task<AgentRunReattachReservation?> ReserveReattachAsync(Guid runId, CancellationToken cancellationToken);
+    Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken);
+    Task<AgentRunOwnerToken?> ActivateReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken);
+    Task AssertOwnershipAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken);
+    Task HeartbeatAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken);
+    Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken);
+    Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken);
+    Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken);
+    Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken);
+    Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
+    Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
+    /// <summary>Complete under an active matching owner and lease. A repeated terminal call fails closed; claim ACK recovery does not imply terminal notification recovery.</summary>
+    Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken);
+
     /// <summary>Persist a new run in <see cref="AgentRunStatus.Queued"/> with <paramref name="task"/> as its envelope. workflowRunId/nodeId/iterationKey soft-link the owning workflow CELL — iterationKey is the spawning node's cell key (empty for a top-level node or a standalone run), so the N branches a map/loop fan-out spawns under one node stay distinguishable (D4 correlation spine).</summary>
     Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default);
 
@@ -34,6 +50,7 @@ public interface IAgentRunService
     /// so a later reclaim (which bumps the epoch again) fences this claimer out. Throws
     /// <see cref="AgentRunTransitionException"/> when the run isn't Queued.
     /// </summary>
+    /// <remarks>Legacy rows only. New production workers must use ClaimOwnershipAsync.</remarks>
     Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken);
 
     /// <summary>Refresh the liveness heartbeat a stuck-run reconciler reads. Idempotent; does not change status.</summary>
@@ -49,6 +66,7 @@ public interface IAgentRunService
     /// (a pure UPDATE, never a tracked save — so it can't strand a long run on optimistic concurrency). Returns
     /// whether it won the row (0 rows = no longer Running / another replica won → don't re-dispatch).
     /// </summary>
+    /// <remarks>Legacy compatibility wrapper that reserves but discards its token. It never authorizes a run-id-only reattach job.</remarks>
     Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -99,7 +117,7 @@ public interface IAgentRunService
     /// <paramref name="expectedEpoch"/> — the epoch the caller claimed with (<see cref="MarkRunningAsync"/>).
     /// The status-guarded CAS additionally requires the run still carries that epoch, so a worker whose run was
     /// reclaimed (its epoch bumped) and then revived matches 0 rows and throws, rather than double-completing.
-    /// The executor uses this; an unfenced caller (a test, a direct admin path) uses the 3-arg overload.
+    /// Legacy compatibility only: both ownership fields must still be null. Production workers use the explicit token overload.
     /// </summary>
     Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken);
 
@@ -145,7 +163,7 @@ public interface IAgentRunService
     Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken);
 }
 
-public sealed class AgentRunService : IAgentRunService, IScopedDependency
+public sealed partial class AgentRunService : IAgentRunService, IScopedDependency
 {
     public const string EventDataHolderKind = "agent_run_event";
 
@@ -244,6 +262,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken)
     {
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
         var run = await LoadAsync(runId, cancellationToken).ConfigureAwait(false);
 
         EnsureTransition(run, AgentRunStatus.Running);
@@ -264,67 +283,58 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     {
         // Lock before sampling database time; UPDATE target expressions alone can be evaluated before a lock wait.
         // A terminal row cannot acquire a fresh execution lease.
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
         var duration = AgentRunLiveness.LeaseDuration;
-        await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)}", cancellationToken).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)} AND target.owner_id IS NULL AND target.reattach_reservation_id IS NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken)
-    {
-        // Recheck expiry in the UPDATE itself. A stale candidate list is not authority to replace a
-        // renewed lease, and the first winner's fresh lease excludes concurrent contenders.
-        var duration = AgentRunLiveness.LeaseDuration;
-        var reclaimed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET fence_epoch = target.fence_epoch + 1, reattach_attempts = target.reattach_attempts + 1, heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
-        return reclaimed == 1;
-    }
+    public async Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken) => await ReserveReattachCoreAsync(runId, true, null, cancellationToken).ConfigureAwait(false) is not null;
 
     public async Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken)
     {
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
         // Tracking-free set-based UPDATE (like HeartbeatAsync): a pure UPDATE that never participates in
         // optimistic concurrency. Safe to bump the row independently of the executor's tracked instance because
         // CompleteAsync flips status via a status-guarded CAS (not the xmin token), so neither this write nor the
         // heartbeat's pings can block completion. A missing row is a harmless no-op.
         await _db.AgentRun
-            .Where(r => r.Id == runId)
+            .Where(r => r.Id == runId && r.OwnerId == null && r.ReattachReservationId == null)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, handleJson), cancellationToken)
             .ConfigureAwait(false);
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SetSandboxConfinementAsync(Guid runId, string confinementJson, CancellationToken cancellationToken)
     {
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
         // Same tracking-free set-based UPDATE as the handle write, and for the same reasons — it must never
         // participate in the executor's optimistic concurrency or block a completion CAS. A missing row is a no-op.
         await _db.AgentRun
-            .Where(r => r.Id == runId)
+            .Where(r => r.Id == runId && r.OwnerId == null && r.ReattachReservationId == null)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.SandboxConfinementJson, confinementJson), cancellationToken)
             .ConfigureAwait(false);
+        await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)
+    public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(runId, null, "legacy"), @event, cancellationToken);
+    public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(owner.RunId, owner, "worker"), @event, cancellationToken);
+    public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(runId, null, "system"), @event, cancellationToken);
+    public async Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(runId, null, "legacy"), events, cancellationToken).ConfigureAwait(false);
+    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(owner.RunId, owner, "worker"), events, cancellationToken).ConfigureAwait(false);
+
+    private async Task<AgentRunEvent> AppendOneEventAsync(AgentEventWriter writer, AgentEvent @event, CancellationToken cancellationToken)
     {
-        var eventId = Guid.NewGuid();
-        var data = new[] { PersistedText.SanitizeJson(@event.Data?.GetRawText()) };
-        var dataArtifactIds = new Guid?[1];
-        await OffloadLargeDataPayloadsAsync(runId, [eventId], data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
-
-        var record = new AgentRunEvent
-        {
-            Id = eventId,
-            AgentRunId = runId,
-            Kind = @event.Kind,
-            Text = PersistedText.Sanitize(@event.Text)!,
-            DataJson = data[0],
-            DataArtifactId = dataArtifactIds[0],
-        };
-
-        _db.AgentRunEvent.Add(record);
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-        return record;
+        var ids = await AppendEventsCoreAsync(writer, [@event], cancellationToken).ConfigureAwait(false);
+        return await _db.AgentRunEvent.AsNoTracking().SingleAsync(e => e.Id == ids[0], cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Guid>> AppendEventsCoreAsync(AgentEventWriter writer, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
     {
-        if (events.Count == 0) return;
+        var runId = writer.RunId;
+        if (writer.Owner is { } owner) await AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
+        else if (writer.Kind == "legacy") await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
+        if (events.Count == 0) return [];
 
         // ONE round-trip, ONE statement, with the per-run BIGSERIAL `sequence` assigned in STRICT emission order.
         // EF's batched AddRange does NOT preserve insert order for same-type rows — it sorts the modification
@@ -335,7 +345,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // thus serial-stamps) the rows in array order. This holds because Postgres never parallelizes the writing
         // side of a single INSERT … SELECT — the ModifyTable node consumes the sorted stream row-by-row and calls
         // nextval() in that order; the ordering tests (single batch, cross-batch monotonicity, 300-row) guard it.
-        // The parameter count is FIXED at six regardless of batch size (one array per column, fully bound — never
+        // The parameter count is fixed regardless of batch size (one array per column plus the owner receipt — never
         // string-concatenated), so a 256-event flush is one bind, not hundreds of placeholders. `id` + `occurred_at`
         // are respectively pre-minted before offload and DB-stamped with NOW(); append-only INSERT — the
         // immutability trigger (UPDATE/DELETE-only) is unaffected.
@@ -361,12 +371,15 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         await OffloadLargeDataPayloadsAsync(runId, ids, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
 
         const string sql =
-            "INSERT INTO agent_run_event (id, agent_run_id, kind, text, data_json, data_artifact_id) " +
-            "SELECT e.id, {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id " +
-            "FROM unnest({1}::uuid[], {2}::text[], {3}::text[], {4}::text[], {5}::uuid[]) WITH ORDINALITY AS e(id, kind, text, data, data_artifact_id, ord) " +
-            "ORDER BY e.ord";
+            "WITH locked AS MATERIALIZED (SELECT id, status, owner_id, reattach_reservation_id, fence_epoch, lease_expires_at FROM agent_run WHERE id = {0} FOR UPDATE) " +
+            "INSERT INTO agent_run_event (id, agent_run_id, kind, text, data_json, data_artifact_id, writer_kind, writer_owner_id, writer_epoch) " +
+            "SELECT e.id, {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id, {6}, CASE WHEN {6} = 'worker' THEN {7}::uuid ELSE NULL END, CASE WHEN {6} = 'worker' THEN {8}::bigint ELSE NULL END " +
+            "FROM unnest({1}::uuid[], {2}::text[], {3}::text[], {4}::text[], {5}::uuid[]) WITH ORDINALITY AS e(id, kind, text, data, data_artifact_id, ord) CROSS JOIN locked " +
+            "WHERE {6} = 'system' OR ({6} = 'legacy' AND locked.owner_id IS NULL AND locked.reattach_reservation_id IS NULL) OR ({6} = 'worker' AND locked.owner_id = {7} AND locked.fence_epoch = {8} AND locked.status = 'Running' AND locked.lease_expires_at > clock_timestamp()) ORDER BY e.ord";
 
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, ids, kinds, texts, data, dataArtifactIds }, cancellationToken).ConfigureAwait(false);
+        var inserted = await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, ids, kinds, texts, data, dataArtifactIds, writer.Kind, writer.Owner?.OwnerId ?? Guid.Empty, writer.Owner?.Epoch ?? 0 }, cancellationToken).ConfigureAwait(false);
+        if (inserted != events.Count) throw new AgentRunOwnershipLostException(runId);
+        return ids;
     }
 
     /// <summary>
@@ -376,6 +389,8 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// ZERO I/O (no team lookup, no store call), so both append paths' common case is unchanged; the team id is
     /// resolved once, lazily, only when something actually needs offloading.
     /// </summary>
+    private sealed record AgentEventWriter(Guid RunId, AgentRunOwnerToken? Owner, string Kind);
+
     private async Task OffloadLargeDataPayloadsAsync(Guid runId, Guid[] holderIds, string?[] data, Guid?[] dataArtifactIds, CancellationToken cancellationToken)
     {
         Guid? teamId = null;
@@ -403,13 +418,24 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     }
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) =>
-        CompleteCoreAsync(runId, result, expectedEpoch: null, cancellationToken);
+        CompleteCoreAsync(new(runId, null, null), result, cancellationToken);
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken) =>
-        CompleteCoreAsync(runId, result, expectedEpoch, cancellationToken);
+        CompleteCoreAsync(new(runId, expectedEpoch, null), result, cancellationToken);
 
-    private async Task CompleteCoreAsync(Guid runId, AgentRunResult result, long? expectedEpoch, CancellationToken cancellationToken)
+    public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => CompleteCoreAsync(new(owner.RunId, owner.Epoch, owner), result, cancellationToken);
+
+    public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => CompleteCoreAsync(new(runId, null, null, QueuedOnly: true), result, cancellationToken);
+
+    private sealed record CompletionWriter(Guid RunId, long? ExpectedEpoch, AgentRunOwnerToken? Owner, bool QueuedOnly = false);
+
+    private async Task CompleteCoreAsync(CompletionWriter writer, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var runId = writer.RunId;
+        var expectedEpoch = writer.ExpectedEpoch;
+        var owner = writer.Owner;
+        if (owner is not null) await AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
+        else await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
         if (!AgentRunStateMachine.IsTerminal(result.Status))
             throw new AgentRunTransitionException($"AgentRunResult.Status must be terminal — got {result.Status}.");
 
@@ -432,6 +458,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
         var current = snapshot.Status;
+        if (writer.QueuedOnly && current != AgentRunStatus.Queued) throw new AgentRunTransitionException($"AgentRun {runId} has already been claimed; a preclaim refusal cannot complete it.");
 
         // Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered —
         // re-grade Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at
@@ -464,18 +491,22 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var sessionId = PersistedText.Sanitize(result.SessionId);
         var error = PersistedText.Sanitize(result.Error);
 
-        var flipped = await _db.AgentRun
-            .Where(r => r.Id == runId && r.Status == current && (expectedEpoch == null || r.FenceEpoch == expectedEpoch))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(r => r.Status, result.Status)
-                .SetProperty(r => r.ResultJson, resultJson)
-                .SetProperty(r => r.SessionId, sessionId)
-                .SetProperty(r => r.Error, error)
-                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-            .ConfigureAwait(false);
-
-        if (flipped == 0)
-            throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current}{(expectedEpoch is { } e ? $" at epoch {e}" : "")} at completion — a concurrent transition or reclaim won the race.");
+        int flipped;
+        if (owner is not null)
+        {
+            flipped = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET status = {result.Status.ToString()}, result_jsonb = CAST({resultJson} AS jsonb), session_id = {sessionId}, error = {error}, completed_at = clock_timestamp() FROM locked WHERE target.id = locked.id AND target.status = {current.ToString()} AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+            if (flipped == 0) throw new AgentRunOwnershipLostException(runId);
+        }
+        else
+        {
+            flipped = await _db.AgentRun.Where(r => r.Id == runId && r.Status == current && r.OwnerId == null && r.ReattachReservationId == null && (expectedEpoch == null || r.FenceEpoch == expectedEpoch))
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, result.Status).SetProperty(r => r.ResultJson, resultJson).SetProperty(r => r.SessionId, sessionId).SetProperty(r => r.Error, error).SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+            if (flipped == 0)
+            {
+                await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
+                throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current} at completion — a concurrent transition won the race.");
+            }
+        }
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
 
@@ -694,6 +725,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running && r.FenceEpoch == snapshot.FenceEpoch)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, AgentRunStatus.Cancelled)
+                .SetProperty(r => r.FenceEpoch, r => r.FenceEpoch + 1)
                 .SetProperty(r => r.Error, reason)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);

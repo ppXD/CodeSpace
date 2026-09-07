@@ -41,6 +41,10 @@ public class AgentRunEvent : IEntity<Guid>
     /// <summary>D2 #1 — when a large structured payload was offloaded to the artifact store, the artifact id holding the full JSON; <see cref="DataJson"/> is then NULL. Consumers read it through the bounded run/event-scoped endpoint, never by trusting a naked artifact id. NULL when the payload is inline (small) or absent.</summary>
     public Guid? DataArtifactId { get; set; }
 
+    public string WriterKind { get; set; } = "legacy";
+    public Guid? WriterOwnerId { get; set; }
+    public long? WriterEpoch { get; set; }
+
     public DateTimeOffset OccurredAt { get; set; } = DateTimeOffset.UtcNow;
 
     public AgentRun Run { get; set; } = default!;

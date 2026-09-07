@@ -34,7 +34,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var input = SucceededWithChanges();   // OutputReviewMode defaults to None
-        var result = await executor.ReviewOutputIfEnabledAsync(DefaultTask, input, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), DefaultTask, input, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("None never reviews — byte-identical to no review");
         result.ShouldBeSameAs(input, "the result is passed through reference-unchanged");
@@ -47,7 +47,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, failed, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, failed, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a non-success has no produced change to gate");
         result.Status.ShouldBe(AgentRunStatus.Failed);
@@ -59,7 +59,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
         var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch, no Summary
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, noChanges, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, noChanges, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a no-op / re-attach run that produced nothing at all has nothing to gate");
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
@@ -71,7 +71,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks good" });
 
         var input = SucceededWithChanges();
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, input, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, input, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeTrue("a gated run with a diff IS reviewed");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "an approved change stays a clean success");
@@ -83,7 +83,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "InvalidOperationException: the reviewer credential was revoked"));
 
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a failed review is never worse than no review — fail-open");
         result.ExitReason.ShouldNotBe("output-flagged", "a review that did not run must not masquerade as a flag");
@@ -104,7 +104,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // critique because the same string is fed back to the agent for its revise round — guidance comes first.
         var (runId, executor, _, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "incomplete", ReviewerModel = "claude-sonnet-4-6" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.ReviewFeedback.ShouldBe("incomplete (reviewed on claude-sonnet-4-6)");
     }
@@ -114,7 +114,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         runs.AppendedEvents.ShouldBeEmpty("a clean pass is byte-identical — no flag, and no skipped-review warning either");
     }
@@ -124,7 +124,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Issues = new[] { new CriticIssue { Text = "no tests for the new path" } }, Rationale = "incomplete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "a disapproved change blocks the clean-success path so a human looks");
         result.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
@@ -147,7 +147,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // blocking decision is pending, the output review is skipped entirely — the critic is never even called.
         var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false }, pendingDecision: Guid.NewGuid());
 
-        var result = await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeFalse("a pending decision defers to A1 — the output review never runs");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the output review leaves the status for A1 to re-grade at completion");
@@ -169,7 +169,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var workflowRunId = Guid.NewGuid();
         var run = Run(runId, workflowRunId: workflowRunId, nodeId: "agent-node", iterationKey: "agent-node#2");
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), run, CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), run, CancellationToken.None);
 
         critic.Called.ShouldBeTrue();
         critic.ObservedScope.ShouldNotBeNull("the critic call is made under a pushed recording scope");
@@ -188,7 +188,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
-        await executor.ReviewOutputIfEnabledAsync(AnswerTask, withDiff ? SucceededWithChanges() : SucceededWithAnswer(), Run(runId), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, withDiff ? SucceededWithChanges() : SucceededWithAnswer(), Run(runId), CancellationToken.None);
 
         critic.ObservedRequest!.CallKind.ShouldBe(LlmStructuredCritic.OutputReviewCallKind, "a change and an answer are both RESULTS — one probe has to find either");
     }
@@ -200,7 +200,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // — the critic still runs (records nothing), fail-open and byte-identical to the pre-recording behaviour.
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
 
         critic.Called.ShouldBeTrue("the critic still runs for a standalone run");
         critic.ObservedScope.ShouldBeNull("no workflow run ⇒ no scope pushed ⇒ the call records nothing (fail-open)");
@@ -222,7 +222,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var workflowRunId = Guid.NewGuid();
         var run = Run(runId, workflowRunId: workflowRunId, nodeId: "agent-node", iterationKey: "agent-node#2");
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), run, CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), run, CancellationToken.None);
 
         var beat = ledger.Records.ShouldHaveSingleItem();
         beat.RecordType.ShouldBe(WorkflowRunRecordTypes.ReviewCompleted, "a verdict that happened is a ledger record, not only a re-graded status");
@@ -250,7 +250,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // having to tell an absent key from an absent value.
         var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
 
         JsonDocument.Parse(ledger.Records.ShouldHaveSingleItem().Payload).RootElement
             .GetProperty("reviewerModel").ValueKind.ShouldBe(JsonValueKind.Null);
@@ -263,7 +263,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // review.skipped beat is the record of that, and inventing a verdict here would be the over-claim inverted.
         var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(CriticVerdict.ReviewFailed(ReviewMode.Gate, "the reviewer credential was revoked"));
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
 
         ledger.Records.ShouldBeEmpty("no verdict exists, so none is recorded");
     }
@@ -273,7 +273,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "clean" });
 
-        await executor.ReviewOutputIfEnabledAsync(GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);   // WorkflowRunId == null
 
         ledger.Records.ShouldBeEmpty("no workflow run ⇒ no ledger to land on ⇒ fail-open, byte-identical");
     }
@@ -287,7 +287,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the diff hardcodes the fixture", Issues = new[] { new CriticIssue { Text = "hardcoded expected value", Evidence = "src/foo.cs line 3" } } },
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "approval requires CONSENSUS across the two independent channels — a disagreement fails toward the human, never a silent pass");
         result.ReviewFeedback.ShouldContain("The reviewer agent approved, but the independent model co-check disagreed: the diff hardcodes the fixture");
@@ -303,7 +303,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "agree" },
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "consensus across both independent channels ⇒ a clean pass");
         critic.CallCount.ShouldBe(1, "the co-sign is the only model call");
@@ -317,7 +317,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"),
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a broken co-check must not manufacture a flag — fail-open to the agent's approval");
         critic.CallCount.ShouldBe(1);
@@ -331,7 +331,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "would have passed" },
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "placeholder hack", Issues = new[] { new CriticIssue { Text = "hack committed", Evidence = "feature.txt line 1" } } });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview);
         result.ReviewFeedback.ShouldBe("placeholder hack Issues: hack committed (evidence: feature.txt line 1)", "the agent's grounded verdict is the feedback, un-diluted");
@@ -345,7 +345,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "model ok" },
             agentVerdict: CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: no produced branch"));
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         critic.CallCount.ShouldBe(1, "the model call is the LADDER — a laddered model approval never co-signs itself");
@@ -360,7 +360,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         // the gate skipped it entirely — the one shape where an ungated claim is least falsifiable shipped ungated.
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeTrue("a text-only answer under a configured Gate IS reviewed");
         critic.ObservedRequest!.ArtifactKind.ShouldBe("agent answer", customMessage: "the critic is told it is reading an answer, not a diff");
@@ -375,7 +375,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
 
-        await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         critic.ObservedRequest!.ArtifactKind.ShouldBe("agent change", customMessage: "byte-identity for the diff-bearing lane — C1 changed only the diff-less one");
         critic.ObservedRequest.Artifact.ShouldContain("Diff:");
@@ -387,7 +387,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, runs, _) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false, Rationale = "the answer cites no source" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "an answer the critic rejects blocks the clean-success path exactly as a rejected diff does");
         result.ExitReason.ShouldBe("output-flagged");
@@ -400,7 +400,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     {
         var (runId, executor, _, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"));
 
-        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the answer lane fails open like the diff lane — a review that could not run never manufactures a flag");
         result.ExitReason.ShouldNotBe("output-flagged");
@@ -413,7 +413,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { deliverable });
 
         var captured = SucceededWithAnswer() with { Summary = "wrote the comparison", CapturedArtifactCount = 1 };
-        await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, captured, Run(runId), CancellationToken.None);
 
         critic.ObservedRequest!.Artifact.ShouldContain("=== DELIVERABLE.md ===", customMessage: "the deliverable is named so the critic can attribute its reading");
         critic.ObservedRequest.Artifact.ShouldContain("Rust wins on safety", customMessage: "the report the agent actually wrote is what gets judged — not just its self-summary");
@@ -425,7 +425,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: Array.Empty<FakeDeliverable>(), deliverableReadThrows: true);
 
         var captured = SucceededWithAnswer() with { CapturedArtifactCount = 2 };
-        var result = await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, captured, Run(runId), CancellationToken.None);
 
         critic.Called.ShouldBeTrue("a storage fault must not cancel the review — the summary is still an answer");
         critic.ObservedRequest!.Artifact.ShouldContain("Rust is memory-safe without a GC");
@@ -444,7 +444,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
 
         var captured = SucceededWithAnswer() with { CapturedArtifactCount = 1 };
-        var result = await executor.ReviewOutputIfEnabledAsync(AgentReviewedTask, captured, Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, captured, Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.NeedsReview, "the agent's verdict still stands — laziness changes cost, never the outcome");
         critic.Called.ShouldBeFalse("a disapproving agent needs no co-sign, so no model rung consumes a request");
@@ -457,7 +457,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var (runId, executor, _, critic, store, _) = NewExecutorWithStore(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: new[] { new FakeDeliverable("DELIVERABLE.md", "# Comparison") });
 
         var captured = SucceededWithAnswer() with { CapturedArtifactCount = 1 };
-        await executor.ReviewOutputIfEnabledAsync(AnswerTask, captured, Run(runId), CancellationToken.None);
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, captured, Run(runId), CancellationToken.None);
 
         critic.ObservedRequest!.Artifact.ShouldContain("=== DELIVERABLE.md ===");
         store.ListCalls.ShouldBe(1, "the lazy build is memoized — a consumed request costs exactly the one read it always did");
@@ -704,6 +704,20 @@ public sealed class AgentRunExecutorOutputReviewTests
         public Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken) => Task.FromResult<ResumableSession?>(null);
         public Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunOwnerToken?> ClaimOwnershipAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunReattachReservation?> ReserveReattachAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunOwnerToken?> ActivateReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task AssertOwnershipAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task HeartbeatAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(owner.RunId, @event, cancellationToken);
+        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => AppendEventsAsync(owner.RunId, events, cancellationToken);
+        public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(runId, @event, cancellationToken);
+        public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
+
         public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();

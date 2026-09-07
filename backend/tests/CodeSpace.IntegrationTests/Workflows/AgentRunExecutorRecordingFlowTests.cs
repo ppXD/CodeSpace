@@ -54,7 +54,8 @@ public class AgentRunExecutorRecordingFlowTests
             // the interaction records key onto.
             var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
 
-            await BuildExecutor(scope).ReviewOutputIfEnabledAsync(task, result, agentRun, CancellationToken.None);
+            var owner = (await scope.Resolve<IAgentRunService>().ClaimOwnershipAsync(agentRun.Id, CancellationToken.None))!;
+            await BuildExecutor(scope).ReviewOutputIfEnabledAsync(owner, task, result, agentRun, CancellationToken.None);
         }
 
         using var verify = _fixture.BeginScope();
@@ -101,7 +102,8 @@ public class AgentRunExecutorRecordingFlowTests
             var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
             await SeedCapturedDeliverableAsync(teamId, runId, agentRun.Id, "DELIVERABLE.md", "# Comparison\nRust wins on safety; Go wins on build speed.");
 
-            await BuildExecutor(scope).ReviewOutputIfEnabledAsync(task, result, agentRun, CancellationToken.None);
+            var owner = (await scope.Resolve<IAgentRunService>().ClaimOwnershipAsync(agentRun.Id, CancellationToken.None))!;
+            await BuildExecutor(scope).ReviewOutputIfEnabledAsync(owner, task, result, agentRun, CancellationToken.None);
         }
 
         using var verify = _fixture.BeginScope();

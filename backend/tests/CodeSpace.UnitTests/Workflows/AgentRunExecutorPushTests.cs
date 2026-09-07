@@ -191,7 +191,7 @@ public sealed class AgentRunExecutorPushTests
         var handle = new RecordingPushHandle();
         var optedOut = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = false };
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, optedOut, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), optedOut, SucceededWithChanges(), handle, CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull();
         result.PublishSkipReason.ShouldBe("push disabled by the launch profile", "the ProfileOptOutPublishGuard's verdict is folded into the result, never a silent no-op");
@@ -208,7 +208,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle();
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
 
         handle.PushCalled.ShouldBeTrue("push is DEFAULT-ON for a non-empty diff — no opt-in required");
         result.ProducedBranch.ShouldBe(handle.BranchPushed);
@@ -226,7 +226,7 @@ public sealed class AgentRunExecutorPushTests
         var handle = new RecordingPushHandle();
 
         var ended = SucceededWithChanges() with { Status = status };
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, ended, handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, ended, handle, CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull();
         handle.PushCalled.ShouldBeFalse($"a {status} run ended on its own terms — never pushed");
@@ -244,7 +244,7 @@ public sealed class AgentRunExecutorPushTests
         var handle = new RecordingPushHandle();
 
         var killed = SucceededWithChanges() with { Status = status };
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, killed, handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, killed, handle, CancellationToken.None);
 
         handle.PushCalled.ShouldBeTrue($"a {status} run's real on-disk changes are salvaged as a branch, not discarded");
         result.ProducedBranch.ShouldBe(handle.BranchPushed);
@@ -258,7 +258,7 @@ public sealed class AgentRunExecutorPushTests
         var handle = new RecordingPushHandle();
 
         var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, noChanges, handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, noChanges, handle, CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull();
         handle.PushCalled.ShouldBeFalse("nothing changed → nothing to push");
@@ -269,7 +269,7 @@ public sealed class AgentRunExecutorPushTests
     {
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), new ReadOnlyHandle(), ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), new ReadOnlyHandle(), CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull("a handle that doesn't implement IWorkspacePushHandle is skipped");
     }
@@ -279,7 +279,7 @@ public sealed class AgentRunExecutorPushTests
     {
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), workspace: null, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), workspace: null, CancellationToken.None);
 
         result.ProducedBranch.ShouldBeNull();
     }
@@ -290,7 +290,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle();
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
 
         handle.PushCalled.ShouldBeTrue();
         handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "the deterministic run-derived branch name is pushed");
@@ -303,23 +303,22 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle { ReturnBranch = null };   // e.g. no changes to commit / anonymous clone
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
 
         handle.PushCalled.ShouldBeTrue();
         result.ProducedBranch.ShouldBeNull("a null push result means no branch — the result is unchanged");
     }
 
     [Fact]
-    public async Task A_reclaimed_run_skips_the_push()
+    public async Task A_reclaimed_run_stops_the_observer_before_the_push()
     {
         // The run was reclaimed after this executor claimed it: the persisted epoch no longer matches.
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch + 1);
         var handle = new RecordingPushHandle();
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        await Should.ThrowAsync<CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException>(() => executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None));
 
         handle.PushCalled.ShouldBeFalse("a reclaimed run (epoch bumped) skips the side effect — its completion loses the CAS anyway");
-        result.ProducedBranch.ShouldBeNull();
     }
 
     // ─── Multi-repo per-repo push (multi-repo PR3) ───────────────────────────
@@ -336,7 +335,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new MultiRepoRecordingPushHandle();
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, MultiRepoSucceeded(runId), handle, CancellationToken.None);
 
         var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         handle.PushedByAlias.Keys.ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "every writable repo is pushed, each to its own remote");
@@ -356,7 +355,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new MultiRepoRecordingPushHandle { NullForAliases = { "api" } };
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, MultiRepoSucceeded(runId), handle, CancellationToken.None);
 
         var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
@@ -375,7 +374,7 @@ public sealed class AgentRunExecutorPushTests
         // Top-level ChangedFiles + Patch are EMPTY (primary unchanged) but RepositoryResults still lists both repos.
         var input = MultiRepoSucceeded(runId) with { ChangedFiles = Array.Empty<string>(), Patch = "" };
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, input, handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, input, handle, CancellationToken.None);
 
         handle.PushedByAlias.Count.ShouldBe(2, "the empty top-level gate does not short-circuit a multi-repo push");
         result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch));
@@ -390,7 +389,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new MultiRepoRecordingPushHandle { ThrowForAliases = { "api" } };
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, MultiRepoSucceeded(runId), handle, CancellationToken.None);
 
         var expected = AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch);
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "one repo's push failure never fails the run");
@@ -422,7 +421,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle { FailFirstNCalls = 2 };   // under PushMaxAttempts=3 → recovers
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "the THIRD attempt succeeded — a transient failure no longer costs the branch");
@@ -436,7 +435,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new MultiRepoRecordingPushHandle { FailFirstNCallsByAlias = { ["api"] = 1 } };   // web never fails; api fails once then recovers
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, MultiRepoSucceeded(runId), handle, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch));
@@ -454,7 +453,7 @@ public sealed class AgentRunExecutorPushTests
         var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
         var handle = new RecordingPushHandle { ThrowOnPush = new WorkspaceException("git push failed: token *** rejected") };
 
-        var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a push failure NEVER flips a Succeeded run to Failed");
         result.ProducedBranch.ShouldBeNull();
@@ -471,7 +470,7 @@ public sealed class AgentRunExecutorPushTests
         var handle = new RecordingPushHandle { ThrowOnPush = new OperationCanceledException() };
 
         await Should.ThrowAsync<OperationCanceledException>(async () =>
-            await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None));
+            await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None));
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -639,6 +638,27 @@ public sealed class AgentRunExecutorPushTests
         }
 
         public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunOwnerToken?> ClaimOwnershipAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunReattachReservation?> ReserveReattachAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunOwnerToken?> ActivateReattachAsync(AgentRunReattachReservation reservation, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task AssertOwnershipAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)
+        {
+            GetCalled = true;
+            owner.RunId.ShouldBe(_runId);
+            owner.OwnerId.ShouldBe(_runId);
+            if (owner.Epoch != _epoch) throw new CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException(owner.RunId);
+            return Task.CompletedTask;
+        }
+        public Task HeartbeatAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(owner.RunId, @event, cancellationToken);
+        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => AppendEventsAsync(owner.RunId, events, cancellationToken);
+        public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(runId, @event, cancellationToken);
+        public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
+
         public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
