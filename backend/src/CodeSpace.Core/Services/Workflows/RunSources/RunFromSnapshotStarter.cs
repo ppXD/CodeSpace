@@ -99,7 +99,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
 
     private void EnsureValidDefinition(WorkflowDefinition definition)
     {
-        var result = _validator.Validate(definition);
+        var result = _validator.Validate(definition, allowLaunchContract: true);
         if (result.IsValid) return;
 
         _logger.LogWarning("Snapshot definition rejected by validator. ErrorCount={ErrorCount} Errors={Errors}", result.Errors.Count, string.Join(" | ", result.Errors));

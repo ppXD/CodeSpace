@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Enums;
@@ -114,6 +115,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             : (Guid?)null;
 
         var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, CompletionMode = request.CompletionMode, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, SupervisorBrainModelPinned = brainPinned, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+
+        context = context with { LaunchContract = TaskLaunchContractSnapshot.Capture(request, context) };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 

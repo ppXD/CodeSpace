@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using CodeSpace.Messages.Tasks;
+
 namespace CodeSpace.Messages.Dtos.Workflows;
 
 /// <summary>
@@ -62,6 +65,10 @@ public sealed record WorkflowDefinition
     /// value fail-closed.
     /// </summary>
     public string? CompletionMode { get; init; }
+
+    /// <summary>Server-recorded task launch intent, frozen and hashed with this definition. Not authorable workflow configuration or proof that controls were enforced. Absent on legacy/authored definitions: unknown, never an inferred empty contract.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TaskLaunchContract? LaunchContract { get; init; }
 
     // The workflow definition is pure structure (graph + IO contract). Per-team and
     // per-workflow operational variable values live in the `variable` table (scope=Workflow

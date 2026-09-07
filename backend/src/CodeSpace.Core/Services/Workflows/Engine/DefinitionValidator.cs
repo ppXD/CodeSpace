@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
@@ -35,12 +36,14 @@ public sealed class DefinitionValidator : IScopedDependency
         _nodeRegistry = nodeRegistry;
     }
 
-    public ValidationResult Validate(WorkflowDefinition definition)
+    public ValidationResult Validate(WorkflowDefinition definition, bool allowLaunchContract = false)
     {
         var errors = new List<string>();
 
         CheckSchemaVersion(definition, errors);
         CheckCompletionMode(definition, errors);
+        if (definition.LaunchContract is not null && !allowLaunchContract) errors.Add("launchContract is server-recorded task provenance and cannot be authored.");
+        errors.AddRange(TaskLaunchContractSnapshot.Validate(definition.LaunchContract));
         CheckNodeIdsAndTypes(definition, errors);
         CheckEdgeEndpoints(definition, errors);
         CheckEdgeSourceHandles(definition, errors);
