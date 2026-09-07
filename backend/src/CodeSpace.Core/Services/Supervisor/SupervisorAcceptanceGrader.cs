@@ -28,7 +28,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v4";   // v4: an argv oracle's own program file is protected from candidate tampering even when no ProtectedPaths were authored
+    public const string EvaluatorVersion = "supervisor-acceptance/v5";   // v5: live local acceptance context, explicit oracle snapshots, and malformed-contract fail-closed semantics
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the

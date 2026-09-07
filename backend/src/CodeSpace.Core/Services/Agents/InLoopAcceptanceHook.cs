@@ -52,8 +52,9 @@ public static class InLoopAcceptanceHook
     public static int MaxBlocks =>
         int.TryParse(Environment.GetEnvironmentVariable(MaxBlocksEnvVar), out var n) && n >= 0 ? n : DefaultMaxBlocks;
 
-    /// <summary>Whether a task carries an acceptance command real enough to wire an in-loop Stop hook for — mirrors <see cref="AgentAcceptanceContract.RequiresGrade"/> exactly (the same "is there really a check here" test the control plane already uses), so the hook is wired for precisely the tasks the control plane will later grade.</summary>
-    public static bool AppliesTo(AgentTask task) => AgentAcceptanceContract.RequiresGrade(task);
+    /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands.</summary>
+    public static bool AppliesTo(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, Command.Count: > 0 } spec
+        && !string.IsNullOrWhiteSpace(spec.Command[0]) && spec.Command.All(value => value != null && !value.Contains('\0'));
 
     /// <summary>
     /// The POSIX-<c>sh</c> Stop-hook script content, harness-PARAMETERIZED. Both Claude Code's <c>settings.json</c>

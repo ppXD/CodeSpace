@@ -16,6 +16,7 @@ internal sealed record PlannerAcceptanceDraft
     public required BenchmarkGradingKind Kind { get; init; }
     public IReadOnlyList<string>? Argv { get; init; }
     public IReadOnlyList<string>? ArtifactPaths { get; init; }
+    public IReadOnlyList<string>? OraclePaths { get; init; }
     public string? Description { get; init; }
     public AcceptanceRubric? Rubric { get; init; }
     public JsonElement? Schema { get; init; }
@@ -43,7 +44,9 @@ internal sealed record PlannerAcceptanceDraft
             throw new JsonException("Planner acceptance rubric/schema must belong to the selected oracle; unused requirements cannot be silently dropped.");
         if (Rubric?.Criteria?.Any(criterion => criterion is null) == true) throw new JsonException("Planner acceptance rubric criteria cannot contain null entries.");
 
-        var spec = new SupervisorAcceptanceSpec { Kind = Kind, Command = payload.ToArray(), Description = Description, Rubric = Rubric, Schema = Schema };
+        if (OraclePaths?.Any(value => string.IsNullOrWhiteSpace(value) || value.Contains('\0') || Path.IsPathRooted(value) || value.Split('/').Contains("..")) == true)
+            throw new JsonException("Planner acceptance oraclePaths requires literal relative file paths without traversal.");
+        var spec = new SupervisorAcceptanceSpec { Kind = Kind, Command = payload.ToArray(), OraclePaths = OraclePaths?.ToArray(), Description = Description, Rubric = Rubric, Schema = Schema };
         if (AgentAcceptanceContract.ValidateAuthored(spec) is { } error) throw new JsonException(error);
         return spec;
     }

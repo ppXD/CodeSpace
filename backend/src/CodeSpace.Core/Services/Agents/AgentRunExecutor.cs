@@ -375,6 +375,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring },
                 effectiveTask, modelBaseUrl, modelProvider, workspaceProvision);
 
+            using var localAcceptance = effectiveTask.Acceptance is not null && RepositoryWorkspaceResolver.CanonicalWorkspace(effectiveTask) is null
+                ? await PrepareLocalAcceptanceAsync(new(owner, run.TeamId, effectiveTask, runnerKind, spec.WorkingDirectory ?? ""), cancellationToken).ConfigureAwait(false)
+                : null;
+            if (localAcceptance is not null)
+            {
+                using var acceptanceScope = _scopeFactory.CreateScope();
+                var prepared = await acceptanceScope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().ObserveAsync(new(owner, run.TeamId, effectiveTask, localAcceptance), cancellationToken).ConfigureAwait(false);
+                if (prepared.Failure is { } unavailable)
+                {
+                    // Known invalid or unavailable verification cannot be repaired by billing an agent invocation.
+                    // No process or capture intent exists yet; normal terminal ownership and cleanup still apply.
+                    await CompleteAndNotifyAsync(owner, run.TeamId, FoldGrade(new() { Status = AgentRunStatus.Failed, ExitReason = "acceptance-unavailable" }, unavailable), cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+            }
+
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
             // points at it. Null when no endpoint → nothing to re-open.
@@ -412,7 +428,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
             await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, CaptureExpectationsOf(effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            result = await VerifyProducedWorkAsync(new(owner, run, harness, effectiveTask, workspace), result, cancellationToken).ConfigureAwait(false);
+            result = await VerifyProducedWorkAsync(new(owner, run, harness, effectiveTask, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
 
             // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
             // Improve-mode critic flagged the output, feed the failure detail back to the SAME agent (same workspace;
@@ -485,7 +501,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
                 // wrapper (which quotes the failure and could bias or blind the reviewer).
-                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = effectiveTask.Goal }, workspace), result, cancellationToken).ConfigureAwait(false);
+                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = effectiveTask.Goal }, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
 
                 priorReason = reason;
             }
@@ -648,7 +664,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // CLOSED rather than landing Succeeded ungraded because a crash happened at the right moment. The live
             // workspace handle (repo clone OR scratch) died with the worker, so the repo-less lane has no world
             // here either — null keeps the fail-closed posture.
-            result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace: null, cancellationToken).ConfigureAwait(false);
+            result = await GradeAcceptanceIfPresentAsync(new(run, task, null, owner), result, cancellationToken).ConfigureAwait(false);
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
@@ -1526,7 +1542,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         result = await EnrichWithWorkspaceChangesAsync(new(owner, run.TeamId, task, workspace), result, cancellationToken).ConfigureAwait(false);
 
-        result = await CaptureDeclaredArtifactsAsync(runId, run, task, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+        result = await CaptureDeclaredArtifactsAsync(context, result, cancellationToken).ConfigureAwait(false);
 
         result = await PushProducedBranchIfEnabledAsync(owner, task, result, workspace, cancellationToken).ConfigureAwait(false);
 
@@ -1534,7 +1550,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var claimedOutcome = result;
 
-        result = await GradeAcceptanceIfPresentAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
+        result = await GradeAcceptanceIfPresentAsync(new(run, task, workspace, owner, context.AcceptanceContext), result, cancellationToken).ConfigureAwait(false);
 
         result = await PublishFoldedUnderClaimAsync(context, claimedOutcome, result, cancellationToken).ConfigureAwait(false);
 
@@ -1632,21 +1648,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// acceptance, the same place the promise did. A skipped deliverable is an accounting fact — it never re-grades
     /// the run.
     /// </summary>
-    private async Task<AgentRunResult> CaptureDeclaredArtifactsAsync(Guid runId, AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> CaptureDeclaredArtifactsAsync(ProducedWorkContext context, AgentRunResult result, CancellationToken cancellationToken)
     {
-        if (workspace is null) return result;
-
+        var (owner, run, _, task, workspace) = context;
+        var runId = owner.RunId;
+        var claimedEpoch = owner.Epoch;
+        var directory = workspace?.Directory;
         var captured = 0;
 
         try
         {
-            captured = await _artifactManifests.CaptureDeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            if (directory is null)
+            {
+                if (ArtifactManifestStore.DeclaredDeliverablePaths(task).Count == 0) return result;
+                using var scope = _scopeFactory.CreateScope();
+                var observation = await scope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().ObserveAsync(new(owner, run.TeamId, task, context.AcceptanceContext), cancellationToken).ConfigureAwait(false);
+                if (observation.Failure is { } unavailable) return result with { DeliverableCaptureFault = unavailable.Detail };
+                directory = observation.Directory;
+            }
+            captured = await _artifactManifests.CaptureDeclaredAsync(task, directory!, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
             // C2: only a SCRATCH world (a repo-less run) gets the undeclared walk. A git-backed workspace's
             // undeclared files are already captured — as the diff, with their history — so walking one would mint a
             // second, weaker copy of what the patch already holds.
-            var walk = workspace.Repositories.Count == 0
-                ? await _artifactManifests.CaptureUndeclaredAsync(task, workspace.Directory, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false)
+            var walk = workspace is { Repositories.Count: 0 }
+                ? await _artifactManifests.CaptureUndeclaredAsync(task, directory!, runId, run.WorkflowRunId, run.TeamId, claimedEpoch, cancellationToken).ConfigureAwait(false)
                 : UndeclaredCaptureOutcome.None;
 
             return result with { CapturedArtifactCount = captured, UndeclaredArtifactCount = walk.Captured, UncapturedScratchFileCount = walk.Refused };
@@ -1763,7 +1789,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>An oracle failure the agent can plausibly fix with another pass — the negation of the SHARED infra classification (<see cref="AgentAcceptanceContract.IsInfraFailure"/>): grader failures, half-authored specs (<c>no-rubric</c>/<c>no-schema</c> — an agent cannot author the missing half), and publish failures with work present never buy a revise round.</summary>
     private static bool IsAgentFixableOracleFailure(AgentRunResult result, string detail) =>
-        !AgentAcceptanceContract.IsInfraFailure(detail, WorkPresent(result));
+        !AgentAcceptanceContract.IsInfraFailure(new BenchmarkGrade { Passed = false, Detail = detail, Class = result.AcceptanceFailureClass }, WorkPresent(result));
 
     /// <summary>
     /// The ONE "this run produced WORK" read this executor shares — the infra classification above (which uses it to
@@ -2029,8 +2055,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// decide the outcome: <c>false</c> is the correctly-predicted no-diff case (a vacuous pass, never a failure);
     /// otherwise (the byte-identical default) it fails closed exactly as before this field existed.</para>
     /// </summary>
-    internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    internal Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken) =>
+        GradeAcceptanceIfPresentAsync(new(run, task, workspace), result, cancellationToken);
+
+    internal async Task<AgentRunResult> GradeAcceptanceIfPresentAsync(AcceptanceInvocation invocation, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var (run, task, _, _, _) = invocation;
         if (!AgentAcceptanceContract.RequiresGrade(task)) return result;
         if (SelfReportedSuccess(result) is not { } claimedSuccess) return result;
 
@@ -2044,7 +2074,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (await ledger.FindBlockingDecisionIdAsync(run.Id, cancellationToken).ConfigureAwait(false) is not null) return result;
         }
 
-        var graded = await GradeAgainstOracleAsync(run, task, result, workspace, cancellationToken).ConfigureAwait(false);
+        var graded = await GradeAgainstOracleAsync(invocation, result, cancellationToken).ConfigureAwait(false);
 
         return claimedSuccess ? graded : FoldSelfReportedFailureGrade(result, graded);
     }
@@ -2090,32 +2120,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         true => graded with { Status = AgentRunStatus.Succeeded, Contradiction = AgentContradiction.UnderClaim },
         false => claimed with
         {
-            AcceptancePassed = AgentAcceptanceContract.IsInfraFailure(graded.AcceptanceDetail, AnyWorkPresent(claimed)) ? null : false,
+            AcceptancePassed = AgentAcceptanceContract.IsInfraFailure(new BenchmarkGrade { Passed = false, Detail = graded.AcceptanceDetail ?? "", Class = graded.AcceptanceFailureClass }, AnyWorkPresent(claimed)) ? null : false,
             AcceptanceDetail = graded.AcceptanceDetail,
             AcceptanceEvidenceId = graded.AcceptanceEvidenceId,
+            AcceptanceFailureClass = graded.AcceptanceFailureClass,
         },
         null => graded,
     };
 
     /// <summary>The oracle grade itself, once the gate has decided this result is gradable: the multi-repo fold, the repo-less scratch fold, or the single-repo branch/patch fold.</summary>
-    private async Task<AgentRunResult> GradeAgainstOracleAsync(AgentRun run, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> GradeAgainstOracleAsync(AcceptanceInvocation invocation, AgentRunResult result, CancellationToken cancellationToken)
     {
+        var (run, task, workspace, _, _) = invocation;
+        if (LocalAcceptanceVerifier.ValidateContract(task.Acceptance!) is { } invalid) return FoldGrade(result, invalid);
+        if (task.Acceptance!.OraclePaths is { Count: > 0 } && (task.RepositoryId != null || result.RepositoryResults.Count > 0))
+            return FoldGrade(result, new() { Passed = false, Detail = "grade-error: oracle-paths-require-local-context", Class = Messages.Agents.Benchmark.GradeFailureClass.SpecIncomplete });
         if (result.RepositoryResults.Count > 0) return await GradeMultiRepoAcceptanceAsync(run, task, result, cancellationToken).ConfigureAwait(false);
 
         var spec = task.Acceptance!;
-        var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        var command = spec.Command.ToArray();
 
         if (task.RepositoryId is not { } repositoryId)
         {
-            // DC-4 slice 2 (the repo-less lane): the scratch workspace IS the world — grade the oracle directly
-            // against it while the handle is still alive (the agent process has exited; grading its left-behind
-            // directory is equivalent to grading a clone). Only a contract with truly no world fails closed.
-            if (workspace is { Repositories.Count: 0 } scratch)
-                return await GradeScratchAsync(run, spec with { Command = command }, result, scratch, cancellationToken).ConfigureAwait(false);
-
-            _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no repository to grade against — failing closed", run.Id);
-
-            return AcceptanceFailed(result, "no-branch-or-repo");
+            // A repository descriptor without a legacy primary id keeps its existing branch failure semantics;
+            // it is not a repository-free invocation and cannot borrow a local verification context.
+            if (RepositoryWorkspaceResolver.CanonicalWorkspace(task) is not null) return AcceptanceFailed(result, "no-branch-or-repo");
+            return await GradeLocalAcceptanceAsync(invocation, result, cancellationToken).ConfigureAwait(false);
         }
 
         var hasBranch = !string.IsNullOrEmpty(result.ProducedBranch);
@@ -2160,58 +2190,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogInformation("Agent run {RunId}: the acceptance check passed ({Detail})", run.Id, grade.Detail);
 
-            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId };
+            return FoldGrade(result, grade);
         }
 
         _logger.LogWarning("Agent run {RunId}: the acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
 
-        return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
+        return FoldGrade(result, grade);
     }
 
-    /// <summary>
-    /// The repo-less grade fold: the same per-kind oracle over the still-alive scratch directory, the same pass/fail
-    /// stamping as the branch/patch lanes — a grader escape degrades to not-accepted, never a crash.
-    /// <para>C2: every repo-less run now HAS a scratch world (the walk needs one), so the kind check that used to be
-    /// implied by "no scratch existed for a TestsPass contract" is explicit here instead. A TestsPass argv in a
-    /// directory of captured documents is a category error — a bare <c>exit 0</c> would pass vacuously — so it keeps
-    /// failing closed on the exact same detail as before, from <see cref="AgentAcceptanceContract.GradesFromDeliverables"/>,
-    /// the one rule the supervisor fold's twin reads too.</para>
-    /// </summary>
-    private async Task<AgentRunResult> GradeScratchAsync(AgentRun run, SupervisorAcceptanceSpec spec, AgentRunResult result, IWorkspaceHandle scratch, CancellationToken cancellationToken)
+    private async Task<LocalAcceptanceContext> PrepareLocalAcceptanceAsync(LocalAcceptancePreparation request, CancellationToken cancellationToken)
     {
-        if (!AgentAcceptanceContract.GradesFromDeliverables(spec))
-        {
-            _logger.LogWarning("Agent run {RunId}: a TestsPass acceptance contract is present but there is no repository to run it against — failing closed", run.Id);
-
-            return AcceptanceFailed(result, "no-branch-or-repo");
-        }
-
-        BenchmarkGrade grade;
-        try
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
-            var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
-
-            grade = await grader.GradeDirectoryAsync(scratch.Directory, spec, run.TeamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
-        {
-            _logger.LogWarning(ex, "Agent run {RunId}: the scratch acceptance grade failed unexpectedly; recording not-accepted", run.Id);
-            grade = new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
-        }
-
-        if (grade.Passed)
-        {
-            _logger.LogInformation("Agent run {RunId}: the scratch acceptance check passed ({Detail})", run.Id, grade.Detail);
-
-            return result with { AcceptancePassed = true, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId };
-        }
-
-        _logger.LogWarning("Agent run {RunId}: the scratch acceptance check FAILED ({Detail}) — re-grading the run to Failed", run.Id, grade.Detail);
-
-        return AcceptanceFailed(result, grade.Detail) with { AcceptanceEvidenceId = grade.EvidenceArtifactId };
+        using var scope = _scopeFactory.CreateScope();
+        return await scope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().PrepareAsync(request, cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task<AgentRunResult> GradeLocalAcceptanceAsync(AcceptanceInvocation invocation, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (invocation.Owner is null || invocation.LocalContext is null)
+            return FoldGrade(result, new() { Passed = false, Detail = "grade-error: no-live-local-context", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment });
+        using var scope = _scopeFactory.CreateScope();
+        var grade = await scope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().GradeAsync(new(invocation.Owner, invocation.Run.TeamId, invocation.Task, invocation.LocalContext), cancellationToken).ConfigureAwait(false);
+        return FoldGrade(result, grade);
+    }
+
+    private static AgentRunResult FoldGrade(AgentRunResult result, BenchmarkGrade grade) =>
+        (grade.Passed ? result : AcceptanceFailed(result, grade.Detail)) with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId, AcceptanceFailureClass = grade.Class };
 
     /// <summary>
     /// Grade a MULTI-repo run's acceptance contract against EVERY repo it actually changed — a contract binds the
@@ -2229,7 +2232,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<AgentRunResult> GradeMultiRepoAcceptanceAsync(AgentRun run, AgentTask task, AgentRunResult result, CancellationToken cancellationToken)
     {
         var spec = task.Acceptance!;
-        var command = spec.Command.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        var command = spec.Command.ToArray();
         var fullSpec = spec with { Command = command };
         var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
 
@@ -3513,7 +3516,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await _notifier.NotifyCompletedAsync(run.Id, cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record ProducedWorkContext(AgentRunOwnerToken Owner, AgentRun Run, IAgentHarness Harness, AgentTask Task, IWorkspaceHandle? Workspace);
+    private sealed record ProducedWorkContext(AgentRunOwnerToken Owner, AgentRun Run, IAgentHarness Harness, AgentTask Task, IWorkspaceHandle? Workspace)
+    {
+        public LocalAcceptanceContext? AcceptanceContext { get; init; }
+    }
+    internal sealed record AcceptanceInvocation(AgentRun Run, AgentTask Task, IWorkspaceHandle? Workspace, AgentRunOwnerToken? Owner = null, LocalAcceptanceContext? LocalContext = null);
     private sealed record WorkspaceCaptureContext(AgentRunOwnerToken Owner, Guid TeamId, AgentTask Task, IWorkspaceHandle? Workspace);
     private sealed record RepositoryPushContext(AgentRunOwnerToken Owner, AgentTask Task, IWorkspaceHandle Workspace, IWorkspacePushHandle PushHandle);
 
