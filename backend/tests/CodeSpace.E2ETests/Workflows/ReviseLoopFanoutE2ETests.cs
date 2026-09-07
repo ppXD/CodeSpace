@@ -137,7 +137,7 @@ public sealed class ReviseLoopFanoutE2ETests
             // exactly three times — branch 0's flag + approve, and branch 1's single post-revise approve.
             CriticCalls().ShouldBe(3, "critic billing = flag(b0) + approve(b0) + approve(b1); round 1 of the contract branch was killed by the oracle BEFORE any review");
 
-            await AssertReviseEventsAsync(verify, agentRuns[0].Id, agentRuns[0].TeamId, expectedFragment: "reviewer flagged");
+            await AssertReviseEventsAsync(verify, agentRuns[0].Id, agentRuns[0].TeamId, expectedFragment: "output review flagged");
             await AssertReviseEventsAsync(verify, agentRuns[1].Id, agentRuns[1].TeamId, expectedFragment: "acceptance check failed");
 
             // The LIVE checklist tells the healed story per item — Completed states + the contract item's verdict.
