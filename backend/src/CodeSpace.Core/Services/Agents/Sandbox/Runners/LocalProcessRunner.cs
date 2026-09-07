@@ -23,7 +23,7 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// Caller cancellation is honoured distinctly from the spec timeout: it terminates the process and rethrows
 /// (the durable path differs — see its remarks: cancellation stops observing without killing).
 /// </summary>
-public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISandboxDurableLogSource, ISandboxDurableDiagnosticSource, ISingletonDependency
+public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISandboxLaunchIdentityRunner, ISandboxDurableLogSource, ISandboxDurableDiagnosticSource, ISingletonDependency
 {
     /// <summary>This runner's registry key. The runner-local spelling of the shared <see cref="SandboxKinds.Local"/> — same constant, so there is one literal.</summary>
     public const string LocalKind = SandboxKinds.Local;
