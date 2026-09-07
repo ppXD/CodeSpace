@@ -50,28 +50,37 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorReplanStanding
 {
     /// <summary>Where this unit must be sent instead of at another plan, or <see cref="SupervisorReplanExit.None"/> when a re-plan is still an honest move. The admissibility half is the server's own amend gate, never a second reading of it, so the steer can only ever name a verb the turn's roster also offers. The converse does NOT hold, on purpose: a unit the newest plan dropped is steered at the human even though the gate would still admit an amendment for it — withholding a steer is free, and a co-sign no retry can consume is not.</summary>
-    public static SupervisorReplanExit ExitFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId) =>
-        subtaskId is null ? SupervisorReplanExit.None : ExitFor(priorDecisions, subtaskId, AttemptsOf(priorDecisions, subtaskId), NewestGeneration(priorDecisions), BlockedSubtaskIds(priorDecisions));
+    public static SupervisorReplanExit ExitFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId)
+    {
+        if (subtaskId is null) return SupervisorReplanExit.None;
+
+        var boundaries = ValidBoundaries(priorDecisions);
+
+        return ExitFor(priorDecisions, subtaskId, AttemptsOf(priorDecisions, subtaskId), new TapeWideReads(NewestGeneration(boundaries), BlockedSubtaskIds(priorDecisions), boundaries));
+    }
 
     /// <summary>
     /// EVERY staged unit's exit off ONE walk of the ATTEMPT index — the entry point a prompt build uses, because
     /// <see cref="ExitFor(IReadOnlyList{SupervisorPriorDecision}, string?)"/> re-walks it (re-parsing every staging
     /// decision's <c>OutcomeJson</c>) per call and the decider renders the same unit once per attempt it appears
-    /// in. The tape-wide reads it shares across units — the newest generation, the dependency frontier — are
-    /// resolved once here too. NOT every read: the re-graded arm consults the server's amend gate, which walks the
-    /// tape again per unit it is asked about, and that is deliberate (a second reading of admissibility is the one
-    /// thing this file must never carry). Keyed by subtask id, with an entry for every unit the tape ever staged a
-    /// folded result for — including the <see cref="SupervisorReplanExit.None"/> ones, so a caller reads "no exit"
-    /// and "not on this tape" identically instead of asking again.
+    /// in. The tape-wide reads it shares across units — the newest generation, the valid plan boundaries, the
+    /// dependency frontier — are resolved once here too, so the re-graded arm's own boundary lookup
+    /// (<see cref="NewestGenerationBefore"/>) becomes a scan of that short precomputed list instead of re-parsing
+    /// and re-validating every Plan decision's payload for every unit that reaches it. NOT every read: once a unit
+    /// clears that lookup, the amend gate it may still be sent through walks the tape again per unit it is asked
+    /// about, and that is deliberate (a second reading of admissibility is the one thing this file must never
+    /// carry). Keyed by subtask id, with an entry for every unit the tape ever staged a folded result for —
+    /// including the <see cref="SupervisorReplanExit.None"/> ones, so a caller reads "no exit" and "not on this
+    /// tape" identically instead of asking again.
     /// </summary>
     public static IReadOnlyDictionary<string, SupervisorReplanExit> ExitsFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
-        var generation = NewestGeneration(priorDecisions);
-        var blocked = BlockedSubtaskIds(priorDecisions);
+        var boundaries = ValidBoundaries(priorDecisions);
+        var reads = new TapeWideReads(NewestGeneration(boundaries), BlockedSubtaskIds(priorDecisions), boundaries);
         var exits = new Dictionary<string, SupervisorReplanExit>(StringComparer.Ordinal);
 
         foreach (var (subtaskId, attempts) in AttemptsBySubtask(priorDecisions))
-            exits[subtaskId] = ExitFor(priorDecisions, subtaskId, attempts, generation, blocked);
+            exits[subtaskId] = ExitFor(priorDecisions, subtaskId, attempts, reads);
 
         return exits;
     }
@@ -99,41 +108,44 @@ public static class SupervisorReplanStanding
     /// never reached the check is no evidence about what the re-planned check does.</para>
     /// </summary>
     public static bool VerdictSurvivedAReplan(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId) =>
-        subtaskId is not null && ReGradedIdentically(priorDecisions, AttemptsOf(priorDecisions, subtaskId));
+        subtaskId is not null && ReGradedIdentically(AttemptsOf(priorDecisions, subtaskId), ValidBoundaries(priorDecisions));
 
     /// <summary>The TAPE half of the other arm: a valid plan generation opened AFTER this unit's standing graded failure and nothing has been staged for the unit since. The plan is authored and unrun — the run's own next move, and the one the model must not replace with a third plan. TRUE does not by itself decide the exit: a unit that ALSO carries an identical re-grade across an earlier boundary is sent at the amendment instead (<see cref="ExitFor(IReadOnlyList{SupervisorPriorDecision}, string?)"/> orders them), because a plan authored over spent evidence must not launder it.</summary>
     public static bool AwaitsItsReplannedStaging(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string? subtaskId) =>
-        subtaskId is not null && AwaitsStaging(AttemptsOf(priorDecisions, subtaskId), NewestGeneration(priorDecisions));
+        subtaskId is not null && AwaitsStaging(AttemptsOf(priorDecisions, subtaskId), NewestGeneration(ValidBoundaries(priorDecisions)));
 
-    /// <summary>The ONE resolution both entry points funnel through, over the attempts, the generation and the frontier each resolved its own way. Ordered so the free tape facts rule before the amend gate is consulted at all — that gate is the only reader here that walks the tape again.</summary>
-    private static SupervisorReplanExit ExitFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string subtaskId, IReadOnlyList<Attempt> attempts, SupervisorPriorDecision? generation, IReadOnlySet<string> blocked)
+    /// <summary>The three tape-wide facts <see cref="ExitsFor"/> resolves ONCE and threads through every unit's resolution — grouped so the per-unit call stays within a sane parameter count and no unit pays twice for a fact the whole tape only needed answering once.</summary>
+    private readonly record struct TapeWideReads(SupervisorPriorDecision? Generation, IReadOnlySet<string> Blocked, IReadOnlyList<SupervisorPriorDecision> Boundaries);
+
+    /// <summary>The ONE resolution both entry points funnel through, over the attempts and the tape-wide reads each resolved its own way. Ordered so the free tape facts rule before the amend gate is consulted at all — that gate is the only reader here that walks the tape again.</summary>
+    private static SupervisorReplanExit ExitFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string subtaskId, IReadOnlyList<Attempt> attempts, TapeWideReads reads)
     {
-        var reGraded = ReGradedIdentically(priorDecisions, attempts);
+        var reGraded = ReGradedIdentically(attempts, reads.Boundaries);
 
-        if (!reGraded && !AwaitsStaging(attempts, generation)) return SupervisorReplanExit.None;
+        if (!reGraded && !AwaitsStaging(attempts, reads.Generation)) return SupervisorReplanExit.None;
 
         // A unit the NEWEST plan no longer declares has neither of the two live exits available to it, whatever the
         // tape says about its verdict: a spawn cannot stage a unit the plan does not declare, and an amendment
         // co-signed for it would mint a human ruling no retry could ever consume (the residual
         // SupervisorAmendPrecondition.GradedAttempts names and declines to guard, because the gate reads the whole
         // tape on purpose). A human is the only door.
-        if (!Declares(generation!, subtaskId)) return SupervisorReplanExit.ToHuman;
+        if (!Declares(reads.Generation!, subtaskId)) return SupervisorReplanExit.ToHuman;
 
         // The staging arm, ORDERED by the rail that clamps it: the dependency gate reads "satisfied" inside the
         // CURRENT generation only, so a re-declared unit whose dependency was accepted under an EARLIER plan is
         // deferred again — and the spawn this arm would name unqualified stages nothing (an all-deferred spawn is
         // accepted-empty) one screen from a frontier block calling the unit blocked. Still the staging, never
         // another plan; only its ordering is stated.
-        if (!reGraded) return blocked.Contains(subtaskId) ? SupervisorReplanExit.ToStagingBehindADependency : SupervisorReplanExit.ToStaging;
+        if (!reGraded) return reads.Blocked.Contains(subtaskId) ? SupervisorReplanExit.ToStagingBehindADependency : SupervisorReplanExit.ToStaging;
 
         return SupervisorAmendPrecondition.IsAmendable(priorDecisions, subtaskId) ? SupervisorReplanExit.ToAmendment : SupervisorReplanExit.ToHuman;
     }
 
-    /// <summary>An attempt re-graded this unit ACROSS a valid plan boundary and returned the verdict it already had before that boundary opened — the boundary being the newest one the unit's STANDING verdict was graded after, never necessarily the newest on the tape.</summary>
-    private static bool ReGradedIdentically(IReadOnlyList<SupervisorPriorDecision> priorDecisions, IReadOnlyList<Attempt> attempts)
+    /// <summary>An attempt re-graded this unit ACROSS a valid plan boundary and returned the verdict it already had before that boundary opened — the boundary being the newest one the unit's STANDING verdict was graded after, never necessarily the newest on the tape. <paramref name="boundaries"/> is every valid boundary on the tape, oldest first (<see cref="ValidBoundaries"/>), so this never re-parses or re-validates a Plan payload itself.</summary>
+    private static bool ReGradedIdentically(IReadOnlyList<Attempt> attempts, IReadOnlyList<SupervisorPriorDecision> boundaries)
     {
         if (StandingFailure(attempts) is not { } standing) return false;
-        if (NewestGenerationBefore(priorDecisions, standing.Sequence) is not { } boundary) return false;
+        if (NewestGenerationBefore(boundaries, standing.Sequence) is not { } boundary) return false;
 
         return attempts.Any(a => a.Sequence < boundary.Sequence && IsGradedFailure(a.Result)
                                  && string.Equals(a.Result.AcceptanceDetail, standing.Result.AcceptanceDetail, StringComparison.Ordinal));
@@ -154,15 +166,19 @@ public static class SupervisorReplanStanding
     /// <summary>A verdict the server actually graded and REFUSED — never an ungraded pass-through, and never a human waiver (WAIVED ≠ FAILED at every door, the B2 invariant).</summary>
     private static bool IsGradedFailure(SupervisorAgentResult result) => result.AcceptancePassed == false && !SupervisorOutcome.IsWaived(result);
 
-    /// <summary>The newest decision that OPENS a plan generation, or null when nothing on the tape does.</summary>
-    private static SupervisorPriorDecision? NewestGeneration(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
-        NewestGenerationBefore(priorDecisions, long.MaxValue);
+    /// <summary>Every decision on the tape that OPENS a plan generation, tape order preserved — computed ONCE per call so <see cref="NewestGenerationBefore"/> is a scan over a short list of already-valid boundaries rather than re-parsing and re-validating (<see cref="SupervisorPlanWindow.IsValidBoundary"/>) every Plan decision's payload for every unit that asks.</summary>
+    private static IReadOnlyList<SupervisorPriorDecision> ValidBoundaries(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions.Where(SupervisorPlanWindow.IsValidBoundary).ToList();
+
+    /// <summary>The newest decision that OPENS a plan generation, or null when <paramref name="boundaries"/> is empty.</summary>
+    private static SupervisorPriorDecision? NewestGeneration(IReadOnlyList<SupervisorPriorDecision> boundaries) =>
+        NewestGenerationBefore(boundaries, long.MaxValue);
 
     /// <summary>The newest generation opened BEFORE a given sequence, or null when none was. The newest such boundary is the only one worth asking about: every earlier boundary admits a SUBSET of the prior attempts as the "before" side of a re-grade, so if any boundary witnesses one, this one does.</summary>
-    private static SupervisorPriorDecision? NewestGenerationBefore(IReadOnlyList<SupervisorPriorDecision> priorDecisions, long sequence)
+    private static SupervisorPriorDecision? NewestGenerationBefore(IReadOnlyList<SupervisorPriorDecision> boundaries, long sequence)
     {
-        for (var i = priorDecisions.Count - 1; i >= 0; i--)
-            if (priorDecisions[i].Sequence < sequence && SupervisorPlanWindow.IsValidBoundary(priorDecisions[i])) return priorDecisions[i];
+        for (var i = boundaries.Count - 1; i >= 0; i--)
+            if (boundaries[i].Sequence < sequence) return boundaries[i];
 
         return null;
     }

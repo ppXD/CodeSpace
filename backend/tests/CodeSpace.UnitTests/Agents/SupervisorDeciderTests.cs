@@ -668,7 +668,7 @@ public class SupervisorDeciderTests
     [Theory]
     [InlineData(SupervisorReplanExit.None, null)]
     [InlineData(SupervisorReplanExit.ToStaging, "'spawn' this item so its re-planned check grades it.")]
-    [InlineData(SupervisorReplanExit.ToStagingBehindADependency, "spawn what the dependency frontier above says this item waits on, then 'spawn' this item so its re-planned check grades it.")]
+    [InlineData(SupervisorReplanExit.ToStagingBehindADependency, "spawn what the dependency frontier says this item waits on, then 'spawn' this item so its re-planned check grades it.")]
     [InlineData(SupervisorReplanExit.ToAmendment, "Propose 'amend_acceptance' for this item's check, or 'ask_human' to rule.")]
     [InlineData(SupervisorReplanExit.ToHuman, "repairing its check cannot move it either, so do not propose that: 'ask_human' to rule.")]
     public void Each_replan_exit_maps_to_one_exit_ramp(SupervisorReplanExit replanExit, string? namedExit)

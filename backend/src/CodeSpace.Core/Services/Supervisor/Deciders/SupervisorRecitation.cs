@@ -122,12 +122,10 @@ public static class SupervisorRecitation
     /// One subtask's live state off its LATEST covering spawn/retry: the folded result's status + acceptance verdict
     /// (accepted / REJECTED-with-detail / failed-with-error / the raw non-terminal status), a staged-but-unfolded
     /// attempt reads "running", and an un-staged subtask "pending". Newest-first scan, so a retry supersedes the
-    /// original spawn — exactly the freshest-attempt rule the decider prompt already marks.
+    /// original spawn — exactly the freshest-attempt rule the decider prompt already marks. Takes the item's re-plan
+    /// exit already resolved (<see cref="Render"/>'s overload), so one whole-tape walk answers both this line and
+    /// the authoring lint beside it.
     /// </summary>
-    internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors) =>
-        StateFor(subtaskId, priors, SupervisorReplanStanding.ExitFor(priors, subtaskId));
-
-    /// <summary>The same state line with the item's re-plan exit already resolved — <see cref="Render"/>'s overload, so one whole-tape walk answers both this line and the authoring lint beside it.</summary>
     internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors, SupervisorReplanExit replanExit)
     {
         // B6: an approved-but-unconsumed oracle amendment makes the recorded verdict STALE — reciting "REJECTED by
