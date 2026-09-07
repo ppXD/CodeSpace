@@ -396,11 +396,8 @@ public sealed class SupervisorRetryWorldStateFlowTests
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
-        var (_, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-        using var scopeAsAdmin = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
-        var workflowId = await scopeAsAdmin.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        using var scopeAsOperator = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId).ConfigureAwait(false);
+        var workflowId = await scopeAsOperator.Resolve<IMediator>().Send(new CreateWorkflowCommand
         {
             Name = "sup-retry-world-state-" + Guid.NewGuid().ToString("N")[..6],
             Description = null,
@@ -419,7 +416,7 @@ public sealed class SupervisorRetryWorldStateFlowTests
             Enabled = true,
         });
 
-        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        return await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId).ConfigureAwait(false);
     }
 
     // ─── Git helpers ────────────────────────────────────────────────────────────

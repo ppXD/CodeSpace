@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -32,6 +33,57 @@ public sealed class SupervisorRetryEscalationFlowTests
     private readonly PostgresFixture _fixture;
 
     public SupervisorRetryEscalationFlowTests(PostgresFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public async Task The_supervisor_fixture_preserves_its_real_publisher_and_launcher_in_a_background_retry()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(teamId);
+        using var read = _fixture.BeginScope();
+        var db = read.Resolve<CodeSpaceDbContext>();
+        var owner = await db.TeamMembership.SingleAsync(m => m.TeamId == teamId && m.Role == TeamRole.Owner);
+        var parent = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
+        var version = await db.WorkflowVersion.SingleAsync(v => v.WorkflowId == parent.WorkflowId && v.Version == parent.WorkflowVersion);
+        version.CreatedBy.ShouldBe(owner.UserId);
+        var canonical = await db.WorkflowRunExecutionAuthority.SingleAsync(r => r.WorkflowRunId == runId && r.TeamId == teamId);
+        var receipt = JsonSerializer.Deserialize<AgentExecutionAuthority>(canonical.ReceiptJson, AgentJson.Options)!;
+        receipt.Subjects.Select(s => s.Kind).ShouldBe(new[] { "author", "launcher" });
+        receipt.Subjects.ShouldAllBe(s => s.UserId == owner.UserId && s.MembershipId == owner.Id && !s.GlobalAdmin);
+
+        var (task, _) = await ExecuteRetryAsync(Context(runId, teamId, Plan("s1")), "s1");
+        task.ExecutionAuthority.ShouldNotBeNull();
+        JsonElement.DeepEquals(JsonSerializer.SerializeToElement(task.ExecutionAuthority, AgentJson.Options), JsonSerializer.SerializeToElement(receipt, AgentJson.Options)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_background_retry_cannot_reuse_a_revoked_publishers_authority()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(teamId);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRunExecutionAuthority.CountAsync(r => r.WorkflowRunId == runId && r.TeamId == teamId)).ShouldBe(1);
+        await db.TeamMembership.Where(m => m.TeamId == teamId).ExecuteDeleteAsync();
+
+        var refusal = await Assert.ThrowsAsync<AgentAuthorityDeniedException>(() => ExecuteRetryAsync(Context(runId, teamId, Plan("s1")), "s1"));
+        refusal.Reason.ShouldBe("membership-revoked");
+        (await db.AgentRun.AnyAsync(r => r.WorkflowRunId == runId)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_background_retry_cannot_borrow_another_teams_parent_authority()
+    {
+        var parentTeamId = await SeedTeamAsync();
+        var otherTeamId = await SeedTeamAsync();
+        var runId = await SeedSupervisorRunAsync(parentTeamId);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRunExecutionAuthority.CountAsync(r => r.WorkflowRunId == runId && r.TeamId == parentTeamId)).ShouldBe(1);
+
+        var refusal = await Assert.ThrowsAsync<AgentAuthorityDeniedException>(() => ExecuteRetryAsync(Context(runId, otherTeamId, Plan("s1")), "s1"));
+        refusal.Reason.ShouldBe("unknown-workflow-run");
+        (await db.AgentRun.AnyAsync(r => r.WorkflowRunId == runId)).ShouldBeFalse();
+    }
 
     [Fact]
     public async Task A_retry_following_a_contradiction_escalates_to_the_strongest_available_model()
@@ -437,11 +489,8 @@ public sealed class SupervisorRetryEscalationFlowTests
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
-        var (_, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-        using var scopeAsAdmin = _fixture.BeginScopeAs(userId, teamId, Messages.Constants.Roles.Admin);
-        var workflowId = await scopeAsAdmin.Resolve<MediatR.IMediator>().Send(new Messages.Commands.Workflows.CreateWorkflowCommand
+        using var scopeAsOperator = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId).ConfigureAwait(false);
+        var workflowId = await scopeAsOperator.Resolve<MediatR.IMediator>().Send(new Messages.Commands.Workflows.CreateWorkflowCommand
         {
             Name = "sup-retry-escalation-" + Guid.NewGuid().ToString("N")[..6],
             Description = null,
@@ -460,6 +509,6 @@ public sealed class SupervisorRetryEscalationFlowTests
             Enabled = true,
         });
 
-        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        return await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId).ConfigureAwait(false);
     }
 }

@@ -982,9 +982,9 @@ public sealed class SupervisorDependencyStagingFlowTests
             ? null
             : new WorkspaceSpec { Repositories = new[] { new WorkspaceRepositorySpec { Alias = "repo", RepositoryId = repositoryId, Ref = checkoutRef, IsPrimary = true } } };
 
-        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "produce", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, Workspace = workspace },
-            teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        AgentRun run;
+        using (var admission = workflowRunId is null ? await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId).ConfigureAwait(false) : _fixture.BeginScope())
+            run = await admission.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = "produce", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, Workspace = workspace }, teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
@@ -1027,9 +1027,9 @@ public sealed class SupervisorDependencyStagingFlowTests
             Repositories = new[] { new WorkspaceRepositorySpec { Alias = "repo", RepositoryId = repositoryId, Ref = checkoutRef, IsPrimary = true } },
         };
 
-        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "do the unit", Harness = harnessKind, Model = null, RepositoryId = repositoryId, Workspace = workspace },
-            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        AgentRun run;
+        using (var admission = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId).ConfigureAwait(false))
+            run = await admission.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = "do the unit", Harness = harnessKind, Model = null, RepositoryId = repositoryId, Workspace = workspace }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
         await scope.Resolve<IAgentRunExecutor>().ExecuteAsync(run.Id, CancellationToken.None);
 
@@ -1121,11 +1121,8 @@ public sealed class SupervisorDependencyStagingFlowTests
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
-        var (_, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-        using var scopeAsAdmin = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
-        var workflowId = await scopeAsAdmin.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        using var scopeAsOperator = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId).ConfigureAwait(false);
+        var workflowId = await scopeAsOperator.Resolve<IMediator>().Send(new CreateWorkflowCommand
         {
             Name = "sup-dep-staging-" + Guid.NewGuid().ToString("N")[..6],
             Description = null,
@@ -1144,7 +1141,7 @@ public sealed class SupervisorDependencyStagingFlowTests
             Enabled = true,
         });
 
-        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        return await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId).ConfigureAwait(false);
     }
 
     private sealed class CountingPatchReader : IAgentPatchReader
