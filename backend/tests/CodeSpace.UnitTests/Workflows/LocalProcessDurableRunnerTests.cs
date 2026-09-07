@@ -496,6 +496,35 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         end.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bytes_appended_after_the_empty_range_observation_must_be_read_before_eof(bool stderr)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var handle = await LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "exit 0" }, TimeoutSeconds = 30 });
+        await AttachCollectAsync(handle);
+        var source = (ISandboxDurableLogSource)_runner;
+        var descriptor = source.DescribeLogs(handle).Single(value => value.StreamKind == (stderr ? AgentRunLogKinds.StandardError : AgentRunLogKinds.StandardOutput));
+        var path = Path.Combine(handle.SpoolDirectory, stderr ? "err.log" : "out.log");
+        File.Delete(Path.Combine(handle.SpoolDirectory, "logs.sealed"));
+        var observedOffset = new FileInfo(path).Length;
+        observedOffset.ShouldBe(0);
+        var request = new SandboxDurableLogReadRequest { Handle = handle, SourceKey = descriptor.SourceKey, OffsetBytes = observedOffset, MinimumBytes = 1, MaximumBytes = 2, FinalDrain = true };
+
+        // Deterministically pause at the real read path's empty-range boundary. The actual file grows and is then
+        // sealed before the observer resumes; no timing probability or fake storage is used to create the race.
+        await File.AppendAllTextAsync(path, "late");
+        await File.WriteAllTextAsync(Path.Combine(handle.SpoolDirectory, "logs.sealed"), "");
+        var stale = await LocalProcessRunner.ReadAtObservedEndAsync(request, path, CancellationToken.None);
+        stale.ShouldBeOfType<SandboxDurableLogReadResult.NoData>("a seal at byte 4 cannot certify EOF at the earlier observed byte 0");
+        var first = (await source.ReadAsync(request, CancellationToken.None)).ShouldBeOfType<SandboxDurableLogReadResult.Available>();
+        first.Bytes.ToArray().ShouldBe("la"u8.ToArray());
+        var second = (await source.ReadAsync(request with { OffsetBytes = 2 }, CancellationToken.None)).ShouldBeOfType<SandboxDurableLogReadResult.Available>();
+        second.Bytes.ToArray().ShouldBe("te"u8.ToArray());
+        (await source.ReadAsync(request with { OffsetBytes = 4 }, CancellationToken.None)).ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>();
+    }
+
     // ─── Spool size cap: SandboxSpec.MaxFileSizeMb bounds what the FIFO copiers write ─────────────────────────────
 
     /// <summary>A spec whose command floods stdout with <paramref name="mib"/> MiB (no newlines), then prints a trailing marker and exits with <paramref name="exitCode"/>. Pure shell builtins so it behaves identically under dash and bash.</summary>
