@@ -274,6 +274,41 @@ public sealed class SupervisorRecitationTests
         recitation.ShouldNotContain("[s2] Sound: pending ⚠", customMessage: "a valid spec lints nothing");
     }
 
+    /// <summary>
+    /// The lint and the re-plan exit on ONE line. <c>no-rubric</c> classifies INFRA
+    /// (<see cref="AgentAcceptanceContract.IsInfraFailure(string?, bool)"/>), which is exactly the verdict shape
+    /// <see cref="SupervisorReplanStanding"/> fires on — so a half-authored spec the model then RE-PLANNED without
+    /// fixing rendered the withdrawal ("do not author another plan") and the lint's own stock steer ("re-plan this
+    /// item's check") a few characters apart, and a model picks its verb off the copy. The DIAGNOSIS still recites;
+    /// only its verb defers to the one reading that resolves the item against the whole tape.
+    /// </summary>
+    [Fact]
+    public void A_linted_spec_whose_replan_exit_fired_defers_its_verb_to_that_exit()
+    {
+        var priors = new[]
+        {
+            JudgeWithoutARubric(1),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "no-rubric")),
+            JudgeWithoutARubric(3),
+        };
+
+        SupervisorReplanStanding.ExitFor(priors, "s1").ShouldBe(SupervisorReplanExit.ToStaging,
+            "fixture check — an exit must really have fired, or this asserts the untouched first-time copy under a new name");
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("acceptance spec is INVALID as authored", customMessage: "the diagnosis is the only line that names why this check can never pass — it must survive");
+        recitation.ShouldContain("take the exit its verdict names above, not another plan", customMessage: "…and its verb defers to the exit the results block one screen up already named");
+        recitation.ShouldNotContain("re-plan this item's check", customMessage: "one recitation must not forbid another plan and demand one");
+    }
+
+    /// <summary>A plan whose ONE item stakes an <c>LlmJudge</c> check with no rubric — the half-authored spec that can never pass at grade time and grades <c>no-rubric</c>, so a tape can carry both the authoring lint and an infra-classed verdict for the same unit.</summary>
+    private static SupervisorPriorDecision JudgeWithoutARubric(int seq) =>
+        Prior(seq, SupervisorDecisionKinds.Plan, JsonSerializer.Serialize(new
+        {
+            subtasks = new[] { new { id = "s1", title = "Report", instruction = "write it", acceptance = new { kind = "LlmJudge", command = new[] { "report.md" } } } },
+        }, AgentJson.Options));
+
     // ─── A2 (P4-2) tier escalation ──────────────────────────────────────────────
 
     [Fact]

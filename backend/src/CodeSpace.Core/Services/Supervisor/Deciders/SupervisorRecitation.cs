@@ -35,9 +35,15 @@ public static class SupervisorRecitation
         var builder = new StringBuilder(Header);
         var unfinished = new List<string>();
 
+        // Resolved ONCE for the whole block rather than per item: the reading walks the entire tape to answer, and
+        // both the state line and the authoring lint below need the SAME answer for an item — two calls could not
+        // disagree, but they would pay twice for the privilege.
+        var replanExits = SupervisorReplanStanding.ExitsFor(priorDecisions);
+
         foreach (var subtask in subtasks)
         {
-            var state = StateFor(subtask.Id, priorDecisions);
+            var replanExit = replanExits.GetValueOrDefault(subtask.Id);
+            var state = StateFor(subtask.Id, priorDecisions, replanExit);
 
             builder.AppendLine().Append($"- [{subtask.Id}] {subtask.Title}: {state}{EscalationNoteFor(subtask.Id, priorDecisions)}");
 
@@ -45,9 +51,17 @@ public static class SupervisorRecitation
             // never got): a half-authored acceptance spec (judge without rubric, schema check without schema) can
             // NEVER pass at grade time — telling the model NOW turns a paid clone + a fail-closed verdict + a retry
             // temptation into one re-plan. Pure over the authored spec; a valid/absent spec adds nothing.
+            //
+            // Its "re-plan this item's check" steer is DROPPED once this item has an exit, because no-rubric and
+            // no-schema classify INFRA (AgentAcceptanceContract.IsInfraFailure) — which is exactly the verdict shape
+            // the exit fires on. Left in, one recitation forbids and demands a re-plan of the same item two lines
+            // apart, and the model picks whichever it read last. The diagnosis still recites; only the verb moves to
+            // the one place that resolves it against the whole tape.
             if (!effective.WaivedSubtaskIds.Contains(subtask.Id)
                 && effective.BySubtask.GetValueOrDefault(subtask.Id) is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
-                builder.Append($" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check.");
+                builder.Append(replanExit == SupervisorReplanExit.None
+                    ? $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; re-plan this item's check."
+                    : $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; take the exit its verdict names above, not another plan.");
 
             // An under-claim (P4-1) reads its own guidance line ("do not retry, merge it") — it is objectively DONE,
             // just self-reported wrong, so it must not also land on the unfinished list and contradict its own text.
@@ -96,7 +110,11 @@ public static class SupervisorRecitation
     /// attempt reads "running", and an un-staged subtask "pending". Newest-first scan, so a retry supersedes the
     /// original spawn — exactly the freshest-attempt rule the decider prompt already marks.
     /// </summary>
-    internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
+    internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors) =>
+        StateFor(subtaskId, priors, SupervisorReplanStanding.ExitFor(priors, subtaskId));
+
+    /// <summary>The same state line with the item's re-plan exit already resolved — <see cref="Render"/>'s overload, so one whole-tape walk answers both this line and the authoring lint beside it.</summary>
+    internal static string StateFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors, SupervisorReplanExit replanExit)
     {
         // B6: an approved-but-unconsumed oracle amendment makes the recorded verdict STALE — reciting "REJECTED by
         // its acceptance check" here is what drove a live brain to re-amend five times instead of retrying (the
@@ -118,16 +136,23 @@ public static class SupervisorRecitation
             && SupervisorAmendObligation.StandingFor(priors, subtaskId) == SupervisorAmendStanding.Discarded)
             return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — a re-plan already DISCARDED the co-signed repair; propose 'amend_acceptance' again or ask a human, do not re-plan and do not retry";
 
-        // The SAME fixed point with no co-sign in it, and the far commoner tape: a re-plan has already been spent on
-        // this unit and its verdict did not move (SupervisorReplanStanding). Describe's infra arm would recite
-        // "re-plan the check" — the move the run has already made here — one screen under a results block that has
-        // just withdrawn it, and the model picks whichever verb it read last.
-        if (result.AcceptancePassed == false && IsInfraRejection(result)
-            && SupervisorReplanStanding.ExitFor(priors, subtaskId) == SupervisorReplanExit.ToAmendment)
-            return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — a re-plan already left this verdict unchanged; propose 'amend_acceptance' or ask a human, do not re-plan and do not retry";
+        // The SAME fixed point with no co-sign in it, and the far commoner tape: a plan has already been authored
+        // over this unit's verdict (SupervisorReplanStanding). Describe's infra arm would recite "re-plan the
+        // check" — the move the run has already made here — one screen under a results block that has just
+        // withdrawn it, and the model picks whichever verb it read last.
+        if (result.AcceptancePassed == false && IsInfraRejection(result) && replanExit != SupervisorReplanExit.None)
+            return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — {ReplanExitRecital(replanExit)}";
 
         return Describe(result);
     }
+
+    /// <summary>The state line's own wording for each exit — a SWITCH rather than a single ToAmendment arm, because that arm was exhaustive only by accident: the guard above it is infra-classed, every infra verdict was amendable under the gate's arms as they stood, and the moment a fourth arm (an unrun re-plan, a unit the newest plan dropped) could reach it the fallthrough would recite "re-plan the check" on exactly the items the results block had withdrawn it from. Deliberately terser than <c>LlmSupervisorDecider.ReplanExitRampFor</c>: the results block argues the case, this block is a one-line reminder of it.</summary>
+    private static string ReplanExitRecital(SupervisorReplanExit replanExit) => replanExit switch
+    {
+        SupervisorReplanExit.ToStaging => "a plan for it was already authored and never run; SPAWN it under that plan, do not re-plan and do not retry",
+        SupervisorReplanExit.ToAmendment => "a re-plan already left this verdict unchanged; propose 'amend_acceptance' or ask a human, do not re-plan and do not retry",
+        _ => "a plan was already authored over this verdict and it did not move, and repairing its check cannot move it either; ask a human, do not re-plan and do not retry",
+    };
 
     /// <summary>
     /// One subtask's LATEST covering spawn/retry and that attempt's folded result — <c>Attempt</c> null = never

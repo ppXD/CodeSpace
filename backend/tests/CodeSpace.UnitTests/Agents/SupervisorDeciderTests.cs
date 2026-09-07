@@ -31,8 +31,8 @@ public class SupervisorDeciderTests
         new() { Goal = "ship the feature", TurnNumber = turnNumber, PriorDecisions = prior, SupervisorModelId = BrainModelId };
 
     /// <summary>A plan the way a live model authors one — at least one subtask. Tests that only need SOME decision to reach the prompt use this rather than an EMPTY plan, which is itself an incoherent shape the decider now re-asks about (and which no useful model reply ever looks like).</summary>
-    private static SupervisorPlanPayload OnePlannedSubtask() =>
-        new() { Goal = "ship", Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it" } } };
+    private static SupervisorPlanPayload OnePlannedSubtask(string subtaskId = "s1") =>
+        new() { Goal = "ship", Subtasks = new[] { new SupervisorPlannedSubtask { Id = subtaskId, Title = "Audit", Instruction = "audit it" } } };
 
     // ── The decider folds context → a schema-valid canonical decision ────────────────
 
@@ -480,12 +480,12 @@ public class SupervisorDeciderTests
             OutcomeJson = InfraFailedUnit(Guid.NewGuid(), detail),
         };
 
-    /// <summary>A plan prior — the anchor every approved amendment lives or dies by (MAJOR-8), so the amend tapes can put one AFTER a co-sign and read what the steer does then.</summary>
-    private static SupervisorPriorDecision PlanAt(long sequence) =>
+    /// <summary>A plan prior declaring ONE subtask — the anchor every approved amendment lives or dies by (MAJOR-8), so the amend tapes can put one AFTER a co-sign and read what the steer does then. <paramref name="subtaskId"/> is what the plan DECLARES, which is how a tape says a newer plan DROPPED the unit its earlier attempt was graded under.</summary>
+    private static SupervisorPriorDecision PlanAt(long sequence, string subtaskId = "s1") =>
         new()
         {
             Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
-            PayloadJson = JsonSerializer.Serialize(OnePlannedSubtask(), AgentJson.Options), OutcomeJson = """{"planned":["s1"],"count":1}""",
+            PayloadJson = JsonSerializer.Serialize(OnePlannedSubtask(subtaskId), AgentJson.Options), OutcomeJson = $$"""{"planned":["{{subtaskId}}"],"count":1}""",
         };
 
     /// <summary>
@@ -657,39 +657,85 @@ public class SupervisorDeciderTests
             .ShouldBe(!cosigned, "a co-signed unit is never steered at the plan the co-sign is anchored to");
     }
 
-    // ── The re-plan exit ramp: a plan already spent on this unit for nothing stops being offered ──
+    // ── The re-plan exit ramp: a plan already authored over this verdict stops being offered again ──
 
     /// <summary>
-    /// The ramp's two arms, pinned as a full mapping (the #1795 convention) — and the None arm pinned as NULL,
-    /// because "null ⇒ each steer renders its own original sentence" is the whole reason a scenario with no spent
-    /// re-plan on its tape stays byte-identical.
+    /// The ramp's three arms, pinned as a full mapping (the #1795 convention) — and the None arm pinned as NULL,
+    /// because "null ⇒ each steer renders its own original sentence" is the whole reason a scenario with no re-plan
+    /// on its tape stays byte-identical. Every non-None arm must carry the prohibition, must name a verb, and must
+    /// not read as "re-plan".
     /// </summary>
     [Theory]
     [InlineData(SupervisorReplanExit.None, null)]
+    [InlineData(SupervisorReplanExit.ToStaging, "'spawn' this item so its re-planned check grades it.")]
     [InlineData(SupervisorReplanExit.ToAmendment, "Propose 'amend_acceptance' for this item's check, or 'ask_human' to rule.")]
-    [InlineData(SupervisorReplanExit.ToHuman, "Its check RAN, so there is no oracle to amend either: 'ask_human' to rule.")]
+    [InlineData(SupervisorReplanExit.ToHuman, "repairing its check cannot move it either, so do not propose that: 'ask_human' to rule.")]
     public void Each_replan_exit_maps_to_one_exit_ramp(SupervisorReplanExit replanExit, string? namedExit)
     {
         var ramp = LlmSupervisorDecider.ReplanExitRampFor(replanExit);
 
         if (namedExit is null)
         {
-            ramp.ShouldBeNull("no spent re-plan ⇒ no substitution ⇒ both steers render the copy they always did");
+            ramp.ShouldBeNull("no re-plan ⇒ no substitution ⇒ both steers render the copy they always did");
             return;
         }
 
         ramp.ShouldNotBeNull();
         ramp!.ShouldEndWith(namedExit);
-        ramp.ShouldContain("A re-plan ALREADY left this verdict unchanged", Case.Sensitive, "the reason leads, so the prohibition is not a bare assertion");
+        ramp.ShouldContain("do NOT author another", Case.Sensitive, "the prohibition is what the ramp is for; the verb it names is the way out of it");
+        ramp.ShouldContain("ALREADY", Case.Sensitive, "the reason leads, so the prohibition is not a bare assertion");
         ramp.ShouldNotContain("Re-plan this item", Case.Insensitive,
             "the ramp sits exactly where the re-plan sentence used to — a model picks its verb off the copy, so it must not read as that instruction");
     }
 
     /// <summary>
-    /// THE attractor this ramp exists for, in its live shape: <c>plan → spawn → plan</c> with no co-sign anywhere on
-    /// the tape, so every amended arm is inapplicable and the un-amended steer re-rendered "Re-plan this item"
-    /// verbatim. Re-planning never clears the verdict, so the identical steer re-renders — a fixed point the
-    /// no-progress bound is the only thing that ends. Arm
+    /// A fourth exit that fell through to null would silently re-render "Re-plan this item" on the very tape it was
+    /// added to withdraw it from — the same mute-arm defect the amend standings' sweep pins one screen up. Swept
+    /// over the enum, so a new reading cannot land without copy.
+    /// </summary>
+    [Fact]
+    public void Every_replan_exit_but_none_carries_its_own_ramp()
+    {
+        var ramps = Enum.GetValues<SupervisorReplanExit>().Where(v => v != SupervisorReplanExit.None)
+            .Select(LlmSupervisorDecider.ReplanExitRampFor).ToList();
+
+        ramps.ShouldAllBe(r => r != null, "an exit with no ramp falls back to the re-plan sentence it exists to replace");
+        ramps.Distinct(StringComparer.Ordinal).Count().ShouldBe(ramps.Count, "two exits render the same ramp — one of them is falling through to the other's arm");
+    }
+
+    /// <summary>
+    /// THE arm split, at the render site: <c>plan → spawn → plan</c> is the tape one turn after the model obeyed
+    /// "re-plan this item with a check its agent can satisfy". The re-plan is authored and UNRUN, so the prompt must
+    /// send the unit at the staging that grades it — not tell it a re-plan changed nothing (nothing re-graded it) and
+    /// offer only amend/ask, which withdraws the plan verb the turn after it was correctly used and names no verb
+    /// that could ever run the repaired check.
+    /// </summary>
+    [Fact]
+    public void An_unrun_re_plan_is_steered_at_the_staging_it_is_waiting_for()
+    {
+        var graded = StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found");
+
+        var firstTime = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, PlanAt(1), graded));
+        var context = Context(turnNumber: 4, PlanAt(1), graded, PlanAt(3));
+        var afterReplan = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        firstTime.ShouldContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
+            "the FIRST time a check comes back unrunnable, authoring a satisfiable one is honest advice — and its wording must not move");
+
+        afterReplan.ShouldNotContain("Re-plan this item", Case.Insensitive, "the plan it asks for has already been authored");
+        afterReplan.ShouldContain(LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToStaging)!, Case.Sensitive);
+        afterReplan.ShouldNotContain("re-plan the check", Case.Insensitive,
+            "the plan-state recitation must not ask for the move the results block one screen above just withdrew");
+        afterReplan.ShouldContain("SPAWN it under that plan", Case.Sensitive, "…it recites the same exit instead");
+
+        SupervisorActionRoster.Offerable(context).ShouldContain(SupervisorDecisionKinds.Spawn,
+            "the ramp may only name a verb the same prompt's menu offers — spawn is never maskable, which is what makes this arm always honest");
+    }
+
+    /// <summary>
+    /// THE attractor this ramp exists for, in its live shape: the re-planned check RAN and came back saying exactly
+    /// what it said before, with no co-sign anywhere on the tape — so every amended arm is inapplicable and the
+    /// un-amended steer re-rendered "Re-plan this item" verbatim, forever. Arm
     /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> reached it in ~25-40% of its attempts
     /// (<c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2).
     ///
@@ -699,9 +745,11 @@ public class SupervisorDeciderTests
     public void An_infra_verdict_a_re_plan_already_failed_to_move_stops_being_offered_another_plan()
     {
         var graded = StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found");
+        var reGraded = StagedInfraFailure(4, SupervisorDecisionKinds.Retry, "grade-error: npm not found");
 
         var firstTime = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, PlanAt(1), graded));
-        var afterReplan = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, PlanAt(1), graded, PlanAt(3)));
+        var context = Context(turnNumber: 5, PlanAt(1), graded, PlanAt(3), reGraded);
+        var afterReplan = LlmSupervisorDecider.BuildUserPromptForTest(context);
 
         firstTime.ShouldContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
             "the FIRST time a check comes back unrunnable, authoring a satisfiable one is honest advice — and its wording must not move");
@@ -711,8 +759,6 @@ public class SupervisorDeciderTests
             "…and the exit is named: the check could not RUN, so the server's gate admits an amendment for it");
         afterReplan.ShouldNotContain("re-plan the check", Case.Insensitive,
             "the plan-state recitation must not ask for the move the results block one screen above just withdrew");
-
-        var context = Context(turnNumber: 4, PlanAt(1), graded, PlanAt(3));
 
         SupervisorActionRoster.Offerable(context).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
             "the ramp may only name a verb the same prompt's menu offers — the two read one gate, so this cannot be a coincidence");
@@ -727,16 +773,12 @@ public class SupervisorDeciderTests
     [Fact]
     public void A_work_classed_verdict_a_re_plan_already_failed_to_move_is_sent_only_to_a_human()
     {
-        var graded = new SupervisorPriorDecision
-        {
-            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
-            PayloadJson = """{"subtaskIds":["s1"]}""",
-            OutcomeJson = GradedUnitOutcome(Guid.NewGuid(), passed: false, detail: "tests-failed-exit-1", baselinePassed: false, baselineDetail: "tests-failed-exit-1"),
-        };
+        var graded = StagedRedBaseline(2, SupervisorDecisionKinds.Spawn);
+        var reGraded = StagedRedBaseline(4, SupervisorDecisionKinds.Retry);
 
         var firstTime = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, PlanAt(1), graded));
-        var afterReplan = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, PlanAt(1), graded, PlanAt(3)));
-        var context = Context(turnNumber: 4, PlanAt(1), graded, PlanAt(3));
+        var context = Context(turnNumber: 5, PlanAt(1), graded, PlanAt(3), reGraded);
+        var afterReplan = LlmSupervisorDecider.BuildUserPromptForTest(context);
 
         firstTime.ShouldContain(LlmSupervisorDecider.ReplanOrRescopeTheBaseline, Case.Sensitive, "the first-time baseline steer's wording must not move either");
 
@@ -747,6 +789,38 @@ public class SupervisorDeciderTests
 
         SupervisorActionRoster.Withheld(context).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
             "…which is the fact that makes naming it wrong, read off the roster itself rather than restated");
+    }
+
+    /// <summary>
+    /// The plan-MEMBERSHIP conjunct at the render site: the newest plan dropped this unit, so neither live exit is
+    /// reachable — a spawn cannot stage a unit the plan does not declare, and a co-sign minted for it could never be
+    /// consumed by a retry. The steer must send it at the human rather than spend one for nothing.
+    ///
+    /// <para>…and it must do that WITHOUT claiming the amend gate refuses it, because the gate does not: a dropped
+    /// unit's superseded attempt is still infra-classed, so <c>amend_acceptance</c> stays on the turn's own menu
+    /// (<c>SupervisorAmendPrecondition</c>'s named residual — the model may know something about the unit the
+    /// plan's shape does not say). The ramp's job is to stop STEERING a human's co-sign at a unit no retry can
+    /// consume it for; asserting inadmissibility one screen from a menu that offers it would be the two-rosters
+    /// defect the ramp was built to avoid.</para>
+    /// </summary>
+    [Fact]
+    public void A_unit_the_newest_plan_no_longer_declares_is_steered_only_at_a_human()
+    {
+        var context = Context(turnNumber: 4,
+            PlanAt(1),
+            StagedInfraFailure(2, SupervisorDecisionKinds.Spawn, "grade-error: npm not found"),
+            PlanAt(3, subtaskId: "s2"));
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToHuman)!, Case.Sensitive);
+        prompt.ShouldNotContain("'spawn' this item", Case.Sensitive, "there is no plan item left for a spawn to stage");
+        prompt.ShouldNotContain("Propose 'amend_acceptance'", Case.Sensitive, "and a co-sign for a dropped unit is a human spent on a retry that can never come");
+
+        SupervisorActionRoster.Offerable(context).ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "the gate still admits a proposal for this unit's superseded infra verdict — so the ramp may withhold the STEER, never assert the verb is unavailable");
+        LlmSupervisorDecider.ReplanExitRampFor(SupervisorReplanExit.ToHuman)!.ShouldNotContain("admissible", Case.Insensitive,
+            "…which is exactly the claim this arm must not make, because it is false of one of the two causes that reach it");
     }
 
     /// <summary>
@@ -765,8 +839,18 @@ public class SupervisorDeciderTests
 
         prompt.ShouldContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
             "the re-planned check ran and produced a DIFFERENT verdict — the run is not at a fixed point");
+        prompt.ShouldNotContain("ALREADY authored", Case.Sensitive);
         prompt.ShouldNotContain("A re-plan ALREADY left this verdict unchanged", Case.Sensitive);
     }
+
+    /// <summary>A spawn or retry that staged 's1' and folded one WORK-classed rejection for it against a MEASURED-RED baseline — the second re-plan steer's own tape.</summary>
+    private static SupervisorPriorDecision StagedRedBaseline(long sequence, string decisionKind) =>
+        new()
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = decisionKind, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = decisionKind == SupervisorDecisionKinds.Spawn ? """{"subtaskIds":["s1"]}""" : """{"subtaskId":"s1"}""",
+            OutcomeJson = GradedUnitOutcome(Guid.NewGuid(), passed: false, detail: "tests-failed-exit-1", baselinePassed: false, baselineDetail: "tests-failed-exit-1"),
+        };
 
     // ── P5-2 (diagnosis-driven repair): the failing check's OUTPUT + the S3 baseline differential reach the brain ──
 
