@@ -601,8 +601,6 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         if (waitingIds.Count == 0) return (0, 0);
 
-        var staleThreshold = DateTimeOffset.UtcNow - AgentRunLiveness.Window;
-
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => waitingIds.Contains(r.Id))
             .Select(r => new { r.Id, r.Status, r.CreatedDate, r.WorkflowRunId })
@@ -623,7 +621,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             // the normal stale-window re-dispatch — the durable-recovery path this guard must not break.
             if (run.WorkflowRunId is { } parentId && terminalParents.Contains(parentId))
                 await CancelOrphanedQueuedAsync(run.Id, OrphanedParentTerminalError, cancellationToken).ConfigureAwait(false);
-            else if (run.CreatedDate < staleThreshold)
+            else // The bounded selection already established staleness using the database clock.
                 reDispatched += TryReDispatch(run.Id, run.CreatedDate);
         }
 
@@ -670,9 +668,14 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         try
         {
+            var token = runId.ToString();
+            var pendingIds = await _db.WorkflowRunWait.AsNoTracking().Where(w => w.WaitKind == WorkflowWaitKinds.AgentRun && w.Token == token && w.Status == WorkflowWaitStatuses.Pending
+                && _db.AgentRun.Any(a => a.Id == runId && a.WorkflowRunId == w.RunId && _db.WorkflowRun.Any(p => p.Id == w.RunId && p.TeamId == a.TeamId))).Select(w => w.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+            if (pendingIds.Count == 0) return 0;
             await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
-
-            _logger.LogInformation("AgentRunReconciler: resumed the workflow parked on terminal agent run {RunId} ({Status})", runId, status);
+            // NotifyCompletedAsync is best effort. A normal return alone proves nothing; the durable wait is the acknowledgement.
+            if (!await _db.WorkflowRunWait.AsNoTracking().AnyAsync(w => pendingIds.Contains(w.Id) && w.Status == WorkflowWaitStatuses.Resolved, cancellationToken).ConfigureAwait(false)) return 0;
+            _logger.LogInformation("AgentRunReconciler: acknowledged a terminal agent wait for {RunId} ({Status}); the parent may still have other pending waits", runId, status);
             return 1;
         }
         catch (Exception ex)
@@ -699,21 +702,32 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
     }
 
-    /// <summary>The agent-run ids that workflow runs are currently parked on (pending AgentRun waits). The wait Token is the agent-run id; parse defensively.</summary>
+    /// <summary>Select eligible waits before the cap and persist retry order before invoking any notifier. A crashed worker leaves a retryable timestamp, never a false acknowledgement.</summary>
     private async Task<List<Guid>> PendingAgentRunWaitIdsAsync(CancellationToken cancellationToken)
     {
-        var tokens = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
-            .Select(w => w.Token)
-            .Take(BatchSize)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
-
-        return tokens
-            .Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null)
-            .Where(id => id.HasValue)
-            .Select(id => id!.Value)
-            .ToList();
+        if (_db.Database.CurrentTransaction != null) throw new InvalidOperationException("Agent wait recovery requires an independent scope without an ambient transaction.");
+        var terminalStatuses = Enum.GetValues<AgentRunStatus>().Where(AgentRunStateMachine.IsTerminal).Select(s => s.ToString()).ToArray();
+        var window = AgentRunLiveness.Window;
+        // The notifier uses this canonical token and parent identity too. Never cast an untrusted token to UUID.
+        // A short retry floor avoids immediately reselecting in-flight callbacks in another worker. This is not an ownership lease.
+        var ids = await _db.Database.SqlQuery<Guid>($"""
+            WITH candidates AS MATERIALIZED (
+                SELECT w.id
+                FROM workflow_run_wait w
+                JOIN agent_run a ON w.token = a.id::text AND w.run_id = a.workflow_run_id
+                JOIN workflow_run p ON p.id = w.run_id AND p.team_id = a.team_id
+                WHERE w.wait_kind = {WorkflowWaitKinds.AgentRun} AND w.status = {WorkflowWaitStatuses.Pending}
+                  AND (w.last_agent_recovery_attempt_at IS NULL OR w.last_agent_recovery_attempt_at < clock_timestamp() - interval '5 seconds')
+                  AND (a.status = ANY({terminalStatuses}) OR (a.status = 'Queued' AND
+                       (a.created_date < clock_timestamp() - {window} OR p.status IN ('Cancelled', 'Failure', 'Success'))))
+                ORDER BY w.last_agent_recovery_attempt_at ASC NULLS FIRST, w.created_at, w.id
+                LIMIT {BatchSize} FOR UPDATE OF w SKIP LOCKED
+            )
+            UPDATE workflow_run_wait w SET last_agent_recovery_attempt_at = clock_timestamp()
+            FROM candidates c WHERE w.id = c.id
+            RETURNING w.token::uuid AS "Value"
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+        return ids.Distinct().ToList();
     }
 
     /// <summary>Append one reconciler-authored event (abandonment / recovery / re-attach note) so the live log / replay timeline shows what happened. Best-effort — a logging failure doesn't undo the transition.</summary>
@@ -768,6 +782,7 @@ public sealed record AgentRunReconcileSummary
     public int ReattachedStaleRunning { get; init; }
 
     /// <summary>Workflow runs resumed off a terminal agent run that hadn't propagated its completion (crash / failed notify).</summary>
+    /// <summary>Terminal agents with an observed persisted wait acknowledgement; a parent can still have other pending waits.</summary>
     public int ResumedStalledParents { get; init; }
 
     /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>

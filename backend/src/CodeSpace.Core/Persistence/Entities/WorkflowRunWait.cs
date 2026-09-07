@@ -39,4 +39,7 @@ public class WorkflowRunWait
 
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ResolvedAt { get; set; }
+
+    /// <summary>Database-clock recovery selection time; retry fairness survives worker replacement. Not a completion receipt.</summary>
+    public DateTimeOffset? LastAgentRecoveryAttemptAt { get; set; }
 }
