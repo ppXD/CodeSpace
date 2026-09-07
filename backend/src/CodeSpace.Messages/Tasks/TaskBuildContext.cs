@@ -22,6 +22,9 @@ public sealed record TaskBuildContext
     /// <summary>The normalized task seed (surface dimension already erased).</summary>
     public required TaskLaunchSeed Seed { get; init; }
 
+    /// <summary>Detached operator intent captured by the launch service before projection. The snapshot factory owns this stamp; builders cannot author or override it. Null for older/internal callers with no recorded provenance.</summary>
+    public TaskLaunchContract? LaunchContract { get; init; }
+
     /// <summary>The routing decision — its <see cref="RoutePlan.ProjectionKind"/> selects the builder; its <see cref="RoutePlan.Caps"/> carry the bounds.</summary>
     public required RoutePlan Route { get; init; }
 

@@ -449,6 +449,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         if (!string.Equals(recomputed, storedHash, StringComparison.Ordinal))
             throw ReleaseTamperedException.ForSnapshot(run.Id, storedHash, recomputed);
 
+        var contractErrors = Tasks.Contracts.TaskLaunchContractSnapshot.Validate(definition.LaunchContract);
+        if (contractErrors.Count > 0) throw new WorkflowValidationException(contractErrors);
+
         return (definition, storedHash);
     }
 
