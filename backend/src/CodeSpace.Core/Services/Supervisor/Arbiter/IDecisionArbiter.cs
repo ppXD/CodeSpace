@@ -26,7 +26,9 @@ public interface IDecisionArbiter
 /// client, and the response is constrained to <see cref="ArbiterDecisionSchema"/> — but FAILS CLOSED TO ESCALATE, not
 /// stop: a missing / unusable brain model, an empty pool, no structured provider, or a malformed verdict all mean the
 /// supervisor cannot responsibly decide, so the decision goes to a HUMAN (the safe default — a wrong auto-answer is
-/// costly; a human can always answer).
+/// costly; a human can always answer). WHICH kind of miss rides along on <see cref="ArbiterVerdict.Cause"/>: a gateway
+/// fault (rate limit / transient / auth) is tagged <see cref="ArbiterEscalateCause.GatewayInfra"/> so a consumer can
+/// tell "the brain was unreachable" from every other escalate reason — the ESCALATE behaviour itself never changes.
 /// </summary>
 public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
 {
@@ -64,11 +66,32 @@ public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
 
             return model is null ? ArbiterVerdict.Escalate("The arbiter returned no decision — escalated to a human.") : Project(model);
         }
+        // A GATEWAY fault (rate limit / transient 5xx-timeout / auth) — the same 3-way split LlmSupervisorDecider
+        // PROPAGATES instead of fail-closing (its IsModelCapabilityMiss complement) and RealModelGate.IsTransientTransport
+        // matches on LlmApiException. The arbiter cannot propagate it (its caller relies on ALWAYS getting a verdict for
+        // one blocked child decision — there is no "clean stop" to fall back to), so it still escalates, but tagged
+        // GatewayInfra: the cause is the gateway being unreachable, never a decision anyone made. Real run 34108260233
+        // (a 429 storm) is why this split exists — it read as a plain behavioural escalate before this.
+        catch (LlmApiException ex) when (IsGatewayInfra(ex.Category))
+        {
+            return ArbiterVerdict.EscalateInfra(InfraRationale(ex.Category));
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ArbiterVerdict.Escalate("The arbiter could not produce a valid decision — escalated to a human.");
         }
     }
+
+    /// <summary>Whether a brain-call failure is a GATEWAY fault rather than a model-side capability miss (malformed / over-long / content-filtered / bad-request reply) — mirrors <c>LlmSupervisorDecider.IsModelCapabilityMiss</c>'s complement.</summary>
+    private static bool IsGatewayInfra(LlmErrorCategory category) => category is LlmErrorCategory.Transient or LlmErrorCategory.RateLimited or LlmErrorCategory.AuthFailed;
+
+    /// <summary>The human-readable escalate rationale for a gateway fault, naming WHICH one so an operator reading the run log doesn't have to guess.</summary>
+    private static string InfraRationale(LlmErrorCategory category) => category switch
+    {
+        LlmErrorCategory.RateLimited => "The arbiter could not reach the model (rate limited) — escalated to a human.",
+        LlmErrorCategory.AuthFailed => "The arbiter could not reach the model (authentication failed) — escalated to a human.",
+        _ => "The arbiter could not reach the model (gateway unavailable) — escalated to a human.",
+    };
 
     private static StructuredLLMCompletionRequest BuildRequest(PendingDecision decision, string goal, ModelPoolPick pick) => new()
     {

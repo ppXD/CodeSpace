@@ -864,11 +864,18 @@ public static class RealModelGate
         InfraParkUnresolvedException => true,
         System.Net.Sockets.SocketException se => !WiringSocketErrors.Contains(se.SocketErrorCode),
         // The decider classifies a gateway fault into a TYPED LlmApiException and PROPAGATES the infra categories
-        // (Transient / RateLimited / AuthFailed) rather than fail-closing them — so the EXCEPTION path (trajectory /
-        // arbiter, which catch the throw directly) must treat those exactly as the string-based IsGatewayInfraError
-        // already treats the persisted node-failed record: non-gating infra. The model-CAPABILITY categories
-        // (Malformed / ContextLengthExceeded / ContentFiltered / BadRequest) are NOT here — they are a real miss and gate.
+        // (Transient / RateLimited / AuthFailed) rather than fail-closing them — so the EXCEPTION path (trajectory,
+        // which drives the decider and lets that throw fly straight up) must treat those exactly as the string-based
+        // IsGatewayInfraError already treats the persisted node-failed record: non-gating infra. The model-CAPABILITY
+        // categories (Malformed / ContextLengthExceeded / ContentFiltered / BadRequest) are NOT here — they are a real
+        // miss and gate.
         LlmApiException { Category: LlmErrorCategory.Transient or LlmErrorCategory.RateLimited or LlmErrorCategory.AuthFailed } => true,
+        // The ARBITER cannot propagate the same way — LlmDecisionArbiter.DecideAsync's own contract is to NEVER throw
+        // (a blocked child decision must always get SOME verdict), so it converts the SAME gateway fault into an
+        // escalate verdict tagged ArbiterVerdict.Cause = GatewayInfra instead. The arbiter eval re-raises that tag as
+        // this so it reaches the identical non-gating skip rather than scoring "the arbiter punted an obvious
+        // decision" (real run 34108260233: a 429 storm read as a behavioural miss).
+        ArbiterGatewayInfraException => true,
         _ => false,
     };
 
