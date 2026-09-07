@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -55,7 +56,11 @@ public sealed class ScheduleTriggerService : IScheduleTriggerService, IScopedDep
 
         foreach (var activation in activations)
         {
-            firedRunIds.AddRange(await FireActivationOccurrencesAsync(activation, from, now, cancellationToken).ConfigureAwait(false));
+            try { firedRunIds.AddRange(await FireActivationOccurrencesAsync(activation, from, now, cancellationToken).ConfigureAwait(false)); }
+            catch (AgentAuthorityDeniedException ex)
+            {
+                _logger.LogWarning("Schedule activation authority refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Code={Code} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Code, ex.Reason);
+            }
         }
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

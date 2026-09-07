@@ -1,5 +1,4 @@
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.RegularExpressions;

@@ -114,7 +114,6 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// </summary>
     public string? RoutePlanJson { get; set; }
 
-
     /// <summary>
     /// Launch-time SCOPE: the repositories this run was launched against (multi-repo) — a point-in-time snapshot set at
     /// the snapshot/task creation site. NOT the repos the run actually touched (that is the future

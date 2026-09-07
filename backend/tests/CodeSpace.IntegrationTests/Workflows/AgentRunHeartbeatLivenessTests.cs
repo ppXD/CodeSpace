@@ -1,3 +1,4 @@
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -39,7 +40,7 @@ public class AgentRunHeartbeatLivenessTests
             var teamId = await SeedTeamAsync();
 
             Guid runId;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
                 runId = (await scope.Resolve<IAgentRunService>().CreateAsync(
                     new AgentTask { Goal = "quiet", Harness = "codex-cli", Model = "test-model" }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 

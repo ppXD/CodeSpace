@@ -366,7 +366,7 @@ public class WorkflowRunReplayFlowTests
             .Select(w => w.TeamId)
             .SingleAsync();
 
-        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: triggerPayload);
+        return await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: triggerPayload);
     }
 
     /// <summary>

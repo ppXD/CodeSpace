@@ -630,7 +630,7 @@ public class RerunFromNodeFlowTests
         // gate. (No frontend / docs should imply such a node is approval-gated; this is the conservative path.)
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, BothFlagsDef());
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);   // suspends at the both-flags node; the gate fires regardless
 
         var before = await RunCountAsync(teamId);
@@ -670,7 +670,7 @@ public class RerunFromNodeFlowTests
         SuspendProbeNode.Reset(probeKey);
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendThenDownstreamDef(probeKey));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);
         await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
 
@@ -798,7 +798,7 @@ public class RerunFromNodeFlowTests
         SuspendProbeNode.Reset(probeKey);
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendInlineDef(probeKey));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);   // suspends; the gate fires regardless of the original's state
 
         var before = await RunCountAsync(teamId);
@@ -829,7 +829,7 @@ public class RerunFromNodeFlowTests
         try
         {
             var workflowId = await CreateWorkflowAsync(teamId, userId, AgentThenSuspendProbeDef(probeKey));
-            var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+            var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
             await RunEngineAsync(originalRunId);   // suspends parked on agent.run(a)'s AgentRun wait
             await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
 
@@ -859,7 +859,7 @@ public class RerunFromNodeFlowTests
         // is real (no 422), the timer is self-contained per-run, and the original is immutable.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, SleepThenEndDef(seconds: 60));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(originalRunId);                       // original parks on the sleep timer
         await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended, "the original parks on the sleep timer");
@@ -950,7 +950,7 @@ public class RerunFromNodeFlowTests
         SuspendProbeNode.Reset(probeKey);
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendInlineDef(probeKey));
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);
         await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
 
@@ -1420,7 +1420,7 @@ public class RerunFromNodeFlowTests
     /// <summary>Seed + walk a fresh authored run to terminal.</summary>
     private async Task<Guid> RunFreshAsync(Guid workflowId, Guid teamId, string payloadJson = "{}")
     {
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
+        var runId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
         await RunEngineAsync(runId);
         return runId;
     }

@@ -136,7 +136,8 @@ public sealed class ExecutionAuthorityService : IScopedDependency
                 var original = await _db.WorkflowRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == run.ParentRunId && r.RunRequestId == causationId && r.TeamId == run.TeamId, cancellationToken).ConfigureAwait(false) ?? throw Denied("invalid-replay-source");
                 // A new actor may replay a cancelled execution. Only the old frozen ceiling travels, never its subjects.
                 var originalReceiptJson = await _db.WorkflowRunExecutionAuthority.AsNoTracking().Where(r => r.WorkflowRunId == original.Id && r.TeamId == original.TeamId).Select(r => r.ReceiptJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-                if (originalReceiptJson != null) ceiling = AgentAutonomyPolicy.Clamp(ceiling, Deserialize(originalReceiptJson).GrantedCeiling);
+                if (originalReceiptJson == null) throw Denied("legacy-replay-authority-unverifiable");
+                ceiling = AgentAutonomyPolicy.Clamp(ceiling, Deserialize(originalReceiptJson).GrantedCeiling);
                 if (original.DefinitionSnapshotHash != run.DefinitionSnapshotHash || original.WorkflowId != run.WorkflowId || original.WorkflowVersion != run.WorkflowVersion) throw Denied("replay-definition-mismatch");
             }
         }
@@ -169,30 +170,23 @@ public sealed class ExecutionAuthorityService : IScopedDependency
 
     private static void VerifyActivation(WorkflowAdmission admission, WorkflowActivation activation, WorkflowVersion version)
     {
+        // Mutable audit timestamps cannot prove which historical revision delegated execution.
+        if (admission.Legacy) throw Denied("legacy-trigger-authority-unverifiable");
         JsonElement snapshot;
         try { snapshot = JsonDocument.Parse(admission.Request.ActivationSnapshotJson ?? "null").RootElement; }
         catch (JsonException) { throw Denied("invalid-trigger-snapshot"); }
         if (snapshot.ValueKind != JsonValueKind.Object || !snapshot.TryGetProperty("id", out var id) || !id.TryGetGuid(out var snapshotId) || snapshotId != activation.Id
-            || !snapshot.TryGetProperty("typeKey", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != activation.TypeKey || activation.TypeKey != admission.Request.SourceType
+            || !snapshot.TryGetProperty("typeKey", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != activation.TypeKey || activation.TypeKey != ActivationTypeFor(admission.Request)
             || !snapshot.TryGetProperty("config", out var config) || !JsonElement.DeepEquals(config, JsonDocument.Parse(activation.ConfigJson).RootElement)
             || !snapshot.TryGetProperty("enabled", out var enabled) || enabled.ValueKind != JsonValueKind.True) throw Denied("trigger-snapshot-mismatch");
-        if (!admission.Legacy)
-        {
-            if (!activation.Enabled || version.Version != activation.Workflow.LatestVersion
-                || !snapshot.TryGetProperty("authorityRevision", out var revision) || !revision.TryGetGuid(out var snapshotRevision) || snapshotRevision == Guid.Empty || snapshotRevision != activation.AuthorityRevision
-                || !snapshot.TryGetProperty("publisherId", out var publisher) || !publisher.TryGetGuid(out var publisherId) || publisherId != ActivationAuthoritySnapshot.Publisher(activation)
-                || !snapshot.TryGetProperty("workflowVersion", out var workflowVersion) || !workflowVersion.TryGetInt32(out var snapshotVersion) || snapshotVersion != version.Version) throw Denied("stale-trigger-delegation");
-        }
-        else
-        {
-            // Historical snapshots did not name their publisher. Reconstruct only when the exact old config still
-            // matches and its unchanged, earlier audit identity is the immutable version author. Equal timestamps,
-            // later edits, missing audit times, and a different publisher cannot establish that original delegation.
-            var receivedAt = admission.Request.ReceivedAt;
-            if (activation.CreatedDate == default || activation.LastModifiedDate < activation.CreatedDate || activation.LastModifiedDate >= receivedAt
-                || version.CommittedAt is not { } committedAt || committedAt > receivedAt || ActivationAuthoritySnapshot.Publisher(activation) != version.CreatedBy) throw Denied("legacy-trigger-authority-unverifiable");
-        }
+        if (!activation.Enabled || version.Version != activation.Workflow.LatestVersion
+            || !snapshot.TryGetProperty("authorityRevision", out var revision) || !revision.TryGetGuid(out var snapshotRevision) || snapshotRevision == Guid.Empty || snapshotRevision != activation.AuthorityRevision
+            || !snapshot.TryGetProperty("publisherId", out var publisher) || !publisher.TryGetGuid(out var publisherId) || publisherId != ActivationAuthoritySnapshot.Publisher(activation)
+            || !snapshot.TryGetProperty("workflowVersion", out var workflowVersion) || !workflowVersion.TryGetInt32(out var snapshotVersion) || snapshotVersion != version.Version) throw Denied("stale-trigger-delegation");
     }
+
+    // The schedule producer has a canonical source distinct from its activation catalog key; webhook matchers use theirs verbatim.
+    private static string ActivationTypeFor(WorkflowRunRequest request) => request.ActorType == WorkflowRunActorTypes.System && request.SourceType == WorkflowRunSourceTypes.ScheduleCron ? "trigger.schedule" : request.SourceType;
 
     private async Task<AgentExecutionAuthority> ReadWorkflowReceiptAsync(WorkflowRun run, HashSet<Guid> lineage, CancellationToken cancellationToken)
     {

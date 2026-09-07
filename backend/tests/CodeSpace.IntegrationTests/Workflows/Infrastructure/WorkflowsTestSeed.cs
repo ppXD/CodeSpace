@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -183,6 +184,17 @@ public static class WorkflowsTestSeed
 
     public static JsonElement EmptyJson() => JsonDocument.Parse("{}").RootElement.Clone();
     public static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
+
+    /// <summary>Admit a current manual run through production authority, then enqueue it for a fixture-driven engine walk.</summary>
+    public static async Task<Guid> SeedAdmittedManualRunAsync(PostgresFixture fixture, Guid workflowId, Guid teamId, int workflowVersion = 1, string payloadJson = "{}")
+    {
+        using var scope = await BeginSeedOperatorScopeAsync(fixture, teamId).ConfigureAwait(false);
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var operatorId = await db.TeamMembership.Where(m => m.TeamId == teamId && m.Role == TeamRole.Owner).Select(m => m.UserId).SingleAsync().ConfigureAwait(false);
+        var runId = await scope.Resolve<IRunStarter>().StartAsync(new RunSourceEnvelope { TeamId = teamId, WorkflowId = workflowId, WorkflowVersion = workflowVersion, SourceType = WorkflowRunSourceTypes.Manual, ActorType = WorkflowRunActorTypes.User, ActorId = operatorId, CreatedBy = operatorId, NormalizedPayloadJson = payloadJson }, CancellationToken.None).ConfigureAwait(false);
+        await db.WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Enqueued)).ConfigureAwait(false);
+        return runId;
+    }
 
     /// <summary>
     /// Insert a <c>workflow_run_request</c> + <c>workflow_run</c> pair simulating a manual

@@ -492,7 +492,7 @@ public class McpToolApprovalFlowTests
         if (!System.Net.Sockets.Socket.OSSupportsUnixDomainSockets) return;
 
         var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
-        var runId = Guid.NewGuid();
+        var runId = await CreateEndpointRunAsync(teamId, ownerId);
         var tool = new CountingWriteTool();
 
         var socketPath = SocketPath("ap");
@@ -531,7 +531,7 @@ public class McpToolApprovalFlowTests
         if (!System.Net.Sockets.Socket.OSSupportsUnixDomainSockets) return;
 
         var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
-        var runId = Guid.NewGuid();
+        var runId = await CreateEndpointRunAsync(teamId, ownerId);
         var tool = new CountingWriteTool();
 
         // The lease the OBSERVER would read, resolved from the run id exactly as AgentRunExecutor stamps it onto the
@@ -574,6 +574,41 @@ public class McpToolApprovalFlowTests
             // The lease materialised the run-scoped spool dir; reap it (Rule 12.3) so a run of this test leaves nothing.
             try { Directory.Delete(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), recursive: true); } catch { /* best-effort */ }
         }
+    }
+
+    [Fact]
+    public async Task A_human_action_approval_does_not_restore_a_launcher_grant_revoked_while_the_real_endpoint_was_waiting()
+    {
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var launcherId = await SeedConversationMemberAsync(teamId, ownerId, channelId);
+        var runId = await CreateEndpointRunAsync(teamId, launcherId);
+        var tool = new CountingWriteTool();
+        var socketPath = SocketPath("rv");
+        var token = $"tok-{Guid.NewGuid():N}";
+        await using var endpoint = NewEndpoint(runId, teamId, channelId, socketPath, token, tool);
+        await using var client = await UdsClient.ConnectAsync(socketPath, token);
+        var call = Task.Run(() => client.CallToolAsync(1, "git.open_pr", new { branch = "main" }));
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+        tool.CallCount.ShouldBe(0);
+        using (var revoke = _fixture.BeginScope()) await revoke.Resolve<CodeSpaceDbContext>().TeamMembership.Where(m => m.TeamId == teamId && m.UserId == launcherId).ExecuteDeleteAsync();
+
+        await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+        var result = await call.WaitAsync(TimeSpan.FromSeconds(10));
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(result).ShouldContain("agent.authority_denied");
+        tool.CallCount.ShouldBe(0, "action approval is not a replacement execution grant");
+        var row = await ReadRowAsync(ledgerId);
+        row.ApprovedAt.ShouldNotBeNull();
+        row.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.DataJson != null && e.DataJson.Contains("authority.denied"));
+    }
+
+    private async Task<Guid> CreateEndpointRunAsync(Guid teamId, Guid operatorId)
+    {
+        using var scope = _fixture.BeginScopeAs(operatorId, teamId);
+        return (await scope.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = "review a tool action", Harness = "test", Autonomy = AgentAutonomyLevel.Standard }, teamId, null, null, cancellationToken: CancellationToken.None)).Id;
     }
 
     // ─── Build the handler / endpoint with the full approval surface ─────────────

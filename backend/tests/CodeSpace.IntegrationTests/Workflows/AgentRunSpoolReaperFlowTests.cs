@@ -1,3 +1,4 @@
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Core.Settings;
 using System.Text.Json;
 using Autofac;
@@ -65,7 +66,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
 
         // Running, NEVER completed (CompletedAt null) → must never be a reap candidate, no matter how long it runs.
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
@@ -139,7 +140,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
     private async Task<Guid> SeedTerminalRunWithHandleAsync(Guid teamId, string spoolDir, DateTimeOffset completedAt, string? egressNetnsKey = null)
     {
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;

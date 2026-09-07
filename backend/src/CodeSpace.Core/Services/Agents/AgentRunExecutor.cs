@@ -200,7 +200,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (AgentAuthorityDeniedException ex)
         {
-            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = ex.Message }, run.FenceEpoch, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, AuthorityRefusalResult(ex), run.FenceEpoch, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -563,7 +563,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     try { await revokedRunner.TerminateAsync(revokedHandle, cancellationToken).ConfigureAwait(false); }
                     catch (Exception termination) when (termination is not OperationCanceledException) { _logger.LogError(termination, "Revoked agent run {RunId} could not terminate its detached process", agentRunId); }
                 }
-                await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = ex.Message }, run.FenceEpoch, cancellationToken).ConfigureAwait(false);
+                await CompleteAndNotifyAsync(agentRunId, run.TeamId, AuthorityRefusalResult(ex), run.FenceEpoch, cancellationToken).ConfigureAwait(false);
                 return;
             }
         }
@@ -3040,6 +3040,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return true;
     }
+
+    private static AgentRunResult AuthorityRefusalResult(AgentAuthorityDeniedException exception) => exception.Reason is "workflow-terminal" or "parent-terminal"
+        ? new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }
+        : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = exception.Message };
 
     /// <summary>Claim the run (Queued → Running) and return the fencing epoch to complete under, or null when it's already claimed/terminal (the exactly-once guard).</summary>
     private async Task<long?> TryClaimAsync(Guid runId, CancellationToken cancellationToken)

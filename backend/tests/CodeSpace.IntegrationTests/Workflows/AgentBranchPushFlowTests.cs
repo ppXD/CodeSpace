@@ -1,3 +1,4 @@
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -176,7 +177,7 @@ public sealed class AgentBranchPushFlowTests
 
     private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId, bool? pushProducedBranch, int? timeoutSeconds = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, PushProducedBranch = pushProducedBranch, TimeoutSeconds = timeoutSeconds },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);

@@ -6,6 +6,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -177,11 +179,41 @@ public sealed partial class AgentExecutionAuthorityFlowTests
         (await verifyDb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == workflowRunId)).Status.ShouldBe(WorkflowRunStatus.Enqueued);
     }
 
+    [Fact]
+    public async Task A_revoked_reattach_terminates_the_actual_detached_process_before_landing_terminal()
+    {
+        var seed = await SeedAsync();
+        using var scope = _fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        var service = scope.Resolve<IAgentRunService>();
+        var runId = (await service.CreateAsync(Task(), seed.TeamId, null, null, cancellationToken: CancellationToken.None)).Id;
+        await service.MarkRunningAsync(runId, CancellationToken.None);
+        var runner = (ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+        var handle = await runner.LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = ["-c", "sleep 45"], TimeoutSeconds = 60 }, runId.ToString("N"), CancellationToken.None);
+        try
+        {
+            await service.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+            (await runner.ProbeAsync(handle, CancellationToken.None)).State.ShouldBe(SandboxRunState.Running);
+            await RevokeAsync(seed);
+
+            using var worker = _fixture.BeginScope();
+            await worker.Resolve<IAgentRunExecutor>().ReattachAsync(runId, CancellationToken.None);
+
+            using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while ((await runner.ProbeAsync(handle, bound.Token)).State == SandboxRunState.Running) await System.Threading.Tasks.Task.Delay(25, bound.Token);
+            (await worker.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Failed);
+        }
+        finally
+        {
+            await runner.TerminateAsync(handle, CancellationToken.None);
+            if (Directory.Exists(handle.SpoolDirectory)) Directory.Delete(handle.SpoolDirectory, true);
+        }
+    }
+
     private async Task<RunSourceEnvelope> TriggerAsync(Seed seed)
     {
         using var scope = _fixture.BeginScopeAs(seed.UserId, seed.TeamId);
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var activation = new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = seed.WorkflowId, TypeKey = WorkflowRunSourceTypes.ScheduleCron, ConfigJson = "{\"cron\":\"0 * * * *\"}", Enabled = true };
+        var activation = new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = seed.WorkflowId, TypeKey = "trigger.schedule", ConfigJson = "{\"cron\":\"0 * * * *\"}", Enabled = true };
         db.WorkflowActivation.Add(activation);
         await db.SaveChangesAsync();
         activation = await db.WorkflowActivation.AsNoTracking().Include(a => a.Workflow).SingleAsync(a => a.Id == activation.Id);

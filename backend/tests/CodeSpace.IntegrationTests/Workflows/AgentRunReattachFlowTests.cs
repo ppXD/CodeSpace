@@ -1,3 +1,4 @@
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using System.Diagnostics;
 using System.Text.Json;
 using Autofac;
@@ -639,7 +640,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
     private async Task<Guid> CreateScriptedRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800 },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -648,7 +649,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
     private async Task<Guid> CreateRunWithCredentialAsync(Guid teamId, Guid modelCredentialId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);

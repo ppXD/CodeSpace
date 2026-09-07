@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -71,7 +72,7 @@ WHERE session_id IS NULL
     private async Task<Guid> SeedPreMigrationRunAsync(Guid teamId, AgentRunResult result)
     {
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
         {
             var run = await scope.Resolve<IAgentRunService>().CreateAsync(
                 new AgentTask { Goal = "historical run", Harness = "codex-cli", Model = null, TimeoutSeconds = 600 },

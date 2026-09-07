@@ -161,7 +161,7 @@ public class AgentRunNulBytePersistenceTests
         retried.Goal.ShouldContain(Nul, Case.Sensitive, "the fold really does splice the raw tail through verbatim");
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(retried, teamId, null, null, cancellationToken: CancellationToken.None)).Id;
 
         using var verify = _fixture.BeginScope();
@@ -179,7 +179,7 @@ public class AgentRunNulBytePersistenceTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
