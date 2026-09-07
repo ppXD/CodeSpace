@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -26,16 +28,18 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
     private readonly Sessions.IWorkSessionService _sessions;
     private readonly Completion.IModeProfileRegistry _modes;
     private readonly ILogger<RunStarter> _logger;
+    private readonly Agents.Authority.ExecutionAuthorityService _authority;
 
     /// <summary>Postgres unique-constraint violation SQLSTATE. <see cref="DbUpdateException"/> wraps this when our duplicate-event index fires.</summary>
     private const string PostgresUniqueViolation = "23505";
 
-    public RunStarter(CodeSpaceDbContext db, IRunRecordLogger recordLogger, Sessions.IWorkSessionService sessions, Completion.IModeProfileRegistry modes, ILogger<RunStarter> logger)
+    public RunStarter(CodeSpaceDbContext db, RunAdmissionServices admission, ILogger<RunStarter> logger)
     {
         _db = db;
-        _recordLogger = recordLogger;
-        _sessions = sessions;
-        _modes = modes;
+        _recordLogger = admission.Records;
+        _sessions = admission.Sessions;
+        _modes = admission.Modes;
+        _authority = admission.Authority;
         _logger = logger;
     }
 
@@ -54,7 +58,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
         // delivery (provider re-sends the same X-GitHub-Delivery, the matcher fires twice)
         // raises 23505 below and we return Guid.Empty so the caller treats it as "already
         // accepted, drop on the floor".
-        _db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        var request = new WorkflowRunRequest
         {
             Id = requestId,
             TeamId = envelope.TeamId,
@@ -73,17 +77,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ActivationId = envelope.ActivationId,
             ActivationSnapshotJson = envelope.ActivationSnapshotJson,
             CausationId = envelope.CausationRequestId,
-        });
-
-        // Resolve the run's session at this ONE staging seam: the envelope's own (a continuation / an inherited fork
-        // session) or a FRESH per-run Workflow-kind session opened here — so a TRIGGER that supplies none (manual,
-        // scheduled, webhook) still gets one, and a new trigger can't forget. Staged onto _db → committed by the save
-        // below. EXCEPTION: a nested sub-workflow CHILD is not a standalone session — the session read layer keeps
-        // ChildWorkflow runs OUT of the session (they live inside the parent turn), so minting one would surface a bare
-        // orphan row; it rides the envelope's session VERBATIM (inherited from the parent, incl. session-less).
-        var session = envelope.SourceType == WorkflowRunSourceTypes.ChildWorkflow
-            ? envelope.Session
-            : await _sessions.ResolveForRunAsync(envelope.Session, envelope.TeamId, envelope.WorkflowId, envelope.ActorId, cancellationToken).ConfigureAwait(false);
+        };
 
         // P2b (Enforced cohort): the enforcement mode comes from the run's own frozen definition — the version row
         // this run targets — so every lane launching an opted-in definition stamps Enforced, and a definition
@@ -98,7 +92,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
         var mode = Completion.RunModeClassifier.DeriveFromJson(projectionKind: null, definitionJson);
         var enforcementMode = Completion.CompletionPolicy.StampModeFor(DefinitionCompletionMode.Read(definitionJson), mode, _modes.Resolve(mode));
 
-        _db.WorkflowRun.Add(new WorkflowRun
+        var run = new WorkflowRun
         {
             Id = runId,
             WorkflowId = envelope.WorkflowId,
@@ -111,15 +105,29 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ParentRunId = envelope.ParentRunId,
             RootRunId = envelope.RootRunId,
             RerunFromNodeId = envelope.RerunFromNodeId,
-            SessionId = session?.SessionId,
-            SessionTurnIndex = session?.TurnIndex,
             // P2a: the completion policy is part of the execution's identity — stamped at creation, immutable.
             CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion,
             CompletionEnforcementMode = enforcementMode.ToString(),
             Status = WorkflowRunStatus.Pending,
             CreatedBy = envelope.CreatedBy,
             LastModifiedBy = envelope.CreatedBy,
-        });
+        };
+        var authority = await _authority.MintAsync(run, request, cancellationToken).ConfigureAwait(false);
+        // Resolve the run's session at this ONE staging seam: the envelope's own (a continuation / an inherited fork
+        // session) or a FRESH per-run Workflow-kind session opened here — so a TRIGGER that supplies none (manual,
+        // scheduled, webhook) still gets one, and a new trigger can't forget. Staged onto _db → committed by the save
+        // below. EXCEPTION: a nested sub-workflow CHILD is not a standalone session — the session read layer keeps
+        // ChildWorkflow runs OUT of the session (they live inside the parent turn), so minting one would surface a bare
+        // orphan row; it rides the envelope's session VERBATIM (inherited from the parent, incl. session-less).
+        var session = envelope.SourceType == WorkflowRunSourceTypes.ChildWorkflow
+            ? envelope.Session
+            : await _sessions.ResolveForRunAsync(envelope.Session, envelope.TeamId, envelope.WorkflowId, envelope.ActorId, cancellationToken).ConfigureAwait(false);
+
+        run.SessionId = session?.SessionId;
+        run.SessionTurnIndex = session?.TurnIndex;
+        _db.WorkflowRunRequest.Add(request);
+        _db.WorkflowRun.Add(run);
+        _db.WorkflowRunExecutionAuthority.Add(new WorkflowRunExecutionAuthority { WorkflowRunId = run.Id, TeamId = run.TeamId, ReceiptJson = JsonSerializer.Serialize(authority, AgentJson.Options), IssuedAt = authority.IssuedAt });
 
         try
         {
@@ -140,6 +148,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             // when EF had already detached the entity for us.
             DetachIfTracked(_db.WorkflowRunRequest.Local, requestId, r => r.Id);
             DetachIfTracked(_db.WorkflowRun.Local, runId, r => r.Id);
+            DetachIfTracked(_db.WorkflowRunExecutionAuthority.Local, runId, r => r.WorkflowRunId);
             // A duplicate event opened a FRESH session above (staged as Added); detach it too, else it would insert
             // orphaned on the caller's next SaveChanges. A PROVIDED session (continuation / inherited fork) isn't
             // tracked-as-Added here, so this no-ops for it; a child rides a null/inherited session (nothing Added).

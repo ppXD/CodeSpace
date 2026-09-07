@@ -73,6 +73,7 @@ public class AgentMcpEndpointFlowTests
     private const string Provider = "Anthropic";
 
     private readonly PostgresFixture _fixture;
+    private readonly Dictionary<Guid, Guid> _operators = new();
 
     public AgentMcpEndpointFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
@@ -1351,7 +1352,7 @@ public class AgentMcpEndpointFlowTests
     /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set.</summary>
     private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model")
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(_operators[teamId], teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools, EnableMcpEndpoint = enableMcp },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
@@ -1371,6 +1372,7 @@ public class AgentMcpEndpointFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
+        _operators.Add(teamId, userId);
         return teamId;
     }
 

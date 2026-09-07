@@ -9,6 +9,7 @@ public class WorkflowActivationConfiguration : IEntityTypeConfiguration<Workflow
     public void Configure(EntityTypeBuilder<WorkflowActivation> builder)
     {
         builder.HasKey(a => a.Id);
+        builder.Property(a => a.AuthorityRevision).ValueGeneratedOnAddOrUpdate();
 
         builder.Property(a => a.ConfigJson).HasColumnName("config_jsonb").HasColumnType("jsonb");
 

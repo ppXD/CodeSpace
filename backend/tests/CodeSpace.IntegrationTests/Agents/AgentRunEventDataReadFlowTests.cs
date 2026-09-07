@@ -108,7 +108,7 @@ public sealed class AgentRunEventDataReadFlowTests
 
     private async Task<Guid> CreateRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         return (await scope.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = "Capture tool telemetry", Harness = "codex-cli" },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
     }

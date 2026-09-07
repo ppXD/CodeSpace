@@ -1,3 +1,5 @@
+using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -33,6 +35,7 @@ namespace CodeSpace.Core.Services.Workflows;
 public sealed class WorkflowService : IWorkflowService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ICurrentUser _author;
     private readonly DefinitionValidator _validator;
     private readonly INodeRegistry _nodeRegistry;
     private readonly Lifecycle.IRunRecordLogger _recordLogger;
@@ -49,20 +52,21 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, WorkflowDefinitionServices definition, WorkflowLaunchServices launch, WorkflowControlServices control, ILogger<WorkflowService> logger)
     {
         _db = db;
-        _validator = validator;
-        _nodeRegistry = nodeRegistry;
-        _recordLogger = recordLogger;
-        _runStarter = runStarter;
-        _snapshotStarter = snapshotStarter;
-        _runDispatcher = runDispatcher;
-        _resumeService = resumeService;
-        _postCommit = postCommit;
-        _agentRunService = agentRunService;
-        _cellSeeder = cellSeeder;
-        _cancellationRegistry = cancellationRegistry;
+        _validator = definition.Validator;
+        _nodeRegistry = definition.Nodes;
+        _author = definition.Author;
+        _recordLogger = launch.Records;
+        _runStarter = launch.Starter;
+        _snapshotStarter = launch.Snapshots;
+        _runDispatcher = launch.Dispatcher;
+        _resumeService = control.Resume;
+        _postCommit = launch.PostCommit;
+        _agentRunService = control.Agents;
+        _cellSeeder = control.Cells;
+        _cancellationRegistry = control.Cancellation;
         _logger = logger;
     }
 
@@ -177,7 +181,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             DefinitionJson = definitionJson,
             DefinitionHash = DefinitionHash.Compute(definition),
             CommittedAt = now,
-            CreatedDate = now
+            CreatedDate = now,
+            CreatedBy = _author.Id ?? Guid.Empty,
         });
 
         foreach (var activation in activations) _db.WorkflowActivation.Add(BuildActivationRow(workflowId, activation));
@@ -227,7 +232,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             DefinitionJson = definitionJson,
             DefinitionHash = DefinitionHash.Compute(definition),
             CommittedAt = nowUtc,
-            CreatedDate = nowUtc
+            CreatedDate = nowUtc,
+            CreatedBy = _author.Id ?? Guid.Empty,
         });
 
         await ReplaceActivationsAsync(workflowId, activations, cancellationToken).ConfigureAwait(false);

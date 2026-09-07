@@ -1,3 +1,4 @@
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -268,7 +269,7 @@ public sealed class NativeRecordDualWriteFlowTests
 
     private async Task<Guid> CreateScriptedRunAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800 },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);

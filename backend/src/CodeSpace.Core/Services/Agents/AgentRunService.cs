@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Authority;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence;
@@ -149,6 +150,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     public const string EventDataHolderKind = "agent_run_event";
 
     private readonly CodeSpaceDbContext _db;
+    private readonly ExecutionAuthorityService _authority;
     private readonly IAdmissionController _admissionController;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IArtifactOffloader _offloader;
@@ -157,14 +159,15 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly ILogger<AgentRunService> _logger;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, Completion.ICompletionContractStore contracts, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null)
+    public AgentRunService(CodeSpaceDbContext db, AgentRunRuntimeServices runtime, ExecutionAuthorityService authority, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null)
     {
         _db = db;
-        _admissionController = admissionController;
-        _runners = runners;
-        _offloader = offloader;
-        _ledger = ledger;
-        _contracts = contracts;
+        _admissionController = runtime.Admission;
+        _runners = runtime.Runners;
+        _offloader = runtime.Offloader;
+        _ledger = runtime.Ledger;
+        _contracts = runtime.Contracts;
+        _authority = authority;
         _logger = logger;
         _completeness = completeness;
     }
@@ -176,9 +179,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // so an over-cap branch routes to its error edge / the map's continue-on-error rather than crashing.
         await _admissionController.EnsureAgentRunAdmittedAsync(teamId, cancellationToken).ConfigureAwait(false);
 
+        var agentRunId = Guid.NewGuid();
+        task = await _authority.AdmitAgentAsync(new AgentAuthorityAdmission(task, teamId, agentRunId, workflowRunId), cancellationToken).ConfigureAwait(false);
         var run = new AgentRun
         {
-            Id = Guid.NewGuid(),
+            Id = agentRunId,
             TeamId = teamId,
             WorkflowRunId = workflowRunId,
             NodeId = nodeId,
@@ -242,6 +247,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var run = await LoadAsync(runId, cancellationToken).ConfigureAwait(false);
 
         EnsureTransition(run, AgentRunStatus.Running);
+        await _authority.EnsureAgentActionAsync(runId, run.TeamId, cancellationToken).ConfigureAwait(false);
 
         run.Status = AgentRunStatus.Running;
         run.StartedAt = DateTimeOffset.UtcNow;

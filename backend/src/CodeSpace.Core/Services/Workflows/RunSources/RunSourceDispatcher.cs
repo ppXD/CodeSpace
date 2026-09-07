@@ -210,7 +210,7 @@ public sealed class RunSourceDispatcher :
             NormalizedPayloadJson = payload.GetRawText(),
             CreatedBy = SystemUsers.SeederId,                   // engine-initiated row; no user identity
             ActivationId = activation.Id,
-            ActivationSnapshotJson = SerializeActivationSnapshot(activation),
+            ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
             ExternalEventId = normalizedEvent.ProviderEventId,
             IdempotencyKey = SynthesiseProviderIdempotencyKey(matcher.TypeKey, normalizedEvent.ProviderEventId, activation.Id),
         }, cancellationToken).ConfigureAwait(false);
@@ -238,17 +238,5 @@ public sealed class RunSourceDispatcher :
     private static string SynthesiseProviderIdempotencyKey(string sourceType, string deliveryId, Guid activationId) =>
         $"{sourceType}:{deliveryId}:{activationId:N}";
 
-    private static string SerializeActivationSnapshot(WorkflowActivation a)
-    {
-        // Capture the matched activation row verbatim. Replay tooling reads this to reproduce
-        // the original match decision even after the activation is edited or deleted.
-        var snapshot = new
-        {
-            id = a.Id,
-            typeKey = a.TypeKey,
-            config = JsonDocument.Parse(a.ConfigJson).RootElement,
-            enabled = a.Enabled,
-        };
-        return JsonSerializer.Serialize(snapshot);
-    }
+
 }

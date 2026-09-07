@@ -45,6 +45,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<WorkflowActivation> WorkflowActivation => Set<WorkflowActivation>();
     public DbSet<TaskRouteSnapshot> TaskRouteSnapshot => Set<TaskRouteSnapshot>();
     public DbSet<WorkflowRun> WorkflowRun => Set<WorkflowRun>();
+    public DbSet<WorkflowRunExecutionAuthority> WorkflowRunExecutionAuthority => Set<WorkflowRunExecutionAuthority>();
     public DbSet<WorkflowRunRequest> WorkflowRunRequest => Set<WorkflowRunRequest>();
     public DbSet<WorkflowRunRecord> WorkflowRunRecord => Set<WorkflowRunRecord>();
     public DbSet<WorkflowRunSensitiveRecordPayload> WorkflowRunSensitiveRecordPayload => Set<WorkflowRunSensitiveRecordPayload>();

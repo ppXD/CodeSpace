@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Agents.Authority;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
@@ -187,16 +188,20 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         // The ledger + chat-bot services are SCOPED (their own DbContext), and the accept loop can serve concurrent
         // connections, so a shared instance would race the (thread-unsafe) DbContext. Mint a FRESH per-connection scope
-        // here and dispose it when this connection's pump ends. Null when governance is off → the handler is
-        // byte-identical. The bot + component registry + waiter registry are the durable-approval collaborators
+        // here and dispose it when this connection's pump ends. Authority is always checked; governance controls
+        // the durable approval collaborators only. The bot + component registry + waiter registry are the durable-approval collaborators
         // (item D2): resolved here so flag-OFF constructs none of them (the approval path is unreachable then anyway).
-        using var connectionScope = _governanceEnabled ? _scope.ServiceProvider.CreateScope() : null;
-        var ledger = connectionScope?.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
-        var bot = connectionScope?.ServiceProvider.GetRequiredService<IChatBotService>();
-        var waiters = connectionScope?.ServiceProvider.GetRequiredService<IToolApprovalWaiterRegistry>();
-        var components = connectionScope?.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>();
+        using var connectionScope = _scope.ServiceProvider.CreateScope();
+        var ledger = _governanceEnabled ? connectionScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>() : null;
+        var bot = _governanceEnabled ? connectionScope.ServiceProvider.GetRequiredService<IChatBotService>() : null;
+        var waiters = _governanceEnabled ? connectionScope.ServiceProvider.GetRequiredService<IToolApprovalWaiterRegistry>() : null;
+        var components = _governanceEnabled ? connectionScope.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>() : null;
 
-        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters);
+        var authorityContext = new McpAuthorityContext(_runId, _teamId, connectionScope.ServiceProvider.GetRequiredService<IAgentAuthorityCallGuard>(), _counters);
+        var authorizedRegistry = new AuthorityCheckedToolRegistry(_registry, authorityContext);
+        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters);
+
+        var handler = new AuthorizedMcpRequestHandler(protocol, authorityContext);
 
         // A request in flight — including a tools/call parked on a human approval, which blocks for minutes while the
         // run emits nothing — RENEWS the run's progress lease, so the no-progress watchdog never kills a run that is

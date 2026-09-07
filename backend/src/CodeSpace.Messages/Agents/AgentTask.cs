@@ -182,6 +182,10 @@ public sealed record AgentTask
     /// </summary>
     public AgentAutonomyLevel Autonomy { get; init; } = AgentAutonomyLevel.Standard;
 
+    /// <summary>Server-issued execution provenance. AgentRunService replaces any caller-supplied copy at admission.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AgentExecutionAuthority? ExecutionAuthority { get; init; }
+
     /// <summary>What the agent is allowed to do — mapped by the harness onto its sandbox flags. Derived from <see cref="Autonomy"/> plus any per-field overrides.</summary>
     public AgentPermissions Permissions { get; init; } = new();
 

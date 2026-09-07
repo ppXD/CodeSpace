@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Authority;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -303,10 +304,17 @@ public class AgentMcpEndpointTests
 
     // The endpoint takes an IServiceScope (it mints per-connection child scopes for the ledger when governance is on).
     // These tests run governance OFF, so the provider is never asked for the ledger — an empty provider suffices.
+    // These unit tests exercise framing with an empty registry. No fake principal authorizes a tool;
+    // real receipt/revocation behavior is exercised by AgentExecutionAuthorityFlowTests against PostgreSQL.
+    private sealed class TransportAuthorityStub : IAgentAuthorityCallGuard
+    {
+        public Task<AuthorityCallFailure?> CheckAsync(Guid runId, Guid teamId, string toolKind, CancellationToken cancellationToken) => Task.FromResult<AuthorityCallFailure?>(new("agent.authority_denied", "transport-test", "No execution principal in this transport fixture.", false));
+    }
+
     private sealed class TrackingScope : IServiceScope
     {
         public bool Disposed { get; private set; }
-        public IServiceProvider ServiceProvider { get; } = new ServiceCollection().BuildServiceProvider();
+        public IServiceProvider ServiceProvider { get; } = new ServiceCollection().AddSingleton<IAgentAuthorityCallGuard, TransportAuthorityStub>().BuildServiceProvider();
         public void Dispose() => Disposed = true;
     }
 

@@ -107,7 +107,7 @@ public sealed class ScheduleTriggerService : IScheduleTriggerService, IScopedDep
             NormalizedPayloadJson = payload,
             CreatedBy = SystemUsers.SeederId,
             ActivationId = activation.Id,
-            ActivationSnapshotJson = SerializeActivationSnapshot(activation),
+            ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
             SourceInstanceId = activation.Id.ToString(),
             ExternalEventId = occurrenceUtc.ToUnixTimeSeconds().ToString(),
             IdempotencyKey = $"{WorkflowRunSourceTypes.ScheduleCron}:{activation.Id:N}:{occurrenceUtc.ToUnixTimeSeconds()}",
@@ -162,15 +162,6 @@ public sealed class ScheduleTriggerService : IScheduleTriggerService, IScopedDep
             return null;
         }
     }
-
-    private static string SerializeActivationSnapshot(WorkflowActivation a) =>
-        JsonSerializer.Serialize(new
-        {
-            id = a.Id,
-            typeKey = a.TypeKey,
-            config = JsonDocument.Parse(a.ConfigJson).RootElement,
-            enabled = a.Enabled,
-        });
 
     private static TimeSpan LookbackWindow()
     {

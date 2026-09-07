@@ -50,7 +50,7 @@ public class DefaultRunnerKindFlowTests
     /// <summary>A run whose task leaves <c>RunnerKind</c> null — the only case the deployment default applies to — on a harness the production registry really has.</summary>
     private async Task<Guid> SeedRunWithNoRunnerKindAsync(Guid teamId)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
 
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "default-runner-kind", Harness = "claude-code", Model = "test-model", TimeoutSeconds = 60 },

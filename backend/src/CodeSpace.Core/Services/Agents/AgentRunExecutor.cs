@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using System.Text;
 using System.Text.Json;
 using System.Net.Sockets;
@@ -191,7 +192,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
-        if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } claimedEpoch) return;
+        long claimedEpoch;
+        try
+        {
+            if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } epoch) return;
+            claimedEpoch = epoch;
+        }
+        catch (AgentAuthorityDeniedException ex)
+        {
+            await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = ex.Message }, run.FenceEpoch, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
         // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
@@ -538,6 +549,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
         if (run.Status != AgentRunStatus.Running) return;   // already landed terminal (completed/recovered) — nothing to re-attach
+
+        using (var authorityScope = _scopeFactory.CreateScope())
+        {
+            try
+            {
+                await authorityScope.ServiceProvider.GetRequiredService<Authority.ExecutionAuthorityService>().EnsureAgentActionAsync(agentRunId, run.TeamId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (AgentAuthorityDeniedException ex)
+            {
+                if (DeserializeHandle(run.RunnerHandleJson) is { } revokedHandle && _runners.All.FirstOrDefault(r => r.Kind == revokedHandle.Kind) is ISandboxDurableRunner revokedRunner)
+                {
+                    try { await revokedRunner.TerminateAsync(revokedHandle, cancellationToken).ConfigureAwait(false); }
+                    catch (Exception termination) when (termination is not OperationCanceledException) { _logger.LogError(termination, "Revoked agent run {RunId} could not terminate its detached process", agentRunId); }
+                }
+                await CompleteAndNotifyAsync(agentRunId, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "authority-denied", Error = ex.Message }, run.FenceEpoch, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
 
         if (DeserializeHandle(run.RunnerHandleJson) is not { } handle) return;   // no durable handle — the reconciler marker-recovers it instead
 

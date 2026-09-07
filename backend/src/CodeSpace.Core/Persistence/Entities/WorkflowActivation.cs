@@ -35,6 +35,9 @@ public class WorkflowActivation : IEntity<Guid>, IAuditable
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>DB-generated identity rotated on every update, independent of application clocks and publisher fields.</summary>
+    public Guid AuthorityRevision { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
