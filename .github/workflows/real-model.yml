@@ -513,7 +513,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate|FullyQualifiedName~RealModelSpecPreview|FullyQualifiedName~RealModelAnswerReview"
+          --filter "FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner|FullyQualifiedName~RealModelDeliveryGate|FullyQualifiedName~RealModelSpecPreview|FullyQualifiedName~RealModelAnswerReview|FullyQualifiedName~RealModelReviseEvidence"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model-wholeloop-aux.trx"
           --results-directory backend/TestResults
@@ -534,6 +534,8 @@ jobs:
             backend/TestResults/real-model-wholeloop-aux.trx \
             RealModelAnswerReview \
             CodeSpace.E2ETests.Workflows.RealModelAnswerReviewDelegationE2ETests.A_background_review_child_uses_the_live_CLI_and_its_parent_grant \
+            RealModelReviseEvidence \
+            CodeSpace.E2ETests.Workflows.RealModelReviseEvidenceE2ETests.A_live_CLI_revision_uses_the_actual_failed_oracle_diagnosis \
             RealModelDeliveryGate \
             RealModelPlanner \
             Live_planner_keeps_executable_content_checks_separate_from_file_obligations_and_the_real_oracle_rejects_wrong_content \
