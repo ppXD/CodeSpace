@@ -226,7 +226,10 @@ public sealed class CompletionAssessmentComposer : ICompletionAssessmentComposer
                 Kind = ContractKinds.Acceptance,
                 AttemptId = attempt.AttemptId,
                 WorkUnit = attempt.WorkUnit,
-                Disposition = VerificationDispositions.Classify(passed, result.AcceptanceDetail, workPresent: !string.IsNullOrEmpty(result.ProducedBranch)),
+                // The SHARED work-present read (AgentWorkPresence), never ProducedBranch alone — see the supervisor
+                // lane's twin in SupervisorGradedReceipts: a patch-only repository pushes nothing, so a branch-only
+                // test graded a publish that had work in hand as a genuine acceptance failure.
+                Disposition = VerificationDispositions.Classify(passed, result.AcceptanceDetail, workPresent: AgentWorkPresence.ShowsWork(result)),
                 Authority = ContractAuthority.ServerPolicy,
                 EvidenceRef = result.AcceptanceEvidenceId,
                 EvaluatorVersion = SupervisorAcceptanceGrader.EvaluatorVersion,

@@ -795,11 +795,8 @@ public static class SupervisorOutcome
         (result.AcceptancePassed != false || Agents.AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, ResultShowsWork(result)))
         && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal) || ResultShowsWork(result));
 
-    /// <summary>Whether the compact shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — the ONE work-present read the evidence fold, the decider's verdict line, and the recitation all share for the infra classification, so the three can never drift on what "work exists" means.</summary>
-    public static bool ResultShowsWork(SupervisorAgentResult result) =>
-        result.ChangedFiles.Count > 0
-        || !string.IsNullOrEmpty(result.ProducedBranch)
-        || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
+    /// <summary>Whether the compact shows produced WORK (git ground truth: changed files or a branch, single- or multi-repo) — the supervisor-side name for <see cref="Agents.AgentWorkPresence.ShowsWork(SupervisorAgentResult)"/>, the ONE definition the evidence fold, the decider's verdict line, the recitation AND both receipt-minting sites share for the infra classification, so none of them can drift on what "work exists" means.</summary>
+    public static bool ResultShowsWork(SupervisorAgentResult result) => Agents.AgentWorkPresence.ShowsWork(result);
 
     /// <summary>
     /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4; B2

@@ -32,6 +32,14 @@ public interface ICompletionTerminalAuthority
 /// </summary>
 public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, IScopedDependency
 {
+    /// <summary>
+    /// The prefix every <see cref="TerminalDecision.HonestFailure"/> arbitration writes to <c>workflow_run.error</c>
+    /// — the authority DECIDING a non-success it can defend, never a crash. Pinned (Rule 8) because the real-model
+    /// gates classify a run <see cref="WorkflowRunStatus.Failure"/> by it: a harness that cannot tell this terminal
+    /// from an engine fault reds the REQUIRED lane for the protocol working exactly as designed.
+    /// </summary>
+    public const string HonestFailureReasonPrefix = "completion-authority: honest failure";
+
     private readonly ICompletionAssessmentComposer _composer;
     private readonly ICompletionContractStore _contracts;
     private readonly ICompletionHandoffProbe _handoff;
@@ -145,7 +153,7 @@ public sealed class CompletionTerminalAuthority : ICompletionTerminalAuthority, 
         return decision switch
         {
             TerminalDecision.CleanSuccess => new TerminalArbitration(WorkflowRunStatus.Success, Reason: null, decision, watermarks),
-            TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"completion-authority: honest failure (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision, watermarks),
+            TerminalDecision.HonestFailure => new TerminalArbitration(WorkflowRunStatus.Failure, $"{HonestFailureReasonPrefix} (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact})", decision, watermarks),
             _ => new TerminalArbitration(WorkflowRunStatus.Suspended, $"completion-authority: {decision} — parked for a human (outcome={composed.Assessment.Outcome}, verification={composed.Assessment.Verification}, artifact={composed.Assessment.Artifact}, delivery={composed.Assessment.Delivery}, execution={composed.Assessment.Execution}, handoffReachable={handoffReachable})", decision, watermarks),
         };
     }

@@ -999,7 +999,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             if (lastAsk is not null && SupervisorOutcome.ReadAskHumanAnswer(lastAsk.OutcomeJson) is null && IsGateCardQuestion(lastAsk.PayloadJson))
                 return (RealModelOutcome.Drove, $"status={run.Status}, no stop — the run PARKED on the gate card (publish-or-park chose park; the accepted work awaits a human instead of evaporating into a vacuous Success)");
 
-            return (Classify(run.Status, drove: false), $"status={run.Status}, no stop decision was recorded this attempt — I3 was not exercised");
+            return (ClassifyRun(run.Status, run.Error, drove: false), $"status={run.Status}, no stop decision was recorded this attempt — I3 was not exercised");
         }
 
         // Check 1: re-validate EVERY persisted stop against the tape as it stood immediately before that row. A
@@ -1078,7 +1078,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             repositoryId.ShouldBe(repoId, "the run's terminal output must echo the SAME repository the branch was actually pushed to — PR-6's Open-PR action has no other way to resolve it for a single-repo run");
         }
 
-        return (Classify(run.Status, drove: true), $"status={run.Status}, stops={stops.Count}, everProducedWork={everProducedWork}, all I3 checks held");
+        return (ClassifyRun(run.Status, run.Error, drove: true), $"status={run.Status}, stops={stops.Count}, everProducedWork={everProducedWork}, all I3 checks held");
     }
 
     [SkippableFact]
@@ -1335,7 +1335,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var trail = string.Join("→", kinds);
 
         var drove = spawned && someAgentFailed && recovered;
-        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, escalated={escalated}, trajectory={trail}");
+        return (ClassifyRun(run.Status, run.Error, drove), $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, escalated={escalated}, trajectory={trail}");
     }
 
     /// <summary>The live brain handled the real conflict APPROPRIATELY iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then took ANY prompt-sanctioned reaction — `resolve` (executed, or gated to the resolve-approval ask_human floor), a terminal `stop` to leave it for a human, or an `ask_human` escalation. Gating on `resolve` ALONE would RED main when the model picks the stop the decider prompt offers co-equally (the resolve MECHANISM is already gated deterministically by SupervisorWholeLoopE2ETests); the sound live-model claim is "engages a real conflict without merging over it". Classified three-way; the note reports which reaction it took so a stop-vs-resolve trajectory is legible.</summary>
@@ -1378,7 +1378,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var trail = string.Join("→", decisions.Select(d => d.DecisionKind));
 
         var drove = spawned && conflicted && handledConflict;
-        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, handled={handledConflict}, trajectory={trail}");
+        return (ClassifyRun(run.Status, run.Error, drove), $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, handled={handledConflict}, trajectory={trail}");
     }
 
     /// <summary>Seed a team channel the supervisor's irreversible-resolve approval card parks on (so a live brain that chooses resolve parks cleanly rather than erroring on a missing surface).</summary>
@@ -1394,7 +1394,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// <summary>
     /// Map a live whole-loop run to the THREE-WAY gate outcome so the blessed wire reds ONLY on a code regression. A
     /// FAULTED run (<see cref="WorkflowRunStatus.Failure"/>) is reported as <see cref="RealModelOutcome.CodeFault"/> — the
-    /// engine could not execute the brain's decisions.
+    /// engine could not execute the brain's decisions — UNLESS the terminal is the completion authority's own DESIGNED
+    /// honest failure, which is a capability miss (<see cref="RealModelGate.ClassifyRunFailure"/> owns that rule for
+    /// every arm; pinned in <c>RealModelFailureVerdictTests</c>).
     ///
     /// <para>NOTE ON WHAT THAT LABEL DOES AND DOES NOT PROVE. This classifier keys on <c>status == Failure</c> and the
     /// gateway-category regex, and nothing else — so it cannot distinguish "a code change broke the engine" from "the
@@ -1410,8 +1412,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     /// parked short of the arc — a capability shortfall, not a code bug) → <see cref="RealModelOutcome.CapabilityMiss"/>,
     /// which is reported but never gates.
     /// </summary>
-    private static RealModelOutcome Classify(WorkflowRunStatus status, bool drove) =>
-        status == WorkflowRunStatus.Failure ? RealModelOutcome.CodeFault
+    internal static RealModelOutcome ClassifyRun(WorkflowRunStatus status, string? runError, bool drove) =>
+        status == WorkflowRunStatus.Failure ? RealModelGate.ClassifyRunFailure(runError)
         : drove ? RealModelOutcome.Drove
         : RealModelOutcome.CapabilityMiss;
 
@@ -1566,7 +1568,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             return (RealModelOutcome.CodeFault, $"{outcomeFault} (status={run.Status}, trajectory={trail})");
 
         var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
-        return (Classify(run.Status, drove), $"status={run.Status}, completionMode={run.CompletionEnforcementMode ?? "(unstamped)"}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
+        return (ClassifyRun(run.Status, run.Error, drove), $"status={run.Status}, completionMode={run.CompletionEnforcementMode ?? "(unstamped)"}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
