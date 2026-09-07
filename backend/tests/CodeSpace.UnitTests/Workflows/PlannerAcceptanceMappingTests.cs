@@ -94,5 +94,86 @@ public sealed class PlannerAcceptanceMappingTests
         Should.Throw<InvalidOperationException>(() => LlmWorkflowPlanner.Deserialize(legacy));
     }
 
+    [Theory]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\"}", "TestsPass", "argv")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[]}", "TestsPass", "argv")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\"}", "ArtifactPresent", "artifactPaths")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"CitationsResolve\",\"artifactPaths\":[]}", "CitationsResolve", "artifactPaths")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}}", "LlmJudge", "artifactPaths")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactSchema\",\"schema\":{\"type\":\"object\"}}", "ArtifactSchema", "artifactPaths")]
+    public void An_oracle_chosen_with_no_payload_costs_that_subtask_its_oracle_and_never_the_whole_plan(string acceptance, string kind, string payloadName)
+    {
+        // The regression this pins: one subtask skipping one payload FAILED the planner node, so a plan-map launch
+        // died at planning over a model-quality miss. The plan is kept; the item is graded by nothing, and says so.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply(acceptance));
+
+        plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "item", "sibling" }, "the sibling subtasks are not evidence about the one bad payload");
+        plan.Subtasks[0].Acceptance.ShouldBeNull("an oracle with no payload is no oracle — never a guessed or repaired one");
+        plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "true" }, "a well-formed sibling contract survives untouched");
+
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("item", "an unnamed drop is indistinguishable from an acceptance the planner never wrote");
+        drop.Kind.ShouldBe(Enum.Parse<BenchmarkGradingKind>(kind));
+        drop.Reason.ShouldContain(payloadName);
+    }
+
+    [Fact]
+    public void A_clean_plan_carries_no_drop_record_at_all()
+    {
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}"));
+
+        plan.DroppedAcceptances.ShouldBeNull("null-omitted keeps a clean plan's bytes identical to before");
+        JsonSerializer.SerializeToElement(plan, AgentJson.Options).TryGetProperty("droppedAcceptances", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_dropped_acceptance_reaches_the_node_output_as_its_own_readable_fact()
+    {
+        // The node stamps this as a TOP-LEVEL output key, not only inside `json`, because a large plan's `json` is
+        // offloaded to the artifact store — a defect readable only there disappears exactly when the plan is big.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"TestsPass\"}"));
+
+        var drop = JsonSerializer.SerializeToElement(plan, AgentJson.Options).GetProperty("droppedAcceptances")[0];
+
+        drop.GetProperty("subtaskId").GetString().ShouldBe("item");
+        drop.GetProperty("kind").GetString().ShouldBe("TestsPass", "the wire kind is the same vocabulary the acceptance contract uses");
+        drop.GetProperty("reason").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
+    [Theory]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\"}", true)]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[]}", true)]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}", false)]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"report.md\"]}", false)]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"UnknownOracle\"}", false)]
+    public void The_unbound_payload_earns_a_reask_while_a_fatal_violation_stays_the_validators_business(string acceptance, bool advised)
+    {
+        // The two severities are asked separately: the ADVISOR is what makes the provider re-ask (#1837 behaviour is
+        // kept for exactly this defect), and only the VALIDATOR can turn a reply into a Malformed fault.
+        var reply = Reply(acceptance);
+
+        LlmWorkflowPlanner.AdviseModelResponse(reply).Count.ShouldBe(advised ? 1 : 0);
+
+        if (advised) LlmWorkflowPlanner.ValidateModelResponse(reply).ShouldBeEmpty("a droppable defect must never be the reason a plan dies");
+    }
+
+    [Fact]
+    public void The_reask_advice_names_the_subtask_and_both_ways_out()
+    {
+        var advice = LlmWorkflowPlanner.AdviseModelResponse(Reply("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}}")).ShouldHaveSingleItem();
+
+        advice.ShouldContain("'item'", customMessage: "\"somewhere in your plan\" is not a correction a model can act on");
+        advice.ShouldContain("LlmJudge");
+        advice.ShouldContain("artifactPaths");
+        advice.ShouldContain("omit", customMessage: "omitting acceptance is the honest alternative to inventing a payload");
+    }
+
     private static PlannedSubtask Parse(JsonElement acceptance) => LlmWorkflowPlanner.Deserialize(JsonSerializer.SerializeToElement(new { goal = "verify", subtasks = new[] { new { id = "item", title = "Item", instruction = "Do the work", acceptance } } })).Subtasks.Single();
+
+    /// <summary>A two-subtask reply: the first carries <paramref name="acceptance"/> verbatim, the second a well-formed contract — so a test can tell "this item degraded" apart from "the plan collapsed".</summary>
+    private static JsonElement Reply(string acceptance) => JsonDocument.Parse(
+        "{\"goal\":\"verify\",\"subtasks\":["
+      + "{\"id\":\"item\",\"title\":\"Item\",\"instruction\":\"Do the work\",\"acceptance\":" + acceptance + "},"
+      + "{\"id\":\"sibling\",\"title\":\"Sibling\",\"instruction\":\"Do the other work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}}"
+      + "]}").RootElement;
 }

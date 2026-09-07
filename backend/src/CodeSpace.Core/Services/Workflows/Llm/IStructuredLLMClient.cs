@@ -40,6 +40,18 @@ public sealed record StructuredLLMCompletionRequest
     [JsonIgnore]
     public Func<JsonElement, IReadOnlyList<string>>? ResponseValidator { get; init; }
 
+    /// <summary>
+    /// Consumer-contract defects the model gets the SAME bounded re-ask to fix, but which must not fail the call when
+    /// it doesn't — the reply is returned as-is and the consumer degrades. Reported only when
+    /// <see cref="ResponseValidator"/> found nothing fatal; like it, this callback never rewrites output.
+    ///
+    /// <para>The two severities are separate because a model-QUALITY miss and a broken contract are different faults.
+    /// Folding them together means one skipped optional field kills work the rest of the reply was fine for, which is
+    /// how a planner reply missing one acceptance payload took a whole live plan down with it.</para>
+    /// </summary>
+    [JsonIgnore]
+    public Func<JsonElement, IReadOnlyList<string>>? ResponseAdvisor { get; init; }
+
     /// <summary>The output-token cap. NULL (the default) ⇒ "let the model decide its ceiling": the OpenAI wire OMITS the param (the model runs to its context limit); the Anthropic wire — where <c>max_tokens</c> is REQUIRED — sends <see cref="LlmModelCapabilities.DefaultMaxOutputTokens"/>. A value pins an explicit cap (control-plane callers scope their output this way). The OpenAI wire renames it to <c>max_completion_tokens</c> for a reasoning model (see <see cref="LlmModelCapabilities.UsesMaxCompletionTokens"/>).</summary>
     public int? MaxOutputTokens { get; init; }
 

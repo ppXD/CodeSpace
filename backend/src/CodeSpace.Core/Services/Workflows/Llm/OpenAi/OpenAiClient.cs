@@ -152,12 +152,14 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
         // Get the JSON via the progressive path (with a re-ask when it produces NO parseable JSON at all), then VALIDATE
         // it against the requested schema — a recovered object that is missing a required field / has a wrong-typed value
         // / an invalid enum is NOT success. On a validation miss, RE-ASK ONCE with the exact violations named, then
-        // re-validate; a second miss is a typed Malformed fault.
+        // re-validate; a second miss is a typed Malformed fault — unless the only thing left is ADVISORY, which earns
+        // the re-ask but never the fault.
         var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
         var errors = StructuredResponseValidation.Validate(first.Json, request);
-        if (errors.Count == 0) return PhysicalLlmCallContext.Aggregate(first, candidateOnly: true);
+        var advisories = errors.Count == 0 ? StructuredResponseValidation.Advise(first.Json, request) : Array.Empty<string>();
+        if (errors.Count == 0 && advisories.Count == 0) return PhysicalLlmCallContext.Aggregate(first, candidateOnly: true);
 
-        var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
+        var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, [.. errors, .. advisories], first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = StructuredResponseValidation.Validate(second.Json, request);
         if (errors2.Count == 0) return PhysicalLlmCallContext.Aggregate(second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) }, candidateOnly: true);   // total billed = the first (invalid) attempt + the re-ask

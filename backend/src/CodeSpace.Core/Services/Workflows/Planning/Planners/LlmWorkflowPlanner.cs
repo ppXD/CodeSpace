@@ -86,6 +86,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         UserPrompt = BuildUserPrompt(request, catalog, lessons),
         JsonSchema = PlannerSchema.ResponseSchema,
         ResponseValidator = ValidateModelResponse,
+        ResponseAdvisor = AdviseModelResponse,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
     };
@@ -95,12 +96,31 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     {
         try
         {
-            var plan = PlannerAcceptanceDraft.ReadResponse(response);
+            var plan = PlannerAcceptanceDraft.ReadResponse(response, out _);
             return plan is null || plan.Subtasks.Count == 0 ? ["The planner response requires at least one subtask."] : [];
         }
         catch (JsonException ex)
         {
             return [$"Planner response contract: {ex.Message}"];
+        }
+    }
+
+    /// <summary>
+    /// The one acceptance defect the plan outlives: an oracle kind chosen with no payload authored for it. It rides
+    /// the SAME bounded re-ask — the model is told exactly which subtask to equip — but a reply that still skips it
+    /// costs that subtask its oracle, not the run its plan. Naming the subtask matters: "somewhere in your plan" is
+    /// not a correction a model can act on.
+    /// </summary>
+    internal static IReadOnlyList<string> AdviseModelResponse(JsonElement response)
+    {
+        try
+        {
+            PlannerAcceptanceDraft.ReadResponse(response, out var dropped);
+            return dropped.Select(drop => $"Subtask '{drop.SubtaskId}' chose acceptance kind {drop.Kind} but authored no payload for it. {drop.Reason} Author that payload, or omit the subtask's acceptance entirely.").ToArray();
+        }
+        catch (JsonException)
+        {
+            return [];   // a fatal contract violation is ValidateModelResponse's to report
         }
     }
 
@@ -151,10 +171,11 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     internal static PlannedWorkflow Deserialize(JsonElement json)
     {
         PlannedWorkflow? plan;
+        IReadOnlyList<DroppedAcceptance> dropped;
 
         try
         {
-            plan = PlannerAcceptanceDraft.ReadResponse(json);
+            plan = PlannerAcceptanceDraft.ReadResponse(json, out dropped);
         }
         catch (JsonException ex)
         {
@@ -169,7 +190,9 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         if (plan == null || plan.Subtasks.Count == 0)
             throw new InvalidOperationException("The planner returned an empty plan (no subtasks). The response did not conform to the planner schema.");
 
-        return plan;
+        // An acceptance the re-ask could not get authored is carried as a NAMED defect on the plan, not thrown away
+        // silently and not thrown at all: the subtask keeps its work with no oracle (graded unverified downstream).
+        return dropped.Count == 0 ? plan : plan with { DroppedAcceptances = dropped };
     }
 
     // Internal (not private): the planner-cassette drift detector reconstructs the EXACT run-time request from
