@@ -513,7 +513,11 @@ jobs:
             RealModelPlanner \
             RealModelPlannerRouteSnapshot \
             RealModelSession \
-            RealModelSpecPreview
+            RealModelSpecPreview \
+            With_no_repository_to_ground_on_the_live_compiler_refuses_to_invent_an_acceptance_check \
+            A_live_compile_produces_a_suggestion_an_operator_could_actually_use \
+            A_live_source_review_recognizes_an_explicit_repo_free_command_without_claiming_execution \
+            A_live_source_review_does_not_treat_a_quoted_rejected_command_as_user_authorization
 
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
