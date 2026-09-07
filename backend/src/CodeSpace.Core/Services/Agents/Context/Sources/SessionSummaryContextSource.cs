@@ -36,9 +36,13 @@ public sealed class SessionSummaryContextSource : IContextSource, IScopedDepende
             .Select(s => new { s.Summary, s.SummaryStaleSinceTurn })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (row is null || string.IsNullOrWhiteSpace(row.Summary)) return AgentContextResult.Empty;
+        if (row is null || (string.IsNullOrWhiteSpace(row.Summary) && row.SummaryStaleSinceTurn is null)) return AgentContextResult.Empty;
 
-        var text = $"# Distilled summary of earlier work in this thread\n{row.Summary.Trim()}";
+        // A known coverage gap (SummaryStaleSinceTurn set) is context even with NO distilled prose yet — a first-ever
+        // distillation failure must not read as a clean "nothing here" (that would hide the gap from a puller too).
+        var text = string.IsNullOrWhiteSpace(row.Summary)
+            ? "# Distilled summary of earlier work in this thread"
+            : $"# Distilled summary of earlier work in this thread\n{row.Summary.Trim()}";
 
         if (row.SummaryStaleSinceTurn is { } staleSince)
             text += $"\n\n(Note: turns from {staleSince} onward have not yet been folded into this summary — it may be incomplete.)";

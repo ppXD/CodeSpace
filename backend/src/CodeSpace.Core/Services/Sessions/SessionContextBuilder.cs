@@ -79,21 +79,34 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             .FirstOrDefaultAsync(s => s.Id == sessionId && s.TeamId == teamId, cancellationToken).ConfigureAwait(false);
         var summary = session?.Summary;
 
+        // Older, FOLDED turns can still carry an unresolved contract even once their prose has scrolled out of the
+        // window above — read from the durable source binding (never re-derived from the summary's own prose), so a
+        // persisted failed verification or unknown delivery is never silently lost to compaction.
+        var carriedForward = await BuildCarriedForwardContractsAsync(session?.SummarySourceBindingJson, teamId, cancellationToken).ConfigureAwait(false);
+
         var sb = new StringBuilder();
         sb.AppendLine("# Earlier turns in this work thread");
         sb.AppendLine("You are continuing an existing thread. Build on the work below — do not redo it.");
 
-        if (!string.IsNullOrWhiteSpace(summary))
+        if (!string.IsNullOrWhiteSpace(summary) || session?.SummaryStaleSinceTurn is not null)
         {
             sb.AppendLine();
             sb.AppendLine("## Summary of earlier work (older turns, distilled)");
-            sb.AppendLine(summary.Trim());
 
-            // Fail-open distillation (SessionSummarizer) leaves Summary UNCHANGED on a model/LLM error — never silent
-            // here, since a stale summary read as current could mislead the continuing agent about what already
-            // happened before the gap turn.
+            if (!string.IsNullOrWhiteSpace(summary)) sb.AppendLine(summary!.Trim());
+
+            // Fail-open distillation (SessionSummarizer) leaves Summary UNCHANGED — or, on a FIRST-EVER failure,
+            // leaves it null — on a model/LLM error. Never silent here (even with no prior prose to prepend), since
+            // an unflagged gap could mislead the continuing agent about what already happened before the gap turn.
             if (session?.SummaryStaleSinceTurn is { } staleSince)
                 sb.AppendLine($"(Note: turns from {staleSince} onward have not yet been folded into this summary — it may be incomplete.)");
+        }
+
+        if (carriedForward.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Unresolved contracts carried forward from earlier (summarized) turns");
+            foreach (var line in carriedForward) sb.AppendLine(line);
         }
 
         foreach (var row in Enumerable.Reverse(window))
@@ -113,6 +126,41 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// Every durably-bound older turn whose LAST-RECORDED assessment was unresolved, rendered as one line each —
+    /// reads the assessment by its EXACT bound id (the one the fold actually saw when it was folded), never
+    /// "whatever is latest now" for that run (a source change behind the watermark is <c>SessionSummarizer</c>'s job
+    /// to detect and refresh, not this digest's). Bounded to the (typically tiny) set of bound turns that ever had
+    /// an assessment.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> BuildCarriedForwardContractsAsync(string? bindingJson, Guid teamId, CancellationToken cancellationToken)
+    {
+        var bindings = SessionSummarySourceBindings.Parse(bindingJson).Where(b => b.AssessmentId is not null).OrderBy(b => b.Turn).ToList();
+
+        if (bindings.Count == 0) return [];
+
+        var assessmentIds = bindings.Select(b => b.AssessmentId!.Value).ToList();
+
+        var assessmentsById = (await _db.CompletionAssessmentRecord.AsNoTracking()
+            .Where(a => a.TeamId == teamId && assessmentIds.Contains(a.Id))
+            .Select(a => new { a.Id, a.AssessmentJson, a.WouldBeTerminalDecision })
+            .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToDictionary(a => a.Id, a => a);
+
+        var lines = new List<string>();
+
+        foreach (var binding in bindings)
+        {
+            if (!assessmentsById.TryGetValue(binding.AssessmentId!.Value, out var recorded)) continue;
+
+            if (RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is not { } completion) continue;
+
+            lines.Add($"Turn {binding.Turn} (run {binding.EffectiveRunId}, assessment {binding.AssessmentId}): {completion}");
+        }
+
+        return lines;
     }
 
     /// <summary>The turn's contract verdict in ONE legible line — dimensions that are fine are omitted, so a clean turn reads clean and an unclean one names exactly what is still owed. Null (no line) when everything is settled positive; a malformed record renders nothing rather than a wrong claim.</summary>

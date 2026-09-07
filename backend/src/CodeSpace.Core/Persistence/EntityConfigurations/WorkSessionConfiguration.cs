@@ -21,6 +21,7 @@ public class WorkSessionConfiguration : IEntityTypeConfiguration<WorkSession>
         builder.Property(s => s.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(s => s.Title).HasMaxLength(WorkSession.TitleMaxLength);
         builder.Property(s => s.ScopeJson).HasColumnName("scope_jsonb").HasColumnType("jsonb");
+        builder.Property(s => s.SummarySourceBindingJson).HasColumnName("summary_source_binding_jsonb").HasColumnType("jsonb");
 
         // The MRU sort key carries a store DEFAULT now() (migration 0089) — so any writer that doesn't set it (the
         // service open path does) still lands a real instant, never 0001-01-01. EF sends an explicit value when set.
