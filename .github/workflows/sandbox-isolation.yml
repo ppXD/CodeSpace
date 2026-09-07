@@ -153,6 +153,11 @@ jobs:
               cases = [r for r in results if r.get('testName', '').endswith('GitWorkspaceIsolationE2ETests.' + method)]
               assert len(cases) == 1 and cases[0].get('outcome') == 'Passed', f'{method}: the actual Git confinement case must pass, skips are not evidence'
           print('All 5 Git workspace confinement cases passed.')
+          survival = [r for r in results if 'GitWorkspaceIsolationE2ETests.A_command_survives_its_managed_launch_thread_while_the_worker_process_is_alive(' in r.get('testName', '')]
+          assert len(survival) == 2 and all(r.get('outcome') == 'Passed' for r in survival), 'Both command modes must survive managed launch thread retirement'
+          death = [r for r in results if r.get('testName', '').endswith('GitWorkspaceIsolationE2ETests.Killing_the_worker_process_still_terminates_its_confined_command')]
+          assert len(death) == 1 and death[0].get('outcome') == 'Passed', 'Worker process death must still terminate the real sandbox'
+          print('All 3 worker/thread lifetime cases passed.')
           PY
 
       - name: Upload test results
