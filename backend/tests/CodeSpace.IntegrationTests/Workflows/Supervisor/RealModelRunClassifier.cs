@@ -49,15 +49,18 @@ public static class RealModelRunClassifier
     /// A harness's own transport ANNOUNCEMENT and the HTTP status it names: Claude Code's <c>result</c>-line
     /// <c>is_error</c> text (<c>"API Error: 401 Authentication Error"</c>, <c>"API Error (429)"</c>,
     /// <c>"API Error: Request rejected (429) AccountQuotaExceeded"</c> — pinned in <c>ClaudeCodeHarnessTests</c>) and
-    /// Codex's <c>turn.failed</c> <c>error.message</c> (<c>"unexpected status 401 Unauthorized"</c> — pinned in
-    /// <c>CodexHarnessTests</c>). The PHRASE is the anchor and the status must sit within its slot — same line, at most
-    /// 40 non-digit characters after it — so prose that merely mentions a status matches nothing, while an announcement
-    /// still matches after a stderr tail is folded in front of it. A three-digit token alone is never enough. Matched
-    /// case-SENSITIVELY, in each harness's own casing: an agent writing about "the api error path" is discussing one,
-    /// not emitting one.
+    /// Codex's <c>turn.failed</c> <c>error.message</c> in either of the two shapes Codex itself emits: a single failed
+    /// call (<c>"unexpected status 401 Unauthorized"</c> — pinned in <c>CodexHarnessTests</c>) or its OWN retry loop
+    /// giving up (<c>"exceeded retry limit, last status: 429 Too Many Requests"</c> — the exact text real-model
+    /// stop-hook lane runs 34135877074 and 34136267088 captured on a genuine gateway rate-limit that this regex used
+    /// to miss, reddening the gate on an outage instead of skipping it). The PHRASE is the anchor and the
+    /// status must sit within its slot — same line, at most 40 non-digit characters after it — so prose that merely
+    /// mentions a status matches nothing, while an announcement still matches after a stderr tail is folded in front
+    /// of it. A three-digit token alone is never enough. Matched case-SENSITIVELY, in each harness's own casing: an
+    /// agent writing about "the api error path" is discussing one, not emitting one.
     /// </summary>
     private static readonly Regex AnnouncedStatusRegex = new(
-        @"(?:API Error|unexpected status)\b[^0-9\n]{0,40}?(?<status>[1-5][0-9]{2})\b",
+        @"(?:API Error|unexpected status|exceeded retry limit)\b[^0-9\n]{0,40}?(?<status>[1-5][0-9]{2})\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
