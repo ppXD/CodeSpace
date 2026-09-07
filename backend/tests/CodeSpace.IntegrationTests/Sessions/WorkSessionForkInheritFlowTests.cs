@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -22,7 +23,7 @@ namespace CodeSpace.IntegrationTests.Sessions;
 /// NULL turn index (Correction-1 — a derived run attaches to the thread via ParentRunId, consuming no new turn), so
 /// replaying a turn keeps it ON the thread instead of orphaning it. Before S5 a fork dropped the session
 /// (<c>session: null</c>). Proven through the REAL <see cref="IWorkflowService.ReplayRunAsync"/> over both fork branches
-/// (snapshot inline-def + authored re-pinned-version). A fork of a session-LESS parent (legacy only) now opens its OWN
+/// (snapshot inline-def + authored re-pinned-version). A fork of an authorized session-LESS parent now opens its OWN
 /// session at the generic staging seam. The fork is staged but not executed (inheritance established at staging — AutoExecute paused).
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -38,7 +39,7 @@ public class WorkSessionForkInheritFlowTests
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var sessionId = await SeedSessionAsync(teamId);
-        var originalRunId = await SeedSnapshotRunAsync(teamId, sessionId, turnIndex: 1);
+        var originalRunId = await SeedSnapshotRunAsync(teamId, userId, sessionId, turnIndex: 1);
 
         using var pause = PauseAutoExecute();
         var replayRunId = await ReplayAsync(originalRunId, teamId, userId);
@@ -52,11 +53,11 @@ public class WorkSessionForkInheritFlowTests
     [Fact]
     public async Task Replay_of_a_session_less_run_opens_its_own_session()
     {
-        // A session-less parent (only LEGACY pre-session runs) has no thread to inherit, so the generic staging seam opens
+        // An authorized session-less parent (for example, after authority backfill) has no thread to inherit, so the generic staging seam opens
         // the fork its OWN session — every run reaches the Journal, none stays session-less. (A session-BACKED parent is
         // still inherited with no new turn — the tests above.)
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var originalRunId = await SeedSnapshotRunAsync(teamId, sessionId: null, turnIndex: null);
+        var originalRunId = await SeedSnapshotRunAsync(teamId, userId, sessionId: null, turnIndex: null);
 
         using var pause = PauseAutoExecute();
         var replayRunId = await ReplayAsync(originalRunId, teamId, userId);
@@ -75,7 +76,7 @@ public class WorkSessionForkInheritFlowTests
         var sessionId = await SeedSessionAsync(teamId);
 
         var workflowId = await CreateEchoWorkflowAsync(teamId, userId);
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);   // completes the original (stamps ReleaseHashAtRun the authored fork re-pins)
         await BindRunToSessionAsync(originalRunId, sessionId, turnIndex: 1);   // make the authored run a session turn
 
@@ -119,32 +120,15 @@ public class WorkSessionForkInheritFlowTests
     }
 
     /// <summary>Seed a completed SNAPSHOT run (WorkflowId=null, inline frozen def) — optionally bound to a session as a turn — the shape a launched task leaves and a replay forks from.</summary>
-    private async Task<Guid> SeedSnapshotRunAsync(Guid teamId, Guid? sessionId, int? turnIndex)
+    private async Task<Guid> SeedSnapshotRunAsync(Guid teamId, Guid userId, Guid? sessionId, int? turnIndex)
     {
-        using var scope = _fixture.BeginScope();
+        using var pause = PauseAutoExecute();
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(WorkflowsTestSeed.MinimalDefinition(), teamId, userId, "{}", [], "single-agent", null, CancellationToken.None);
         var db = scope.Resolve<CodeSpaceDbContext>();
-
-        var requestId = Guid.NewGuid();
-        var runId = Guid.NewGuid();
-        var now = DateTimeOffset.UtcNow;
-
-        db.WorkflowRunRequest.Add(new WorkflowRunRequest
-        {
-            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
-            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed,
-            ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
-        });
-        db.WorkflowRun.Add(new WorkflowRun
-        {
-            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
-            Status = WorkflowRunStatus.Success, ProjectionKind = "single-agent",
-            DefinitionSnapshotJson = JsonSerializer.Serialize(WorkflowsTestSeed.MinimalDefinition()),
-            DefinitionSnapshotHash = "test-hash",
-            SessionId = sessionId, SessionTurnIndex = turnIndex,
-            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
-        });
-
-        await db.SaveChangesAsync();
+        (await db.WorkflowRunExecutionAuthority.CountAsync(r => r.WorkflowRunId == runId && r.TeamId == teamId)).ShouldBe(1,
+            "session inheritance is tested on an admitted source; an unverifiable legacy grant must not be forged by a fixture");
+        await db.WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(set => set.SetProperty(r => r.Status, WorkflowRunStatus.Success).SetProperty(r => r.SessionId, sessionId).SetProperty(r => r.SessionTurnIndex, turnIndex));
         return runId;
     }
 

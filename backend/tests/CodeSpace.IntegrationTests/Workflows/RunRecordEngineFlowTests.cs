@@ -205,7 +205,7 @@ public class RunRecordEngineFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, WorkflowsTestSeed.MinimalDefinition());
 
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         await RunEngineAsync(originalRunId);
 
         var originalRecords = await ReadRecordsAsync(originalRunId);

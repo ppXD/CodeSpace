@@ -153,7 +153,7 @@ public class RunStarterFlowTests
         var workflowId = await CreateWorkflowAsync(teamId, userId);
 
         // First, an "original" run we'll replay from.
-        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
         Guid originalRequestId;
         using (var scope = _fixture.BeginScope())
         {

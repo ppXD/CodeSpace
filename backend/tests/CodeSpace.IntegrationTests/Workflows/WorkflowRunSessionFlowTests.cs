@@ -1,5 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Authority;
 using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Workflows.RunSources;
@@ -63,6 +65,15 @@ public class WorkflowRunSessionFlowTests
         // webhook / child alike: the seam opens a fresh Workflow-kind session, so none of them can be session-less.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, WorkflowsTestSeed.MinimalDefinition());
+        WorkflowActivation activation;
+        using (var publisher = _fixture.BeginScopeAs(userId, teamId))
+        {
+            var publisherDb = publisher.Resolve<CodeSpaceDbContext>();
+            activation = new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = workflowId, TypeKey = "trigger.schedule", ConfigJson = "{\"cron\":\"0 * * * *\"}", Enabled = true };
+            publisherDb.WorkflowActivation.Add(activation);
+            await publisherDb.SaveChangesAsync();
+            activation = await publisherDb.WorkflowActivation.AsNoTracking().Include(a => a.Workflow).SingleAsync(a => a.Id == activation.Id);
+        }
 
         Guid runId;
         using (var scope = _fixture.BeginScope())
@@ -72,6 +83,8 @@ public class WorkflowRunSessionFlowTests
                 WorkflowId = workflowId,
                 WorkflowVersion = 1,
                 SourceType = WorkflowRunSourceTypes.ScheduleCron,
+                ActivationId = activation.Id,
+                ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
                 ActorType = WorkflowRunActorTypes.System,
                 ActorId = SystemUsers.SeederId,
                 NormalizedPayloadJson = "{}",
@@ -139,6 +152,10 @@ public class WorkflowRunSessionFlowTests
         // session-less, as sub-workflow dispatch supplies none.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, WorkflowsTestSeed.MinimalDefinition());
+        var parentId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, teamId);
+        int sessionsBefore;
+        using (var before = _fixture.BeginScope())
+            sessionsBefore = await before.Resolve<CodeSpaceDbContext>().WorkSession.CountAsync(s => s.TeamId == teamId);
 
         Guid runId;
         using (var scope = _fixture.BeginScope())
@@ -148,8 +165,9 @@ public class WorkflowRunSessionFlowTests
                 WorkflowId = workflowId,
                 WorkflowVersion = 1,
                 SourceType = WorkflowRunSourceTypes.ChildWorkflow,
+                ParentRunId = parentId,
                 ActorType = WorkflowRunActorTypes.System,
-                ActorId = userId,
+                ActorId = SystemUsers.SeederId,
                 NormalizedPayloadJson = "{}",
                 CreatedBy = userId,
             }, CancellationToken.None);
@@ -160,7 +178,7 @@ public class WorkflowRunSessionFlowTests
         (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).SessionId
             .ShouldBeNull("a nested child run rides the parent's session (here none) — the seam must not mint it a standalone session that would list as an orphan");
         (await db.WorkSession.AsNoTracking().CountAsync(s => s.TeamId == teamId))
-            .ShouldBe(0, "no session row was created for the child run");
+            .ShouldBe(sessionsBefore, "the admitted parent has its session; no additional session row was created for the child run");
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)
