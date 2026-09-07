@@ -38,6 +38,7 @@ public class RunQualificationRoundHandlerTests
         runner.Selection!.Harness.ShouldBe("claude-code");
         runner.Selection.ModelCredentialId.ShouldBe(credentialId);
         response.Granted.ShouldBe(PerformanceQualification.Sealed);
+        response.ExecutionPath.ShouldBe(BenchmarkExecutionPath.TaskLaunch);
         response.ReceiptId.ShouldBe(runner.ReceiptId);
     }
 

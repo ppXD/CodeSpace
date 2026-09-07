@@ -28,6 +28,7 @@ public sealed class RunQualificationRoundCommandHandler : IRequestHandler<RunQua
         return new RunQualificationRoundResponse
         {
             Granted = outcome.Granted,
+            ExecutionPath = outcome.ExecutionPath,
             SolveRateLowerBound = outcome.SolveRateLowerBound,
             EvaluatorHealth = outcome.Score.EvaluatorHealth,
             Solved = outcome.Score.Solved,

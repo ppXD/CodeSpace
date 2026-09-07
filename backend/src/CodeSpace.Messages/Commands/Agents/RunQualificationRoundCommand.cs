@@ -41,6 +41,7 @@ public sealed record RunQualificationRoundCommand : ICommand<RunQualificationRou
 public sealed record RunQualificationRoundResponse
 {
     public required PerformanceQualification Granted { get; init; }
+    public required BenchmarkExecutionPath ExecutionPath { get; init; }
     public required double SolveRateLowerBound { get; init; }
     public required double EvaluatorHealth { get; init; }
     public required int Solved { get; init; }
