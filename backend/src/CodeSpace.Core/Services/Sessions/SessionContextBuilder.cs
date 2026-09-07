@@ -133,21 +133,30 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
     }
 
     /// <summary>
-    /// Every durably-bound older turn whose LAST-RECORDED assessment was unresolved, rendered as one line each —
-    /// reads the assessment by its EXACT bound id (the one the fold actually saw when it was folded), never
+    /// Every durably-bound older turn whose LAST-RECORDED assessment was unresolved, rendered as one line each. For
+    /// a turn bound to a specific assessment, reads it by that EXACT id (the one the fold actually saw), never
     /// "whatever is latest now" for that run (a source change behind the watermark is <c>SessionSummarizer</c>'s job
-    /// to detect and refresh, not this digest's). Because that refresh is fail-open (a drift may not have been
-    /// picked up yet), a line whose run now has a NEWER recorded assessment than the bound one says so — the bound
-    /// verdict is still what renders, flagged as possibly superseded rather than presented as current. Bounded to
-    /// the (typically tiny) set of bound turns that ever had an assessment.
+    /// to detect and refresh, not this digest's) — except that refresh is fail-open (a drift may not have been
+    /// picked up yet), so a line whose run now has a NEWER recorded assessment than the bound one says so; the bound
+    /// verdict still renders, flagged as possibly superseded rather than presented as current. A turn folded while
+    /// its run had NO assessment yet (bound with a null id) is never a permanent blind spot: if the run has SINCE
+    /// been assessed, that current latest assessment renders instead, flagged as recorded after the fold —
+    /// <see cref="SessionSummarizer"/>'s own dirty-check (a null-to-non-null <c>AssessmentId</c>) self-heals the
+    /// binding too, but only starting the next launch that runs the summarizer; this covers the launch(es) in
+    /// between. A turn with no assessment either at fold time or now still renders nothing. Bounded to the
+    /// (typically tiny) set of bound turns that ever had, or now have, an assessment.
     /// </summary>
     private async Task<IReadOnlyList<string>> BuildCarriedForwardContractsAsync(string? bindingJson, Guid teamId, CancellationToken cancellationToken)
     {
-        var bindings = SessionSummarySourceBindings.Parse(bindingJson).Where(b => b.AssessmentId is not null).OrderBy(b => b.Turn).ToList();
+        var bindings = SessionSummarySourceBindings.Parse(bindingJson).OrderBy(b => b.Turn).ToList();
 
         if (bindings.Count == 0) return [];
 
-        var assessmentIds = bindings.Select(b => b.AssessmentId!.Value).ToList();
+        var latestAssessmentIdByRunId = await LoadLatestAssessmentIdsAsync(teamId, bindings.Select(b => b.EffectiveRunId).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
+
+        var assessmentIds = bindings.Where(b => b.AssessmentId is not null).Select(b => b.AssessmentId!.Value)
+            .Concat(latestAssessmentIdByRunId.Values)
+            .Distinct().ToList();
 
         var assessmentsById = (await _db.CompletionAssessmentRecord.AsNoTracking()
             .Where(a => a.TeamId == teamId && assessmentIds.Contains(a.Id))
@@ -155,21 +164,26 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
             .ToListAsync(cancellationToken).ConfigureAwait(false))
             .ToDictionary(a => a.Id, a => a);
 
-        var latestAssessmentIdByRunId = await LoadLatestAssessmentIdsAsync(teamId, bindings.Select(b => b.EffectiveRunId).Distinct().ToList(), cancellationToken).ConfigureAwait(false);
-
         var lines = new List<string>();
 
         foreach (var binding in bindings)
         {
-            if (!assessmentsById.TryGetValue(binding.AssessmentId!.Value, out var recorded)) continue;
+            var hasLatest = latestAssessmentIdByRunId.TryGetValue(binding.EffectiveRunId, out var latestId);
+
+            if (binding.AssessmentId is null && !hasLatest) continue;   // never assessed at fold time, and still nothing recorded now
+
+            var renderedId = binding.AssessmentId ?? latestId;
+
+            if (!assessmentsById.TryGetValue(renderedId, out var recorded)) continue;
 
             if (RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is not { } completion) continue;
 
-            var supersededNote = latestAssessmentIdByRunId.TryGetValue(binding.EffectiveRunId, out var latestId) && latestId != binding.AssessmentId!.Value
-                ? " [a NEWER assessment now exists for this run — this verdict may be superseded]"
-                : "";
+            string flag;
+            if (binding.AssessmentId is null) flag = " [an assessment was recorded for this run AFTER the last fold]";
+            else if (hasLatest && latestId != binding.AssessmentId) flag = " [a NEWER assessment now exists for this run — this verdict may be superseded]";
+            else flag = "";
 
-            lines.Add($"Turn {binding.Turn} (run {binding.EffectiveRunId}, assessment {binding.AssessmentId}): {completion}{supersededNote}");
+            lines.Add($"Turn {binding.Turn} (run {binding.EffectiveRunId}, assessment {renderedId}): {completion}{flag}");
         }
 
         return lines;

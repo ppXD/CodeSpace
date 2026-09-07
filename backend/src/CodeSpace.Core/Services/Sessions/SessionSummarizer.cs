@@ -28,7 +28,9 @@ namespace CodeSpace.Core.Services.Sessions;
 /// than left silently stale behind an equal watermark. That full-span rebuild is retried at most once per known
 /// failure though — while a PRIOR attempt is still unresolved (<c>WorkSession.SummaryStaleSinceTurn</c> set), a
 /// launch falls back to the cheap incremental fold instead of re-paying for the whole span on every launch under a
-/// sustained provider outage; it re-arms the next time any fold succeeds. <see cref="SessionContextBuilder"/> reads
+/// sustained provider outage; it re-arms the next time any fold succeeds. That re-arm needs a LATER launch to ever
+/// invoke this method again though — a session that goes dormant right after the failure keeps the disclosed
+/// (never silent) gap forever, not just until the next launch. <see cref="SessionContextBuilder"/> reads
 /// the binding to carry an out-of-window turn's unresolved contract forward without re-deriving it from this class's
 /// own model-written prose.</para>
 /// </summary>
