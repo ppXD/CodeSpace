@@ -4,6 +4,7 @@ name: Backend · Real model
 # its decisions over the golden scenarios — the measure-the-intelligence kill-gate. Each run calls the LIVE API,
 # so it runs on main + on demand (NOT on every PR push) to control token cost. The Category=RealModel tests
 # self-skip when the secrets are absent, so a fork without them stays green at zero API cost.
+# CLI jobs use the worker image's Node major; strict npm engine checks reject incompatible pinned packages before live tests.
 
 on:
   push:
@@ -248,7 +249,7 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         # Installs the REAL Claude Code CLI so the live CODING-AGENT arm (the_real_coding_agent_solves_a_goal_relevance_task)
@@ -264,7 +265,9 @@ jobs:
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -427,7 +430,7 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         # Installs the REAL Claude Code CLI so the live CODING-AGENT arm (the_real_coding_agent_solves_a_goal_relevance_task)
@@ -443,7 +446,9 @@ jobs:
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -607,7 +612,7 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         # The benchmark drives the real `claude` CLI per corpus pair (the ClaudeCodeHarness resolves it on PATH + projects
@@ -618,7 +623,9 @@ jobs:
         run: |
           # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
           # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -795,11 +802,13 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -915,11 +924,13 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -1058,7 +1069,7 @@ jobs:
       - name: Set up Node (for the real coding-agent CLIs)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLIs (Claude Code + Codex)
         # BOTH harness binaries: claude (ClaudeCodeHarness) drives the blessed behavioral gate; codex (CodexHarness)
@@ -1069,8 +1080,10 @@ jobs:
         run: |
           # One retry each to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the lane; a
           # genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
-          npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
+          npm install --engine-strict -g '@openai/codex@0.142.2' || { sleep 5; npm install --engine-strict -g '@openai/codex@0.142.2'; }
           claude --version
           codex --version
 
@@ -1207,12 +1220,14 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         # FATAL install (a missing binary must RED the lane, never let the gating arm self-skip green — "skip ≠ pass").
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
           git --version
 
@@ -1334,12 +1349,14 @@ jobs:
       - name: Set up Node (for the real coding-agent CLI)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLI (Claude Code)
         # FATAL install (a missing binary must RED the lane, never let the gating agent-feed arm self-skip green — "skip ≠ pass").
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
           claude --version
           git --version
 
@@ -1459,15 +1476,17 @@ jobs:
       - name: Set up Node (for the real coding-agent CLIs)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install the real coding-agent CLIs (Claude Code + Codex)
         # BOTH harness binaries: claude (ClaudeCodeHarness) drives the settings.json Stop hook, codex (CodexHarness)
         # drives the hooks.json Stop hook. FATAL install (a missing binary must RED the lane, never let it self-skip
         # green — "skip ≠ pass"). Pins match the injection lane's own pinned versions.
         run: |
-          npm install -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install -g '@anthropic-ai/claude-code@2.1.263'; }
-          npm install -g '@openai/codex@0.142.2' || { sleep 5; npm install -g '@openai/codex@0.142.2'; }
+          node --version
+          npm --version
+          npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263' || { sleep 5; npm install --engine-strict -g '@anthropic-ai/claude-code@2.1.263'; }
+          npm install --engine-strict -g '@openai/codex@0.142.2' || { sleep 5; npm install --engine-strict -g '@openai/codex@0.142.2'; }
           claude --version
           codex --version
 
