@@ -38,7 +38,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
+public sealed partial class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
 {
     private readonly PostgresFixture _fixture;
     private readonly List<string> _roots = [];

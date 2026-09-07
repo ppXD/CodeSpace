@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Backends;
 /// no-op. Reads validate the url resolves to a path UNDER the configured root (defence-in-depth against a tampered
 /// <c>storage_url</c>) before touching the filesystem.</para>
 /// </summary>
-public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifactBlobStreamWriter, IArtifactBlobPurge, ISingletonDependency
+public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifactBlobStreamWriter, IArtifactBlobStreamReader, IArtifactBlobPurge, ISingletonDependency
 {
     private const int CopyBufferBytes = 128 * 1024;
     private readonly string _root;
@@ -125,6 +125,12 @@ public sealed class LocalFileArtifactBlobBackend : IArtifactBlobBackend, IArtifa
         var path = ResolveUnderRoot(storageUrl);
 
         return await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<Stream> OpenReadAsync(string storageUrl, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<Stream>(new FileStream(ResolveUnderRoot(storageUrl), FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.Asynchronous | FileOptions.SequentialScan));
     }
 
     public async Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken)
