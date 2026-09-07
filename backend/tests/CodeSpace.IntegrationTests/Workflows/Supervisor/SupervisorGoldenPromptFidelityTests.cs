@@ -46,13 +46,31 @@ public class SupervisorGoldenPromptFidelityTests
         "resolve-cap-spent", "verified-resolution",
     };
 
+    /// <summary>
+    /// The verbs the rendered prompt WITHHOLDS — parsed out of the mask block itself rather than off the whole
+    /// prompt. The turn roster OFFERS its verbs in the same <c>- verb — …</c> shape three lines above, so a bare
+    /// substring test would read an offered verb as a withheld one, and the block's mere presence no longer means
+    /// "resolve is masked" now that <c>amend_acceptance</c> can be the only line in it.
+    /// </summary>
+    private static IReadOnlyList<string> WithheldInPrompt(string prompt)
+    {
+        var start = prompt.IndexOf(SupervisorActionMask.Header, StringComparison.Ordinal);
+
+        if (start < 0) return [];
+
+        return prompt[start..].Split('\n').Skip(1)
+            .TakeWhile(line => line.StartsWith("- ", StringComparison.Ordinal))
+            .Select(line => line[2..line.IndexOf(" — ", StringComparison.Ordinal)])
+            .ToList();
+    }
+
     [Fact]
     public void Every_scenario_renders_the_action_mask_arm_its_tape_implies()
     {
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
         {
             var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
-            var masked = prompt.Contains(SupervisorActionMask.Header, StringComparison.Ordinal);
+            var masked = WithheldInPrompt(prompt).Contains(SupervisorDecisionKinds.Resolve);
 
             if (ResolveCapSpent.Contains(scenario.Name))
             {
@@ -164,6 +182,47 @@ public class SupervisorGoldenPromptFidelityTests
         LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context)
             .ShouldNotContain("'merge' will include them", Case.Sensitive,
                 "the carry-over line offers the model a verb this scenario grades as wrong — and it is offering it truthfully, which is the fixture's bug, not the line's");
+    }
+
+    /// <summary>
+    /// The turn roster's <c>amend_acceptance</c> arm on the two co-sign scenarios, and — deliberately — the
+    /// CONTRADICTION it exposes rather than hides.
+    ///
+    /// <para><c>amended-oracle-awaiting-retry</c> is coherent: a co-sign is outstanding, the precondition refuses a
+    /// second amend, the roster withholds the verb, the banner says RETRY, and the accepted set is {retry}. Every
+    /// surface agrees.</para>
+    ///
+    /// <para><c>amended-oracle-discarded-by-replan</c> is NOT coherent, and this pins the disagreement so a future
+    /// change cannot resolve one side without noticing the other. Its accepted set names
+    /// <c>amend_acceptance</c> and <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s Discarded arm tells the model
+    /// to propose one — but <see cref="SupervisorAmendPrecondition"/> would REFUSE it synchronously with "has never
+    /// been attempted": that arm reads the graded evidence through <see cref="SupervisorPlanWindow"/>, and the
+    /// re-plan the scenario is built around closes the window over the attempt that produced the evidence. The
+    /// precondition's FIRST arm reads the whole tape, so the gate is internally split on scope, not merely strict.</para>
+    ///
+    /// <para>The roster reports the SERVER's answer, because a menu that offered the verb here would be the exact
+    /// defect this block exists to remove — pointing the model at a move that cannot advance the run. Whether the
+    /// gate should widen (a discarded co-sign is designed to be re-proposable —
+    /// <see cref="SupervisorAmendStanding.Discarded"/>) or the scenario's accepted set should drop the verb is a
+    /// decision about the amend arc's admission rule, not about this block; either one turns this test red.</para>
+    /// </summary>
+    [Fact]
+    public void The_cosign_pair_gets_the_amend_arm_its_own_precondition_would_answer_with()
+    {
+        var awaitingRetry = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-awaiting-retry");
+        var discarded = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-discarded-by-replan");
+
+        WithheldInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(awaitingRetry.Context))
+            .ShouldContain(SupervisorDecisionKinds.AmendAcceptance, "a co-sign is outstanding here, so the precondition refuses a second amend — offering it invites the amend×5 loop of run 34066916864");
+
+        // The named collision. Both halves are asserted, so neither can move silently.
+        discarded.AcceptedKinds.ShouldContain(SupervisorDecisionKinds.AmendAcceptance,
+            "the scenario grades the verb, and the Discarded steer sends the model at it");
+        SupervisorAmendPrecondition.Reject(discarded.Context, new SupervisorAmendAcceptancePayload { SubtaskId = "s1", Waive = true, Reason = "the check could not run" })
+            .ShouldNotBeNull("…while the server's own gate refuses it on this tape — that disagreement is the finding, not this test's expectation")
+            .ShouldContain("never been attempted", customMessage: "and the reason is the plan window closing over the graded evidence, not the amendment being unwarranted");
+        WithheldInPrompt(LlmSupervisorDecider.BuildUserPromptForTest(discarded.Context))
+            .ShouldContain(SupervisorDecisionKinds.AmendAcceptance, "so the roster reports the SERVER's answer — a menu offering a verb the gate refuses is the defect this block removes");
     }
 
     [Fact]
@@ -400,7 +459,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "157c10446744d26e41c45112e46a3c7635106176d9cb366745737d5c7ea85b33";
+    private const string GoldenPromptDigest = "e3df9e15ffc302fb4a5b30e47ca17106652a8ad5cfb966b46f655309db8c7358";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -413,13 +472,18 @@ public class SupervisorGoldenPromptFidelityTests
     ///
     /// <para>The corpus's numbers stay comparable across the re-pin, and that is DERIVED rather than claimed: every
     /// scenario's prompt is wound back through <see cref="AsRenderedBeforeTheTurnRoster"/> — the roster replaced by
-    /// the mask block it grew out of, and the conflicted-integration block's cap-aware closing line replaced by the
-    /// invitation it retired — and this pin then reproduces itself over the whole 25-scenario corpus, while the two
-    /// 23-scenario anchors below reproduce theirs over the subset they were each taken at. So the moved bytes are
-    /// exactly those two blocks and nothing else: the roster on every scenario, and the closing line on the two that
-    /// record a conflict with the resolve cap spent (<c>resolve-cap-spent</c>, <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and none acquired a menu entry for a
-    /// verb its own tape cannot reach — which <see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>
-    /// and <see cref="Every_scenario_renders_the_action_mask_arm_its_tape_implies"/> re-derive off the mask itself.</para>
+    /// the mask block it grew out of (as that mask read before it could withhold <c>amend_acceptance</c>), the
+    /// conflicted-integration block's cap-aware closing line replaced by the invitation it retired, and the prompt's
+    /// cap-aware closing sentence replaced by the unconditional one — and this pin then reproduces itself over the
+    /// whole 25-scenario corpus, while the three 23-scenario anchors below reproduce theirs over the subset they
+    /// were each taken at. So the moved bytes are exactly those three blocks and nothing else: the roster on every
+    /// scenario, and the closing line and closing sentence on the tapes that record a conflict with the resolve cap
+    /// spent (<c>resolve-cap-spent</c>, <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and
+    /// none acquired a menu entry for a verb its own tape cannot reach — which
+    /// <see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>,
+    /// <see cref="Every_scenario_renders_the_action_mask_arm_its_tape_implies"/> and
+    /// <see cref="The_cosign_pair_gets_the_amend_arm_its_own_precondition_would_answer_with"/> re-derive off the
+    /// mask and the amend gate themselves.</para>
     /// </summary>
     private const string StaticVerbRosterCorpusDigest = "d4c31246c3aefb766e4e913dc8fbbf9dc25f428fc5a2b0805e9087a6963ee42c";
 
@@ -459,6 +523,14 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>). Every other scenario is
     /// byte-identical, which <see cref="Only_a_scenario_missing_a_required_stage_renders_a_different_prompt_than_before"/>
     /// re-derives against the anchor below rather than taking on trust.</para>
+    ///
+    /// <para>It shipped ASSERTED BY NOTHING (#1795 added the constant and the sentence claiming a receipt
+    /// re-derives it, but no test ever recomputed it) — which is precisely the state this file's own rule calls
+    /// out: a digest no test recomputes can only ever be compared with itself. The receipt in
+    /// <see cref="The_rendered_corpus_matches_its_pinned_digest"/> now recomputes it, over the same 23-scenario
+    /// corpus it was taken at (it WAS this corpus's <c>GoldenPromptDigest</c> at 5618fc262^, where the count
+    /// assertion read 23), through this commit's wind-back plus
+    /// <see cref="AsSteeredBeforeTheReachAwareSteer"/>.</para>
     /// </summary>
     private const string ConstantSteerCorpusDigest = "9a06aec3056ee4851e8ccd69cdb67585b6b3f20a4414ec03be2dc0ea188426ba";
 
@@ -482,6 +554,12 @@ public class SupervisorGoldenPromptFidelityTests
         // remains comparable with one taken under the new one.
         Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context), PredatesTheSupersededPins)).ShouldBe(PreCosignScenarioCorpusDigest,
             "a pre-existing scenario's prompt moved in the same commit that grew the corpus — the growth is then not the whole story, and the digest below cannot be attributed to it");
+
+        // One commit further back, and the receipt #1795 said existed but never wrote: undo the reach-aware steer
+        // on top of this commit's wind-back and the constant-steer pin must return over the same 23 scenarios it
+        // was taken at. Without this the constant is a digest nobody recomputes — comparable only with itself.
+        Digest(RenderedCorpus(s => AsSteeredBeforeTheReachAwareSteer(AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context), s.Context), PredatesTheSupersededPins)).ShouldBe(ConstantSteerCorpusDigest,
+            "undoing the reach-aware steer no longer reproduces the pin this corpus carried before it — so the steer is not the whole delta of that change either, and the chain of superseded pins has a gap in it");
 
         var digest = Digest(RenderedCorpus());
 
@@ -610,11 +688,13 @@ public class SupervisorGoldenPromptFidelityTests
     /// re-derivation of today's code, and every receipt anchored to it silently degrades from "the before half is
     /// the rendering that really shipped" to "the before half is whatever this build produces".
     ///
-    /// <para>ONE set serves BOTH superseded pins, and that is only sound while they were taken over the SAME
-    /// corpus — they were: <see cref="DimensionsOnlyCorpusDigest"/> and <see cref="PreCosignScenarioCorpusDigest"/>
-    /// both stood at the corpus's 23 pre-co-sign scenarios. The moment a pin is taken at a different corpus size,
-    /// split this into a per-pin set: excluding from a pin a scenario it already covered would silently recompute
-    /// that pin over a corpus it never measured, which is exactly the degradation above.</para>
+    /// <para>ONE set serves ALL THREE 23-scenario pins, and that is only sound while they were taken over the SAME
+    /// corpus — they were: <see cref="DimensionsOnlyCorpusDigest"/>, <see cref="PreCosignScenarioCorpusDigest"/> and
+    /// <see cref="ConstantSteerCorpusDigest"/> all stood at the corpus's 23 pre-co-sign scenarios. (The fourth,
+    /// <see cref="StaticVerbRosterCorpusDigest"/>, was taken at 25 and is recomputed over the whole corpus, which is
+    /// why it does not use this set.) The moment a pin is taken at a different corpus size, split this into a
+    /// per-pin set: excluding from a pin a scenario it already covered would silently recompute that pin over a
+    /// corpus it never measured, which is exactly the degradation above.</para>
     /// </summary>
     private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
     {
@@ -626,36 +706,72 @@ public class SupervisorGoldenPromptFidelityTests
     /// <summary>
     /// The conflicted-integration block's closing line as it read BEFORE it became cap-aware — the copy that
     /// offered <c>resolve</c> and a re-<c>merge</c> on a tape where the mask had withdrawn the first and the
-    /// stopped-now steer the second. Frozen history, not live copy: it is deleted from the renderer, so it can
-    /// never be reworded again and restating it here cannot become a two-file chore. Only the merge arm is needed —
-    /// every cap-spent conflict in this corpus is a conflicted MERGE, and a tape that ever reached the blocked-spawn
-    /// arm with a spent cap would fail the anchors below loudly rather than silently.
+    /// stopped-now steer the second. Restated rather than derived because the renderer no longer holds this exact
+    /// string: the with-budget arm still renders the invitation, but with its <c>afterResolve</c> clause filled per
+    /// call site, so there is no constant to point at. It is frozen HISTORY — the bytes a superseded digest was
+    /// taken over — and a reword of the live line must not silently move it. Only the merge arm is needed: every
+    /// cap-spent conflict in this corpus is a conflicted MERGE, and a tape that ever reached the blocked-spawn arm
+    /// with a spent cap would fail the anchors below loudly rather than silently.
     /// </summary>
     private const string ResolveInvitedOnAConflictedIntegration =
         "    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, then you merge again. Or stop to leave the conflict for a human.";
 
     /// <summary>
-    /// One scenario's prompt wound back to the rendering that produced the superseded pins below: the turn's VERB
-    /// ROSTER replaced by the action mask it grew out of, and the conflicted-integration block's cap-aware closing
-    /// line replaced by the invitation it retired. It exists because the roster renders on EVERY turn where the mask
-    /// rendered on most, so a superseded digest recomputed over today's raw rendering can no longer reproduce
-    /// itself, and both receipts below would have to be deleted or re-pinned into tautologies.
+    /// One scenario's prompt wound back to the rendering that produced the superseded pins below. THREE blocks are
+    /// undone, and they are the three this commit moved:
+    /// <list type="number">
+    ///   <item>the turn's VERB ROSTER, replaced by the action mask it grew out of — as that mask read before it
+    ///         could withhold <c>amend_acceptance</c> (<see cref="AsMaskedBeforeTheAmendArm"/>);</item>
+    ///   <item>the conflicted-integration block's cap-aware closing line, replaced by the invitation it retired;</item>
+    ///   <item>the prompt's cap-aware CLOSING SENTENCE, replaced by the unconditional "then merge the successful
+    ///         results, then stop." it retired.</item>
+    /// </list>
+    /// It exists because the roster renders on EVERY turn where the mask rendered on most, so a superseded digest
+    /// recomputed over today's raw rendering can no longer reproduce itself, and every receipt below would have to
+    /// be deleted or re-pinned into a tautology.
     ///
     /// <para>Winding them back keeps the receipts, and makes them stronger than a re-pin would: the roster is a pure
-    /// INSERTION over the mask and the closing line is a pure SUBSTITUTION, so undoing exactly those two must return
-    /// the pre-commit bytes — which is what the anchors assert by still reproducing their old digests over the whole
-    /// pre-pin corpus. Anything else that drifted into this commit shows up as a failure here rather than as a
-    /// digest nobody can attribute. Every part except the deleted line is taken FROM the renderers rather than
-    /// retyped, in the same spirit as the stage line below.</para>
+    /// INSERTION over the mask and the other two are pure SUBSTITUTIONS, so undoing exactly those three must return
+    /// the pre-commit bytes — which is what the anchors assert by still reproducing their old digests over the
+    /// corpus each was taken at. Anything else that drifted into this commit shows up as a failure here rather than
+    /// as a digest nobody can attribute.</para>
+    ///
+    /// <para>THE COST, stated plainly: every anchor that routes through this helper is now BLIND to the three blocks
+    /// it undoes. A reword of the roster, of the cap-aware closing line, or of the closing sentence moves no
+    /// superseded digest — by construction, since the wind-back reads today's renderers for two of the three. Only
+    /// the live <see cref="GoldenPromptDigest"/> catches a change in them, so a re-pin of THAT constant is the only
+    /// place such a change becomes visible, and the per-block unit tests
+    /// (<c>SupervisorActionRosterTests</c>) are what pin the copy itself.</para>
     /// </summary>
     private static string AsRenderedBeforeTheTurnRoster(string prompt, SupervisorTurnContext context)
     {
         var roster = $"{Environment.NewLine}{SupervisorActionRoster.Render(context)}{Environment.NewLine}";
-        var mask = SupervisorActionMask.Render(context) is { } withheld ? $"{Environment.NewLine}{withheld}{Environment.NewLine}" : string.Empty;
+        var mask = AsMaskedBeforeTheAmendArm(context) is { } withheld ? $"{Environment.NewLine}{withheld}{Environment.NewLine}" : string.Empty;
 
         return prompt
             .Replace(roster, mask, StringComparison.Ordinal)
-            .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal);
+            .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal)
+            .Replace(LlmSupervisorDecider.ClosingCannotLand, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal);
+    }
+
+    /// <summary>The action mask as it rendered before <c>amend_acceptance</c> joined the verbs it can withhold: resolve's line alone, or NOTHING when resolve was the available one. Derived by deleting the amend line from today's render rather than restating the old format, so a reworded resolve reason stays a one-file change.</summary>
+    private static string? AsMaskedBeforeTheAmendArm(SupervisorTurnContext context)
+    {
+        if (SupervisorActionMask.Render(context) is not { } mask) return null;
+
+        var kept = mask.Split('\n').Where(line => !line.StartsWith($"- {SupervisorDecisionKinds.AmendAcceptance} — ", StringComparison.Ordinal)).ToList();
+
+        return kept.Count > 1 ? string.Join('\n', kept) : null;
+    }
+
+    /// <summary>The same prompt one commit further back: the stopped-now steer as it read while it was a CONSTANT, before <see cref="SupervisorActionMask.LandingReachFor"/> narrowed it to the verbs a tape can still reach. Taken FROM the renderer's own <c>Unconstrained</c> arm — which IS the retired constant — so this cannot drift into restating copy.</summary>
+    private static string AsSteeredBeforeTheReachAwareSteer(string prompt, SupervisorTurnContext context)
+    {
+        var reach = SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts);
+
+        return reach == SupervisorLandingReach.Unconstrained
+            ? prompt
+            : prompt.Replace(SupervisorStopNowRecital.SteerFor(reach), SupervisorStopNowRecital.SteerFor(SupervisorLandingReach.Unconstrained), StringComparison.Ordinal);
     }
 
     /// <summary>One scenario's prompt as this corpus rendered it BEFORE the mirror carried the trace: the stopped-now block from the assessment ALONE — no stage trace, no profile, no enforcement mode.</summary>

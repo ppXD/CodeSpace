@@ -533,6 +533,43 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>One bounded summarizer round-trip on the SAME pinned brain row: the prior digest (roll-forward) + the foldable head, out comes the new digest. A model-side miss reads as "no digest" (null → the overflow propagates); an INFRA fault propagates (the node's park owns it).</summary>
     private static async Task<string?> SummarizeAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable, CancellationToken cancellationToken)
     {
+        try
+        {
+            var completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = "You compact a supervisor run's oldest decisions into one rolling progress digest. Keep every fact a future decision needs: what was planned, each subtask's final state (succeeded/failed/why), branches produced, merges/conflicts, human answers, key learnings. Be dense; max ~400 words. Reply with ONLY the schema JSON.",
+                UserPrompt = BuildSummarizerPrompt(context, foldable),
+                JsonSchema = TapeSummarySchema,
+                MaxOutputTokens = 1024,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+
+            return completion.Json.ValueKind == JsonValueKind.Object && completion.Json.TryGetProperty("summary", out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString()
+                : null;
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The summarizer's own user prompt, exposed for the tests that pin what a fold may put into the persisted digest.</summary>
+    internal static string BuildSummarizerPromptForTest(SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable) => BuildSummarizerPrompt(context, foldable);
+
+    /// <summary>
+    /// The summarizer's input: the goal, the digest to roll forward into, and the foldable head rendered by the SAME
+    /// per-decision renderer the live prompt uses.
+    ///
+    /// <para>Sharing that renderer is what makes the options below load-bearing rather than cosmetic. The digest this
+    /// call produces re-enters the LIVE prompt on every later turn, so a cap-BLIND fold would smuggle
+    /// "To reconcile: choose 'resolve' … then you merge again" — the invitation the live render withdraws once the
+    /// resolve cap is spent — back into the prompt through the one block the cap-aware renderer never sees again.</para>
+    /// </summary>
+    private static string BuildSummarizerPrompt(SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable)
+    {
         var builder = new StringBuilder();
 
         builder.AppendLine($"Goal: {context.Goal}");
@@ -552,30 +589,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // payloads — the summarizer wants "what was planned" verbatim to distil. The superseded-plan digest is a
             // LIVE-prompt concern only. Evidence tails are the OPPOSITE: the foldable head excludes the newest
             // CompactTailKeep decisions, so any tail here is stale by construction (P5-2) — never bake one into the
-            // persisted rolling digest; the one-line verdicts alone carry the state the digest needs.
-            AppendPriorDecision(builder, foldable[i], new PriorRenderOptions { IsLatestSpawn = i == latestSpawnIndex });
-
-        try
-        {
-            var completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            // persisted rolling digest; the one-line verdicts alone carry the state the digest needs. ResolveExhausted
+            // is read off the SAME mask the live render reads (~:784), because the digest outlives this turn.
+            AppendPriorDecision(builder, foldable[i], new PriorRenderOptions
             {
-                Model = pick.ModelId,
-                SystemPrompt = "You compact a supervisor run's oldest decisions into one rolling progress digest. Keep every fact a future decision needs: what was planned, each subtask's final state (succeeded/failed/why), branches produced, merges/conflicts, human answers, key learnings. Be dense; max ~400 words. Reply with ONLY the schema JSON.",
-                UserPrompt = builder.ToString(),
-                JsonSchema = TapeSummarySchema,
-                MaxOutputTokens = 1024,
-                Temperature = 0,
-                Credential = pick.Credential,
-            }, cancellationToken).ConfigureAwait(false);
+                IsLatestSpawn = i == latestSpawnIndex,
+                ResolveExhausted = SupervisorActionMask.IsResolveCapSpent(context),
+            });
 
-            return completion.Json.ValueKind == JsonValueKind.Object && completion.Json.TryGetProperty("summary", out var v) && v.ValueKind == JsonValueKind.String
-                ? v.GetString()
-                : null;
-        }
-        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
-        {
-            return null;
-        }
+        return builder.ToString();
     }
 
     /// <summary>Whether an LLM transport failure is a MODEL-side capability miss (the model could not produce a usable structured decision) rather than a gateway/credential INFRA fault. Capability misses fail closed to a clean stop (never crash the run); infra faults (Transient / RateLimited / AuthFailed) propagate so the engine fails the run and the live-gate treats them as non-gating infra. This is the decider's "fail closed on a model miss, surface real infra" split.</summary>
@@ -847,10 +869,32 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
 
         builder.AppendLine();
-        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
+        builder.AppendLine($"Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), {ClosingMoveFor(context)} Return ONLY the schema-constrained JSON.");
 
         return builder.ToString();
     }
+
+    /// <summary>The ordinary closing move — drive the units to done, fold them, finish. Named so the cap-aware arm below can be a substitution rather than a second sentence.</summary>
+    internal const string ClosingLandsWithAMerge = "then merge the successful results, then stop.";
+
+    /// <summary>The closing move once a conflict is recorded and the resolve cap is spent: there is no landing left, so the sentence must not keep asking for one.</summary>
+    internal const string ClosingCannotLand = "then stop with outcome 'gave_up' or ask_human; do not merge again — the merge already conflicted.";
+
+    /// <summary>
+    /// How the prompt's LAST sentence ends — the recency slot, immediately under the turn's verb roster. It was
+    /// unconditional, so on a tape with a conflicted integration and the resolve cap spent it stood as a standing
+    /// instruction to "merge the successful results": a re-run of the merge already recorded as conflicted, and the
+    /// second of the two answers the gating wire gave on golden <c>resolve-cap-spent</c> (the first, <c>resolve</c>,
+    /// is what the roster and the conflicted-integration block withdrew).
+    ///
+    /// <para>Read off <see cref="SupervisorActionMask.LandingReachFor"/> — the SAME reader the mask and the
+    /// stopped-now steer use — so the last line the model reads cannot disagree with the block three lines above it.
+    /// No new state source, and the default arm stays byte-identical for every other tape.</para>
+    /// </summary>
+    private static string ClosingMoveFor(SupervisorTurnContext context) =>
+        SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts) == SupervisorLandingReach.NoLandingReachable
+            ? ClosingCannotLand
+            : ClosingLandsWithAMerge;
 
     /// <summary>
     /// Render the plan's dependency FRONTIER (loopability — the server enforces <c>DependsOn</c> ordering at spawn): the
