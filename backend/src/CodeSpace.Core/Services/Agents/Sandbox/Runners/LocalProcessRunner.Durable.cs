@@ -863,7 +863,7 @@ public sealed partial class LocalProcessRunner
         // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
         // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback). A
         // filtered-egress netns prefix (B3.2b), when present, wraps the whole chain outermost.
-        AppendChildCommand(info.ArgumentList, spec, configHome, mcpDeclarationPath, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>());
+        AppendChildCommand(info.ArgumentList, new CommandIsolationContext(spec, configHome, mcpDeclarationPath, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>()));
 
         ApplyEnvironment(info, spec);
 
@@ -906,8 +906,9 @@ public sealed partial class LocalProcessRunner
     /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
     /// host without <c>bwrap</c>, or one that denies unprivileged user namespaces.
     /// </summary>
-    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, string? mcpDeclarationPath, IReadOnlyList<string> egressExecPrefix, IReadOnlyList<string> cgroupExecPrefix)
+    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, CommandIsolationContext context)
     {
+        var (spec, configHome, mcpDeclarationPath, egressExecPrefix, cgroupExecPrefix) = context;
         // Fail-closed: a deployment that mandates isolation (Sandbox:RequireConfinement) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
 

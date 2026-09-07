@@ -2,13 +2,14 @@ using System.Diagnostics;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 
 /// <summary>
-/// v0 sandbox runner: runs the command as a child OS process on the worker itself. No container
-/// isolation — this is the local-dev / single-tenant default that proves the seam end to end while
-/// Docker / Kubernetes-Job runners are built behind the same <see cref="ISandboxRunner"/> contract.
+/// Runs child OS processes with shared filesystem, network and resource isolation across batch, streaming
+/// and durable execution. Hosts without bubblewrap can run unconfined only when deployment policy permits it.
 ///
 /// Implements the batch <see cref="ISandboxRunner"/> (full stdout/stderr capture), the streaming
 /// <see cref="ISandboxStreamRunner"/> (stdout delivered line-by-line for live logs), and the DURABLE
@@ -83,16 +84,24 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     /// <summary>Internal signal: the stall watchdog tripped (no output for the idle window). Caught by the streaming caller and mapped to <see cref="SandboxStatus.Stalled"/>.</summary>
     private sealed class AgentStalledException : Exception { }
 
+    private readonly ILogger<LocalProcessRunner> _logger;
+    public LocalProcessRunner(ILogger<LocalProcessRunner>? logger = null) => _logger = logger ?? NullLogger<LocalProcessRunner>.Instance;
+
+    /// <summary>After termination, escaped descendants may still hold a pipe on an unconfined host. Observation must remain bounded.</summary>
+    internal static readonly TimeSpan TerminationDrainTimeout = TimeSpan.FromSeconds(2);
+
     public string Kind => LocalKind;
 
     public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
     {
-        using var process = new Process { StartInfo = BuildStartInfo(spec) };
+        await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
+        using var process = new Process { StartInfo = invocation.StartInfo };
 
         process.Start();
+        using var pipes = new CommandPipeLifetime(process, _logger);
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(pipes.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(pipes.Token);
 
         using var timeoutCts = WallClockCts(spec.TimeoutSeconds);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -100,25 +109,28 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         try
         {
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+            await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(linkedCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             return await TerminateAsync(process, stdoutTask, stderrTask, cancellationToken).ConfigureAwait(false);
         }
 
-        var status = process.ExitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed;
+        var status = invocation.ExitStatus(process.ExitCode);
 
         return new SandboxResult { Status = status, ExitCode = process.ExitCode, Stdout = await stdoutTask.ConfigureAwait(false), Stderr = await stderrTask.ConfigureAwait(false) };
     }
 
     public async Task<SandboxResult> RunStreamingAsync(SandboxSpec spec, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
     {
-        using var process = new Process { StartInfo = BuildStartInfo(spec) };
+        await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
+        using var process = new Process { StartInfo = invocation.StartInfo };
 
         process.Start();
+        using var pipes = new CommandPipeLifetime(process, _logger);
 
         // stderr captured in full (diagnostic context for the result); stdout is pumped line-by-line to the consumer.
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync(pipes.Token);
 
         using var timeoutCts = WallClockCts(spec.TimeoutSeconds);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -127,6 +139,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         {
             await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token, NoProgressWindow()).ConfigureAwait(false);
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+            await stderrTask.WaitAsync(linkedCts.Token).ConfigureAwait(false);
         }
         catch (AgentStalledException)
         {
@@ -136,8 +149,14 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         {
             return await TerminateStreamingAsync(process, stderrTask, cancellationToken, stalled: false).ConfigureAwait(false);
         }
+        catch
+        {
+            KillQuietly(process);
+            await SafeRead(stderrTask).ConfigureAwait(false);
+            throw;
+        }
 
-        var status = process.ExitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed;
+        var status = invocation.ExitStatus(process.ExitCode);
 
         return new SandboxResult { Status = status, ExitCode = process.ExitCode, Stdout = "", Stderr = await stderrTask.ConfigureAwait(false) };
     }
@@ -211,7 +230,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     }
 
     /// <summary>Same terminate semantics as the batch path: kill the tree, let stderr settle, rethrow on caller-cancel, else map to Stalled (C3) or TimedOut.</summary>
-    private static async Task<SandboxResult> TerminateStreamingAsync(Process process, Task<string> stderrTask, CancellationToken cancellationToken, bool stalled)
+    private async Task<SandboxResult> TerminateStreamingAsync(Process process, Task<string> stderrTask, CancellationToken cancellationToken, bool stalled)
     {
         KillQuietly(process);
 
@@ -264,14 +283,15 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     }
 
     /// <summary>Kill the (possibly child-spawning) process, then map to TimedOut — unless the CALLER cancelled, which rethrows.</summary>
-    private static async Task<SandboxResult> TerminateAsync(Process process, Task<string> stdoutTask, Task<string> stderrTask, CancellationToken cancellationToken)
+    private async Task<SandboxResult> TerminateAsync(Process process, Task<string> stdoutTask, Task<string> stderrTask, CancellationToken cancellationToken)
     {
         KillQuietly(process);
 
         // Let the captured output settle (the kill closes the child's pipes) BEFORE we return OR throw,
         // so the read tasks never run against the Process as `using` disposes it on the caller-cancel path.
-        var stdout = await SafeRead(stdoutTask).ConfigureAwait(false);
-        var stderr = await SafeRead(stderrTask).ConfigureAwait(false);
+        var drained = await Task.WhenAll(SafeRead(stdoutTask), SafeRead(stderrTask)).ConfigureAwait(false);
+        var stdout = drained[0];
+        var stderr = drained[1];
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -279,9 +299,15 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     }
 
     /// <summary>Await a redirected-stream read that may fault if the process was killed mid-read — partial/empty output is best-effort.</summary>
-    private static async Task<string> SafeRead(Task<string> readTask)
+    private async Task<string> SafeRead(Task<string> readTask)
     {
-        try { return await readTask.ConfigureAwait(false); }
+        try { return await readTask.WaitAsync(TerminationDrainTimeout).ConfigureAwait(false); }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Command pipe observation incomplete after termination grace; an unconfined descendant may still be running");
+            _ = readTask.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return "";
+        }
         catch { return ""; }
     }
 
