@@ -38,6 +38,7 @@ public class RunQualificationRoundHandlerTests
         runner.Selection!.Harness.ShouldBe("claude-code");
         runner.Selection.ModelCredentialId.ShouldBe(credentialId);
         response.Granted.ShouldBe(PerformanceQualification.Sealed);
+        response.ExecutionPath.ShouldBe(BenchmarkExecutionPath.TaskLaunch);
         response.ReceiptId.ShouldBe(runner.ReceiptId);
     }
 
@@ -48,7 +49,7 @@ public class RunQualificationRoundHandlerTests
         public Task<QualificationOutcome> QualifyAsync(string mode, string capabilityKey, QualificationSpec spec, Guid teamId, BenchmarkAgentSelection selection, CancellationToken cancellationToken)
         {
             Spec = spec; Selection = selection; TeamId = teamId;
-            return Task.FromResult(new QualificationOutcome(new CorpusCellScore { Solved = 19, Unsolved = 1, Abstained = 0, InfraUnknown = 0 }, 0.75, PerformanceQualification.Sealed, ReceiptId, "sha256:x", new FormatFaultTally()));
+            return Task.FromResult(new QualificationOutcome(new CorpusCellScore { Solved = 19, Unsolved = 1, Abstained = 0, InfraUnknown = 0 }, 0.75, PerformanceQualification.Sealed, ReceiptId, "sha256:x", new FormatFaultTally(), BenchmarkExecutionPath.TaskLaunch));
         }
     }
 

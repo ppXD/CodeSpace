@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Agents.Benchmark;
+
 namespace CodeSpace.Messages.Contracts;
 
 /// <summary>
@@ -13,6 +15,9 @@ public sealed record VerifierBundle
     public required string? Model { get; init; }
 
     public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>The production boundary actually exercised. Null means a legacy receipt whose path was not recorded and therefore must not be newly treated as Launch evidence.</summary>
+    public BenchmarkExecutionPath? ExecutionPath { get; init; }
 }
 
 /// <summary>

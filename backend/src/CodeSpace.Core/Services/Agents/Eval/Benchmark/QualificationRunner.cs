@@ -20,8 +20,8 @@ public sealed record QualificationSpec
     public required int ValidityDays { get; init; }
 }
 
-/// <summary>One qualification round's outcome: the frozen-denominator score, the one-sided lower bound, the tier granted, the immutable receipt minted for it, and the gateway-health tally the score was produced under (how many cells the format-fault mitigation respawned, and how many of those were solved with extended thinking disabled).</summary>
-public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest, FormatFaultTally FormatFaults);
+/// <summary>One qualification round's outcome: the frozen-denominator score, the one-sided lower bound, the tier granted, the immutable receipt minted for it, the gateway-health tally, and the production boundary actually exercised.</summary>
+public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest, FormatFaultTally FormatFaults, BenchmarkExecutionPath ExecutionPath);
 
 /// <summary>The sealed-suite source seam — production reads THE conventional owner-held location; a test injects its own directory. Never an env toggle: pointing production elsewhere is a code change.</summary>
 public interface IHiddenSuiteSource
@@ -44,7 +44,8 @@ public interface IQualificationRunner
     /// the one-sided lower confidence bound with infra-unknown cells counted AGAINST the rate (a broken evaluator
     /// can never inflate capability), grant <see cref="PerformanceQualification.Sealed"/> only when BOTH the bound
     /// and the evaluator-health bar clear — anything less mints a <see cref="PerformanceQualification.Shadow"/>
-    /// receipt (measured evidence, no sealed claim).
+    /// receipt (measured evidence, no sealed claim). A corpus that reports <see cref="BenchmarkExecutionPath.DirectAgentHarness"/>
+    /// also remains Shadow regardless of score because it did not exercise the product Launch mode named by the receipt.
     /// </summary>
     Task<QualificationOutcome> QualifyAsync(string mode, string capabilityKey, QualificationSpec spec, Guid teamId, BenchmarkAgentSelection selection, CancellationToken cancellationToken);
 }
@@ -75,12 +76,12 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
 
         var score = EvalSuite.Score(run.Cells ?? Array.Empty<CorpusCellOutcome>());
         var lowerBound = QualificationStatistics.WilsonLowerBound(score.Solved, score.Total);
-        var granted = Grant(spec, score, lowerBound);
+        var granted = Grant(spec, score, lowerBound, run.ExecutionPath);
 
         // Q5: the round's identity is minted as the TYPED nouns — the cohort it covers (launch-knowable facts
         // only) and the verifier bundle that judged it — never ad-hoc json a reader has to guess at.
         var cohort = new LaunchCohortDescriptor { TeamId = teamId, Mode = mode, Tier = LaunchCohortDescriptor.InternalQualificationTier, CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion };
-        var verifier = new VerifierBundle { Harness = selection.Harness, Model = selection.Model, ModelCredentialId = selection.ModelCredentialId };
+        var verifier = new VerifierBundle { Harness = selection.Harness, Model = selection.Model, ModelCredentialId = selection.ModelCredentialId, ExecutionPath = run.ExecutionPath };
 
         var receipt = new QualificationReceipt
         {
@@ -94,7 +95,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
             MetricsJson = JsonSerializer.Serialize(new
             {
                 solved = score.Solved, unsolved = score.Unsolved, abstained = score.Abstained, infraUnknown = score.InfraUnknown,
-                total = score.Total, solveRate = score.SolveRateOverSuite, solveRateLowerBound = lowerBound, evaluatorHealth = score.EvaluatorHealth,
+                total = score.Total, solveRate = score.SolveRateOverSuite, solveRateLowerBound = lowerBound, evaluatorHealth = score.EvaluatorHealth, executionPath = run.ExecutionPath,
             }, Agents.AgentJson.Options),
             EffectiveFrom = DateTimeOffset.UtcNow,
             ExpiresAt = DateTimeOffset.UtcNow.AddDays(spec.ValidityDays),
@@ -102,15 +103,15 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
 
         await _receipts.AppendAsync(receipt, cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("Qualification round for ({Mode}, {Capability}): {Granted} — solved {Solved}/{Total}, lower bound {Bound:F3}, evaluator health {Health:F3}, suite {Digest}",
-            mode, capabilityKey, granted, score.Solved, score.Total, lowerBound, score.EvaluatorHealth, suite.SuiteContentHash);
+        _logger.LogInformation("Qualification round for ({Mode}, {Capability}): {Granted} — path {ExecutionPath}, solved {Solved}/{Total}, lower bound {Bound:F3}, evaluator health {Health:F3}, suite {Digest}",
+            mode, capabilityKey, granted, run.ExecutionPath, score.Solved, score.Total, lowerBound, score.EvaluatorHealth, suite.SuiteContentHash);
 
-        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash, run.FormatFaults);
+        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash, run.FormatFaults, run.ExecutionPath);
     }
 
-    /// <summary>The grant fold: Sealed only when the LOWER BOUND clears the bar AND the evaluator itself was healthy — an infra-riddled round or a thin suite mints Shadow evidence, never a sealed claim.</summary>
-    internal static PerformanceQualification Grant(QualificationSpec spec, CorpusCellScore score, double lowerBound) =>
-        score.Total > 0 && lowerBound >= spec.MinSolveRateLowerBound && score.EvaluatorHealth >= spec.MinEvaluatorHealth
+    /// <summary>The grant fold: Sealed only when the official TaskLaunch boundary ran, the LOWER BOUND clears the bar, and the evaluator itself was healthy. Direct harness data remains useful Shadow evidence but cannot substantiate a product mode claim.</summary>
+    internal static PerformanceQualification Grant(QualificationSpec spec, CorpusCellScore score, double lowerBound, BenchmarkExecutionPath executionPath) =>
+        executionPath == BenchmarkExecutionPath.TaskLaunch && score.Total > 0 && lowerBound >= spec.MinSolveRateLowerBound && score.EvaluatorHealth >= spec.MinEvaluatorHealth
             ? PerformanceQualification.Sealed
             : PerformanceQualification.Shadow;
 }

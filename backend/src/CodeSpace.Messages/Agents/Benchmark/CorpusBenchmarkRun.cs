@@ -22,6 +22,9 @@ namespace CodeSpace.Messages.Agents.Benchmark;
 /// </summary>
 public sealed record CorpusBenchmarkRun
 {
+    /// <summary>The production boundary this corpus actually exercised. DirectAgentHarness is the legacy/default path and cannot substantiate a product Launch-mode seal.</summary>
+    public BenchmarkExecutionPath ExecutionPath { get; init; } = BenchmarkExecutionPath.DirectAgentHarness;
+
     /// <summary>Every (task,mode) pair that RAN and was graded — the objective per-pair outcomes.</summary>
     public required IReadOnlyList<BenchmarkResult> Results { get; init; }
 

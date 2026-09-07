@@ -35,7 +35,7 @@ public class QualificationRunnerFlowTests
         var mode = "supervisor-" + Guid.NewGuid().ToString("N")[..6];
 
         using var scope = _fixture.BeginScope();
-        var runner = Runner(scope, cells: Cells(solved: 19, unsolved: 1, infra: 0));
+        var runner = Runner(scope, cells: Cells(solved: 19, unsolved: 1, infra: 0), BenchmarkExecutionPath.TaskLaunch);
 
         var outcome = await runner.QualifyAsync(mode, "git-branch", Spec(minLowerBound: 0.7), teamId, Selection(), CancellationToken.None);
 
@@ -49,6 +49,7 @@ public class QualificationRunnerFlowTests
         var metrics = JsonDocument.Parse(row.MetricsJson!).RootElement;
         metrics.GetProperty("solved").GetInt32().ShouldBe(19);
         metrics.GetProperty("solveRateLowerBound").GetDouble().ShouldBe(outcome.SolveRateLowerBound);
+        metrics.GetProperty("executionPath").GetString().ShouldBe("TaskLaunch");
 
         // Q5: the round's identity lands as the TYPED nouns — a claim reader parses them back verbatim.
         var cohort = JsonDocument.Parse(row.CohortJson!).RootElement;
@@ -56,7 +57,25 @@ public class QualificationRunnerFlowTests
         cohort.GetProperty("mode").GetString().ShouldBe(mode);
         cohort.GetProperty("tier").GetString().ShouldBe("internal-qualification");
         cohort.GetProperty("completionPolicyVersion").GetInt32().ShouldBe(CodeSpace.Core.Services.Completion.CompletionPolicy.CurrentVersion);
-        JsonDocument.Parse(row.VerifierBundleJson!).RootElement.GetProperty("harness").GetString().ShouldBe("codex-cli");
+        var verifier = JsonDocument.Parse(row.VerifierBundleJson!).RootElement;
+        verifier.GetProperty("harness").GetString().ShouldBe("codex-cli");
+        verifier.GetProperty("executionPath").GetString().ShouldBe("TaskLaunch");
+    }
+
+    [Fact]
+    public async Task A_direct_harness_round_remains_shadow_even_when_every_oracle_passes()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var mode = "supervisor-" + Guid.NewGuid().ToString("N")[..6];
+
+        using var scope = _fixture.BeginScope();
+        var runner = Runner(scope, cells: Cells(solved: 20, unsolved: 0, infra: 0), BenchmarkExecutionPath.DirectAgentHarness);
+
+        var outcome = await runner.QualifyAsync(mode, "git-branch", Spec(minLowerBound: 0.5), teamId, Selection(), CancellationToken.None);
+
+        outcome.Granted.ShouldBe(PerformanceQualification.Shadow);
+        var row = await scope.Resolve<CodeSpaceDbContext>().QualificationReceipt.AsNoTracking().SingleAsync(r => r.Id == outcome.ReceiptId);
+        JsonDocument.Parse(row.MetricsJson!).RootElement.GetProperty("executionPath").GetString().ShouldBe("DirectAgentHarness");
     }
 
     [Fact]
@@ -108,8 +127,8 @@ public class QualificationRunnerFlowTests
 
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
-    private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells) =>
-        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells),
+    private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness) =>
+        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells, executionPath),
             scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
 
     private static QualificationSpec Spec(double minLowerBound) => new() { MinSolveRateLowerBound = minLowerBound, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
@@ -137,7 +156,8 @@ public class QualificationRunnerFlowTests
     private sealed class FakeCorpusRunner : ICorpusBenchmarkRunner
     {
         private readonly IReadOnlyList<CorpusCellOutcome> _cells;
-        public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells) => _cells = cells;
+        private readonly BenchmarkExecutionPath _executionPath;
+        public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness) { _cells = cells; _executionPath = executionPath; }
 
         public Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new CorpusBenchmarkRun
@@ -146,6 +166,7 @@ public class QualificationRunnerFlowTests
                 Errored = Array.Empty<CorpusBenchmarkError>(),
                 Scorecard = new CodeSpace.Messages.Agents.AgentRunScorecard { Harnesses = Array.Empty<CodeSpace.Messages.Agents.HarnessScore>(), Overall = new CodeSpace.Messages.Agents.HarnessScore { Harness = "overall", Total = 0, Succeeded = 0, SuccessRate = 0 } },
                 Cells = _cells,
+                ExecutionPath = _executionPath,
             });
     }
 }
