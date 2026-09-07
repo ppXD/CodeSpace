@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Xml.Linq;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.E2ETests.Workflows;
@@ -51,6 +52,22 @@ public sealed class StopHookQualificationCensusTests
         {
             var rows = StopHookQualificationCensus.Read(directory, Path.Combine(directory, "results.trx"));
             rows.ShouldAllBe(r => r.TestOutcome == outcome && !r.QualificationSucceeded);
+        });
+    }
+
+    /// <summary>
+    /// A CLI-observed run whose own recorded failure is gateway/transport infra (<see cref="StopHookExecutionEvidence.AssessAsync"/>
+    /// routes it to a non-gating skip, landing the TRX as NotExecuted) must read from the census as neither a pass NOR
+    /// a behavioral miss — <see cref="StopHookArmCensus.BehavioralPassed"/> stays null (nothing was measured), never
+    /// <c>false</c> (which would misread an outage as "the model tried and failed").
+    /// </summary>
+    [Fact]
+    public void An_infra_fault_record_counts_as_neither_a_pass_nor_a_behavioral_miss()
+    {
+        WithResults("NotExecuted", new StopHookExecutionRecord { Arm = "claude", RunId = Guid.NewGuid(), NativeSessionEvents = 1, RecordedFailureKind = FailureKind.Unavailable, FailureDetail = "exceeded retry limit, last status: 429 Too Many Requests" }, directory =>
+        {
+            var rows = StopHookQualificationCensus.Read(directory, Path.Combine(directory, "results.trx"));
+            rows.ShouldAllBe(r => r.Measurement == "infra-fault" && r.BehavioralPassed == null && !r.QualificationSucceeded);
         });
     }
 

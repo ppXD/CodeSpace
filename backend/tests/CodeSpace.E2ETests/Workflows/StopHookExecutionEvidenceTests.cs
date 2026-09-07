@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.E2ETests.Workflows;
@@ -76,6 +77,41 @@ public sealed class StopHookExecutionEvidenceTests
         evidence.Record.QualificationSucceeded.ShouldBeFalse();
     }
 
+    /// <summary>
+    /// The run COMPLETED (drive returned instead of throwing) with no model output — the exact shape real-model
+    /// stop-hook lane runs 34135877074 and 34136267088 hit: the codex CLI started, then its own turn failed on a
+    /// gateway rate-limit, and <c>drive()</c> returned <c>(false, verdict)</c> rather than throwing. Whether that
+    /// reds the gate or skips it must turn on the run's OWN recorded failure, not on whether some caller upstream of
+    /// this evidence happened to classify it first.
+    /// </summary>
+    [Theory]
+    [InlineData("exceeded retry limit, last status: 429 Too Many Requests", true)]     // Codex's own retry-loop giving up — verbatim text from both cited runs
+    [InlineData("unrecognized codex failure: malformed prompt template", false)]       // no recognized infra marker — a genuine miss, must still red, now with the detail attached
+    public async Task A_CLI_observed_run_is_classified_by_its_own_recorded_failure_not_left_as_a_flat_red(string error, bool expectInfraSkip)
+    {
+        using var evidence = new StopHookExecutionEvidence("codex", directory: "");
+        CaptureFailed(evidence, "codex", error);
+
+        if (expectInfraSkip)
+        {
+            await Should.ThrowAsync<Xunit.SkipException>(() => evidence.AssessAsync(() => Task.FromResult((false, "did not create the file"))));
+            evidence.Record.Measurement.ShouldBe("infra-fault");
+            evidence.Record.RecordedFailureKind.ShouldBe(FailureKind.Unavailable);
+            evidence.Record.BehavioralPassed.ShouldBeNull();
+        }
+        else
+        {
+            var assertion = await Assert.ThrowsAsync<ShouldAssertException>(() => evidence.AssessAsync(() => Task.FromResult((false, "did not create the file"))));
+            assertion.Message.ShouldContain(error);
+            evidence.Record.Measurement.ShouldBe("no-model-evidence");
+            evidence.Record.RecordedFailureKind.ShouldBeNull();
+        }
+
+        evidence.Record.CliObserved.ShouldBeTrue();
+        evidence.Record.ModelObserved.ShouldBeFalse();
+        evidence.Record.QualificationSucceeded.ShouldBeFalse();
+    }
+
     [Fact]
     public void Native_frames_from_another_run_cannot_prove_this_run_executed()
     {
@@ -111,6 +147,18 @@ public sealed class StopHookExecutionEvidenceTests
         var run = new AgentRun { Id = runId, Status = AgentRunStatus.Succeeded, StartedAt = DateTimeOffset.UtcNow, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
         var native = arm == "claude" ? new ClaudeCodeHarness().ParseEvents("{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"PRIVATE-ENDPOINT\",\"apiKey\":\"PRIVATE-API-KEY\"}") : new CodexHarness().ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"PRIVATE-ENDPOINT\",\"apiKey\":\"PRIVATE-API-KEY\"}");
         var events = variant != NativeEvidence.Missing ? native.Select(e => new AgentRunEvent { AgentRunId = variant == NativeEvidence.ForeignRun ? Guid.NewGuid() : runId, Kind = e.Kind, DataJson = e.Data?.GetRawText(), Text = e.Text }).ToArray() : Array.Empty<AgentRunEvent>();
+        evidence.Capture(run, events);
+    }
+
+    /// <summary>A CLI-observed run that FAILED with the given recorded error — <see cref="Capture"/>'s sibling for the failure-classification cases, which need <see cref="AgentRunStatus.Failed"/> with a real <see cref="AgentRun.Error"/> rather than the always-Succeeded happy path above.</summary>
+    private static void CaptureFailed(StopHookExecutionEvidence evidence, string arm, string error)
+    {
+        var runId = Guid.NewGuid();
+        evidence.Admitted(runId);
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = error };
+        var run = new AgentRun { Id = runId, Status = AgentRunStatus.Failed, Error = error, StartedAt = DateTimeOffset.UtcNow, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+        var native = arm == "claude" ? new ClaudeCodeHarness().ParseEvents("{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"PRIVATE-ENDPOINT\"}") : new CodexHarness().ParseEvents("{\"type\":\"thread.started\",\"thread_id\":\"PRIVATE-ENDPOINT\"}");
+        var events = native.Select(e => new AgentRunEvent { AgentRunId = runId, Kind = e.Kind, DataJson = e.Data?.GetRawText(), Text = e.Text }).ToArray();
         evidence.Capture(run, events);
     }
 }

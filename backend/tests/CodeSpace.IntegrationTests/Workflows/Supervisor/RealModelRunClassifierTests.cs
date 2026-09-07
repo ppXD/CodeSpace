@@ -22,6 +22,7 @@ public sealed class RealModelRunClassifierTests
     [InlineData("non-zero-exit", "API Error (429)", true)]                                                  // ClaudeCodeHarnessTests: the `result` line's is_error text
     [InlineData("non-zero-exit", "API Error: Request rejected (429) AccountQuotaExceeded", true)]           // ClaudeCodeHarnessTests: the owner's gateway out of quota
     [InlineData("non-zero-exit", "unexpected status 401 Unauthorized", true)]                               // CodexHarnessTests: Codex's `turn.failed` error.message, lifted verbatim
+    [InlineData("non-zero-exit", "exceeded retry limit, last status: 429 Too Many Requests", true)]         // Codex's OWN retry-loop giving up — the exact text real-model runs 34135877074/34136267088 captured on a gateway rate-limit
     [InlineData("non-zero-exit", "API Error: 503 upstream unavailable", true)]                              // a 5xx is Transient in production's own table
     [InlineData("non-zero-exit", "API Error: 404 the responses wire is not served here", true)]             // Codex on a chat/completions-only gateway — an env/wire mismatch
     [InlineData("non-zero-exit", "API Error: Content block is not a thinking block", true)]                 // the gateway mangled the Anthropic wire FORMAT — the live 2026-09-05 text, verbatim
