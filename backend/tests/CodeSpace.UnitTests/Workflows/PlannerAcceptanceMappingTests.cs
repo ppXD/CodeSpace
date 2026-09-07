@@ -42,7 +42,8 @@ public sealed class PlannerAcceptanceMappingTests
     }
 
     [Theory]
-    [InlineData("ArtifactPresent", "{}")]
+    // ArtifactPresent excluded: since P2.6 a bare one is self-certifying and dropped on an undeclared path — its own
+    // admissibility matrix is covered below (ArtifactPresent_admissibility_follows_the_declared_and_paired_matrix).
     [InlineData("LlmJudge", "{\"rubric\":{\"criteria\":[{\"id\":\"coverage\",\"requirement\":\"explains the evidence\"}],\"threshold\":1}}")]
     [InlineData("CitationsResolve", "{}")]
     [InlineData("ArtifactSchema", "{\"schema\":{\"type\":\"object\",\"required\":[\"answer\"]}}")]
@@ -265,6 +266,69 @@ public sealed class PlannerAcceptanceMappingTests
         drop.GetProperty("subtaskId").GetString().ShouldBe("item");
         drop.GetProperty("kind").GetString().ShouldBe("TestsPass", "the wire kind is the same vocabulary the acceptance contract uses");
         drop.GetProperty("reason").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
+    // ── P2.6: a planner-authored ArtifactPresent cannot self-certify ─────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(false, "self-certifying")]
+    [InlineData(true, "no paired ArtifactSchema or LlmJudge")]
+    public void A_bare_artifact_present_is_dropped_whether_or_not_its_path_is_declared(bool declared, string reasonContains)
+    {
+        // The defect this arc item closes: a planner subtask that both instructs the agent to write a path and
+        // grades that SAME path by mere existence is self-certifying. Declaring the path alone is not enough — file
+        // existence still proves nothing about content — so a bare ArtifactPresent is dropped either way, only the
+        // REASON differs (an operator reading it needs to know whether the path was invented or just unverified).
+        var declaredPaths = declared ? new[] { "report.md" } : null;
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]}"), declaredPaths);
+
+        plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "item", "sibling" });
+        plan.Subtasks[0].Acceptance.ShouldBeNull("mere existence never becomes an oracle, declared or not");
+        plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "true" }, "a well-formed sibling contract survives untouched");
+
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("item");
+        drop.Kind.ShouldBe("ArtifactPresent");
+        drop.Reason.ShouldContain(reasonContains);
+    }
+
+    [Theory]
+    [InlineData("\"schema\":{\"type\":\"object\"}", BenchmarkGradingKind.ArtifactSchema)]
+    [InlineData("\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}", BenchmarkGradingKind.LlmJudge)]
+    public void A_declared_artifact_present_paired_with_a_content_oracle_is_promoted_and_kept(string companion, BenchmarkGradingKind promotedKind)
+    {
+        // Declared AND paired is the one admissible shape: the companion oracle actually reads the file, so it
+        // becomes the EFFECTIVE kind — ArtifactPresent has nothing left to check once its companion runs, and this
+        // reuses the existing ArtifactSchema/LlmJudge graders exactly as if the planner had authored them directly.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]," + companion + "}"), new[] { "report.md" });
+
+        plan.DroppedAcceptances.ShouldBeNull("a declared, paired ArtifactPresent is admissible — nothing is lost");
+        var acceptance = plan.Subtasks[0].Acceptance.ShouldNotBeNull();
+        acceptance.Kind.ShouldBe(promotedKind, "the content oracle it paired with is what actually verifies the file, so that becomes the effective kind");
+        acceptance.Command.ShouldBe(new[] { "report.md" });
+    }
+
+    [Fact]
+    public void Declared_deliverable_paths_never_gate_any_other_oracle_kind()
+    {
+        // TestsPass/Command (and every other kind) is untouched: the admissibility gate reads ONLY ArtifactPresent
+        // acceptances, so an operator who never declares a path still gets a clean, un-dropped TestsPass plan.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}"), new[] { "irrelevant.md" });
+
+        plan.DroppedAcceptances.ShouldBeNull();
+        plan.Subtasks[0].Acceptance!.Kind.ShouldBe(BenchmarkGradingKind.TestsPass);
+    }
+
+    [Fact]
+    public void An_undeclared_artifact_present_drop_surfaces_under_the_droppedAcceptances_wire_key()
+    {
+        var plan = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"report.md\"]}"));
+
+        var drop = JsonSerializer.SerializeToElement(plan, AgentJson.Options).GetProperty("droppedAcceptances")[0];
+
+        drop.GetProperty("subtaskId").GetString().ShouldBe("item");
+        drop.GetProperty("kind").GetString().ShouldBe("ArtifactPresent");
+        drop.GetProperty("reason").GetString().ShouldContain("self-certifying");
     }
 
     [Theory]

@@ -89,4 +89,16 @@ public sealed record WorkflowPlanRequest
 
     /// <summary>The node id the reviewer AgentRun links to — set by the plan nodes alongside <see cref="WorkflowRunId"/>.</summary>
     public string? NodeId { get; init; }
+
+    /// <summary>
+    /// Workspace-relative deliverable paths the GOAL/OPERATOR declared for this plan — the only paths a
+    /// planner-authored <c>ArtifactPresent</c> acceptance may cite. A path the planner invents on its own is
+    /// self-certifying (the same subtask that instructs the agent to write it would also be the only witness that
+    /// it exists), so <c>PlannerAcceptanceDraft</c> drops any <c>ArtifactPresent</c> whose path is not in this set —
+    /// the subtask keeps its work and falls back to the operator's own acceptance floor. Null/empty ⇒ no path is
+    /// declared, so every planner-authored <c>ArtifactPresent</c> is dropped (byte-identical to before this field
+    /// existed). Nothing populates this yet; a future caller wires it from wherever the operator names expected
+    /// deliverables.
+    /// </summary>
+    public IReadOnlyList<string>? DeclaredDeliverablePaths { get; init; }
 }
