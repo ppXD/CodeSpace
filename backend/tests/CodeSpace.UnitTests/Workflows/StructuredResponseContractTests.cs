@@ -92,16 +92,26 @@ public sealed class StructuredResponseContractTests
     }
 
     [Theory]
-    [InlineData("Anthropic", "TestsPass", "argv")]
-    [InlineData("OpenAI", "TestsPass", "argv")]
-    [InlineData("Anthropic", "ArtifactPresent", "artifactPaths")]
-    [InlineData("OpenAI", "ArtifactPresent", "artifactPaths")]
-    public async Task A_planner_reply_that_never_authors_the_payload_is_returned_after_its_one_reask_instead_of_killing_the_plan(string provider, string kind, string payloadName)
+    [InlineData("Anthropic", "TestsPass", "argv", "")]
+    [InlineData("OpenAI", "TestsPass", "argv", "")]
+    [InlineData("Anthropic", "ArtifactPresent", "artifactPaths", "")]
+    [InlineData("OpenAI", "ArtifactPresent", "artifactPaths", "")]
+    // An EMPTY authored payload is the same defect reported by a different schema keyword — `minItems` on the payload
+    // rather than "no oneOf branch matches" — so both arrive as violations of the acceptance's own schema, not of the
+    // consumer contract alone. A degrade that only survived one of the two would still kill live plans.
+    [InlineData("Anthropic", "TestsPass", "argv", ",\"argv\":[]")]
+    [InlineData("OpenAI", "ArtifactPresent", "artifactPaths", ",\"artifactPaths\":[]")]
+    // The arm no keyword could classify: an unmatched `oneOf` spills its CLOSEST branch's violations, and for a
+    // payload-less LlmJudge that branch is another kind's — so the schema faults a `kind` the model got right. The
+    // text reads exactly like a genuinely bad enum value; only the acceptance contract's own verdict tells them apart.
+    [InlineData("Anthropic", "LlmJudge", "artifactPaths", "")]
+    [InlineData("OpenAI", "LlmJudge", "artifactPaths", "")]
+    public async Task A_planner_reply_that_never_authors_the_payload_is_returned_after_its_one_reask_instead_of_killing_the_plan(string provider, string kind, string payloadName, string payload)
     {
         // Live run 34084564329: the model skipped ONE acceptance payload, the re-ask did not fix it, and the reply
         // became a Malformed fault — so the planner NODE failed and a plan-map launch died at planning. A
         // model-quality miss must cost that subtask its oracle, never the run its plan.
-        var handler = new WireHandler(provider, [PlannerReply(kind), PlannerReply(kind)]);
+        var handler = new WireHandler(provider, [PlannerReply(kind, payload), PlannerReply(kind, payload)]);
 
         var response = await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
 
@@ -180,13 +190,46 @@ public sealed class StructuredResponseContractTests
     }
 
     [Theory]
+    [InlineData("Anthropic", "title")]
+    [InlineData("OpenAI", "title")]
+    [InlineData("Anthropic", "kind")]
+    [InlineData("OpenAI", "kind")]
+    [InlineData("Anthropic", "questions")]
+    [InlineData("OpenAI", "questions")]
+    public async Task A_schema_violation_the_consumer_has_no_degrade_for_is_still_a_bounded_typed_fault(string provider, string defect)
+    {
+        // The degrade is scoped by the CONSUMER's own verdict on a named position, not by "this looked like a payload
+        // problem". Missing `title` faults `$.subtasks[0]` — outside the acceptance the advisory claims — while an
+        // unknown oracle `kind` faults INSIDE it and is still fatal, because the acceptance contract refuses to bind
+        // that acceptance at all and therefore never calls it droppable. Every reply here ALSO carries the degradable
+        // absent-payload shape, so this is the composition: one fatal defect outvotes any number of advisory ones.
+        //
+        // The `questions` arm is the one the SCHEMA alone can see — a question with no options binds fine (the record
+        // defaults the list) and the typed consumer check passes it. It is therefore what makes a blanket "this reply
+        // has an advisory, so its schema errors are advisory too" attribution observable instead of merely wrong.
+        var reply = defect switch
+        {
+            "title" => PlannerReply("TestsPass").Replace("\"title\":\"result\",", ""),
+            "kind" => PlannerReply("NoSuchOracle"),
+            _ => PlannerReply("TestsPass").Replace("\"successCriteria\":[]", "\"questions\":[{\"id\":\"q1\",\"question\":\"which shape?\"}],\"successCriteria\":[]"),
+        };
+        var handler = new WireHandler(provider, [reply, reply]);
+
+        var error = await Should.ThrowAsync<LlmApiException>(() => Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None));
+
+        error.Category.ShouldBe(LlmErrorCategory.Malformed);
+        handler.Bodies.Count.ShouldBe(2, "the re-ask stays bounded to one");
+        handler.Bodies[1].ShouldContain("did NOT conform to the required JSON Schema", customMessage: "a reply carrying anything fatal gets the fatal preamble, never the accepting one");
+    }
+
+    [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
-    public async Task The_reask_preamble_calls_a_schema_miss_invalid_and_an_advisory_conformant(string provider)
+    public async Task The_reask_preamble_calls_a_fatal_miss_invalid_and_never_says_that_of_a_degradable_one(string provider)
     {
-        // One preamble cannot serve both severities. Telling a model its schema-VALID reply "did NOT conform to the
-        // required JSON Schema … (invalid)" is a false correction on the exact reply the consumer was going to accept,
-        // and it invites the model to re-author the parts that were already right.
+        // One preamble cannot serve both severities. Telling a model "your previous (invalid) response did NOT
+        // conform" about the exact reply the consumer is going to ACCEPT is a false correction, and it invites the
+        // model to re-author the parts that were already right.
         var fatal = new WireHandler(provider, ["{}", "{}"]);
         await Should.ThrowAsync<LlmApiException>(() => Client(provider, fatal).CompleteStructuredAsync(Request(provider), CancellationToken.None));
 
@@ -196,15 +239,15 @@ public sealed class StructuredResponseContractTests
         var advisory = new WireHandler(provider, [PlannerReply("TestsPass"), PlannerReply("TestsPass")]);
         await Client(provider, advisory).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
 
-        advisory.Bodies[1].ShouldContain("conformed to the required JSON Schema");
         advisory.Bodies[1].ShouldContain("left a required payload unauthored");
-        advisory.Bodies[1].ShouldNotContain("did NOT conform", customMessage: "the reply DID conform — the schema does not require the payload this advice asks for");
-        advisory.Bodies[1].ShouldNotContain("previous (invalid) response", customMessage: "an advisory reply is not invalid; calling it that is a lie the model then acts on");
+        advisory.Bodies[1].ShouldContain("everything else in it is accepted as authored");
+        advisory.Bodies[1].ShouldNotContain("did NOT conform", customMessage: "the reply is about to be accepted; the severity is the point, not which checker noticed");
+        advisory.Bodies[1].ShouldNotContain("previous (invalid) response", customMessage: "a degradable reply is not invalid; calling it that is a lie the model then acts on");
     }
 
-    /// <summary>The live regression shape: one subtask that names an oracle kind and authors NO payload for it — schema-valid (the schema requires only formatVersion + kind), so the defect is the consumer contract's alone.</summary>
-    private static string PlannerReply(string kind) =>
-        "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"" + kind + "\"}}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
+    /// <summary>The live regression shape: one subtask that names an oracle kind and authors NO payload for it — a consumer-contract defect the model-visible schema ALSO faults (no per-kind <c>oneOf</c> branch matches), which is why the two must be read as one severity. <paramref name="payload"/> appends raw acceptance keys, so an EMPTY payload can be authored too.</summary>
+    private static string PlannerReply(string kind, string payload = "") =>
+        "{\"goal\":\"produce the requested result\",\"subtasks\":[{\"id\":\"s1\",\"title\":\"result\",\"instruction\":\"do the work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"" + kind + "\"" + payload + "}}],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
 
     /// <summary>The REAL planner request (schema + validator + advisor as production builds them) — never a stand-in, so these arms pin the wire the live run used.</summary>
     private static StructuredLLMCompletionRequest PlannerRequest(string provider) =>

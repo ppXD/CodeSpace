@@ -23,6 +23,19 @@ internal static class JsonSchemaValidator
         return budget.Remaining < 0 ? ["$: schema validation work budget exceeded; simplify the structured response or schema."] : errors;
     }
 
+    /// <summary>
+    /// The INSTANCE PATH a violation was reported at (<c>$.subtasks[0].acceptance</c>), or the whole line when it
+    /// carries none. Every violation is minted here as <c>$"{path}: {message}"</c>, so the reader of that shape lives
+    /// here too: a consumer that attributes a violation to one part of its own contract must not re-guess the
+    /// separator, and a change to the line format then has exactly one place to keep honest.
+    /// </summary>
+    public static string PathOf(string violation)
+    {
+        var separator = violation.IndexOf(": ", StringComparison.Ordinal);
+
+        return separator < 0 ? violation : violation[..separator];
+    }
+
     private static void ValidateNode(JsonElement instance, JsonElement schema, string path, List<string> errors, ValidationBudget budget)
     {
         if (errors.Count >= MaxErrors || --budget.Remaining < 0) return;

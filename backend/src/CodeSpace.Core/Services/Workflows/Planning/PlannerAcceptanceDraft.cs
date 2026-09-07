@@ -87,35 +87,43 @@ internal sealed record PlannerAcceptanceDraft
     public static PlannedWorkflow? ReadResponse(JsonElement response, out IReadOnlyList<DroppedAcceptance> dropped)
     {
         var plan = response.Deserialize<PlannedWorkflow>(ResponseReadOptions);
-        dropped = plan is null ? Array.Empty<DroppedAcceptance>() : DescribeDroppedAcceptance(response);
+        dropped = plan is null ? Array.Empty<DroppedAcceptance>() : DescribeUnboundAcceptances(response).Select(unbound => unbound.Drop).ToArray();
         return plan;
     }
 
     /// <summary>
-    /// Name the subtasks whose acceptance the bind above dropped. The subtask id lives on the RAW subtask element —
-    /// the converter only ever sees the acceptance object — so the drops are described by re-running the SAME
-    /// <see cref="ToRuntime"/> over the raw drafts. One definition of the contract, read twice, rather than a second
-    /// copy of the payload rule that could drift from the one the bind enforces.
+    /// Name the subtasks whose acceptance the bind above dropped, each with the POSITION it was authored at. The
+    /// subtask id lives on the RAW subtask element — the converter only ever sees the acceptance object — so the drops
+    /// are described by re-running the SAME <see cref="ToRuntime"/> over the raw drafts. One definition of the
+    /// contract, read twice, rather than a second copy of the payload rule that could drift from the one the bind
+    /// enforces — and the same single definition the JSON-Schema side of the re-ask is interpreted against.
+    ///
+    /// <para>The index rides along because a JSON-Schema violation can only be attributed positionally:
+    /// <c>$.subtasks[3].acceptance</c> is where the schema reports the same absent payload, and the model's own
+    /// <c>id</c> appears nowhere in that path.</para>
     /// </summary>
-    private static IReadOnlyList<DroppedAcceptance> DescribeDroppedAcceptance(JsonElement response)
+    internal static IReadOnlyList<(int Index, DroppedAcceptance Drop)> DescribeUnboundAcceptances(JsonElement response)
     {
-        if (!TryReadProperty(response, "subtasks", out var subtasks) || subtasks.ValueKind != JsonValueKind.Array) return Array.Empty<DroppedAcceptance>();
+        if (!TryReadProperty(response, "subtasks", out var subtasks) || subtasks.ValueKind != JsonValueKind.Array) return Array.Empty<(int, DroppedAcceptance)>();
 
-        var dropped = new List<DroppedAcceptance>();
+        var dropped = new List<(int, DroppedAcceptance)>();
+        var index = 0;
 
         foreach (var subtask in subtasks.EnumerateArray())
         {
+            var at = index++;
+
             if (!TryReadProperty(subtask, "acceptance", out var acceptance) || acceptance.ValueKind != JsonValueKind.Object) continue;
 
             if (DescribeUnboundPayload(acceptance) is not { } defect) continue;
 
-            dropped.Add(new DroppedAcceptance { SubtaskId = ReadId(subtask), Kind = defect.Kind, Reason = defect.Reason });
+            dropped.Add((at, new DroppedAcceptance { SubtaskId = ReadId(subtask), Kind = defect.Kind, Reason = defect.Reason }));
         }
 
         return dropped;
     }
 
-    /// <summary>Re-bind ONE raw acceptance draft and report only the droppable shape. A fatal violation cannot reach here — the plan-wide bind already threw on it and no plan came back to describe — so it is swallowed rather than reported twice.</summary>
+    /// <summary>Re-bind ONE raw acceptance draft and report only the droppable shape. A fatal violation is SWALLOWED rather than reported here: it belongs to whoever is asking the plan to bind (the reply-wide read throws; the response validator reports), and describing it as droppable is exactly the mistake that would let it degrade instead of failing.</summary>
     private static (BenchmarkGradingKind Kind, string Reason)? DescribeUnboundPayload(JsonElement acceptance)
     {
         try

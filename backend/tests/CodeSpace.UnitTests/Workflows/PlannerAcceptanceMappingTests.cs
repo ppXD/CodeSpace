@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Agents;
@@ -207,16 +208,46 @@ public sealed class PlannerAcceptanceMappingTests
     {
         var advice = LlmWorkflowPlanner.AdviseModelResponse(Reply("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}}")).ShouldHaveSingleItem();
 
-        advice.ShouldContain("'item'", customMessage: "\"somewhere in your plan\" is not a correction a model can act on");
-        advice.ShouldContain("LlmJudge");
-        advice.ShouldContain("artifactPaths");
-        advice.ShouldContain("omit", customMessage: "omitting acceptance is the honest alternative to inventing a payload");
+        advice.Message.ShouldContain("'item'", customMessage: "\"somewhere in your plan\" is not a correction a model can act on");
+        advice.Message.ShouldContain("LlmJudge");
+        advice.Message.ShouldContain("artifactPaths");
+        advice.Message.ShouldContain("omit", customMessage: "omitting acceptance is the honest alternative to inventing a payload");
+    }
+
+    [Theory]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\"}")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[]}")]
+    // The schema reports an unmatched `oneOf` by spilling its CLOSEST branch's violations, and for a payload-less
+    // LlmJudge the closest branch is a different kind's — so the reply is faulted for a `kind` the model never got
+    // wrong. That spill is why attribution is scoped to the acceptance the contract itself calls droppable rather
+    // than matched on keywords: "missing payload" and "bad kind" are indistinguishable in the violation text here.
+    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\"}")]
+    public void The_advice_claims_the_position_the_schema_reports_the_same_absence_at(string acceptance)
+    {
+        // The two checkers name ONE defect: this contract calls it droppable, the model-visible schema faults the very
+        // same acceptance (no per-kind oneOf branch matches a payload-less one; an empty payload misses its minItems).
+        // The claimed path is how the transport knows they are the same, so it must be the POSITIONAL path the schema
+        // walks — the model's own id appears nowhere in it — and it must be the DEGRADED subtask's, not the plan's.
+        var advice = LlmWorkflowPlanner.AdviseModelResponse(ReplySecondUnbound(acceptance)).ShouldHaveSingleItem();
+
+        advice.Path.ShouldBe("$.subtasks[1].acceptance", "a claim on the wrong index would silence a sibling's fatal defect and leave this one fatal");
+
+        var atClaim = JsonSchemaValidator.Validate(ReplySecondUnbound(acceptance), PlannerSchema.ResponseSchema);
+        atClaim.ShouldNotBeEmpty("the schema must still fault the absent payload — the degrade is an interpretation of that fault, not a hole in it");
+        atClaim.ShouldAllBe(violation => JsonSchemaValidator.PathOf(violation).StartsWith(advice.Path), "every violation this reply raises is the claimed defect; anything else would be a fatal the test is not about");
     }
 
     private static PlannedSubtask Parse(JsonElement acceptance) => LlmWorkflowPlanner.Deserialize(JsonSerializer.SerializeToElement(new { goal = "verify", subtasks = new[] { new { id = "item", title = "Item", instruction = "Do the work", acceptance } } })).Subtasks.Single();
 
     /// <summary>A two-subtask reply: the first carries <paramref name="acceptance"/> verbatim, the second a well-formed contract — so a test can tell "this item degraded" apart from "the plan collapsed".</summary>
     private static JsonElement Reply(string acceptance) => ReplyWith(acceptance, null);
+
+    /// <summary>The mirror of <see cref="Reply"/>: the WELL-FORMED subtask comes first and <paramref name="acceptance"/> second, so a claim pinned to an index cannot pass by accident on a plan whose only subtask is at 0.</summary>
+    private static JsonElement ReplySecondUnbound(string acceptance) => JsonDocument.Parse(
+        "{\"goal\":\"verify\",\"subtasks\":["
+      + "{\"id\":\"sibling\",\"title\":\"Sibling\",\"instruction\":\"Do the other work\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}},"
+      + "{\"id\":\"item\",\"title\":\"Item\",\"instruction\":\"Do the work\",\"acceptance\":" + acceptance + "}"
+      + "]}").RootElement;
 
     /// <summary>The same reply with a model-authored <c>droppedAcceptances</c> appended verbatim — the server-stamped key a reply must never be able to speak for.</summary>
     private static JsonElement ReplyWith(string acceptance, string? droppedAcceptances) => JsonDocument.Parse(
