@@ -138,6 +138,37 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void A_discarded_amendment_recites_the_re_amend_instead_of_the_re_plan_that_lost_it()
+    {
+        // The same hand-off one re-plan later: a plan DISCARDS every approved amendment, so the unrunnable verdict is
+        // live again — and the infra arm's stock copy ("re-plan the check") asks for exactly the move that destroyed
+        // the repair, three lines under a results block forbidding it. One prompt must not carry both verbs.
+        var amend = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "the check invokes missing tooling",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+        });
+
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "grade-error: npm not found")),
+            Prior(3, SupervisorDecisionKinds.AskHuman, amend.PayloadJson!, """{"question":"q","answer":"approve"}"""),
+            Plan(4, ("s1", "First")),
+        };
+
+        SupervisorAmendObligation.StandingFor(priors, "s1").ShouldBe(SupervisorAmendStanding.Discarded,
+            "fixture check — the re-plan must really have eaten the co-sign, or this asserts the None arm under a new name");
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("a re-plan already DISCARDED the co-signed repair", customMessage: "the recital names what the last plan cost");
+        recitation.ShouldContain("propose 'amend_acceptance' again", customMessage: "…and the verb that re-anchors the repair to this plan");
+        recitation.ShouldNotContain("re-plan the check", customMessage: "the stock infra copy asks for the move that discards the repair");
+        recitation.ShouldContain("Unfinished: s1", customMessage: "a check that still cannot run leaves the unit unfinished");
+    }
+
+    [Fact]
     public void A_waived_unit_recites_as_waived_never_as_done()
     {
         // B2 (FATAL-1): "done" alone would feed the decider a waived unit as ordinary evidence.

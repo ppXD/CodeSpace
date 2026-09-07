@@ -115,6 +115,11 @@ public class SupervisorGoldenPromptFidelityTests
     /// amendment, so its prompt must say the re-plan already ate the co-sign and must NOT ask for another plan —
     /// the arm the first cut of this fix fell through on, and the one the observed <c>plan×8</c> lived in. Derived
     /// from the decider's own steer rather than restated, so a reword stays a one-file change.
+    ///
+    /// <para>The steer is only half of what makes this a golden. Both OTHER places the prompt speaks about the same
+    /// unit have to agree with it: the plan-state recitation (whose infra arm otherwise recites "re-plan the check"
+    /// — the move the verdict one screen above just forbade), and the carry-over line, which truthfully offers
+    /// "'merge' will include them" for any unit the tape left mergeable.</para>
     /// </summary>
     [Fact]
     public void The_discarded_cosign_scenario_is_steered_back_at_the_amendment_never_at_another_plan()
@@ -122,8 +127,9 @@ public class SupervisorGoldenPromptFidelityTests
         var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-discarded-by-replan");
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
 
-        SupervisorAmendObligation.StandingFor(scenario.Context.PriorDecisions, "s2").ShouldBe(SupervisorAmendStanding.Discarded,
-            "the fixture must really carry a co-sign a later plan discarded, or the scenario measures nothing it claims to");
+        foreach (var subtaskId in new[] { "s1", "s2" })
+            SupervisorAmendObligation.StandingFor(scenario.Context.PriorDecisions, subtaskId).ShouldBe(SupervisorAmendStanding.Discarded,
+                $"'{subtaskId}' must really carry a co-sign a later plan discarded, or the scenario measures nothing it claims to");
 
         prompt.ShouldContain(LlmSupervisorDecider.InfraSteerFor(SupervisorAmendStanding.Discarded), Case.Sensitive,
             "the unit's own verdict line must steer at the verb its accepted set demands");
@@ -131,8 +137,33 @@ public class SupervisorGoldenPromptFidelityTests
             "…and the prompt must state, once, why the plan it just refused is the move that lost the repair");
         prompt.ShouldNotContain("Re-plan this item", Case.Insensitive,
             "a scenario graded on re-proposing the amendment whose prompt asks for a re-plan is the pre-fix prompt with a new name");
+        prompt.ShouldNotContain("re-plan the check", Case.Insensitive,
+            "the plan-state recitation asks for the re-plan the verdict block forbids — one prompt, two verbs, and the model picks whichever it read last");
         prompt.ShouldNotContain("OUTSTANDING ORACLE AMENDMENT", Case.Sensitive,
             "a discarded amendment owes no retry — the banner is outstanding-only, and this reading is steer-only");
+    }
+
+    /// <summary>
+    /// Why <c>amended-oracle-discarded-by-replan</c> holds ONE right move: nothing on its tape is mergeable. The
+    /// first cut shipped it with a clean sibling unit, so the recitation truthfully told the model
+    /// "1 succeeded result(s) … 'merge' will include them" — and the live decision eval answered <c>merge</c> on
+    /// BOTH the gating and the informational wire, from a prompt that genuinely admitted it. Two independent wires
+    /// agreeing is the corpus's own signal that a scenario, not a model, is wrong; the answer key was left alone and
+    /// the fixture lost its mergeable unit. Asserted off <see cref="SupervisorMergeContributors"/> — the same
+    /// selection the merge executor folds — so this cannot pass against a prompt line the merge would not honour.
+    /// </summary>
+    [Fact]
+    public void The_discarded_cosign_scenario_leaves_nothing_a_merge_could_fold()
+    {
+        var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "amended-oracle-discarded-by-replan");
+        var selection = SupervisorMergeContributors.Resolve(scenario.Context.PriorDecisions);
+
+        selection.AgentRunIds.ShouldBeEmpty("a mergeable contributor makes 'merge' a defensible answer, and the accepted set does not admit it");
+        selection.CarriedOverFromEarlierGenerations.ShouldBe(0, "a stranded-but-mergeable result is the same affordance one generation back");
+
+        LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context)
+            .ShouldNotContain("'merge' will include them", Case.Sensitive,
+                "the carry-over line offers the model a verb this scenario grades as wrong — and it is offering it truthfully, which is the fixture's bug, not the line's");
     }
 
     [Fact]
@@ -369,7 +400,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "624fa1cc6d10a6354abdbfd675388390bf641c181e153d3ffe1f1c60f66eec27";
+    private const string GoldenPromptDigest = "d4c31246c3aefb766e4e913dc8fbbf9dc25f428fc5a2b0805e9087a6963ee42c";
 
     /// <summary>
     /// The pin this corpus carried while it held 23 scenarios — before the two co-sign scenarios joined it. They
@@ -384,7 +415,9 @@ public class SupervisorGoldenPromptFidelityTests
     /// the new steer is derived from a co-signed amendment on the tape, and no pre-existing scenario has one. That
     /// is asserted rather than claimed — <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes
     /// today's rendering over the 23 scenarios that predate this pin and requires exactly this value back. It has
-    /// now survived two corpus growths and one edit to the amended steers, which is the whole point of keeping it.</para>
+    /// now survived two corpus growths and two edits to the amended readings — the second of which reached into the
+    /// plan-state recitation, a block EVERY scenario renders, and this receipt is what proves it moved none of
+    /// them. That is the whole point of keeping it.</para>
     /// </summary>
     private const string PreCosignScenarioCorpusDigest = "4b44d4d228bd23b4dfaad94cc0f403e641af82fc221db31f8b0d35772b4d4bea";
 

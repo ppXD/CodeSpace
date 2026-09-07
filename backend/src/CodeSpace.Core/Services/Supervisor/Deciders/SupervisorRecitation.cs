@@ -108,7 +108,17 @@ public static class SupervisorRecitation
 
         if (attempt is null) return "pending";
 
-        return result is null ? "running" : Describe(result);   // staged, outcome not folded yet
+        if (result is null) return "running";   // staged, outcome not folded yet
+
+        // B6's other half, one re-plan later: the co-sign that repaired this unit's check is GONE (a plan discards
+        // every approved amendment), so its unrunnable verdict is live again — and Describe's infra arm would recite
+        // "re-plan the check", which is the very move that destroyed the repair. Recite the verb that re-anchors it,
+        // or this block spends every turn asking for the step the results block one screen above just forbade.
+        if (result.AcceptancePassed == false && IsInfraRejection(result)
+            && SupervisorAmendObligation.StandingFor(priors, subtaskId) == SupervisorAmendStanding.Discarded)
+            return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — a re-plan already DISCARDED the co-signed repair; propose 'amend_acceptance' again or ask a human, do not re-plan and do not retry";
+
+        return Describe(result);
     }
 
     /// <summary>
