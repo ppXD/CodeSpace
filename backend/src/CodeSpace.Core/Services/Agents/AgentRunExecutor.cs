@@ -534,6 +534,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
         }
+        catch (AgentRunLaunchAdmittedException admitted)
+        {
+            // A physical execution was admitted and could not be made reachable. The process may be alive and it owns
+            // this clone, so this observer stops WITHOUT writing a verdict over live work and WITHOUT reclaiming the
+            // workspace: the run stays Running, and the reconciler re-addresses the execution by its exact attempt
+            // identity — or, when it cannot, abandons the run exactly as it abandons any other handle-less stale run.
+            // Terminalizing here is what deleted a live agent's clone.
+            //
+            // It RETURNS rather than rethrowing, unlike the two tear-down arms below. Those rethrow because a retry of
+            // this very job is who resumes them — a superseded owner's successor, a restarted worker. Here the
+            // recovery owner is the RECONCILER, which needs this run's lease to lapse before it can adopt anything, so
+            // a rethrow would only spend Hangfire's retries on claims that must fail by design.
+            leaveWorkspaceForReattach = true;
+            observerCts.Cancel();
+            _logger.LogWarning(admitted, "Agent run {RunId} stays Running with its workspace intact after an unacknowledged launch; the reconciler re-addresses its admitted execution or abandons the run", agentRunId);
+        }
         catch (AgentRunOwnershipLostException)
         {
             leaveWorkspaceForReattach = true;
@@ -3308,7 +3324,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // This hard-codes the LOCAL runner's layout: ISandboxDurableRunner.LaunchAsync is never handed the run id, so a
         // second durable runner cannot resolve a run-scoped lease of its own — adopting one means giving the interface
         // the run id (or the lease directory) first. A null directory means "no lease".
-        var handle = (await durable.LaunchAsync(context.Spec, context.SpoolKey, cancellationToken).ConfigureAwait(false)) with
+        // The durable attempt this process belongs to already EXISTS (the frame plane opened it before this launch), so
+        // the launch can be bound to that exact identity rather than to a spool key alone. That binding is what makes
+        // the next few statements recoverable: the runner refuses to admit a second execution for it, and a recovery
+        // can re-discover this one by the identity instead of by a handle that may never have been written.
+        var identity = LaunchIdentityOf(sinks);
+        var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
@@ -3316,11 +3337,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         };
         handle = EnsureLogCaptureHandle(handle, durable);
 
-        await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        await RecordConfinementAsync(context.Owner, handle.Confinement, cancellationToken).ConfigureAwait(false);
-        var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
-        if (capture.Handle != handle)
-            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        // From here a physical execution is ADMITTED. Everything up to the handle being durable is inside the window
+        // this seam exists for: a failure in it leaves a live process owning the workspace, so it must not be allowed
+        // to terminalize the run or reclaim the clone. AcknowledgeAdmittedLaunchAsync converts any such failure into
+        // the recoverable exception, and the run stays Running for adoption by exactly this attempt.
+        var capture = await AcknowledgeAdmittedLaunchAsync(context, durable, handle, identity, cancellationToken).ConfigureAwait(false);
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
@@ -3333,6 +3354,61 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await RecordDiagnosticsAsync(new DiagnosticCapture(context.TeamId, context.RunId, context.WorkerFenceEpoch, context.Harness, context.Redactor, capture.Handle, durable), cancellationToken).ConfigureAwait(false);
 
         return result;
+    }
+
+    /// <summary>
+    /// The durable identity this launch belongs to, read off the frame plane's own opening. Null when the plane did
+    /// not open: then no attempt row exists to bind to, and the launch keeps the spool-key-only compatibility binding
+    /// rather than inventing an identity nothing holds a row for.
+    /// </summary>
+    private static SandboxLaunchIdentity? LaunchIdentityOf(HarnessSinks sinks) =>
+        sinks.Frames.Opening is { } opening ? new SandboxLaunchIdentity(opening.TeamId, opening.AgentRunId, opening.ExecutionId, opening.AttemptId) : null;
+
+    /// <summary>
+    /// Launch bound to <paramref name="identity"/> when the runner can carry one, and exactly as before when it
+    /// cannot. Feature-detected (Rule 7) so a runner without the capability is unaffected, and skipped entirely for a
+    /// null identity so the compatibility path stays byte-identical.
+    /// </summary>
+    private static Task<SandboxHandle> LaunchBoundAsync(ISandboxDurableRunner durable, HarnessRunContext context, SandboxLaunchIdentity? identity, CancellationToken cancellationToken) =>
+        identity is not null && durable is ISandboxLaunchIdentityRunner bound
+            ? bound.LaunchAsync(new SandboxLaunchRequest(context.Spec, context.SpoolKey, identity), cancellationToken)
+            : durable.LaunchAsync(context.Spec, context.SpoolKey, cancellationToken);
+
+    /// <summary>
+    /// Make an ADMITTED execution reachable, and keep the run recoverable if that cannot be done.
+    ///
+    /// <para>It writes NOTHING of its own onto the durable attempt, and that is a decision rather than an omission.
+    /// The recoverable facts a launch needs are already on the row the frame plane opened — the identity is its own
+    /// columns and the address is the locator — so the acknowledgement here is exactly what it always was: the app-side
+    /// handle, the confinement record and the log capture. A first cut took the attempt's 0137 observer claim in front
+    /// of them, which made every native attempt permanently unclosable (the terminal-claim CHECK demands a released
+    /// claim, and no closer releases one); see <see cref="INativeRecordLaunchPlane"/> for why it is not coming back
+    /// without a release protocol.</para>
+    ///
+    /// <para>Every failure in that stretch becomes <see cref="AgentRunLaunchAdmittedException"/>, INCLUDING an
+    /// ownership loss: the distinction the outer handler draws between "stop observing" and "terminalize" is right for
+    /// a run with no process, and wrong here, where a live process is holding the clone either way. Cancellation is
+    /// left alone — the outer handler already leaves a torn-down worker's run Running and its workspace intact, which
+    /// is the same outcome by the path the tear-down contract already documents.</para>
+    /// </summary>
+    private async Task<IAgentRunLogCaptureSession> AcknowledgeAdmittedLaunchAsync(HarnessRunContext context, ISandboxDurableRunner durable, SandboxHandle handle, SandboxLaunchIdentity? identity, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            await RecordConfinementAsync(context.Owner, handle.Confinement, cancellationToken).ConfigureAwait(false);
+            var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
+            if (capture.Handle != handle)
+                await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+
+            return capture;
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException && identity is not null)
+        {
+            _logger.LogError(failure, "Agent run {RunId} admitted a physical execution for attempt {AttemptId} and could not make it reachable; leaving the run Running so a recovery can re-address it by that identity", context.RunId, identity.AttemptId);
+
+            throw new AgentRunLaunchAdmittedException(context.RunId, identity.AttemptId, failure);
+        }
     }
 
     /// <summary>

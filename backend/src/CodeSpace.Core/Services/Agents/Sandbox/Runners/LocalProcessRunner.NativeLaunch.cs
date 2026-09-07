@@ -14,6 +14,46 @@ public sealed partial class LocalProcessRunner
     /// <summary>The compatibility producer binds its existing spool key. A native execution/attempt producer can supply the typed identity without coupling it to a worker lease.</summary>
     public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken) => LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, spoolKey), cancellationToken);
 
+    public Task<SandboxHandle> LaunchAsync(SandboxLaunchRequest request, CancellationToken cancellationToken) => LaunchOrDiscoverAsync(request, cancellationToken);
+
+    /// <summary>
+    /// Rebuild the handle of a launch <paramref name="adoption"/>'s exact identity already admitted. It reads the slot
+    /// and NEVER writes it: no request is created, no broker is started, so a recovery that runs against a slot which
+    /// never launched cannot become the thing that launches it. The identity equality below is the fence — the same
+    /// comparison <see cref="BindLaunchAsync"/> makes, applied to a slot this call is forbidden to author.
+    /// </summary>
+    public async Task<SandboxHandle?> AdoptAsync(SandboxLaunchAdoption adoption, CancellationToken cancellationToken)
+    {
+        ValidateLaunchKey(adoption.SpoolKey, adoption.Identity);
+        var spool = SpoolDirectoryFor(adoption.SpoolKey);
+        var directory = NativeLaunchFiles.DirectoryFor(spool);
+
+        NativeLaunchRecord recorded;
+        try { recorded = NativeLaunchFiles.Read<NativeLaunchRecord>(directory, NativeLaunchProtocol.RequestFile); }
+        catch (Exception absent) when (absent is FileNotFoundException or DirectoryNotFoundException) { return null; }
+        catch (Exception error) when (error is JsonException or InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            throw new NativeLaunchException("indeterminate", "The recorded launch request is unreadable; an admitted execution cannot be ruled out.");
+        }
+
+        if (recorded.Version != NativeLaunchProtocol.Version || recorded.Identity is null || recorded.Identity != adoption.Identity || recorded.SpoolKey != adoption.SpoolKey)
+            throw new NativeLaunchException("binding-conflict", "This launch slot is bound to a different immutable identity; it cannot be adopted for this attempt.");
+
+        if (recorded.BootId != NativeProcess.BootId || !string.Equals(recorded.Host, CurrentHost, StringComparison.OrdinalIgnoreCase))
+            throw new NativeLaunchException("foreign-host", "This launch belongs to another host or boot; its PID cannot be adopted here.");
+
+        // A bounded patience, unlike the launch path's: this call runs inside a fleet sweep over many candidates, and
+        // a slot whose broker died before committing any receipt must be reported indeterminate promptly rather than
+        // holding the sweep for the launch handshake's full budget.
+        return await DiscoverHandleAsync(recorded, directory, spool, AdoptionPatience, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>How long <see cref="AdoptAsync"/> waits for a receipt to appear. A recovery runs long after the launch handshake, so an absent receipt here is a verdict, not a race.</summary>
+    private static readonly TimeSpan AdoptionPatience = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long the launch path waits for the bootstrap to commit its receipt.</summary>
+    private static readonly TimeSpan LaunchPatience = TimeSpan.FromSeconds(35);
+
     public async Task<SandboxHandle> LaunchOrDiscoverAsync(SandboxLaunchRequest request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -31,7 +71,7 @@ public sealed partial class LocalProcessRunner
         if (!File.Exists(NativeLaunchFiles.PathFor(directory, NativeLaunchProtocol.CommitmentFile)))
             await StartBrokerAsync(new BrokerStart(request.SpoolKey, spec, spool, directory), cancellationToken).ConfigureAwait(false);
 
-        return await DiscoverHandleAsync(record, directory, spool, cancellationToken).ConfigureAwait(false);
+        return await DiscoverHandleAsync(record, directory, spool, LaunchPatience, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<NativeLaunchRecord> BindLaunchAsync(SandboxLaunchRequest request, string hash, string directory, CancellationToken cancellationToken)
@@ -109,7 +149,7 @@ public sealed partial class LocalProcessRunner
         finally { process.StandardInput.Close(); }
     }
 
-    private static async Task<SandboxHandle> DiscoverHandleAsync(NativeLaunchRecord request, string directory, string spool, CancellationToken cancellationToken)
+    private static async Task<SandboxHandle> DiscoverHandleAsync(NativeLaunchRecord request, string directory, string spool, TimeSpan patience, CancellationToken cancellationToken)
     {
         var watch = Stopwatch.StartNew();
         while (true)
@@ -131,7 +171,7 @@ public sealed partial class LocalProcessRunner
                 if (receipt.State is "rejected" or "indeterminate" || !NativeProcess.IsAlive(receipt.Broker))
                     throw new NativeLaunchException("indeterminate", $"The start commitment was consumed without a confirmed execution receipt ({receipt.Problem ?? receipt.State}); automatic re-execution is forbidden.");
             }
-            if (watch.Elapsed >= TimeSpan.FromSeconds(35)) throw new NativeLaunchException("indeterminate", "The launch receipt is unavailable; automatic re-execution is forbidden.");
+            if (watch.Elapsed >= patience) throw new NativeLaunchException("indeterminate", "The launch receipt is unavailable; automatic re-execution is forbidden.");
             await Task.Delay(20, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -143,12 +183,14 @@ public sealed partial class LocalProcessRunner
         return path;
     }
 
-    private static void ValidateLaunchKey(SandboxLaunchRequest request)
+    private static void ValidateLaunchKey(SandboxLaunchRequest request) => ValidateLaunchKey(request.SpoolKey, request.Identity);
+
+    private static void ValidateLaunchKey(string spoolKey, SandboxLaunchIdentity? identity)
     {
-        if (string.IsNullOrWhiteSpace(request.SpoolKey) || request.SpoolKey is "." or ".." || request.SpoolKey.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, '\0']) >= 0)
-            throw new ArgumentException("Launch slot must be one local path segment.", nameof(request));
-        if (request.Identity is { } identity && new[] { identity.TeamId, identity.AgentRunId, identity.ExecutionId, identity.AttemptId }.Any(value => value == Guid.Empty))
-            throw new ArgumentException("An explicit native launch identity must be complete.", nameof(request));
+        if (string.IsNullOrWhiteSpace(spoolKey) || spoolKey is "." or ".." || spoolKey.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, '\0']) >= 0)
+            throw new ArgumentException("Launch slot must be one local path segment.", nameof(spoolKey));
+        if (identity is { } value && new[] { value.TeamId, value.AgentRunId, value.ExecutionId, value.AttemptId }.Any(field => field == Guid.Empty))
+            throw new ArgumentException("An explicit native launch identity must be complete.", nameof(identity));
     }
 
     private static bool NativeDeadlineExpired(SandboxHandle handle)

@@ -15,6 +15,7 @@ namespace CodeSpace.Messages.Failures;
 public static class FailureCodes
 {
     public const string AgentRunOwnershipLost = "agent-run-ownership-lost";
+    public const string AgentRunLaunchAcknowledgementLost = "agent-run-launch-acknowledgement-lost";
     public const string AgentAuthorityDenied = "agent.authority_denied";
     // ── Identity and access ────────────────────────────────────────────────────────
     public const string Unauthorized = "unauthorized";

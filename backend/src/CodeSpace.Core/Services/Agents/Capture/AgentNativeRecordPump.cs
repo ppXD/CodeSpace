@@ -113,6 +113,13 @@ internal sealed class AgentNativeRecordPump
     /// <summary>Whether frames are actually being captured. False ⇒ the pump still parses exactly as before and records nothing.</summary>
     internal bool IsCapturing => _plane is not null && _handle is not null;
 
+    /// <summary>
+    /// The opening's durable process identity, or null when the plane did not open. This is the one seam through which
+    /// a launch learns WHICH durable attempt it belongs to — the row already exists when the process is started, so
+    /// the identity a recovery would adopt the execution by is knowable before there is anything to adopt.
+    /// </summary>
+    internal NativeRecordCaptureHandle? Opening => _handle;
+
     /// <summary>Whether the captured frames are also being folded into a resumable reduction. False ⇒ frames are still captured and no checkpoint is written.</summary>
     internal bool IsReducing => _reduction.IsReducing;
 

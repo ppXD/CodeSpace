@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -67,6 +68,15 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         "Re-attaching to this run after its worker stopped (a backend restart) — its detached process is still " +
         "alive, so the live timeline resumes from here.";
 
+    /// <summary>
+    /// Wall-clock the whole sweep may spend re-discovering admitted launches. Each adoption waits on a launch receipt
+    /// for the runner's own bounded patience, so <see cref="BatchSize"/> handle-less candidates in one host-crash
+    /// stampede would otherwise outrun the sweep's own cadence. Past this budget the remaining candidates that HAVE a
+    /// live recorded attempt are left alone for the next sweep rather than adopted or abandoned — deferring a decision
+    /// costs a minute, and abandoning one costs a live agent's clone.
+    /// </summary>
+    public static readonly TimeSpan AdoptionSweepBudget = TimeSpan.FromSeconds(10);
+
     /// <summary>Cap on reconciler re-attach attempts for one run: past it, a still-alive-but-unattachable run is abandoned rather than reclaimed forever (the no-livelock guarantee).</summary>
     public const int MaxReattachAttempts = 3;
 
@@ -92,9 +102,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IToolCallLedgerService _ledger;
     private readonly Capture.ICaptureIntentService _captureIntents;
+    private readonly Capture.INativeRecordPlane _nativeRecords;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
         _runs = runs;
@@ -103,6 +114,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _runners = runners;
         _ledger = ledger;
         _captureIntents = captureIntents;
+        _nativeRecords = nativeRecords;
         _logger = logger;
     }
 
@@ -302,8 +314,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         var recovered = 0;
         var reattached = 0;
 
+        // One budget for the whole batch, so the sweep's cost stays bounded no matter how many candidates need a
+        // launch re-discovery. Computed once here rather than per candidate — a per-candidate budget is not a budget.
+        var adoptionDeadline = now + AdoptionSweepBudget;
+
         foreach (var c in candidates)
-            switch (await ResolveStaleRunAsync(c, cancellationToken).ConfigureAwait(false))
+            switch (await ResolveStaleRunAsync(c, adoptionDeadline, cancellationToken).ConfigureAwait(false))
             {
                 case StaleOutcome.Recovered: recovered++; break;
                 case StaleOutcome.Abandoned: abandoned++; break;
@@ -314,14 +330,23 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     }
 
     /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon / defer when the probe cannot be answered from this host), or blind-abandon when there's no usable handle or the probe fails.</summary>
-    private async Task<StaleOutcome> ResolveStaleRunAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken)
+    private async Task<StaleOutcome> ResolveStaleRunAsync(AgentRunReconciliationCandidate candidate, DateTimeOffset adoptionDeadline, CancellationToken cancellationToken)
     {
         var runId = candidate.RunId;
         var reattachAttempts = candidate.ReattachAttempts;
         var durable = ResolveDurableRunner(candidate.RunnerHandleJson, out var handle);
 
         if (durable is null || handle is null)
+        {
+            // No usable handle is not the same as no execution. A run that admitted a physical process and crashed
+            // before that process became reachable has no handle at all, and blind-abandoning it here is what left a
+            // live agent running against a workspace the DB called Failed. The durable attempt still names the
+            // execution exactly, so ask for it by identity before deciding anything.
+            if (await AdoptAdmittedLaunchAsync(candidate, adoptionDeadline, cancellationToken).ConfigureAwait(false) is { } adopted)
+                return adopted;
+
             return await AbandonAsync(candidate, cancellationToken).ConfigureAwait(false);
+        }
 
         var probe = await ProbeQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
@@ -349,6 +374,125 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         return await ReattachAsync(candidate, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Recover a run whose physical execution was admitted but never became reachable — the crash-between-launch-and-
+    /// acknowledgement window. The durable process attempt names that execution exactly, so this asks the runner the
+    /// execution NAMES to re-discover it BY THAT IDENTITY. Four outcomes, and the distinction between them is the
+    /// whole point:
+    ///
+    /// <list type="bullet">
+    /// <item>The receipt matches the identity and its process is real → ADOPT: persist the rebuilt handle so the run
+    /// is reachable again, and let the next sweep probe it like any other handled run. Deliberately not re-attached
+    /// from here: adoption restores the ADDRESS, and the existing probe → recover / re-attach / abandon ladder is what
+    /// decides the run's fate, so a recovered handle earns no shortcut past it.</item>
+    /// <item>This host's copy of the slot holds no launch request at all → null, and the caller's ordinary abandon
+    /// stands. Note what this is NOT: the runner answers absence before it can check host or boot, so on a host that
+    /// never held this run's spool it means "nothing HERE", not "nothing anywhere". It is still the honest input to an
+    /// abandon — the same conclusion a handle-less run reached before this path existed — but it is not proof that no
+    /// process exists.</item>
+    /// <item>A launch exists but cannot be adopted from here — bound to a different identity, minted on a foreign
+    /// host or boot, or holding a receipt that is unreadable or was consumed without a confirmed execution → null, and
+    /// the abandon stands. Nothing is killed on this branch and nothing pretends otherwise: every one of those reasons
+    /// is precisely a reason the process cannot be attributed to this run, so a kill would be aimed at a pid this
+    /// sweep cannot prove is its own. The run reaches Failed with the same best-effort netns/cgroup teardown any
+    /// handle-less abandon gets, and an operator reading the log sees the refusal reason.</item>
+    /// <item>The sweep's <see cref="AdoptionSweepBudget"/> is spent and this run HAS a live recorded attempt →
+    /// <see cref="StaleOutcome.LeftAlone"/>, so the next sweep tries again. A run with a live recorded attempt is the
+    /// one case where abandoning may kill nothing and lose a live agent, so a budget must never convert into a verdict.</item>
+    /// </list>
+    ///
+    /// <para>Null on every OTHER failure is deliberate: this runs inside a fleet sweep whose job is to stop leaving
+    /// runs stuck, so an adoption that cannot answer must not become the reason a run stays Running for ever.</para>
+    /// </summary>
+    private async Task<StaleOutcome?> AdoptAdmittedLaunchAsync(AgentRunReconciliationCandidate candidate, DateTimeOffset adoptionDeadline, CancellationToken cancellationToken)
+    {
+        var runId = candidate.RunId;
+        if (_nativeRecords is not Capture.INativeRecordLaunchPlane launches)
+        {
+            _logger.LogDebug("AgentRunReconciler: agent run {RunId} has no durable process record plane deployed, so an admitted execution cannot be looked up; the ordinary abandon decides it", runId);
+
+            return null;
+        }
+
+        try
+        {
+            if (await launches.FindAdmittedLaunchAsync(runId, cancellationToken).ConfigureAwait(false) is not { } admitted)
+            {
+                _logger.LogDebug("AgentRunReconciler: agent run {RunId} has no live recorded process attempt, so there is no admitted execution to adopt", runId);
+
+                return null;
+            }
+
+            // The budget is checked HERE — after the one cheap query that says whether a live attempt exists, and
+            // before the receipt wait that actually costs time. A run with no attempt still abandons immediately; only
+            // a run that might own a live process is deferred, and it is deferred rather than judged.
+            if (DateTimeOffset.UtcNow >= adoptionDeadline)
+            {
+                _logger.LogWarning("AgentRunReconciler: agent run {RunId} records live attempt {AttemptId} but this sweep spent its adoption budget of {Budget}; leaving the run Running for the next sweep rather than abandoning a possibly live execution", runId, admitted.Identity.AttemptId, AdoptionSweepBudget);
+
+                return StaleOutcome.LeftAlone;
+            }
+
+            if (_runners.All.FirstOrDefault(runner => runner.Kind == admitted.RunnerKind) is not ISandboxLaunchIdentityRunner adopter)
+            {
+                _logger.LogDebug("AgentRunReconciler: agent run {RunId} was launched by runner {RunnerKind}, which cannot re-discover a launch by identity, so it cannot be adopted; the ordinary abandon decides it", runId, admitted.RunnerKind);
+
+                return null;
+            }
+
+            if (await adopter.AdoptAsync(new SandboxLaunchAdoption(admitted.SpoolKey, admitted.Identity), cancellationToken).ConfigureAwait(false) is not { } discovered)
+            {
+                _logger.LogInformation("AgentRunReconciler: agent run {RunId} recorded attempt {AttemptId} but this host's launch slot {SpoolKey} holds no launch request, so there is nothing here to adopt", runId, admitted.Identity.AttemptId, admitted.SpoolKey);
+
+                return null;
+            }
+
+            var handle = WithRederivedLaunchState(discovered, runId);
+
+            if (await AdoptCandidateHandleAsync(candidate, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false) != 1)
+            {
+                _logger.LogInformation("AgentRunReconciler: agent run {RunId} changed under this sweep before its adopted handle could be written, so the worker that moved it decides it", runId);
+
+                return null;
+            }
+
+            // Logged, not appended as a run event. An AgentRunEvent inside the liveness window is exactly what
+            // excludes a run from the next sweep's candidate set, so a breadcrumb here would buy the operator one line
+            // and cost the run a full liveness window of ownerless Running before the probe ladder could reach it.
+            _logger.LogWarning("AgentRunReconciler: adopted the admitted execution of agent run {RunId} by attempt {AttemptId} (pid {ProcessId}); its handle was never acknowledged, and the run is addressable again for the next sweep's probe", runId, admitted.Identity.AttemptId, handle.ProcessId);
+
+            return StaleOutcome.LeftAlone;
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException)
+        {
+            _logger.LogWarning(failure, "AgentRunReconciler: agent run {RunId} could not adopt an admitted execution by its attempt identity; the ordinary abandon decides it", runId);
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Restore onto an adopted handle the launch-time state the RUNNER cannot know, and only what is genuinely
+    /// re-derivable. <c>ProgressLeaseDirectory</c> is: it is a pure function of the run id
+    /// (<see cref="LocalProcessRunner.ProgressLeaseDirectoryFor"/>) and is the same path the run's platform endpoint
+    /// renews, so without it a re-attaching observer resolves a null lease and its no-progress watchdog watches
+    /// nothing.
+    ///
+    /// <para>What is NOT restored, and why an adopted run is narrower than the one it recovers:
+    /// <c>InjectedKeyFingerprint</c> and <c>McpRunToken</c> are minted from a decrypted credential and a one-time
+    /// secret that were never persisted, so an adopted run completes marker-only (a re-attach with a mismatched
+    /// fingerprint fails capture closed, by design) and cannot re-open its MCP endpoint.
+    /// <c>WorkspaceDirectory</c>/<c>WorkspaceBaseSha</c> are a PAIR — the diff capture requires both — and the base
+    /// SHA is durable nowhere until the run's own result writes it, while a repo-backed clone's directory is a random
+    /// root the launch never recorded. Restoring the directory alone would break the documented "null exactly when the
+    /// other is" invariant and still capture no diff, so both stay null and the clone ages out through
+    /// <c>IWorkspaceJanitor</c>. <c>AgentRunLogCaptureSessionId</c> is minted per launch and persisted only by the log
+    /// capture OPEN — which is downstream of the write that failed — so no row names this launch's session; a session
+    /// id recovered from an earlier round would bind the handle to another spool's capture.</para>
+    /// </summary>
+    private static SandboxHandle WithRederivedLaunchState(SandboxHandle discovered, Guid runId) =>
+        discovered with { ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(runId) };
 
     /// <summary>
     /// The runner could not answer this handle's liveness FROM THIS WORKER (it was minted on another host, whose
@@ -553,6 +697,27 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         var duration = AgentRunLiveness.LeaseDuration;
         return await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {candidate.RunId} FOR UPDATE) UPDATE agent_run AS target SET status = {status.ToString()}, error = {error}, result_jsonb = COALESCE(CAST({resultJson} AS jsonb), target.result_jsonb), completed_at = clock_timestamp(), fence_epoch = target.fence_epoch + 1 FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id IS NOT DISTINCT FROM {candidate.OwnerId} AND target.reattach_reservation_id IS NOT DISTINCT FROM {candidate.ReservationId} AND target.fence_epoch = {candidate.Epoch} AND target.runner_handle IS NOT DISTINCT FROM CAST({candidate.RunnerHandleJson} AS jsonb) AND target.reattach_attempts = {candidate.ReattachAttempts} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Write an adopted handle onto a run under the SAME scanned identity <see cref="TerminalizeCandidateAsync"/>
+    /// terminalizes under: this row still Running, still held by the owner and fence this sweep observed, its lease
+    /// still lapsed, and — the clause that matters most here — <c>runner_handle</c> still exactly what was scanned,
+    /// which for an unacknowledged launch is NULL. So a worker that legitimately reclaimed the run and wrote its own
+    /// handle in the meantime is never overwritten by this one.
+    ///
+    /// <para>It deliberately does NOT bump the fence, release the owner, or extend the lease. Adoption restores an
+    /// ADDRESS and claims nothing else: the run stays a candidate, and the next sweep's ordinary probe ladder decides
+    /// its fate from the handle this write just made readable. Bumping the fence here would invalidate the very
+    /// attempt row whose identity was just used to find the process.</para>
+    ///
+    /// <para>The service's unfenced <c>SetRunnerHandleAsync(runId, …)</c> is deliberately not used: it refuses any run
+    /// that still names an owner, which is precisely the state a crashed worker leaves behind.</para>
+    /// </summary>
+    private async Task<int> AdoptCandidateHandleAsync(AgentRunReconciliationCandidate candidate, string handleJson, CancellationToken cancellationToken)
+    {
+        var duration = AgentRunLiveness.LeaseDuration;
+        return await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {candidate.RunId} FOR UPDATE) UPDATE agent_run AS target SET runner_handle = CAST({handleJson} AS jsonb) FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id IS NOT DISTINCT FROM {candidate.OwnerId} AND target.reattach_reservation_id IS NOT DISTINCT FROM {candidate.ReservationId} AND target.fence_epoch = {candidate.Epoch} AND target.runner_handle IS NOT DISTINCT FROM CAST({candidate.RunnerHandleJson} AS jsonb) AND target.reattach_attempts = {candidate.ReattachAttempts} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Resolve the durable runner for a persisted handle, or null when the handle is absent/unparseable or its runner isn't durable (then the caller blind-abandons).</summary>
