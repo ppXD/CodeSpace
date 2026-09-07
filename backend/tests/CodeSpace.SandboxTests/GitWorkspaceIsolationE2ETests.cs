@@ -18,6 +18,35 @@ namespace CodeSpace.SandboxTests;
 [Trait("Category", "Sandbox")]
 public sealed class GitWorkspaceIsolationE2ETests
 {
+    [KernelFact]
+    public async Task A_command_survives_its_managed_launch_thread_while_the_worker_process_is_alive()
+    {
+        var directory = Directory.CreateTempSubdirectory("cs-command-thread-").FullName;
+        Task<SandboxResult>? operation = null;
+        Exception? startFailure = null;
+        var ready = Path.Combine(directory, "ready");
+        var starter = new Thread(() =>
+        {
+            try
+            {
+                operation = new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "touch ready; sleep 2; printf finished" }, WorkingDirectory = directory, TimeoutSeconds = 10 }, CancellationToken.None);
+                SpinWait.SpinUntil(() => File.Exists(ready) || operation.IsCompleted, TimeSpan.FromSeconds(5));
+            }
+            catch (Exception error) { startFailure = error; }
+        });
+        try
+        {
+            starter.Start();
+            starter.Join(TimeSpan.FromSeconds(10)).ShouldBeTrue();
+            startFailure.ShouldBeNull();
+            File.Exists(ready).ShouldBeTrue("the sandbox must be alive before its managed launch thread exits");
+            var result = await operation.ShouldNotBeNull();
+            result.Status.ShouldBe(SandboxStatus.Success, $"the worker process is still alive; retiring a managed thread must not kill its command (exit={result.ExitCode}, stderr={result.Stderr})");
+            result.Stdout.ShouldBe("finished");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public async Task Pack_clone_uses_only_its_destination_and_reclaims_it()
     {
