@@ -267,13 +267,13 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
             intentId = (await db.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId)).Id;
-            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run_log_capture_intent SET recovery_owner_id = {staleOwner}, recovery_fence_epoch = 1, recovery_attempt_count = 1, recovery_started_at = clock_timestamp(), recovery_lease_expires_at = clock_timestamp() + interval '50 milliseconds', revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {intentId}");
+            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run_log_capture_intent SET recovery_owner_id = {staleOwner}, verification_claim_marker = verification_claim_marker + 1, recovery_fence_epoch = 1, recovery_attempt_count = 1, recovery_started_at = clock_timestamp(), recovery_lease_expires_at = clock_timestamp() + interval '50 milliseconds', revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {intentId}");
         }
         await Task.Delay(150);
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
-            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run_log_capture_intent SET recovery_owner_id = {currentOwner}, recovery_fence_epoch = 2, recovery_attempt_count = 2, recovery_lease_expires_at = clock_timestamp() + interval '5 seconds', revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {intentId}");
+            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run_log_capture_intent SET recovery_owner_id = {currentOwner}, verification_claim_marker = verification_claim_marker + 1, recovery_fence_epoch = 2, recovery_attempt_count = 2, recovery_lease_expires_at = clock_timestamp() + interval '5 seconds', revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {intentId}");
         }
 
         var stale = await logs.FailCaptureAsync(new AgentRunLogFailCaptureRequest

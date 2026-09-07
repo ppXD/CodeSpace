@@ -13,6 +13,19 @@ function content(body: Uint8Array, headers: Record<string, string>) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Agent Run durable log API", () => {
+  it.each(["valid", "unknown-kind", "whole-sha-alias", "wrong-length"])("keeps versioned historical manifest integrity explicit: %s", async (mode) => {
+    const integrity = { kind: "segment-manifest-sha256-chain/v1", manifestDigest: "a".repeat(64), verifiedSegmentCount: 1, verifiedBytes: 3, verifiedAt: "2026-08-15T00:00:01Z" };
+    const row = {
+      streamId: "stream-1", agentRunId: "run-1", streamKind: "stdout/v1", contentType: "text/plain", contentEncoding: "utf-8",
+      captureSource: "spool/v1", retention: "Run", status: "Completed", revision: 3, segmentCount: 1, totalBytes: 3,
+      sha256: mode === "whole-sha-alias" ? "a".repeat(64) : null, integrity: { ...integrity, kind: mode === "unknown-kind" ? "future-integrity/v9" : integrity.kind, verifiedBytes: mode === "wrong-length" ? 4 : 3 },
+      createdAt: "2026-08-15T00:00:00Z", lastModifiedAt: "2026-08-15T00:00:01Z", completedAt: "2026-08-15T00:00:01Z", errorCode: null,
+    };
+    vi.stubGlobal("fetch", vi.fn(() => json(row)));
+    if (mode === "valid") await expect(agentsApi.getRunLog("run-1", "stream-1")).resolves.toMatchObject({ sha256: null, integrity });
+    else await expect(agentsApi.getRunLog("run-1", "stream-1")).rejects.toThrow(/integrity contract/i);
+  });
+
   it("pages metadata with an opaque cursor and propagates AbortSignal", async () => {
     let captured: { url?: URL; signal?: AbortSignal } = {};
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init: RequestInit = {}) => {

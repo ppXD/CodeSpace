@@ -26,7 +26,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         if (options.BatchSize is <= 0 or > 500 || options.MaxConcurrency is <= 0 or > 32 || options.MaxConcurrency > options.BatchSize
             || options.LeaseDuration <= options.OperationTimeout + options.OperationTimeout + MinimumLeaseMargin || options.OperationTimeout <= TimeSpan.Zero
             || options.RetryPolicy.BaseDelay <= TimeSpan.Zero || options.RetryPolicy.MaxDelay < options.RetryPolicy.BaseDelay
-            || options.RetryPolicy.MaxAttempts <= 0 || options.RetryPolicy.MaxAge <= TimeSpan.Zero || options.RetryPolicy.TerminalGrace < TimeSpan.Zero)
+            || options.RetryPolicy.MaxAttempts <= 0 || options.RetryPolicy.MaxAge <= TimeSpan.Zero || options.RetryPolicy.TerminalGrace < TimeSpan.Zero || options.VerificationProgressDelay <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
         _dbOptions = dbOptions;
         _logs = logs;
@@ -145,6 +145,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         foreach (var row in rows)
         {
+            if (await db.AgentRunLogStream.AnyAsync(value => value.TeamId == row.TeamId && value.AgentRunId == row.AgentRunId && value.StreamKind == row.StreamKind && value.SchemaVersion == 3, cancellationToken).ConfigureAwait(false)) row.VerificationClaimMarker++;
             row.RecoveryOwnerId = ownerId;
             row.RecoveryFenceEpoch++;
             row.RecoveryAttemptCount++;
@@ -211,6 +212,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             ExpectedRevision = stream.Revision, OperationTimeout = _options.OperationTimeout, RecoveryClaim = Fence(claim),
         }, cancellationToken).ConfigureAwait(false);
         if (result is AgentRunLogCompleteResult.Completed) return RecoveryOutcome.Completed(stream.Id);
+        if (result is AgentRunLogCompleteResult.Progress) return RecoveryOutcome.Progress(stream.Id, _options.VerificationProgressDelay);
         var problem = ((AgentRunLogCompleteResult.Rejected)result).Problem;
         if (problem.IsTransient)
             return RecoveryOutcome.Retry(stream.Id, AgentRunLogCaptureIntentState.SourceFinalized, $"complete-{Code(problem.Code)}", "The finalized stream could not yet be verified.");
@@ -252,11 +254,29 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         if (run == null || row == null || row.RecoveryOwnerId != claim.RecoveryOwnerId || row.RecoveryFenceEpoch != claim.RecoveryFenceEpoch || row.RecoveryLeaseExpiresAt <= now)
             return new RecoverySettlement(outcome.State, true);
 
+        var manifestStreamId = await db.AgentRunLogStream.Where(value => value.TeamId == row.TeamId && value.AgentRunId == row.AgentRunId && value.StreamKind == row.StreamKind && value.SchemaVersion == 3)
+            .Select(value => (Guid?)value.Id).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var isManifest = manifestStreamId != null;
+        if (isManifest)
+        {
+            var progress = await db.AgentRunLogVerification.Where(value => value.TeamId == row.TeamId && value.AgentRunId == row.AgentRunId
+                    && value.WorkerFenceEpoch == row.WorkerFenceEpoch && value.CaptureSessionId == row.CaptureSessionId
+                    && value.StreamId == manifestStreamId!.Value)
+                .Select(value => (long?)(value.NextSegmentOrdinal - 1)).MaxAsync(cancellationToken).ConfigureAwait(false) ?? 0;
+            if (progress > row.VerificationProgressOrdinal)
+            {
+                row.VerificationProgressOrdinal = progress;
+                row.LastVerificationProgressAt = now;
+                row.VerificationStalledAttempts = 0;
+            }
+            else if (!outcome.Terminal && outcome.RetryDirective is not { ArmTerminalGrace: true }) row.VerificationStalledAttempts++;
+        }
         var settled = outcome;
         if (run.FenceEpoch != row.WorkerFenceEpoch)
             settled = RecoveryOutcome.Superseded(row.StreamId, "worker-fence-changed-before-settlement", "The AgentRun worker fence changed after recovery observation and before settlement.");
         else if (!outcome.Terminal && outcome.RetryDirective is not { ArmTerminalGrace: true }
-            && (row.RecoveryAttemptCount >= _options.RetryPolicy.MaxAttempts || now - row.RecoveryStartedAt!.Value >= _options.RetryPolicy.MaxAge))
+            && ((isManifest ? row.VerificationStalledAttempts : row.RecoveryAttemptCount) >= _options.RetryPolicy.MaxAttempts
+                || now - (isManifest ? row.LastVerificationProgressAt ?? row.RecoveryStartedAt!.Value : row.RecoveryStartedAt!.Value) >= _options.RetryPolicy.MaxAge))
             settled = RecoveryOutcome.Indeterminate(outcome.StreamId, "recovery-exhausted", $"Recovery exhausted its bounded attempts or age after '{outcome.ErrorCode}'.");
 
         row.StreamId = settled.StreamId ?? row.StreamId;
@@ -333,6 +353,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         public bool Terminal => State is AgentRunLogCaptureIntentState.Completed or AgentRunLogCaptureIntentState.CaptureFailed or AgentRunLogCaptureIntentState.Superseded or AgentRunLogCaptureIntentState.ExternalStateIndeterminate;
         public static RecoveryOutcome Retry(Guid? streamId, AgentRunLogCaptureIntentState state, string code, string message, RecoveryRetryDirective? retry = null) => new(streamId, state, code, message, retry ?? new RecoveryRetryDirective(false, null));
         public static RecoveryOutcome Completed(Guid streamId) => new(streamId, AgentRunLogCaptureIntentState.Completed, null, null, null);
+        public static RecoveryOutcome Progress(Guid streamId, TimeSpan delay) => new(streamId, AgentRunLogCaptureIntentState.SourceFinalized, null, null, new RecoveryRetryDirective(false, delay));
         public static RecoveryOutcome Failed(Guid? streamId, string code, string message) => new(streamId, AgentRunLogCaptureIntentState.CaptureFailed, code, message, null);
         public static RecoveryOutcome Superseded(Guid? streamId, string code, string message) => new(streamId, AgentRunLogCaptureIntentState.Superseded, code, message, null);
         public static RecoveryOutcome Indeterminate(Guid? streamId, string code, string message) => new(streamId, AgentRunLogCaptureIntentState.ExternalStateIndeterminate, code, message, null);
@@ -372,5 +393,8 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
     private static partial Regex EncodingPattern();
 }
 
-internal sealed record AgentRunLogCaptureRecoveryOptions(int BatchSize, int MaxConcurrency, TimeSpan LeaseDuration, TimeSpan OperationTimeout, AgentRunLogCaptureRetryPolicy RetryPolicy);
+internal sealed record AgentRunLogCaptureRecoveryOptions(int BatchSize, int MaxConcurrency, TimeSpan LeaseDuration, TimeSpan OperationTimeout, AgentRunLogCaptureRetryPolicy RetryPolicy)
+{
+    public TimeSpan VerificationProgressDelay { get; init; } = TimeSpan.FromSeconds(1);
+}
 internal sealed record AgentRunLogCaptureRetryPolicy(TimeSpan BaseDelay, TimeSpan MaxDelay, int MaxAttempts, TimeSpan MaxAge, TimeSpan TerminalGrace);

@@ -59,7 +59,7 @@ public sealed class AgentRunLogRuntimeTests
             WorkerFenceEpoch = 7, CaptureSessionId = session, ExpectedRevision = finalized.Metadata.Revision,
         }, CancellationToken.None)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
         completed.Metadata.State.ShouldBe(AgentRunLogStreamState.Completed);
-        completed.Metadata.Sha256.ShouldBe(Convert.ToHexStringLower(SHA256.HashData(firstBytes.Concat(secondBytes).ToArray())));
+        AssertManifestReceipt(completed.Metadata, 2, firstBytes.LongLength + secondBytes.LongLength);
         (await service.AppendAsync(Append(world, opened.Metadata.StreamId, session, 3, completed.Metadata.TotalBytes, [1]), CancellationToken.None))
             .ShouldBeOfType<AgentRunLogAppendResult.Rejected>().Problem.Code.ShouldBe(AgentRunLogProblemCode.StreamTerminal);
     }
@@ -337,7 +337,7 @@ public sealed class AgentRunLogRuntimeTests
                     TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId,
                     WorkerFenceEpoch = 7, CaptureSessionId = captureSessionId, ExpectedRevision = revision,
                 }, CancellationToken.None)).ShouldBeOfType<AgentRunLogCompleteResult.Completed>();
-                completed.Metadata.Sha256.ShouldBe(Convert.ToHexStringLower(SHA256.HashData(bytes)));
+                AssertManifestReceipt(completed.Metadata, 1, bytes.LongLength);
             }
 
             await SetProfileStateAsync(storageProfileId, StorageProfileState.Retired);
@@ -347,6 +347,20 @@ public sealed class AgentRunLogRuntimeTests
         {
             if (Directory.Exists(rootPath)) Directory.Delete(rootPath, recursive: true);
         }
+    }
+
+    private static void AssertManifestReceipt(AgentRunLogMetadata metadata, long segments, long bytes)
+    {
+        // Exact read-range byte oracles remain in these cases; the independently encoded canonical root oracle
+        // lives in AgentRunLogCompletionRecoveryAuditTests. v3 must never put that root into whole-content SHA.
+        metadata.Sha256.ShouldBeNull();
+        metadata.Integrity.ShouldNotBeNull();
+        metadata.Integrity.Kind.ShouldBe("segment-manifest-sha256-chain/v1");
+        metadata.Integrity.ManifestDigest.ShouldNotBeNull();
+        Convert.FromHexString(metadata.Integrity.ManifestDigest).Length.ShouldBe(32);
+        metadata.Integrity.VerifiedBytes.ShouldBe(bytes);
+        metadata.Integrity.VerifiedSegmentCount.ShouldBe(segments);
+        metadata.Integrity.VerifiedAt.ShouldBe(metadata.CompletedAt);
     }
 
     private async Task<AgentRunLogReadAvailability> ReadAvailabilityAsync(World world, Guid streamId, byte[] expected)

@@ -222,6 +222,15 @@ export type AgentRunEventDataRangeResult = AgentRunEventDataRangeAvailable | Age
 
 export type AgentRunLogStatus = "Open" | "Completed" | "Truncated" | "Unavailable" | "Corrupt" | "CaptureFailed";
 
+/** Historical full-segment-read verification, independent of current physical availability and whole-content SHA. */
+export interface AgentRunLogIntegrity {
+  kind: "segment-manifest-sha256-chain/v1";
+  manifestDigest: string | null;
+  verifiedSegmentCount: number | null;
+  verifiedBytes: number | null;
+  verifiedAt: string | null;
+}
+
 /** Metadata-only durable stream identity. Body bytes are always fetched separately in bounded ranges. */
 export interface AgentRunLogStreamSummary {
   streamId: string;
@@ -236,6 +245,7 @@ export interface AgentRunLogStreamSummary {
   segmentCount: number;
   totalBytes: number;
   sha256: string | null;
+  integrity?: AgentRunLogIntegrity | null;
   createdAt: string;
   lastModifiedAt: string;
   completedAt: string | null;
@@ -768,7 +778,22 @@ function decodeAgentRunLogMetadata(value: unknown, expectedRunId: string, expect
     : status === "Completed" ? completedAt != null && errorCode == null : completedAt != null && errorCode != null;
   const timeValid = Date.parse(lastModifiedAt) >= Date.parse(createdAt) && (completedAt == null || Date.parse(lastModifiedAt) >= Date.parse(completedAt));
   if (!identityValid || !enumValid || !digestValid || !descriptorValid || !lifecycleValid || !timeValid) throw new Error("Agent Run log metadata contract has an invalid identity, enum, descriptor, lifecycle, or digest.");
-  return { streamId, agentRunId, streamKind, contentType, contentEncoding, captureSource, retention, status: status as AgentRunLogStatus, revision, segmentCount, totalBytes, sha256, createdAt, lastModifiedAt, completedAt, errorCode };
+  const integrity = decodeAgentRunLogIntegrity(value.integrity, { status, sha256, segmentCount, totalBytes, completedAt });
+  return { streamId, agentRunId, streamKind, contentType, contentEncoding, captureSource, retention, status: status as AgentRunLogStatus, revision, segmentCount, totalBytes, sha256, integrity, createdAt, lastModifiedAt, completedAt, errorCode };
+}
+
+function decodeAgentRunLogIntegrity(value: unknown, context: { status: string; sha256: string | null; segmentCount: number; totalBytes: number; completedAt: string | null }): AgentRunLogIntegrity | null {
+  if (value == null) return null;
+  const invalid = () => new Error("Agent Run log integrity contract is unsupported or inconsistent.");
+  if (!isRecord(value) || value.kind !== "segment-manifest-sha256-chain/v1" || context.sha256 != null) throw invalid();
+  if (context.status !== "Completed") {
+    if (value.manifestDigest !== null || value.verifiedSegmentCount !== null || value.verifiedBytes !== null || value.verifiedAt !== null) throw invalid();
+    return { kind: value.kind, manifestDigest: null, verifiedSegmentCount: null, verifiedBytes: null, verifiedAt: null };
+  }
+  if (typeof value.manifestDigest !== "string" || !/^[0-9a-f]{64}$/i.test(value.manifestDigest)
+    || value.verifiedSegmentCount !== context.segmentCount || value.verifiedBytes !== context.totalBytes
+    || value.verifiedAt !== context.completedAt || typeof value.verifiedAt !== "string") throw invalid();
+  return { kind: value.kind, manifestDigest: value.manifestDigest, verifiedSegmentCount: context.segmentCount, verifiedBytes: context.totalBytes, verifiedAt: value.verifiedAt };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

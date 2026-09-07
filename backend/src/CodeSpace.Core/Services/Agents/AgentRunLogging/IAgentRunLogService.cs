@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Dtos.Agents;
 
 namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 
@@ -131,7 +132,10 @@ public sealed record AgentRunLogMetadata(
     DateTimeOffset CreatedAt,
     DateTimeOffset LastModifiedAt,
     DateTimeOffset? CompletedAt,
-    string? ErrorCode);
+    string? ErrorCode)
+{
+    public AgentRunLogIntegrity? Integrity { get; init; }
+}
 
 public sealed record AgentRunLogSegmentReceipt(Guid SegmentId, long SegmentOrdinal, long StartOffsetBytes, long LengthBytes, long SourceStartOffsetBytes, long SourceLengthBytes, Guid ArtifactObjectId);
 
@@ -159,6 +163,7 @@ public abstract record AgentRunLogCompleteResult
 {
     private AgentRunLogCompleteResult() { }
     public sealed record Completed(AgentRunLogMetadata Metadata) : AgentRunLogCompleteResult;
+    public sealed record Progress(AgentRunLogMetadata Metadata, long VerifiedSegments, long VerifiedBytes) : AgentRunLogCompleteResult;
     public sealed record Rejected(AgentRunLogProblem Problem) : AgentRunLogCompleteResult;
 }
 

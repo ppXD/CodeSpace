@@ -22,10 +22,21 @@ public sealed record AgentRunLogStreamSummary
     public required long SegmentCount { get; init; }
     public required long TotalBytes { get; init; }
     public string? Sha256 { get; init; }
+    public AgentRunLogIntegrity? Integrity { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset LastModifiedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
     public string? ErrorCode { get; init; }
+}
+
+/// <summary>Historical complete segment-read verification. It does not assert point-in-time object availability or retention.</summary>
+public sealed record AgentRunLogIntegrity
+{
+    public required string Kind { get; init; }
+    public string? ManifestDigest { get; init; }
+    public long? VerifiedSegmentCount { get; init; }
+    public long? VerifiedBytes { get; init; }
+    public DateTimeOffset? VerifiedAt { get; init; }
 }
 
 public enum AgentRunLogStatus

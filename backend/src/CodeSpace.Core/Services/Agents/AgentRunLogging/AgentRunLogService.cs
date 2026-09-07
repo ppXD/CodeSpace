@@ -55,7 +55,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
                 WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = request.CaptureSessionId,
                 StreamKind = request.StreamKind, ContentType = request.ContentType, ContentEncoding = request.ContentEncoding,
                 CaptureSource = request.CaptureSource, Retention = request.Retention, ExpiresAt = request.ExpiresAt,
-                State = AgentRunLogStreamState.Open, Revision = 1, NextSegmentOrdinal = 1, SchemaVersion = 2,
+                State = AgentRunLogStreamState.Open, Revision = 1, NextSegmentOrdinal = 1, SchemaVersion = 3,
                 CreatedAt = now, LastModifiedAt = now,
             };
             db.AgentRunLogStream.Add(stream);
@@ -64,7 +64,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
             return Opened(stream, false, false);
         }
 
-        if (stream.SchemaVersion != 2) return RejectOpen(AgentRunLogProblemCode.Unsupported);
+        if (stream.SchemaVersion is not (2 or 3)) return RejectOpen(AgentRunLogProblemCode.Unsupported);
         if (stream.State != AgentRunLogStreamState.Open) return RejectOpen(AgentRunLogProblemCode.StreamTerminal);
         if (!SameIdentity(stream, request)) return RejectOpen(AgentRunLogProblemCode.CaptureClaimConflict);
         if (stream.WorkerFenceEpoch == request.WorkerFenceEpoch && stream.CaptureSessionId == request.CaptureSessionId)
@@ -117,7 +117,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
             LengthBytes = request.Bytes.Length, ArtifactObjectId = committed.ArtifactObjectId,
             SourceStartOffsetBytes = request.ExpectedSourceOffsetBytes, SourceLengthBytes = request.SourceLengthBytes,
             WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = request.CaptureSessionId,
-            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = 2,
+            FirstObservedAt = now, LastObservedAt = now, CreatedAt = now, SchemaVersion = before.Stream!.SchemaVersion,
         };
 
         await using var db = CreateDb();
@@ -139,6 +139,12 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     public async Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken)
     {
         if (!Valid(request)) return RejectComplete(AgentRunLogProblemCode.InvalidRequest);
+        await using (var versionDb = CreateDb())
+        {
+            var version = await versionDb.AgentRunLogStream.AsNoTracking().Where(value => value.TeamId == request.TeamId && value.Id == request.StreamId).Select(value => (int?)value.SchemaVersion).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (version == 3) return await CompleteManifestAsync(request, cancellationToken).ConfigureAwait(false);
+            if (version != null && version is not (1 or 2)) return RejectComplete(AgentRunLogProblemCode.Unsupported);
+        }
         var snapshot = await ReadSnapshotAsync(request.TeamId, request.StreamId, cancellationToken).ConfigureAwait(false);
         if (snapshot == null || snapshot.Metadata.AgentRunId != request.AgentRunId) return RejectComplete(AgentRunLogProblemCode.Missing);
         if (snapshot.Metadata.State != AgentRunLogStreamState.Open) return RejectComplete(AgentRunLogProblemCode.StreamTerminal);
@@ -327,7 +333,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         if (currentFence != request.WorkerFenceEpoch) return new AppendHead(null, RejectAppend(AgentRunLogProblemCode.StaleWorker));
         var stream = await db.AgentRunLogStream.AsNoTracking().SingleOrDefaultAsync(value => value.TeamId == request.TeamId && value.Id == request.StreamId && value.AgentRunId == request.AgentRunId, cancellationToken).ConfigureAwait(false);
         if (stream == null) return new AppendHead(null, RejectAppend(AgentRunLogProblemCode.Missing));
-        if (stream.SchemaVersion != 2) return new AppendHead(stream, RejectAppend(AgentRunLogProblemCode.Unsupported));
+        if (stream.SchemaVersion is not (2 or 3)) return new AppendHead(stream, RejectAppend(AgentRunLogProblemCode.Unsupported));
         if (stream.State != AgentRunLogStreamState.Open) return new AppendHead(stream, RejectAppend(AgentRunLogProblemCode.StreamTerminal));
         if (stream.CaptureFinalizedAt != null) return new AppendHead(stream, RejectAppend(AgentRunLogProblemCode.CaptureClaimConflict));
         if (stream.WorkerFenceEpoch != request.WorkerFenceEpoch) return new AppendHead(stream, RejectAppend(AgentRunLogProblemCode.StaleWorker));
@@ -597,7 +603,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     private static AgentRunLogOpenResult.Opened Opened(AgentRunLogStream value, bool alreadyOpen, bool reclaimed) => new(Project(value), alreadyOpen, reclaimed) { CaptureSourceBaseOffsetBytes = value.CaptureSourceBaseOffsetBytes, CaptureFinalizedAt = value.CaptureFinalizedAt };
     private static AgentRunLogCaptureHead CaptureHead(AgentRunLogStream value) => new(Project(value), value.WorkerFenceEpoch!.Value, value.CaptureSessionId!.Value, value.CaptureSourceBaseOffsetBytes, value.CaptureFinalizedAt);
     private static AgentRunLogSegmentReceipt Receipt(AgentRunLogSegment value) => new(value.Id, value.SegmentOrdinal, value.StartOffsetBytes, value.LengthBytes, value.SourceStartOffsetBytes, value.SourceLengthBytes, value.ArtifactObjectId);
-    private static AgentRunLogMetadata Project(AgentRunLogStream value) => new(value.Id, value.AgentRunId, value.StreamKind, value.ContentType, value.ContentEncoding, value.CaptureSource, value.Retention, value.State, value.Revision, value.SegmentCount, value.TotalBytes, value.SourceOffsetBytes, value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest), value.CreatedAt, value.LastModifiedAt, value.CompletedAt, value.ErrorCode);
+    private static AgentRunLogMetadata Project(AgentRunLogStream value) => new(value.Id, value.AgentRunId, value.StreamKind, value.ContentType, value.ContentEncoding, value.CaptureSource, value.Retention, value.State, value.Revision, value.SegmentCount, value.TotalBytes, value.SourceOffsetBytes, value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest), value.CreatedAt, value.LastModifiedAt, value.CompletedAt, value.ErrorCode) { Integrity = ProjectIntegrity(value.SchemaVersion, value.ManifestDigest, value.SegmentCount, value.TotalBytes, value.CompletedAt) };
     private static bool SameIdentity(AgentRunLogStream stream, AgentRunLogOpenRequest request) => stream.ContentType == request.ContentType && stream.ContentEncoding == request.ContentEncoding && stream.CaptureSource == request.CaptureSource && stream.Retention == request.Retention && stream.ExpiresAt == request.ExpiresAt;
     private static bool Valid(AgentRunLogOpenRequest value, DateTimeOffset now) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && KeyPattern().IsMatch(value.StreamKind ?? "") && KeyPattern().IsMatch(value.CaptureSource ?? "") && value.ContentType is { Length: <= 255 } && ContentTypePattern().IsMatch(value.ContentType) && (value.ContentEncoding == null || EncodingPattern().IsMatch(value.ContentEncoding)) && Enum.IsDefined(value.Retention) && (value.ExpiresAt == null || value.ExpiresAt > now) && (value.Retention != ArtifactRetention.Ephemeral || value.ExpiresAt != null) && (value.Retention != ArtifactRetention.Permanent || value.ExpiresAt == null);
     private static bool Valid(AgentRunLogAppendRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedSegmentOrdinal > 0 && value.ExpectedOffsetBytes >= 0 && value.ExpectedSourceOffsetBytes >= 0 && value.SourceLengthBytes > 0 && value.StorageProfileId != Guid.Empty && value.StorageProfileRevision > 0 && value.ActorId != Guid.Empty && value.Bytes.Length is > 0 and <= MaximumAppendBytes && ValidTimeout(value.OperationTimeout);
