@@ -68,6 +68,42 @@ public partial class GetContextFlowTests
     }
 
     [Fact]
+    [Trait("P17", "Regression")]
+    public async Task Session_turns_effective_attempt_tie_break_agrees_with_SessionTurnAttempts_across_random_id_pairs()
+    {
+        // SessionTurnsContextSource cannot call the shared C# SessionTurnAttempts.ResolveEffectiveId — its
+        // resolution has to run INSIDE PostgreSQL — so it mirrors the same "newest Success, else newest overall"
+        // rule directly in SQL, with its OWN final tie-break (PostgreSQL's uuid ordering) for two attempts sharing
+        // an identical CreatedDate. That tie-break is a separate implementation from ResolveEffectiveId's own
+        // (.NET's Guid ordering); this pins the two agree on many random id pairs rather than assuming it.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var expectedWinnerByTurn = new Dictionary<int, Guid>();
+
+        const int trials = 12;
+        for (var turn = 1; turn <= trials; turn++)
+        {
+            var idA = Guid.NewGuid();
+            var idB = Guid.NewGuid();
+            var createdDate = DateTimeOffset.UtcNow;
+
+            await SeedTiedAttemptPairAsync(teamId, sessionId, turn, idA, idB, createdDate);
+
+            expectedWinnerByTurn[turn] = SessionTurnAttempts.ResolveEffectiveId(new[]
+            {
+                new SessionTurnAttempts.AttemptRow(idA, WorkflowRunStatus.Success, createdDate),
+                new SessionTurnAttempts.AttemptRow(idB, WorkflowRunStatus.Success, createdDate),
+            });
+        }
+
+        var result = await RetrieveTurnsAsync(teamId, sessionId);
+
+        result.Found.ShouldBeTrue();
+        var mismatches = expectedWinnerByTurn.Where(kv => !result.Text.Contains($"MARKER_{kv.Value}")).Select(kv => $"turn {kv.Key}: C# picked {kv.Value}").ToList();
+        mismatches.ShouldBeEmpty("SessionTurnsContextSource's SQL tie-break (PostgreSQL uuid DESC) disagreed with SessionTurnAttempts.ResolveEffectiveId (.NET Guid order) on a genuine CreatedDate tie");
+    }
+
+    [Fact]
     public async Task Session_turns_query_filters_to_matching_turns()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -398,6 +434,42 @@ public partial class GetContextFlowTests
             Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = originalId, RerunFromNodeId = "agent",
             OutputsJson = JsonSerializer.Serialize(new { summary = rerunSummary }),
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Stage a turn whose lineage has TWO Success attempts sharing the EXACT SAME <c>CreatedDate</c> — a genuine tie
+    /// for <see cref="SessionTurnAttempts.ResolveEffectiveId"/>'s (CreatedDate, Id) tie-break, resolved purely by id.
+    /// Each attempt's result names its OWN id, so whichever one <c>session.turns</c> renders can be read back off
+    /// the composed text.
+    /// </summary>
+    private async Task SeedTiedAttemptPairAsync(Guid teamId, Guid sessionId, int turn, Guid rootId, Guid rerunId, DateTimeOffset createdDate)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var rootRequestId = Guid.NewGuid();
+        var rerunRequestId = Guid.NewGuid();
+
+        db.WorkflowRunRequest.AddRange(
+            new WorkflowRunRequest { Id = rootRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal = $"goal-{turn}" }), Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = createdDate, VerifiedAt = createdDate, NormalizedAt = createdDate },
+            new WorkflowRunRequest { Id = rerunRequestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Rerun, ActorType = "user", ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = createdDate, VerifiedAt = createdDate, NormalizedAt = createdDate });
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = rootId, TeamId = teamId, RunRequestId = rootRequestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = JsonSerializer.Serialize(new { summary = $"MARKER_{rootId}" }),
+            CreatedDate = createdDate, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = rerunId, TeamId = teamId, RunRequestId = rerunRequestId, SourceType = WorkflowRunSourceTypes.Rerun,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = null, RootRunId = rootId, RerunFromNodeId = "agent",
+            OutputsJson = JsonSerializer.Serialize(new { summary = $"MARKER_{rerunId}" }),
+            CreatedDate = createdDate, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 
         await db.SaveChangesAsync();

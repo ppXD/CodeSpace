@@ -3,9 +3,12 @@ using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Context.Sources;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
@@ -14,6 +17,85 @@ namespace CodeSpace.IntegrationTests.Agents;
 
 public partial class GetContextFlowTests
 {
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task A_query_match_past_the_per_turn_display_clip_is_still_found()
+    {
+        // SQL's WHERE now matches the FULL (unclipped) result — the display clip (left(…, @leaf_take)) only bounds
+        // what is RENDERED, never what is SEARCHED. Regression coverage for the old behaviour: the old client-side
+        // re-filter re-checked the query against the CLIPPED rendered copy, so a needle past the clip boundary
+        // passed SQL then failed that re-filter — a false "not found" for a turn that genuinely matched.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        const string needle = "NEEDLE_PAST_THE_DISPLAY_CLIP_9137";
+        var hugeResult = new string('z', SessionTurnsContextSource.MaxOutputChars + 5000) + needle;
+        await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "huge", JsonSerializer.Serialize(new { summary = hugeResult }));
+
+        var result = await RetrieveTurnsAsync(teamId, sessionId, query: needle);
+
+        result.Found.ShouldBeTrue("the needle sits past the per-leaf display clip, but SQL matches the full, unclipped result — the turn must still be found");
+    }
+
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task Session_turns_query_matches_a_turns_produced_branch()
+    {
+        // The SQL predicate used to cover only goal/summary/combined/reason, even though the rendered text also
+        // carries "Produced branch: X" — a query naming the branch silently found nothing. Covers the raw legacy
+        // OutputsJson.branch leaf (the Description names the one remaining gap: a branch resolved ONLY from a
+        // PublishManifest row, disagreeing with this leaf, is not itself searchable).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "the work", JsonSerializer.Serialize(new { summary = "unrelated result text", branch = "feature/distinctive-branch-9137" }));
+        await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "other work", JsonSerializer.Serialize(new { summary = "other result", branch = "main" }));
+
+        var result = await RetrieveTurnsAsync(teamId, sessionId, query: "distinctive-branch-9137");
+
+        result.Found.ShouldBeTrue();
+        result.Text.ShouldContain("distinctive-branch-9137");
+        result.Text.ShouldNotContain("other result", customMessage: "the non-matching turn is filtered out");
+    }
+
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task Session_turns_query_matches_a_turns_status()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedTurnWithStatusAsync(teamId, sessionId, turn: 1, goal: "flaky task", JsonSerializer.Serialize(new { summary = "did not finish" }), WorkflowRunStatus.Failure);
+        await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "other", JsonSerializer.Serialize(new { summary = "clean result" }));
+
+        var result = await RetrieveTurnsAsync(teamId, sessionId, query: "Failure");
+
+        result.Found.ShouldBeTrue();
+        result.Text.ShouldContain("did not finish");
+        result.Text.ShouldNotContain("clean result", customMessage: "the non-matching turn is filtered out");
+    }
+
+    /// <summary>Stage a finished turn with an EXPLICIT (possibly non-Success) status — <c>GetContextFlowTests.SeedTurnAsync</c> always seeds Success.</summary>
+    private async Task SeedTurnWithStatusAsync(Guid teamId, Guid sessionId, int turn, string goal, string outputsJson, WorkflowRunStatus status)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = JsonSerializer.Serialize(new { goal }),
+            Status = WorkflowRunRequestStatus.Consumed, ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = status, SessionId = sessionId, SessionTurnIndex = turn,
+            OutputsJson = outputsJson, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
     [Fact]
     [Trait("P17", "Regression")]
     public async Task Context_retrieval_does_not_materialize_unrelated_json_roots_or_all_history_rows()

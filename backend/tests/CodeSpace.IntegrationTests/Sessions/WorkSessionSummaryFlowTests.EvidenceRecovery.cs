@@ -112,6 +112,65 @@ public partial class WorkSessionSummaryFlowTests
         pulled.Text.ShouldContain("have not yet been folded");
     }
 
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task A_pre_migration_turn_with_no_stored_binding_is_backfilled_on_the_next_fold_and_carried_forward()
+    {
+        // A row from before summary_source_binding_jsonb existed: Summary + SummaryThroughTurnIndex already advanced
+        // (under the OLD code), but SummarySourceBindingJson is NULL — no binding was ever recorded for turn 1, even
+        // though it carries an unresolved assessment.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        var sessionId = await SeedSessionAsync(teamId);
+        for (var turn = 1; turn <= 9; turn++) await SeedTurnAsync(teamId, sessionId, turn, $"goal-{turn}", "The model claims all work is complete.");
+        var (runId, assessmentId) = await AddUnresolvedAssessmentAsync(teamId, sessionId);
+        await SetSummaryAsync(sessionId, "Legacy summary text folded before source bindings existed.", throughTurn: 1);
+
+        // A new turn scrolls another older turn out of the window, so the summarizer has something to fold and runs.
+        await SeedTurnAsync(teamId, sessionId, 10, "goal-10", "Other work.");
+        await RunSummarizerAsync(teamId, sessionId, new CapturingLlmClient { Return = "Turns 1 and 2, folded." });
+
+        var digest = await BuildDigestAsync(sessionId, teamId);
+        digest.ShouldNotBeNull();
+        digest.ShouldContain("UNRESOLVED CONTRACT", customMessage: "the legacy (never-bound) turn's unresolved assessment must be backfilled into a binding and carried forward — not lost forever because the incremental fold only touched turn 2");
+        digest.ShouldContain("verification=Failed");
+        digest.ShouldContain(runId.ToString(), customMessage: "a recovered fact must still identify its effective source run");
+        digest.ShouldContain(assessmentId.ToString(), customMessage: "the raw historical assessment remains addressable");
+    }
+
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task Carried_forward_block_flags_a_bound_verdict_when_a_newer_assessment_now_exists_for_the_run()
+    {
+        // SessionSummarizer's drift refresh is fail-open — a newer assessment does not always trigger a re-fold
+        // before the NEXT digest is built. Swapping "the bound id" for "whatever is latest" would go undetected by
+        // every OTHER assertion in this file (both would show the newest verdict) — this test pins that the digest
+        // keeps showing the id the fold actually saw, with a flag, rather than silently upgrading to the newest one.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        var sessionId = await SeedSessionAsync(teamId);
+        for (var turn = 1; turn <= 8; turn++) await SeedTurnAsync(teamId, sessionId, turn, $"goal-{turn}", "result");
+        var (runId, firstAssessmentId) = await AddUnresolvedAssessmentAsync(teamId, sessionId);
+
+        // Fold turn 1 out of the window — its binding now carries the FIRST (unresolved) assessment.
+        await SeedTurnAsync(teamId, sessionId, 9, "goal-9", "result-9");
+        await RunSummarizerAsync(teamId, sessionId, new CapturingLlmClient { Return = "folded" });
+
+        var beforeSupersession = await BuildDigestAsync(sessionId, teamId);
+        beforeSupersession.ShouldContain(firstAssessmentId.ToString());
+        beforeSupersession.ShouldNotContain("NEWER assessment", customMessage: "sanity: nothing is superseded yet");
+
+        // A SECOND, newer assessment is recorded for the SAME run — the summarizer does NOT run again (a resumed
+        // session is not the only way a digest gets rebuilt).
+        var secondAssessmentId = await AddResolvedAssessmentAsync(teamId, runId);
+
+        var digest = await BuildDigestAsync(sessionId, teamId);
+
+        digest.ShouldContain(firstAssessmentId.ToString(), customMessage: "the BOUND (fold-time) assessment id is still what renders — never silently swapped for 'whatever is latest'");
+        digest.ShouldContain("NEWER assessment", customMessage: "a newer assessment for the same run must be flagged, not presented as an unqualified current verdict");
+        digest.ShouldNotContain(secondAssessmentId.ToString(), customMessage: "the new assessment's own id is not rendered — only the bound one, with a flag");
+    }
+
     private async Task<(Guid RunId, Guid AssessmentId)> AddUnresolvedAssessmentAsync(Guid teamId, Guid sessionId)
     {
         using var scope = _fixture.BeginScope();
@@ -129,5 +188,25 @@ public partial class WorkSessionSummaryFlowTests
         });
         await db.SaveChangesAsync();
         return (runId, id);
+    }
+
+    /// <summary>Record a SECOND, later, RESOLVED assessment on an already-bound run — simulating a re-verification that landed after the fold, before the summarizer has refreshed the binding.</summary>
+    private async Task<Guid> AddResolvedAssessmentAsync(Guid teamId, Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        db.CompletionAssessmentRecord.Add(new CompletionAssessmentRecord
+        {
+            Id = id, TeamId = teamId, WorkflowRunId = runId, EnforcementMode = "Shadow", Basis = "ContractDerived", Outcome = "Solved", Verification = "Passed",
+            AssessmentJson = JsonSerializer.Serialize(new CompletionAssessment
+            {
+                Basis = CompletionBasis.ContractDerived, Execution = ExecutionDisposition.Completed, Outcome = OutcomeDisposition.Solved,
+                Verification = VerificationDisposition.Passed, Artifact = ArtifactDisposition.Captured, Delivery = DeliveryDisposition.Delivered,
+            }, AgentJson.Options), LegacyIsSolved = true, WouldBeTerminalDecision = null,
+            CreatedDate = DateTimeOffset.UtcNow.AddSeconds(1),
+        });
+        await db.SaveChangesAsync();
+        return id;
     }
 }
