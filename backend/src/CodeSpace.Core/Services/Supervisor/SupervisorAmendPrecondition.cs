@@ -46,11 +46,14 @@ public static class SupervisorAmendPrecondition
     /// steered at <c>amend_acceptance</c> one screen under a menu reporting it unavailable, and the model answered
     /// with a third verb (decision eval 34085079257, 24/25).
     ///
-    /// <para>RESIDUAL, named rather than guarded here: a subtask the newest plan no longer declares is now amendable
-    /// on its superseded attempt's evidence, and a co-sign for it can never be consumed by a retry. A plan-membership
-    /// arm would be its own admission rule (and would have to exempt plan-less tapes), and it would re-open exactly
-    /// the split above one case narrower — the decider already renders that unit's verdict line and steer off the
-    /// same whole-tape join (<c>UnitSteerStandings</c>). It belongs in a change that can be graded on that.</para>
+    /// <para>RESIDUAL, named rather than guarded here: a subtask the newest plan no longer declares is still
+    /// amendable on its superseded attempt's evidence, and a co-sign for it can never be consumed by a retry. A
+    /// plan-membership arm HERE would be its own admission rule (and would have to exempt plan-less tapes), and it
+    /// would re-open exactly the split above one case narrower. What it is guarded by instead is the one place that
+    /// can spend a human on it without being asked: <see cref="SupervisorReplanStanding.ExitFor"/> carries the
+    /// membership conjunct, so no STEER sends a dropped unit at <c>amend_acceptance</c>. A model that proposes one
+    /// anyway still reaches a human — which is the deliberate asymmetry, because the model may know something about
+    /// the unit the plan's shape does not say.</para>
     /// </summary>
     private static IReadOnlyDictionary<string, SupervisorAgentResult> GradedAttempts(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         SupervisorDependencyGate.LatestResultsBySubtask(priorDecisions);

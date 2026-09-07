@@ -521,14 +521,18 @@ public class SupervisorGoldenPromptFidelityTests
     /// decision point for the re-plan fixed point with no co-sign in it (a re-plan spent on an unrunnable check
     /// whose verdict did not move: the shape arm
     /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> failed ~25-40% of its attempts on,
-    /// <c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2).
+    /// <c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2). Its tape is
+    /// <c>plan→spawn→re-plan→re-spawn</c>: the RE-SPAWN is what makes the accepted pair the only defensible answer,
+    /// because a re-plan nobody has run yet is a plan whose honest next move is to STAGE it, and a golden must leave
+    /// one right move (<see cref="SupervisorReplanStanding"/> splits those two tapes; the unrun one is pinned at the
+    /// unit level, where the ambiguity does not exist).
     ///
     /// <para>The corpus's numbers stay comparable because NO pre-existing scenario's prompt moved, and that is
     /// DERIVED rather than claimed: <see cref="The_rendered_corpus_matches_its_pinned_digest"/> recomputes today's
     /// rendering over the 25 scenarios that predate this pin and requires <see cref="StaticVerbRosterCorpusDigest"/>
     /// back through its wind-back, and over the 23 older ones for the two pins beneath it. The new steer is derived
-    /// from a spent re-plan on the tape (<see cref="SupervisorReplanStanding"/>), and the corpus's only other tape
-    /// with a re-plan on it carries co-signs, so its units read
+    /// from a re-plan whose re-graded verdict came back identical (<see cref="SupervisorReplanStanding"/>), and the
+    /// corpus's only other tape with a re-plan on it carries co-signs, so its units read
     /// <see cref="SupervisorAmendStanding.Discarded"/> and keep the steer they already had.</para>
     ///
     /// <para>PREVIOUS RE-PIN: the amend gate's evidence read widened past <see cref="SupervisorPlanWindow"/> to the
@@ -540,7 +544,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "a4eed5ee066f3b5664d732280123001aba06a48df378ded8e76f82202a514717";
+    private const string GoldenPromptDigest = "6771ae60585875a7e55399ffa8d7d08b29ba3084b51750a305a4eaf2dec817d4";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —

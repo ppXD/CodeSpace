@@ -431,29 +431,39 @@ public static class SupervisorDecisionGoldenScenarios
     };
 
     /// <summary>
-    /// A re-plan already spent on an unrunnable check, with NO co-sign anywhere on the tape — so every amended
+    /// A re-plan already SPENT on an unrunnable check, with NO co-sign anywhere on the tape — so every amended
     /// reading is inapplicable and the un-amended infra steer used to re-render "Re-plan this item with a check its
     /// agent can satisfy" verbatim, turn after turn. Nothing about a re-plan clears the recorded verdict, so the
     /// identical steer re-rendered and the run walked a fixed point into the no-progress bound: arm
     /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> failed ~25-40% of its attempts this way
     /// (<c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2).
     ///
+    /// <para>The re-plan is followed by a RE-SPAWN whose grade comes back identical, and that fourth prior is
+    /// load-bearing. Without it the tape stops one turn earlier — a plan authored and never run — where the honest
+    /// move is to STAGE it, so <c>spawn</c> is defensible and the accepted pair below would score a corpus point
+    /// against a prompt that genuinely admits a third answer. A golden must leave one right move
+    /// (<see cref="SupervisorReplanStanding"/> splits those two tapes for exactly this reason; the unrun arm is
+    /// pinned at the unit level, where the ambiguity does not exist).</para>
+    ///
     /// <para>The sibling of <see cref="AmendedOracleDiscardedByReplan"/> minus the two co-signs, so the accepted set
     /// is the same pair and for the same reason: the checks could not RUN, which is exactly the verdict shape
     /// <see cref="SupervisorAmendPrecondition"/> admits an amendment against, and nothing on the tape is mergeable
-    /// (both units are acceptance-rejected, so <see cref="SupervisorOutcome.IsWithheldFromHead"/> withholds them),
+    /// (every attempt is acceptance-rejected, so <see cref="SupervisorOutcome.IsWithheldFromHead"/> withholds them),
     /// retryable (another pass cannot fix a check that cannot run) or pending.</para>
     /// </summary>
     private static SupervisorGoldenScenario ReplanLeftTheVerdictUnchanged() => new()
     {
         Name = "re-plan-left-the-verdict-unchanged",
-        Context = Context(turn: 3, new[]
+        Context = Context(turn: 4, new[]
         {
             Plan("s1", "s2"),
             Spawn(new[] { "s1", "s2" },
                 Unrunnable(Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1")),
                 Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
             RePlan(2, "s1", "s2"),
+            ReSpawn(3, new[] { "s1", "s2" },
+                Unrunnable(Agent(Agent3, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1")),
+                Unrunnable(Agent(Agent4, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
         }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.AmendAcceptance, SupervisorDecisionKinds.AskHuman },
     };
@@ -465,6 +475,10 @@ public static class SupervisorDecisionGoldenScenarios
             Sequence = sequence,
             OutcomeJson = JsonSerializer.Serialize(new { planned = subtaskIds, count = subtaskIds.Length, workPlanId = FixtureWorkPlanId, workPlanVersion = 2 }, AgentJson.Options),
         };
+
+    /// <summary>A SECOND staging of the same units under a later plan — <see cref="Spawn"/>'s sequenced sibling (that one is the tape's first staging and pins sequence 1), so a fixture can show what the re-planned check actually graded.</summary>
+    private static SupervisorPriorDecision ReSpawn(long sequence, string[] subtaskIds, params SupervisorAgentResult[] results) =>
+        Spawn(subtaskIds, results) with { Sequence = sequence };
 
     /// <summary>A unit whose CHECK could not run: a FAILED grade whose detail classifies INFRA (<see cref="AgentAcceptanceContract.IsInfraFailure(string?, bool)"/>), which is the only verdict shape an amend proposal is admissible against. No evidence id — an oracle that never ran captured nothing to point at.</summary>
     private static SupervisorAgentResult Unrunnable(SupervisorAgentResult result) =>
