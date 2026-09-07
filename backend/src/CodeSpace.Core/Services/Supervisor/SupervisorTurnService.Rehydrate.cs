@@ -93,6 +93,12 @@ public sealed partial class SupervisorTurnService
         // (none / all-blank) → no objective grade runs, the resolver self-report marker stands (byte-identical to pre-A3).
         var acceptanceCommand = NormalizeCommand(goalConfig?.AcceptanceChecks);
 
+        // C3 narrowing: the run's own ORACLE INVENTORY — the floor's program file(s), derived from the operator's
+        // argv through the SAME extraction every protected grade uses. It is what separates a judge the run owns
+        // from a program file a per-unit check merely EXECUTES: a model-authored `sh solution.sh 7 5` against a
+        // goal that says "edit solution.sh" names the SUBJECT, and restoring it from base voids the correct work.
+        var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(acceptanceCommand);
+
         var priorDecisions = new List<SupervisorPriorDecision>();
         SupervisorPriorDecision? inFlight = null;
 
@@ -129,7 +135,7 @@ public sealed partial class SupervisorTurnService
                 using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd, modelPrices)))
                 {
                     decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
-                    decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
+                    decision = await FoldUnitAcceptanceGradeAsync(decision, priorDecisions, goalConfig, oracleFloorPrograms, supervisorRunId, nodeId, teamId, cancellationToken).ConfigureAwait(false);
                 }
 
                 priorDecisions.Add(decision);
@@ -664,8 +670,10 @@ public sealed partial class SupervisorTurnService
 
         try
         {
-            // The operator floor is always the TestsPass oracle (kind never model-authored on this path).
+            // The operator floor is always the TestsPass oracle (kind never model-authored on this path), and this
+            // gate IS the floor — so its own program file(s) are the run's oracle inventory (C3 narrowing).
             var spec = new SupervisorAcceptanceSpec { Command = command };
+            var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(command);
 
             if (!string.IsNullOrEmpty(resolver?.ProducedBranch))
                 return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, resolver.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
@@ -673,7 +681,7 @@ public sealed partial class SupervisorTurnService
             var manifest = resolver is not null ? await ResolveUnitManifestAsync(resolver.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false) : null;
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
 
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
         }
@@ -709,7 +717,7 @@ public sealed partial class SupervisorTurnService
     /// or a grader error folds <c>passed:false</c> — never a silent accept, never a throw that would strand the
     /// terminal row.
     /// </summary>
-    private async Task<SupervisorPriorDecision> FoldUnitAcceptanceGradeAsync(SupervisorPriorDecision decision, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorGoalConfig? goalConfig, Guid supervisorRunId, string nodeId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<SupervisorPriorDecision> FoldUnitAcceptanceGradeAsync(SupervisorPriorDecision decision, IReadOnlyList<SupervisorPriorDecision> priorDecisions, SupervisorGoalConfig? goalConfig, IReadOnlyList<string> oracleFloorPrograms, Guid supervisorRunId, string nodeId, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) return decision;
 
@@ -790,14 +798,14 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             if (results[i].RepositoryResults.Count > 0)
             {
-                grade = await GradeUnitAcceptanceMultiRepoAsync(results[i], fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+                grade = await GradeUnitAcceptanceMultiRepoAsync(results[i], fullSpec, oracleFloorPrograms, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                    ?? goalConfig?.AgentProfile?.RepositoryId;
 
-                grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+                grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, fullSpec, oracleFloorPrograms, expectsChanges, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
             }
 
             // S3 baseline health: the SAME oracle against the unit's BASE tree (its manifest's recorded BaseSha —
@@ -874,7 +882,7 @@ public sealed partial class SupervisorTurnService
     /// verdict — <c>true</c> (the default) fails closed exactly as before this field existed; <c>false</c> means the
     /// subtask never declared/implied a diff, so the absence is the CORRECTLY predicted outcome, not a failure.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, SupervisorAcceptanceSpec spec, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, SupervisorAcceptanceSpec spec, IReadOnlyList<string> oracleFloorPrograms, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
         try
         {
@@ -884,15 +892,15 @@ public sealed partial class SupervisorTurnService
 
             if (!string.IsNullOrEmpty(result.ProducedBranch))
             {
-                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, repositoryId.Value, spec, teamId, cancellationToken).ConfigureAwait(false);
+                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, repositoryId.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, oracleBaseSha, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, oracleBaseSha, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
             }
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(repositoryId.Value, teamId, manifest.BaseSha!, "", manifest.PatchArtifactId, spec, timeoutSeconds, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
 
             return NotApplicableOrFailed(expectsChanges);
         }
@@ -1023,7 +1031,7 @@ public sealed partial class SupervisorTurnService
     /// short-circuiting on the first failure (the detail names the failing repo); any unexpected non-cancellation
     /// grader escape degrades to not-accepted so the terminal fold can never crash + strand the row.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeUnitAcceptanceMultiRepoAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceMultiRepoAsync(SupervisorAgentResult result, SupervisorAcceptanceSpec spec, IReadOnlyList<string> oracleFloorPrograms, bool expectsChanges, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
         var targets = result.RepositoryResults.Where(r => !string.IsNullOrEmpty(r.ProducedBranch) && r.RepositoryId is not null).ToList();
 
@@ -1034,9 +1042,9 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             try
             {
-                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, target.RepositoryId!.Value, spec, teamId, cancellationToken).ConfigureAwait(false);
+                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, target.RepositoryId!.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseSha, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseSha, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
             }
             catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1120,18 +1128,27 @@ public sealed partial class SupervisorTurnService
     /// P3a-3 (B+V0+): the base sha the grader restores the spec's protected paths from — the unit's recorded
     /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec can be
     /// PROTECTED AT ALL (<see cref="AcceptanceOracleProtection.MayProtect"/> — authored, or derivable from the
-    /// command, the SAME test the grader itself uses to decide whether to widen its clone) — no extra read on a
-    /// genuinely unprotectable spec; null = grader grades exactly as before. Before this shared the grader's own
-    /// derivation, an authored-only guard here meant a per-unit oracle whose only protection was DERIVED (nothing
-    /// in Core or the UI ever authors <c>ProtectedPaths</c>, so this is the shape every real operator floor has)
-    /// never got a base sha at all — the grader could detect that it went unprotected but never had the bytes to
-    /// restore. A protected spec whose unit has no manifest grades with NO restore, and the grade says so out loud
+    /// command AND owned by the run's own floor, the SAME test the grader itself uses to decide whether to widen
+    /// its clone) — no extra read, and no full-history clone, on a spec that owns no oracle; null = grader grades
+    /// exactly as before. Before this shared the grader's own derivation, an authored-only guard here meant a
+    /// per-unit oracle whose only protection was DERIVED (nothing in Core or the UI ever authors
+    /// <c>ProtectedPaths</c>, so this is the shape every real operator floor has) never got a base sha at all —
+    /// the grader could detect that it went unprotected but never had the bytes to restore.
+    ///
+    /// <para>The run-ownership narrowing is the other half of that lesson, learned from a live run: the brain
+    /// authored a per-unit check whose argv named the very file the goal required editing
+    /// (<c>sh solution.sh 7 5</c>), so the derived protection put the stub back and voided a correct agent — "the
+    /// check itself protects the very file the goal requires editing, so no retry can pass it". A program file the
+    /// run's own floor never runs is the SUBJECT under test; it anchors nothing here and the grader reports it
+    /// instead of restoring it.</para>
+    ///
+    /// <para>A protected spec whose unit has no manifest grades with NO restore, and the grade says so out loud
     /// (<c>BenchmarkGrade.OracleNote</c> — "graded UNPROTECTED"): before C3 that case was silent, and silence
-    /// from an unanchored oracle is indistinguishable from a protected one that was left alone.
+    /// from an unanchored oracle is indistinguishable from a protected one that was left alone.</para>
     /// </summary>
-    private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
+    private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, IReadOnlyList<string> oracleFloorPrograms, Guid teamId, CancellationToken cancellationToken)
     {
-        if (!AcceptanceOracleProtection.MayProtect(spec)) return null;
+        if (!AcceptanceOracleProtection.MayProtect(spec, oracleFloorPrograms)) return null;
 
         var manifest = await ResolveUnitManifestAsync(agentRunId, repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -1321,7 +1338,7 @@ public sealed partial class SupervisorTurnService
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
         BenchmarkGrade grade;
         using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
-            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
+            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, AcceptanceOracleProtection.ProgramCandidates(floorCommand), cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
@@ -1461,14 +1478,14 @@ public sealed partial class SupervisorTurnService
     /// migration) at <see cref="SupervisorLane.AcceptanceGradeHeartbeatInterval"/>; it stops the instant grading
     /// finishes (success, failure, or exception) via the linked token — never outlives the grade it protects.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, CancellationToken cancellationToken)
     {
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token);
 
         try
         {
-            return await GradeStopTargetsAsync(teamId, targets, gates, oracleBaseShas, cancellationToken).ConfigureAwait(false);
+            return await GradeStopTargetsAsync(teamId, targets, gates, oracleBaseShas, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -1527,7 +1544,7 @@ public sealed partial class SupervisorTurnService
     /// operator's own workspace, not the model). The first-failure short-circuit keeps the common rejected case cheap;
     /// a future perf slice could grade with a bounded degree-of-parallelism if a large workspace makes wall-clock bite.</para>
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, CancellationToken cancellationToken)
     {
         var oracleNotes = new List<string>();
 
@@ -1544,10 +1561,12 @@ public sealed partial class SupervisorTurnService
                 BenchmarkGrade grade;
                 try
                 {
-                    // C3: every stop gate grades against a PROTECTED oracle — the grader restores the gate command's
-                    // own program file from the run's recorded base, so a candidate cannot buy the run's terminal
-                    // pass by rewriting the check script the operator's floor runs.
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseShas.GetValueOrDefault(target.RepositoryId), cancellationToken).ConfigureAwait(false);
+                    // C3: every stop gate grades against a PROTECTED oracle — the grader restores the FLOOR's own
+                    // program file from the run's recorded base, so a candidate cannot buy the run's terminal pass
+                    // by rewriting the check script the operator's floor runs. The floor's inventory gates BOTH
+                    // gates: the model's own tightening command can name a file the goal required editing, and
+                    // restoring that would void the very work the stop is shipping.
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Workflows.Llm.LlmBudgetExceededException refused)
         {

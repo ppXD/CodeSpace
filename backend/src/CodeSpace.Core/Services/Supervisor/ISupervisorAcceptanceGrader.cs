@@ -54,8 +54,18 @@ public interface ISupervisorAcceptanceGrader
     Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
         Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: captured-deliverable grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
 
-    /// <summary>P3a-3 (B+V0+): grade with ORACLE RESTORE — when the spec names <c>ProtectedPaths</c> and the attempt's base sha is known, the grader restores those paths from the base before running, voiding any candidate tamper of its own judge (recorded in the evidence). Default forwards to the plain overload (fakes and non-git graders are unaffected).</summary>
-    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// P3a-3 (B+V0+): grade with ORACLE RESTORE — when the attempt's base sha is known and the spec names oracle
+    /// bytes the run OWNS, the grader restores those paths from the base before running, voiding any candidate
+    /// tamper of its own judge (recorded in the evidence). Owned means an AUTHORED <c>ProtectedPaths</c>, or a
+    /// program file of the acceptance argv that <paramref name="oracleFloorPrograms"/> — the run's own oracle
+    /// inventory, the OPERATOR FLOOR's program files through
+    /// <c>AcceptanceOracleProtection.ProgramCandidates</c> — also names. Every other program file the command
+    /// executes is the SUBJECT under test (<c>sh solution.sh 7 5</c> runs the deliverable), so it is graded on the
+    /// candidate's own bytes and merely reported: restoring it voids the work the goal asked for and no retry can
+    /// pass. Default forwards to the plain overload (fakes and non-git graders are unaffected).
+    /// </summary>
+    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
 
     /// <summary>
@@ -70,6 +80,10 @@ public interface ISupervisorAcceptanceGrader
     /// legible detail (fail-closed), mirroring <see cref="GradeAsync"/>'s contract exactly.
     /// </summary>
     Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
+
+    /// <summary>The patch lane's ORACLE-RESTORE twin: <paramref name="oracleFloorPrograms"/> is the run's own oracle inventory, exactly as on <see cref="GradeAsync(Guid, Guid, string, SupervisorAcceptanceSpec, int, string?, IReadOnlyList{string}?, CancellationToken)"/> — a patch-only candidate can rewrite the judge it is graded with just as a branch's can. Default forwards to the floor-less overload (fakes and non-git graders are unaffected).</summary>
+    Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
+        GradePatchAsync(repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, cancellationToken);
 
     /// <summary>
     /// S3 — grade the BASE tree itself: clone <paramref name="repositoryId"/> at <paramref name="baseSha"/>

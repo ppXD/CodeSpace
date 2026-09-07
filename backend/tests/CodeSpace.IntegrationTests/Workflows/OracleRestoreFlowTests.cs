@@ -204,7 +204,12 @@ public sealed class OracleRestoreFlowTests
         using var scope = _fixture.BeginScope();
         var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" }, ProtectedPaths = protectedPaths };
 
-        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, spec, 60, baseSha, CancellationToken.None);
+        // The spec graded here IS the operator's own floor, so the run's ORACLE INVENTORY is that argv's own
+        // program file — the derived restore only ever covers a judge the run owns. (A per-unit check naming a file
+        // the floor never runs is the SUBJECT under test; that half is pinned in SupervisorUnitAcceptanceFoldFlowTests.)
+        var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(spec.Command);
+
+        return await scope.Resolve<ISupervisorAcceptanceGrader>().GradeAsync(repoId, teamId, branch, spec, 60, baseSha, oracleFloorPrograms, CancellationToken.None);
     }
 
     private async Task<Guid> SeedTeamAsync() => (await WorkflowsTestSeed.SeedTeamAsync(_fixture)).TeamId;

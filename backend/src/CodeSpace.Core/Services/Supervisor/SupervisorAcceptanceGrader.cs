@@ -28,7 +28,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v6";   // v6: the per-unit oracle base sha is anchored on the SAME derivation (authored or derived) the grader restores from, not authored-only
+    public const string EvaluatorVersion = "supervisor-acceptance/v6";   // v6: restore/void is scoped to oracle files the run OWNS (authored ProtectedPaths + the operator floor's own program files), anchored on the same shared derivation the per-unit base-sha resolver uses; a command's other program files are the SUBJECT under test — reported, graded, never restored
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -58,9 +58,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     }
 
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
-        GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, oracleBaseSha: null, cancellationToken);
+        GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, oracleBaseSha: null, oracleFloorPrograms: null, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken)
     {
         try
         {
@@ -73,12 +73,12 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             // contract that named protected paths did not merely go unprotected, it stopped being gradeable at all,
             // and read as infrastructure noise while doing it. IntegrationRequest.Depth records the same lesson for
             // its 3-way apply: an operation that reaches back to the base needs the base history.
-            if (AcceptanceOracleProtection.MayProtect(spec) && !string.IsNullOrEmpty(oracleBaseSha))
+            if (AcceptanceOracleProtection.MayProtect(spec, oracleFloorPrograms) && !string.IsNullOrEmpty(oracleBaseSha))
                 clone = clone with { Depth = 0 };
 
             await using var workspace = await _providers.Resolve(GradingRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
 
-            var protection = await RestoreOracleAsync(workspace.Directory, spec, oracleBaseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var protection = await RestoreOracleAsync(workspace.Directory, spec, oracleBaseSha, oracleFloorPrograms, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
             if (protection.Failure is not null) return protection.Failure;
 
@@ -219,7 +219,10 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         return current.Where(r => r.FenceEpoch == latest);
     }
 
-    public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+        GradePatchAsync(repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, oracleFloorPrograms: null, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken)
     {
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-" + Guid.NewGuid().ToString("N"));
 
@@ -254,7 +257,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             // The patch is the candidate's work — its edits to protected oracle bytes are as void here as a
             // branch's are (the base sha is this path's own anchor, no manifest resolution needed).
-            var protection = await RestoreOracleAsync(directory, spec, baseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var protection = await RestoreOracleAsync(directory, spec, baseSha, oracleFloorPrograms, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
             if (protection.Failure is not null) return protection.Failure;
 
@@ -355,31 +358,39 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
     /// <summary>
     /// P3a-3 (B+V0+): the ORACLE's bytes are not the candidate's to edit. When the base sha is known and the
-    /// contract yields protected paths — AUTHORED, or C3-DERIVED from the acceptance command's own program:
-    /// (1) any candidate change under those paths is recorded as a TAMPER note, in the evidence AND on the grade
-    /// itself (visibility — the restore makes it void, the note makes it seen); (2) the paths are restored from
-    /// the base, so the check runs the BASE's judge against the CANDIDATE's code. A restore that cannot complete
-    /// fails CLOSED (Environment): an unprotectable oracle cannot verify anything. A judge that could have been
-    /// protected but was not (no base, or a base we could not probe) grades UNPROTECTED and SAYS so.
+    /// contract yields RUN-OWNED protected paths — AUTHORED, or C3-DERIVED from the acceptance command's own
+    /// program where the OPERATOR FLOOR runs that same file: (1) any candidate change under those paths is
+    /// recorded as a TAMPER note, in the evidence AND on the grade itself (visibility — the restore makes it void,
+    /// the note makes it seen); (2) the paths are restored from the base, so the check runs the BASE's judge
+    /// against the CANDIDATE's code. A restore that cannot complete fails CLOSED (Environment): an unprotectable
+    /// oracle cannot verify anything. A judge that could have been protected but was not (no base, or a base we
+    /// could not probe) grades UNPROTECTED and SAYS so.
+    ///
+    /// <para>Every OTHER program file the command executes is the SUBJECT under test, not a judge — a check the
+    /// model authored as <c>sh solution.sh 7 5</c> runs the very file the goal required editing. Restoring that
+    /// from base voids the correct work and no retry can ever pass, so it is graded on the candidate's own bytes
+    /// and the grade says which file that was (<see cref="SubjectNote"/>).</para>
     /// </summary>
-    private async Task<OracleProtectionOutcome> RestoreOracleAsync(string directory, SupervisorAcceptanceSpec spec, string? oracleBaseSha, int timeoutSeconds, CancellationToken cancellationToken)
+    private async Task<OracleProtectionOutcome> RestoreOracleAsync(string directory, SupervisorAcceptanceSpec spec, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, int timeoutSeconds, CancellationToken cancellationToken)
     {
         // C3: a protectable judge that goes UNPROTECTED says so, on the grade itself. Silence here was readable as
         // protection — the one reading it (a decider weighing a pass, an operator reading a receipt) cannot tell
         // "the oracle was restored and untouched" from "nobody ever anchored it" unless the second case speaks.
         if (string.IsNullOrEmpty(oracleBaseSha))
-            return AcceptanceOracleProtection.CommandOracleCandidates(spec).Count == 0 ? OracleProtectionOutcome.None : OracleProtectionOutcome.Unprotected("no base recorded");
+            return AcceptanceOracleProtection.CommandOracleCandidates(spec, oracleFloorPrograms).Count == 0
+                ? OracleProtectionOutcome.None.WithSubjectNote(SubjectNote(spec, Array.Empty<string>()))
+                : OracleProtectionOutcome.Unprotected("no base recorded");
 
         var runner = _runners.Resolve(GradingRunnerKind);
 
-        var (paths, probeFailed) = await ResolveProtectedPathsAsync(runner, directory, spec, oracleBaseSha, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        var (paths, probeFailed) = await ResolveProtectedPathsAsync(runner, directory, spec, oracleBaseSha, oracleFloorPrograms, timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
         if (probeFailed) return OracleProtectionOutcome.Unprotected("base probe failed");
 
-        // No protected path is the QUIET case on purpose: either the contract names no judge file at all, or the
-        // program it names is absent at base — which makes it the CANDIDATE's own creation ("add a check" work),
-        // not an operator oracle that went unguarded.
-        if (paths.Count == 0) return OracleProtectionOutcome.None;
+        // No protected path is the QUIET case on purpose: either the contract names no judge file at all, the
+        // program it names is absent at base (the CANDIDATE's own creation — "add a check" work), or the run owns
+        // no oracle by that name at all, in which case the subject note below is the whole account.
+        if (paths.Count == 0) return OracleProtectionOutcome.None.WithSubjectNote(SubjectNote(spec, paths));
 
         // Working-tree diff (no HEAD) so BOTH grade shapes see the candidate's changes: the branch clone's tree IS
         // the candidate commit, and the patch path's tree is base + an UNCOMMITTED apply (where base..HEAD is empty).
@@ -404,9 +415,31 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         if (removeFailure is not null) return OracleProtectionOutcome.Fail(removeFailure);
 
         if (string.IsNullOrEmpty(tampered))
-            return OracleProtectionOutcome.Clean($"oracle: {paths.Count} protected path(s) restored from {oracleBaseSha[..Math.Min(12, oracleBaseSha.Length)]} (no candidate changes)");
+            return OracleProtectionOutcome.Clean($"oracle: {paths.Count} protected path(s) restored from {oracleBaseSha[..Math.Min(12, oracleBaseSha.Length)]} (no candidate changes)").WithSubjectNote(SubjectNote(spec, paths));
 
-        return OracleProtectionOutcome.Tampered($"ORACLE TAMPER VOIDED \u2014 candidate changed protected path(s), restored from base:\n{tampered}", tampered!);
+        return OracleProtectionOutcome.Tampered($"ORACLE TAMPER VOIDED \u2014 candidate changed protected path(s), restored from base:\n{tampered}", tampered!).WithSubjectNote(SubjectNote(spec, paths));
+    }
+
+    /// <summary>
+    /// The evidence line for the program files the command EXECUTES but this grade did not protect — the SUBJECT
+    /// under test. Null (the dominant case) when the command names no unprotected program file.
+    ///
+    /// <para>It exists because the alternative to saying this is restoring those bytes, and that voids the work
+    /// the goal asked for: a live run's brain authored <c>sh solution.sh 7 5</c> against a goal that said "edit
+    /// solution.sh", the derived protection put the stub back, and the brain read its own correct work as a
+    /// failure it could not fix ("the check itself protects the very file the goal requires editing, so no retry
+    /// can pass it"). The verdict is now the check's real result, and this note is what keeps the reader from
+    /// mistaking that verdict for a protected one.</para>
+    ///
+    /// <para>An EVIDENCE note, not the grade's integrity note: it states a fact about what ran (the Clean/Tampered
+    /// class), not an absence of protection — <see cref="OracleProtectionOutcome.Unprotected"/> stays the only
+    /// note that reports nothing having happened, and the only one deliberately kept out of the evidence.</para>
+    /// </summary>
+    private static string? SubjectNote(SupervisorAcceptanceSpec spec, IReadOnlyList<string> protectedPaths)
+    {
+        var subject = AcceptanceOracleProtection.CommandProgramCandidates(spec).Where(p => !protectedPaths.Contains(p, StringComparer.Ordinal)).ToList();
+
+        return subject.Count == 0 ? null : $"oracle: the check EXECUTES {string.Join(", ", subject)} \u2014 the SUBJECT under test, so this grade ran the candidate's own version of it, not a protected one";
     }
 
     /// <summary>
@@ -420,6 +453,10 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         public static readonly OracleProtectionOutcome None = new(null, null, null);
 
         public static OracleProtectionOutcome Fail(BenchmarkGrade failure) => new(failure, null, null);
+
+        /// <summary>Append the SUBJECT note to the evidence — a command can BOTH run the run's own judge (restored) and the file under test (graded as-is), so the two facts are reported together rather than one shadowing the other. Null note ⇒ unchanged (the dominant case).</summary>
+        public OracleProtectionOutcome WithSubjectNote(string? subjectNote) =>
+            subjectNote is null ? this : this with { EvidenceNote = EvidenceNote is { Length: > 0 } existing ? $"{existing}\n{subjectNote}" : subjectNote };
 
         /// <summary>The oracle was protected and the candidate left it alone — legible in the evidence, and deliberately silent on the grade (the quiet, dominant case).</summary>
         public static OracleProtectionOutcome Clean(string evidenceNote) => new(null, evidenceNote, null);
@@ -452,9 +489,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// <summary>
     /// C3 — the paths this grade protects: the AUTHORED set when the contract named one (explicit wins outright —
     /// a model that scoped its own oracle is not second-guessed), otherwise the set DERIVED from the acceptance
-    /// argv's own program file. The derivation is what gives the OPERATOR's floor a protected oracle: nothing in
-    /// Core or the UI ever authored <c>ProtectedPaths</c>, so before it the most trusted check in the system ran
-    /// whatever bytes the candidate left behind under that name.
+    /// argv's own program file AND owned by the run (a file the OPERATOR FLOOR itself runs). The derivation is
+    /// what gives the OPERATOR's floor a protected oracle: nothing in Core or the UI ever authored
+    /// <c>ProtectedPaths</c>, so before it the most trusted check in the system ran whatever bytes the candidate
+    /// left behind under that name. The run-ownership narrowing is what keeps that from misfiring on a
+    /// model-authored check whose program file is the DELIVERABLE the goal required editing.
     ///
     /// <para>Existence is answered off the base tree of THIS clone (one <c>ls-tree</c> over the candidate paths, no
     /// second fetch), because <c>git checkout &lt;base&gt; -- &lt;path&gt;</c> fails outright on a pathspec that
@@ -462,11 +501,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// The probe is best-effort for the same reason: a base we cannot read protects nothing rather than failing a
     /// grade that would otherwise stand.</para>
     /// </summary>
-    private async Task<(IReadOnlyList<string> Paths, bool ProbeFailed)> ResolveProtectedPathsAsync(ISandboxRunner runner, string directory, SupervisorAcceptanceSpec spec, string oracleBaseSha, int timeoutSeconds, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<string> Paths, bool ProbeFailed)> ResolveProtectedPathsAsync(ISandboxRunner runner, string directory, SupervisorAcceptanceSpec spec, string oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, int timeoutSeconds, CancellationToken cancellationToken)
     {
         if (spec.ProtectedPaths is { Count: > 0 } authored) return (authored, false);
 
-        var candidates = AcceptanceOracleProtection.CommandOracleCandidates(spec);
+        var candidates = AcceptanceOracleProtection.CommandOracleCandidates(spec, oracleFloorPrograms);
 
         if (candidates.Count == 0) return (Array.Empty<string>(), false);
 
@@ -480,7 +519,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         var present = listing.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal);
 
-        return (AcceptanceOracleProtection.DeriveProtectedPaths(spec.Command, present.Contains), false);
+        return (AcceptanceOracleProtection.DeriveProtectedPaths(spec.Command, oracleFloorPrograms, present.Contains), false);
     }
 
     /// <summary>

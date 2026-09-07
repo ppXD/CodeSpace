@@ -2195,8 +2195,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // with. The patch lane always had this anchor; the BRANCH lane discarded it and graded the candidate's
             // bytes as the judge.
             grade = hasBranch
-                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, result.BaseSha, cancellationToken).ConfigureAwait(false)
-                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, result.BaseSha, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false)
+                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -2234,6 +2234,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private static AgentRunResult FoldGrade(AgentRunResult result, BenchmarkGrade grade) =>
         (grade.Passed ? result : AcceptanceFailed(result, grade.Detail)) with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId, AcceptanceEvidenceTail = grade.Passed ? null : AcceptanceEvidenceRenderer.ClipTail(grade.EvidenceTail), AcceptanceFailureClass = grade.Class };
+
+    /// <summary>
+    /// The run's own ORACLE INVENTORY for the C3 restore narrowing. On THIS lane the task carries exactly ONE
+    /// acceptance contract and it is the run's whole definition of done — there is no separate operator floor a
+    /// per-unit check could disagree with — so the contract's own program file(s) are the judge, which is what the
+    /// supervisor lane's floor-derived inventory means for a run with one gate. (The supervisor's per-unit fold is
+    /// the shape that needs narrowing: there a MODEL-authored subtask check can name the very deliverable the goal
+    /// required editing, and restoring that voids the correct work.)
+    /// </summary>
+    private static IReadOnlyList<string> OracleFloorPrograms(SupervisorAcceptanceSpec spec) =>
+        Supervisor.AcceptanceOracleProtection.ProgramCandidates(spec.Command);
 
     /// <summary>
     /// Grade a MULTI-repo run's acceptance contract against EVERY repo it actually changed — a contract binds the
@@ -2278,7 +2289,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             try
             {
                 // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
-                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, target.BaseSha, cancellationToken).ConfigureAwait(false);
+                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, target.BaseSha, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
             {
