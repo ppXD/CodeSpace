@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 /// trimming, retry policy) belongs in the llm.complete node or the LLM-side resilience
 /// service, not in this transport.
 /// </summary>
-public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, IStreamingLLMClient
 {
     public const string ApiKeyEnvVar = "CODESPACE_ANTHROPIC_API_KEY";
     public const string DefaultApiBaseUrl = "https://api.anthropic.com";
@@ -122,18 +122,19 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        using var physical = PhysicalLlmCallContext.EnterProvider(request, Provider);
         // Get the JSON via the progressive path, then VALIDATE it against the requested schema — a recovered object that
         // is missing a required field / has a wrong-typed value / an invalid enum is NOT success (the old path returned
         // it blindly, so {} or a "no kind" object slipped through). On a validation miss, RE-ASK ONCE with the exact
         // violations named, then re-validate. A second miss is a typed Malformed fault (the engine fails it fast).
         var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
         var errors = StructuredResponseValidation.Validate(first.Json, request);
-        if (errors.Count == 0) return first;
+        if (errors.Count == 0) return PhysicalLlmCallContext.Aggregate(first, candidateOnly: true);
 
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = StructuredResponseValidation.Validate(second.Json, request);
-        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) };   // total billed = the first (invalid) attempt + the re-ask
+        if (errors2.Count == 0) return PhysicalLlmCallContext.Aggregate(second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) }, candidateOnly: true);   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
@@ -252,6 +253,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
     private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
         var (http, message) = BuildRequest(body, credential);
+        PhysicalLlmCallContext.Attach(http, message, PhysicalLlmEnvelopeReaders.Anthropic);
 
         using (message)
             return await LlmHttpTransport.SendForJsonAsync<AnthropicMessageResponse>(http, message, Provider, options: null, cancellationToken).ConfigureAwait(false);
@@ -338,7 +340,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient, IStreami
 
     private sealed class AnthropicUsage
     {
-        [JsonPropertyName("input_tokens")] public int InputTokens { get; init; }
-        [JsonPropertyName("output_tokens")] public int OutputTokens { get; init; }
+        [JsonPropertyName("input_tokens")] public int? InputTokens { get; init; }
+        [JsonPropertyName("output_tokens")] public int? OutputTokens { get; init; }
     }
 }

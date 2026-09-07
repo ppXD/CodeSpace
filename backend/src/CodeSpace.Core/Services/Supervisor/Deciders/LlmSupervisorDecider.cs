@@ -533,6 +533,43 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>One bounded summarizer round-trip on the SAME pinned brain row: the prior digest (roll-forward) + the foldable head, out comes the new digest. A model-side miss reads as "no digest" (null → the overflow propagates); an INFRA fault propagates (the node's park owns it).</summary>
     private static async Task<string?> SummarizeAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable, CancellationToken cancellationToken)
     {
+        try
+        {
+            var completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = pick.ModelId,
+                SystemPrompt = "You compact a supervisor run's oldest decisions into one rolling progress digest. Keep every fact a future decision needs: what was planned, each subtask's final state (succeeded/failed/why), branches produced, merges/conflicts, human answers, key learnings. Be dense; max ~400 words. Reply with ONLY the schema JSON.",
+                UserPrompt = BuildSummarizerPrompt(context, foldable),
+                JsonSchema = TapeSummarySchema,
+                MaxOutputTokens = 1024,
+                Temperature = 0,
+                Credential = pick.Credential,
+            }, cancellationToken).ConfigureAwait(false);
+
+            return completion.Json.ValueKind == JsonValueKind.Object && completion.Json.TryGetProperty("summary", out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString()
+                : null;
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The summarizer's own user prompt, exposed for the tests that pin what a fold may put into the persisted digest.</summary>
+    internal static string BuildSummarizerPromptForTest(SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable) => BuildSummarizerPrompt(context, foldable);
+
+    /// <summary>
+    /// The summarizer's input: the goal, the digest to roll forward into, and the foldable head rendered by the SAME
+    /// per-decision renderer the live prompt uses.
+    ///
+    /// <para>Sharing that renderer is what makes the options below load-bearing rather than cosmetic. The digest this
+    /// call produces re-enters the LIVE prompt on every later turn, so a cap-BLIND fold would smuggle
+    /// "To reconcile: choose 'resolve' … then you merge again" — the invitation the live render withdraws once the
+    /// resolve cap is spent — back into the prompt through the one block the cap-aware renderer never sees again.</para>
+    /// </summary>
+    private static string BuildSummarizerPrompt(SupervisorTurnContext context, IReadOnlyList<SupervisorPriorDecision> foldable)
+    {
         var builder = new StringBuilder();
 
         builder.AppendLine($"Goal: {context.Goal}");
@@ -552,30 +589,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             // payloads — the summarizer wants "what was planned" verbatim to distil. The superseded-plan digest is a
             // LIVE-prompt concern only. Evidence tails are the OPPOSITE: the foldable head excludes the newest
             // CompactTailKeep decisions, so any tail here is stale by construction (P5-2) — never bake one into the
-            // persisted rolling digest; the one-line verdicts alone carry the state the digest needs.
-            AppendPriorDecision(builder, foldable[i], new PriorRenderOptions { IsLatestSpawn = i == latestSpawnIndex });
-
-        try
-        {
-            var completion = await structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            // persisted rolling digest; the one-line verdicts alone carry the state the digest needs. ResolveExhausted
+            // is read off the SAME mask the live render reads (~:784), because the digest outlives this turn.
+            AppendPriorDecision(builder, foldable[i], new PriorRenderOptions
             {
-                Model = pick.ModelId,
-                SystemPrompt = "You compact a supervisor run's oldest decisions into one rolling progress digest. Keep every fact a future decision needs: what was planned, each subtask's final state (succeeded/failed/why), branches produced, merges/conflicts, human answers, key learnings. Be dense; max ~400 words. Reply with ONLY the schema JSON.",
-                UserPrompt = builder.ToString(),
-                JsonSchema = TapeSummarySchema,
-                MaxOutputTokens = 1024,
-                Temperature = 0,
-                Credential = pick.Credential,
-            }, cancellationToken).ConfigureAwait(false);
+                IsLatestSpawn = i == latestSpawnIndex,
+                ResolveExhausted = SupervisorActionMask.IsResolveCapSpent(context),
+            });
 
-            return completion.Json.ValueKind == JsonValueKind.Object && completion.Json.TryGetProperty("summary", out var v) && v.ValueKind == JsonValueKind.String
-                ? v.GetString()
-                : null;
-        }
-        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
-        {
-            return null;
-        }
+        return builder.ToString();
     }
 
     /// <summary>Whether an LLM transport failure is a MODEL-side capability miss (the model could not produce a usable structured decision) rather than a gateway/credential INFRA fault. Capability misses fail closed to a clean stop (never crash the run); infra faults (Transient / RateLimited / AuthFailed) propagate so the engine fails the run and the live-gate treats them as non-gating infra. This is the decider's "fail closed on a model miss, surface real infra" split.</summary>
@@ -830,13 +852,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(bounds);
         }
 
-        // A1.5 — the action mask: name what CANNOT advance the run this turn, so a futile verb is refused before
-        // the model spends a turn on it. Null when everything is available ⇒ byte-identical prompt for a healthy run.
-        if (SupervisorActionMask.Render(context) is { } mask)
-        {
-            builder.AppendLine();
-            builder.AppendLine(mask);
-        }
+        // A1.5 — the turn's VERB ROSTER, offered half then masked half, both read off SupervisorActionMask. The
+        // roster used to be a static sentence in the SYSTEM prompt naming all seven verbs on every turn, which
+        // presented a masked verb as choosable three lines above the block forbidding it (golden
+        // `resolve-cap-spent`, 2 of 4 branch lanes). Always renders: the model must be told what it may emit, and
+        // an offerable verb always exists — plan / ask_human / stop are never masked.
+        builder.AppendLine();
+        builder.AppendLine(SupervisorActionRoster.Render(context));
 
         // P5-6 — the reducer's own "if you stopped now" verdict, prerendered at rehydrate (the prompt build stays
         // pure). Null for contract-less / pre-F0 runs ⇒ byte-identical prompt.
@@ -847,10 +869,32 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
 
         builder.AppendLine();
-        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
+        builder.AppendLine($"Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), {ClosingMoveFor(context)} Return ONLY the schema-constrained JSON.");
 
         return builder.ToString();
     }
+
+    /// <summary>The ordinary closing move — drive the units to done, fold them, finish. Named so the cap-aware arm below can be a substitution rather than a second sentence.</summary>
+    internal const string ClosingLandsWithAMerge = "then merge the successful results, then stop.";
+
+    /// <summary>The closing move once a conflict is recorded and the resolve cap is spent: there is no landing left, so the sentence must not keep asking for one.</summary>
+    internal const string ClosingCannotLand = "then stop with outcome 'gave_up' or ask_human; do not merge again — the merge already conflicted.";
+
+    /// <summary>
+    /// How the prompt's LAST sentence ends — the recency slot, immediately under the turn's verb roster. It was
+    /// unconditional, so on a tape with a conflicted integration and the resolve cap spent it stood as a standing
+    /// instruction to "merge the successful results": a re-run of the merge already recorded as conflicted, and the
+    /// second of the two answers the gating wire gave on golden <c>resolve-cap-spent</c> (the first, <c>resolve</c>,
+    /// is what the roster and the conflicted-integration block withdrew).
+    ///
+    /// <para>Read off <see cref="SupervisorActionMask.LandingReachFor"/> — the SAME reader the mask and the
+    /// stopped-now steer use — so the last line the model reads cannot disagree with the block three lines above it.
+    /// No new state source, and the default arm stays byte-identical for every other tape.</para>
+    /// </summary>
+    private static string ClosingMoveFor(SupervisorTurnContext context) =>
+        SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts) == SupervisorLandingReach.NoLandingReachable
+            ? ClosingCannotLand
+            : ClosingLandsWithAMerge;
 
     /// <summary>
     /// Render the plan's dependency FRONTIER (loopability — the server enforces <c>DependsOn</c> ordering at spawn): the
@@ -1029,7 +1073,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             AppendBlockedSpawn(builder, prior, blocked);
 
             if (SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } stagingConflict)
-                AppendConflictedIntegration(builder, prior.DecisionKind, "then re-author the spawn that was withheld", stagingConflict);
+                AppendConflictedIntegration(builder, prior.DecisionKind, "then re-author the spawn that was withheld", stagingConflict, resolveExhausted);
 
             return;
         }
@@ -1049,7 +1093,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // and reverted — the mutation test proved it dead code (re-gating reddened nothing).
         if (prior.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } integration)
         {
-            AppendConflictedIntegration(builder, prior.DecisionKind, "then you merge again", integration);
+            AppendConflictedIntegration(builder, prior.DecisionKind, "then you merge again", integration, resolveExhausted);
             return;
         }
 
@@ -1505,8 +1549,23 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine(Agents.AcceptanceEvidenceRenderer.Render(result.AcceptanceEvidenceTail, result.AcceptanceEvidenceId, "        | "));
     }
 
-    /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>
-    private static void AppendConflictedIntegration(StringBuilder builder, string decisionKind, string afterResolve, SupervisorIntegrationOutcome integration)
+    /// <summary>The conflicted-integration block's closing line once the resolve cap is spent — a fact, and no third steer. Named so the golden corpus's re-pin receipt can wind this commit's rendering back without restating live copy.</summary>
+    internal const string ResolveWithdrawnOnAConflictedIntegration = "    'resolve' is NOT available on this run any more — the resolve cap is spent, so a further reconciliation attempt would FORCE-STOP the run instead of reconciling.";
+
+    /// <summary>
+    /// Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the
+    /// moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).
+    ///
+    /// <para>The closing line is CAP-AWARE for the same reason <see cref="AppendResolutionVerdict"/>'s is: with the
+    /// resolve cap spent, a further resolve does not get refused — it FORCE-STOPS the run — so "To reconcile: choose
+    /// 'resolve' … then you merge again" offered the model BOTH verbs the mask and the stopped-now steer had already
+    /// withdrawn, in the closest, loudest block on the tape. That is the contradiction golden
+    /// <c>resolve-cap-spent</c> answered twice on the gating wire, once with each verb it names. Past the cap the
+    /// line states the fact and stops: what to do INSTEAD is owned by the resolution verdict above it (three-way and
+    /// already cap-aware) and by the stopped-now steer below it (<see cref="SupervisorActionMask.LandingReachFor"/>)
+    /// — a third steer authored here could only disagree with one of them.</para>
+    /// </summary>
+    private static void AppendConflictedIntegration(StringBuilder builder, string decisionKind, string afterResolve, SupervisorIntegrationOutcome integration, bool resolveExhausted)
     {
         builder.AppendLine($"- {decisionKind}: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
         builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
@@ -1516,8 +1575,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         // The verb is named EXPLICITLY here (M0, 2026-07-11): the live golden eval proved a model picks its verb off
         // this copy, and the reconciling agent is the SERVER's to spawn — a model that reads "spawn ONE agent" emits
-        // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation.
-        builder.AppendLine($"    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, {afterResolve}. Or stop to leave the conflict for a human.");
+        // the spawn verb, which needs a plan-local subtask id it does not have for a reconciliation. That same
+        // proof is why the exhausted arm names NEITHER verb rather than softening the invitation.
+        builder.AppendLine(resolveExhausted
+            ? ResolveWithdrawnOnAConflictedIntegration
+            : $"    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, {afterResolve}. Or stop to leave the conflict for a human.");
     }
 
     /// <summary>
@@ -1589,15 +1651,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
     private const string SystemPrompt =
         "You are a software-delivery supervisor driving a bounded loop of decisions toward a goal. " +
-        "On each turn you emit ONE action from a fixed vocabulary: 'plan' (decompose the goal into subtasks), " +
-        "'spawn' (fan out coding agents over planned subtask ids), 'retry' (re-run one subtask), " +
-        "'merge' (synthesize the agents' results), 'resolve' (reconcile a CONFLICTED integration — the server spawns " +
-        "ONE reconciling agent from the recorded conflict; you name no subtask and author no branches), " +
-        "'ask_human' (ask a question), 'stop' (finish). " +
+        "On each turn you emit ONE action. " + SupervisorActionRoster.SystemPromptPointer + " " +
         "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
-        "succeeded — and when an integration reports CONFLICTED, 'resolve' it before merging again. " +
+        "succeeded — and when an integration reports CONFLICTED and the turn still offers 'resolve', resolve it before " +
+        "merging again. " +
         "Stop when the goal is met or a bound forces it. " +
         "When you spawn, you MAY optionally author a per-agent 'agents[]' override (one entry per subtask id) to give " +
         "each agent a DISTINCT role, goal, repo subset, harness, model, persona, or a LOWER autonomy — use it when the " +
@@ -1624,9 +1683,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +
         "work is wanted. A follow-up that asks for NEW or ADDITIONAL work — even building on prior turns, or touching the " +
         "same file/endpoint/area as prior work — is NOT redundant; plan it. " +
-        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; choose 'resolve' — the " +
-        "server spawns ONE agent that reconciles the preserved branches, builds, and runs the tests (then merge again) — " +
-        "or stop to leave the conflict for a human — never accept an unverified resolution. " +
+        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; choose 'resolve' while " +
+        "the turn's AVAILABLE ACTIONS block still offers it — the server spawns ONE agent that reconciles the preserved " +
+        "branches, builds, and runs the tests (then merge again) — or stop to leave the conflict for a human — never " +
+        "accept an unverified resolution. Once the reconciliation budget is spent, 'resolve' is withdrawn — and an " +
+        "UNVERIFIED reconciliation must not be merged either: stop with outcome 'gave_up', or ask_human to rule. " +
         "If the context shows a PLAN-CONFIRMATION question (it asks the human to confirm a plan version) that was just " +
         "answered: an approving answer means the plan is confirmed — proceed to 'spawn' its subtasks; ANY other answer " +
         "is the operator's revision feedback — author a REVISED 'plan' that incorporates it (keep what they liked, " +

@@ -82,11 +82,13 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_timing", "(first_token_at IS NULL OR first_token_at >= started_at) AND (completed_at IS NULL OR completed_at >= started_at) AND (first_token_at IS NULL OR completed_at IS NULL OR first_token_at <= completed_at)");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_source_native_record", "source_native_record_id IS NULL OR source_native_record_id <> '00000000-0000-0000-0000-000000000000'::uuid");
             table.HasCheckConstraint("ck_workflow_run_model_call_attempt_unavailable_figures", UnavailableFiguresCheck);
+            table.HasCheckConstraint("ck_model_call_attempt_physical_receipt", "(candidate_id IS NULL AND candidate_ordinal IS NULL AND candidate_model IS NULL AND budget_reservation_id IS NULL AND pricing_snapshot_json IS NULL) OR (candidate_id IS NOT NULL AND candidate_id <> '00000000-0000-0000-0000-000000000000'::uuid AND candidate_ordinal IS NOT NULL AND candidate_ordinal > 0 AND candidate_model IS NOT NULL AND btrim(candidate_model) <> '' AND budget_reservation_id IS NOT NULL AND pricing_snapshot_json IS NOT NULL AND jsonb_typeof(pricing_snapshot_json) = 'object' AND octet_length(pricing_snapshot_json::text) <= 524288 AND capture_source = 'structured-post/v1')");
         });
         builder.HasKey(a => a.Id);
 
         builder.Property(a => a.EffectiveProvider).HasMaxLength(100);
         builder.Property(a => a.EffectiveModel).HasMaxLength(500);
+        builder.Property(a => a.CandidateModel).HasMaxLength(500);
         builder.Property(a => a.TransportKind).HasMaxLength(64);
         builder.Property(a => a.EndpointFingerprint).HasMaxLength(256);
         builder.Property(a => a.ProviderRequestId).HasMaxLength(512);
@@ -95,7 +97,8 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
         builder.Property(a => a.FinishReason).HasMaxLength(100);
         builder.Property(a => a.CaptureSource).HasMaxLength(64);
         builder.Property(a => a.CaptureCompleteness).HasConversion<string>().HasMaxLength(20);
-        builder.Property(a => a.CostAmount).HasPrecision(18, 8);
+        builder.Property(a => a.CostAmount).HasColumnType("numeric");
+        builder.Property(a => a.PricingSnapshotJson).HasColumnType("jsonb");
         builder.Property(a => a.CostCurrency).HasMaxLength(3);
         builder.Property(a => a.PricingVersion).HasMaxLength(200);
         builder.Property(a => a.SourceEvidenceRevision).IsConcurrencyToken();
@@ -114,6 +117,8 @@ public sealed class WorkflowRunModelCallAttemptConfiguration : IEntityTypeConfig
             .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasIndex(a => new { a.ModelCallId, a.AttemptOrdinal }).IsUnique().HasDatabaseName("ux_workflow_run_model_call_attempt_ordinal");
+        builder.HasIndex(a => a.BudgetReservationId).IsUnique().HasDatabaseName("ux_model_call_attempt_budget_reservation").HasFilter("budget_reservation_id IS NOT NULL");
+        builder.HasOne<BudgetReservation>().WithMany().HasForeignKey(a => new { a.BudgetReservationId, a.TeamId, a.WorkflowRunId }).HasPrincipalKey(r => new { r.Id, r.TeamId, r.WorkflowRunId }).OnDelete(DeleteBehavior.Restrict);
         builder.HasIndex(a => new { a.WorkflowRunId, a.StartedAt, a.Id }).HasDatabaseName("ix_workflow_run_model_call_attempt_run_started");
         builder.HasIndex(a => new { a.TeamId, a.StartedAt, a.Id }).HasDatabaseName("ix_workflow_run_model_call_attempt_team_started");
         builder.HasIndex(a => new { a.EffectiveProvider, a.ProviderRequestId }).HasDatabaseName("ix_workflow_run_model_call_attempt_provider_request").HasFilter("provider_request_id IS NOT NULL");

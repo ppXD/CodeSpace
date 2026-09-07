@@ -59,7 +59,7 @@ public interface IBudgetLedger
 /// presenting that estimate as actual spend. Conditional writes prevent stale tracked entities and recovery
 /// sweeps from overwriting a provider receipt. Reservations are estimates unless their caller proves an upper bound.
 /// </summary>
-public sealed class BudgetLedger : IBudgetLedger, IScopedDependency
+public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocationLedger, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
 
