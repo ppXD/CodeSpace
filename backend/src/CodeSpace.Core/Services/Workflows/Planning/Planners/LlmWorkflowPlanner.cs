@@ -78,16 +78,31 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         };
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog, IReadOnlyList<Persistence.Entities.Lesson> lessons) => new()
+    internal static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog, IReadOnlyList<Persistence.Entities.Lesson> lessons) => new()
     {
         Model = pick.ModelId,
         Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
         UserPrompt = BuildUserPrompt(request, catalog, lessons),
         JsonSchema = PlannerSchema.ResponseSchema,
+        ResponseValidator = ValidateModelResponse,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
     };
+
+    /// <summary>The typed runtime boundary also participates in the provider's existing bounded re-ask. The model corrects invalid intent; the server never invents or repairs argv or artifact requirements.</summary>
+    internal static IReadOnlyList<string> ValidateModelResponse(JsonElement response)
+    {
+        try
+        {
+            var plan = PlannerAcceptanceDraft.ReadResponse(response);
+            return plan is null || plan.Subtasks.Count == 0 ? ["The planner response requires at least one subtask."] : [];
+        }
+        catch (JsonException ex)
+        {
+            return [$"Planner response contract: {ex.Message}"];
+        }
+    }
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing + over-claim guard directly, without a real LLM round-trip.</summary>
     internal static string BuildUserPromptForTest(WorkflowPlanRequest request, string catalog = "", IReadOnlyList<Persistence.Entities.Lesson>? lessons = null) => BuildUserPrompt(request, catalog, lessons ?? Array.Empty<Persistence.Entities.Lesson>());

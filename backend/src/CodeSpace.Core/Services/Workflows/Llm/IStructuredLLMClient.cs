@@ -36,6 +36,10 @@ public sealed record StructuredLLMCompletionRequest
     /// <summary>JSON Schema (object) the response MUST conform to.</summary>
     public required JsonElement JsonSchema { get; init; }
 
+    /// <summary>Server-only validation of the consumer contract, alongside JSON schema. Violations enter the same bounded model re-ask; this callback never rewrites output.</summary>
+    [JsonIgnore]
+    public Func<JsonElement, IReadOnlyList<string>>? ResponseValidator { get; init; }
+
     /// <summary>The output-token cap. NULL (the default) ⇒ "let the model decide its ceiling": the OpenAI wire OMITS the param (the model runs to its context limit); the Anthropic wire — where <c>max_tokens</c> is REQUIRED — sends <see cref="LlmModelCapabilities.DefaultMaxOutputTokens"/>. A value pins an explicit cap (control-plane callers scope their output this way). The OpenAI wire renames it to <c>max_completion_tokens</c> for a reasoning model (see <see cref="LlmModelCapabilities.UsesMaxCompletionTokens"/>).</summary>
     public int? MaxOutputTokens { get; init; }
 
