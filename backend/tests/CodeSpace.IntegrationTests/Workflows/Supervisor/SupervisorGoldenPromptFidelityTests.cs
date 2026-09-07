@@ -414,10 +414,10 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The corpus's numbers stay comparable across the re-pin, and that is DERIVED rather than claimed: every
     /// scenario's prompt is wound back through <see cref="AsRenderedBeforeTheTurnRoster"/> — the roster replaced by
     /// the mask block it grew out of, and the conflicted-integration block's cap-aware closing line replaced by the
-    /// invitation it retired — and both superseded anchors then reproduce their own digests over the whole pre-pin
-    /// corpus. So the moved bytes are exactly those two blocks and nothing else: the roster on every scenario, and
-    /// the closing line on the two that record a conflict with the resolve cap spent (<c>resolve-cap-spent</c>,
-    /// <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and none acquired a menu entry for a
+    /// invitation it retired — and this pin then reproduces itself over the whole 25-scenario corpus, while the two
+    /// 23-scenario anchors below reproduce theirs over the subset they were each taken at. So the moved bytes are
+    /// exactly those two blocks and nothing else: the roster on every scenario, and the closing line on the two that
+    /// record a conflict with the resolve cap spent (<c>resolve-cap-spent</c>, <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and none acquired a menu entry for a
     /// verb its own tape cannot reach — which <see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>
     /// and <see cref="Every_scenario_renders_the_action_mask_arm_its_tape_implies"/> re-derive off the mask itself.</para>
     /// </summary>
@@ -468,6 +468,15 @@ public class SupervisorGoldenPromptFidelityTests
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()
     {
+        // THIS commit's receipt, and the only one the two co-sign scenarios get: wind the two blocks it moved back
+        // to what they replaced — the roster to the mask block it grew out of, the cap-aware closing line to the
+        // invitation it retired — and the whole-corpus pin that stood before them must return. Taken over EVERY
+        // scenario rather than the pre-co-sign subset because 25 IS the corpus this pin was measured at, per the
+        // per-pin-corpus rule on AddedSinceTheSupersededPins. A third block that drifted into this commit fails
+        // here, where the two named ones are still separable from it, instead of hiding inside the re-pin below.
+        Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context))).ShouldBe(StaticVerbRosterCorpusDigest,
+            "undoing the roster and the cap-aware closing line no longer reproduces the pin this corpus carried before them — so those two blocks are not the whole delta, and the new pin below cannot be attributed to them");
+
         // This re-pin's receipt: over the scenarios that predate it, today's rendering still digests to the
         // superseded pin — so the move is corpus GROWTH and nothing else, and every score taken under the old pin
         // remains comparable with one taken under the new one.
