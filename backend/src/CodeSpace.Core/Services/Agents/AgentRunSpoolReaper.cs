@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -12,12 +13,12 @@ namespace CodeSpace.Core.Services.Agents;
 /// <summary>
 /// Reclaims the host resources of agent runs that have FINISHED past a retention window — the disk
 /// counterpart to <c>IWorkspaceJanitor</c>. The durable runner writes each run's stdout/stderr/exit/pid to a
-/// spool directory so a restart can recover/re-attach it; once the run is terminal that spool is debris (its
-/// redacted output is already in the append-only event log), so this ages it out. It is ALSO the backstop for the
+/// spool directory so a restart can recover/re-attach it; this applies the configured terminal-run retention
+/// policy to that host-local source. Terminal status alone does not prove log completeness. It is ALSO the backstop for the
 /// durable runner's filtered-egress netns (B3.2b): a run that reached terminal via a path that skipped the runner's
 /// per-terminal teardown (most notably a re-attach that could only complete from the exit marker) still carries its
-/// netns key on the handle, so the reaper tears that netns down from the handle before clearing it — the last point
-/// the key is available, the guarantee against a permanently-leaked namespace.
+/// netns key on the handle, so the reaper requests best-effort teardown before clearing it. The teardown API does
+/// not return a durable cleanup receipt; successful spool cleanup does not prove namespace cleanup succeeded.
 ///
 /// <para><b>Terminal-gated, not age-gated:</b> a live run has no <c>CompletedAt</c>, so the reaper can NEVER
 /// touch a running run's spool however long it runs — which matters precisely because durable runs are meant
@@ -26,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public interface IAgentRunSpoolReaper
 {
-    /// <summary>Delete the spool directory of every terminal run whose CompletedAt is older than the retention window, then clear its handle so it isn't re-swept. Best-effort + idempotent + safe from multiple replicas. Returns the count reaped.</summary>
+    /// <summary>Reclaim expired terminal spools with a matching launch host. Unknown ownership or failed filesystem cleanup retains the handle for retry. Returns the count whose cleanup handle was cleared.</summary>
     Task<int> ReapAsync(CancellationToken cancellationToken);
 }
 
@@ -35,8 +36,8 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     /// <summary>
     /// Operator override (a TimeSpan, e.g. <c>"1.00:00:00"</c>) for how long a TERMINAL run's spool is kept
     /// before reaping; default 24h. Pinned by a test (Rule 8). The spool holds RAW (un-redacted) output, so a
-    /// shorter window reduces raw-output-at-rest; the durable event log already has the redacted copy, so
-    /// recovery/re-attach never needs a terminal run's spool.
+    /// shorter window reduces raw-output-at-rest. This retention policy is independent of whether late log
+    /// capture has completed; a future durable source-replay obligation must coordinate its own retention hold.
     /// </summary>
     public const string RetentionEnvVar = "CODESPACE_AGENT_RUN_SPOOL_RETENTION";
 
@@ -60,22 +61,26 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
 
     public async Task<int> ReapAsync(CancellationToken cancellationToken)
     {
-        var cutoff = DateTimeOffset.UtcNow - Retention;
+        var now = await _db.Database.SqlQueryRaw<DateTimeOffset>("SELECT clock_timestamp() AS \"Value\"").SingleAsync(cancellationToken).ConfigureAwait(false);
+        var cutoff = now - Retention;
+        var host = LocalProcessRunner.CurrentHost;
 
-        // Terminal (CompletedAt is set only on a terminal flip) + old enough + still carries a handle (= not yet
-        // reaped). A live Running run has a null CompletedAt, so it never enters this set no matter how long it runs.
-        var candidates = await _db.AgentRun.AsNoTracking()
-            .Where(r => r.CompletedAt != null && r.CompletedAt < cutoff && r.RunnerHandleJson != null)
-            .OrderBy(r => r.CompletedAt)
+        // Filter ownership BEFORE LIMIT: foreign and legacy handles must neither lose their only cleanup evidence
+        // nor fill every local batch forever. An unstamped legacy handle has no provable host owner.
+        var candidates = await _db.AgentRun.FromSqlInterpolated($"""
+            SELECT agent_run.*, xmin FROM agent_run
+            WHERE lower(runner_handle ->> 'launchHost') = lower({host})
+            """).AsNoTracking()
+            .Where(r => r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running && r.CompletedAt != null && r.CompletedAt < cutoff && r.RunnerHandleJson != null)
+            .OrderBy(r => r.CompletedAt).ThenBy(r => r.Id)
             .Take(BatchSize)
-            .Select(r => new { r.Id, r.RunnerHandleJson })
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
+            .Select(r => new CleanupCandidate(r.Id, r.RunnerHandleJson!, r.FenceEpoch, r.CompletedAt!.Value))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var reaped = 0;
 
         foreach (var c in candidates)
-            if (await ReapOneAsync(c.Id, c.RunnerHandleJson!, cancellationToken).ConfigureAwait(false))
+            if (await ReapOneAsync(c, cancellationToken).ConfigureAwait(false))
                 reaped++;
 
         if (reaped > 0)
@@ -84,22 +89,42 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         return reaped;
     }
 
-    private async Task<bool> ReapOneAsync(Guid runId, string handleJson, CancellationToken cancellationToken)
+    private async Task<bool> ReapOneAsync(CleanupCandidate candidate, CancellationToken cancellationToken)
     {
-        var handle = TryDeserialize(handleJson);
+        var handle = TryDeserialize(candidate.HandleJson);
+        if (string.IsNullOrWhiteSpace(handle?.LaunchHost) || !string.Equals(handle.LaunchHost, LocalProcessRunner.CurrentHost, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!IsUnderSpoolRoot(handle.SpoolDirectory)) return false;
 
-        // Delete the spool dir ONLY when it's strictly under the spool root (else a forged/corrupt handle path
-        // could point anywhere). A gone / out-of-root / unparseable handle just skips the delete.
-        if (handle?.SpoolDirectory is { } dir && IsUnderSpoolRoot(dir))
-            DeleteQuietly(dir);
+        // Recheck and lock before filesystem side effects. A candidate read is not authority to delete after a
+        // handle replacement or lifecycle change. Concurrent reapers serialize on this row, not filesystem age.
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var current = await _db.AgentRun.FromSqlInterpolated($"""
+            SELECT agent_run.*, xmin FROM agent_run
+            WHERE id = {candidate.Id} AND runner_handle = CAST({candidate.HandleJson} AS jsonb)
+                AND fence_epoch = {candidate.FenceEpoch} AND completed_at = {candidate.CompletedAt}
+                AND status NOT IN ('Queued', 'Running')
+            FOR UPDATE
+            """).AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (current == null) return false;
 
-        // S6: a revised run leaves one spool PER ROUND (ReviseSpoolKey) and the handle points only at the LAST
-        // round's — so sweep the run's whole spool family (the bare round-0 dir + every "-rN" sibling) through the
-        // same containment guard. Without this, every earlier round's raw un-redacted output + per-round config home
-        // (MCP token declaration, session transcript) would sit on disk forever, defeating the retention window.
-        foreach (var sibling in RoundSpoolFamily(runId))
-            if (IsUnderSpoolRoot(sibling))
-                DeleteQuietly(sibling);
+        // Enumerate the entire family before deleting anything. A refused directory listing cannot prove earlier
+        // rounds are absent. Keep the handle through partial deletion so the next sweep can finish the remainder.
+        try
+        {
+            var directories = RoundSpoolFamily(candidate.Id).Append(handle.SpoolDirectory).Distinct(StringComparer.Ordinal).ToArray();
+            if (directories.Any(dir => !IsUnderSpoolRoot(dir))) return false;
+            foreach (var directory in directories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try { Directory.Delete(directory, recursive: true); }
+                catch (DirectoryNotFoundException) { /* an earlier sweep already removed this exact directory */ }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(exception, "AgentRunSpoolReaper: retaining cleanup handle for run {RunId} after filesystem cleanup failed", candidate.Id);
+            return false;
+        }
 
         // Backstop the durable runner's per-terminal-path filtered-egress netns teardown (B3.2b): a run that reached
         // terminal via a path that SKIPPED it — most notably a re-attach that could only complete from the exit marker
@@ -116,12 +141,13 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         if (handle?.CgroupRunKey is { Length: > 0 } cgroupKey && CgroupResourceLimit.CgroupRoot is { } cgroupRoot)
             await CgroupResourceLimit.TeardownAsync(cgroupRoot, cgroupKey, cancellationToken).ConfigureAwait(false);
 
-        // Clear the handle regardless (the spool is reclaimed or irrelevant, and a terminal run never re-attaches)
-        // so the run drops out of the candidate set and isn't re-processed every sweep.
+        // A crash or DB failure after deletion leaves this exact handle intact; a later sweep observes the
+        // missing directories and can finish. Never clear a replacement handle or a newly active lifecycle.
         var cleared = await _db.AgentRun
-            .Where(r => r.Id == runId && r.RunnerHandleJson != null)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, (string?)null), cancellationToken)
-            .ConfigureAwait(false);
+            .Where(r => r.Id == candidate.Id && r.RunnerHandleJson == candidate.HandleJson && r.FenceEpoch == candidate.FenceEpoch && r.CompletedAt == candidate.CompletedAt
+                && r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, (string?)null), cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
         return cleared == 1;
     }
@@ -132,14 +158,14 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         catch (JsonException) { return null; }
     }
 
-    /// <summary>Every spool directory a run can have left behind across S6 revise rounds: the bare run-key dir (round 0) plus every existing <c>-rN</c> suffixed sibling. Computed from the RUN ID — not the handle — so earlier rounds are found even though the handle points only at the last one. Best-effort enumeration; internal so it's unit-pinned.</summary>
+    /// <summary>Every spool directory a run can have left behind across revise rounds. A missing root is already clean; every other enumeration error must preserve the cleanup handle.</summary>
     internal static IReadOnlyList<string> RoundSpoolFamily(Guid runId)
     {
         var root = LocalProcessRunner.SpoolRoot();
         var family = new List<string> { Path.Combine(root, runId.ToString("N")) };
 
-        try { if (Directory.Exists(root)) family.AddRange(Directory.GetDirectories(root, $"{runId:N}-r*")); }
-        catch (Exception) { /* enumeration is best-effort — the handle-pointed dir already got its targeted delete */ }
+        try { family.AddRange(Directory.GetDirectories(root, $"{runId:N}-r*")); }
+        catch (DirectoryNotFoundException) { /* already removed */ }
 
         return family;
     }
@@ -149,15 +175,14 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     {
         if (string.IsNullOrWhiteSpace(dir)) return false;
 
-        var root = Path.GetFullPath(LocalProcessRunner.SpoolRoot());
-        var full = Path.GetFullPath(dir);
-
-        return full.Length > root.Length && full.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        try
+        {
+            var root = Path.GetFullPath(LocalProcessRunner.SpoolRoot());
+            var full = Path.GetFullPath(dir);
+            return full.Length > root.Length && full.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        }
+        catch (ArgumentException) { return false; }
     }
 
-    private void DeleteQuietly(string dir)
-    {
-        try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
-        catch (Exception ex) { _logger.LogWarning(ex, "AgentRunSpoolReaper: failed to delete spool dir {Dir}", dir); }
-    }
+    private sealed record CleanupCandidate(Guid Id, string HandleJson, long FenceEpoch, DateTimeOffset CompletedAt);
 }

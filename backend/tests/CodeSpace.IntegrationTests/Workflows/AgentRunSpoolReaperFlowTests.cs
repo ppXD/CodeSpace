@@ -96,12 +96,12 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task Never_deletes_a_directory_outside_the_spool_root_but_still_clears_the_handle()
+    public async Task An_out_of_root_handle_is_preserved_without_deleting_the_directory()
     {
         var teamId = await SeedTeamAsync();
 
         // A handle whose SpoolDirectory points OUTSIDE the spool root (a corrupt/forged path). The containment
-        // guard must refuse to delete it — but the handle is still cleared so the run isn't re-swept forever.
+        // guard refuses deletion and keeps the handle: cleanup has not proved this resource is gone.
         var outsideDir = MakeSpoolDir(Path.Combine(Path.GetTempPath(), "cs-reaper-outside-" + Guid.NewGuid().ToString("N")));
         var runId = await SeedTerminalRunWithHandleAsync(teamId, outsideDir, completedAt: DateTimeOffset.UtcNow.AddDays(-2));
 
@@ -111,7 +111,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
         Directory.Exists(outsideDir).ShouldBeTrue("an out-of-root path is NEVER deleted by the reaper");
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).RunnerHandleJson
-                .ShouldBeNull("the handle is still cleared so the run doesn't get re-processed every sweep");
+                .ShouldNotBeNull("an unproven cleanup must retain its only recovery evidence");
     }
 
     [Fact]
@@ -157,7 +157,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
     }
 
     private static string HandleJson(string spoolDir, string? egressNetnsKey = null) =>
-        JsonSerializer.Serialize(new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow, EgressNetnsKey = egressNetnsKey }, AgentJson.Options);
+        JsonSerializer.Serialize(new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow, EgressNetnsKey = egressNetnsKey, LaunchHost = LocalProcessRunner.CurrentHost }, AgentJson.Options);
 
     private static string MakeSpoolDir(string dir)
     {
