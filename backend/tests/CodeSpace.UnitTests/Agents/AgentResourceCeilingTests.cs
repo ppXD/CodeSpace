@@ -100,9 +100,6 @@ public class AgentResourceCeilingTests
     // The operator's configuration key. Renaming it silently restores the committed ceiling for every deployment that
     // narrowed it, so the literal is pinned here (Rule 8) rather than only living at the read site.
     [InlineData("1536", 1536)]
-    [InlineData("0", null)]
-    [InlineData("-4", null)]
-    [InlineData("not-a-number", null)]
     [InlineData(null, null)]
     public void The_host_memory_budget_is_read_from_its_pinned_configuration_key(string? configured, int? expected)
     {
@@ -110,6 +107,6 @@ public class AgentResourceCeilingTests
 
         var settings = RuntimeSettings.Read(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
 
-        settings.AgentMemoryCeilingMb.ShouldBe(expected, customMessage: "a blank / zero / unparseable value must land on the committed default, never on 'no limit'");
+        settings.AgentMemoryCeilingMb.ShouldBe(expected, customMessage: "an absent setting preserves the committed default; a valid value narrows it");
     }
 }

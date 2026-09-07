@@ -28,7 +28,7 @@ public static class AgentAutonomyPolicy
     public static AgentAutonomyLevel Clamp(AgentAutonomyLevel requested, AgentAutonomyLevel ceiling) =>
         (AgentAutonomyLevel)Math.Min((int)requested, (int)ceiling);
 
-    /// <summary>Parse an autonomy tier string case-insensitively (mirrors agent.run's ReadAutonomyLevel); null / blank / unrecognised → the supplied fallback. The single tier parser, reused by the launch clamp and the caps-override merge.</summary>
+    /// <summary>Parse requested and per-route tiers case-insensitively; null / blank / unrecognised → the supplied fallback. Deployment configuration uses strict parsing instead.</summary>
     public static AgentAutonomyLevel Parse(string? value, AgentAutonomyLevel fallback) =>
         Enum.TryParse<AgentAutonomyLevel>(value, ignoreCase: true, out var level) ? level : fallback;
 
@@ -64,7 +64,7 @@ public static class AgentAutonomyPolicy
     /// default (<see cref="DefaultDeploymentCeiling"/>) every clamp is an identity, which is what makes the setting
     /// inert until an operator commits a lower value.</para>
     /// </summary>
-    public static AgentAutonomyLevel DeploymentCeiling => Parse(RuntimeSettings.Current.MaxAutonomy, DefaultDeploymentCeiling);
+    public static AgentAutonomyLevel DeploymentCeiling => SandboxConfiguration.ParseMaxAutonomy(RuntimeSettings.Current.MaxAutonomy) ?? DefaultDeploymentCeiling;
 
     /// <summary>
     /// The tier's per-run resource ceilings — the memory + cpu caps the durable launch turns into this run's cgroup-v2

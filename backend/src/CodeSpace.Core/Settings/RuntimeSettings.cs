@@ -36,8 +36,8 @@ public sealed record RuntimeSettings
     /// <summary>
     /// The operator's PER-RUN memory budget in MiB — this host's answer to "how much may one agent run take". It can
     /// only NARROW the autonomy tier's committed ceiling (<c>AgentAutonomyPolicy.Ceilings</c>), never raise it, and a
-    /// value of zero or less is ignored rather than read as "unlimited", so this is a value for a smaller host and
-    /// never a switch that turns the ceilings off. Null (the default) ⇒ every tier keeps its committed row. There is
+    /// configured value must be a positive integer; malformed values fail startup rather than silently restoring a
+    /// broader ceiling. Null (the default) ⇒ every tier keeps its committed row. There is
     /// deliberately no cpu twin: a cpu-quota overrun throttles rather than kills, so overcommitting cpu degrades a
     /// host instead of taking the worker down.
     /// </summary>
@@ -51,9 +51,8 @@ public sealed record RuntimeSettings
     /// that carries its own tier and its own raw <c>network</c> override with no route at all.
     ///
     /// <para>TIGHTEN-ONLY, like every other ceiling here: it can only LOWER what a route or a node already allowed,
-    /// never raise it. Blank or unrecognised ⇒ <c>AgentAutonomyPolicy.DefaultDeploymentCeiling</c>, matching
-    /// <see cref="AgentMemoryCeilingMb"/>'s precedent that a malformed operator value falls back to the committed
-    /// behaviour instead of being read as "no limit" — a typo in a ConfigMap must not sever every run's network.</para>
+    /// never raise it. An absent value preserves <c>AgentAutonomyPolicy.DefaultDeploymentCeiling</c>. Blank,
+    /// unrecognised, numeric or combined tier names fail startup: a typo must not restore a broader ceiling.</para>
     ///
     /// <para>Read through the key <see cref="MaxAutonomyKey"/>, whose literal value is pinned by a unit test: an
     /// operator who lowers this ceiling does it by committing a value here, and a rename that looked harmless would
@@ -63,6 +62,9 @@ public sealed record RuntimeSettings
 
     /// <summary>The configuration key <see cref="MaxAutonomy"/> is read from. Pinned by a unit test (Rule 8) — see <see cref="MaxAutonomy"/> for why a rename is not a harmless refactor.</summary>
     public const string MaxAutonomyKey = "Sandbox:MaxAutonomy";
+
+    public const string RequireConfinementKey = "Sandbox:RequireConfinement";
+    public const string AgentMemoryCeilingMbKey = "Sandbox:AgentMemoryCeilingMb";
 
     /// <summary>Root directory for agent-run spool files (stdout/stderr capture, pid files). Null ⇒ a path under the system temp dir, which is fine for development but is NOT durable across a pod restart — a deployment that wants re-attach to survive one points this at a volume.</summary>
     public string? AgentRunSpoolDirectory { get; init; }
@@ -109,16 +111,16 @@ public sealed record RuntimeSettings
     /// <summary>The bound settings, or the current execution context's test override. Reads before <see cref="Bind"/> get the defaults, which are the same values the pre-configuration code fell back to.</summary>
     public static RuntimeSettings Current => ScopedOverride.Value ?? _bound;
 
-    /// <summary>Bind from the application's configuration. Idempotent — called from both startup paths on purpose, since neither covers every way this assembly is hosted.</summary>
+    /// <summary>Validate and bind the effective configuration before startup. Both Program.Main and CodeSpaceModule call this; invalid security settings never replace a previously bound configuration.</summary>
     public static void Bind(IConfiguration configuration) => _bound = Read(configuration);
 
     /// <summary>Pure read (no static mutation) so the mapping from configuration keys to values is unit-testable directly.</summary>
     public static RuntimeSettings Read(IConfiguration configuration) => new()
     {
-        RequireSandboxConfinement = configuration.GetValue("Sandbox:RequireConfinement", false),
+        RequireSandboxConfinement = SandboxConfiguration.ParseRequireConfinement(configuration[RequireConfinementKey]),
         AgentCgroupRoot = Trimmed(configuration["Sandbox:CgroupRoot"]),
-        AgentMemoryCeilingMb = PositiveOrNull(configuration["Sandbox:AgentMemoryCeilingMb"]),
-        MaxAutonomy = Trimmed(configuration[MaxAutonomyKey]),
+        AgentMemoryCeilingMb = SandboxConfiguration.ParseMemoryCeilingMb(configuration[AgentMemoryCeilingMbKey]),
+        MaxAutonomy = SandboxConfiguration.ParseMaxAutonomy(configuration[MaxAutonomyKey])?.ToString(),
         AgentRunSpoolDirectory = Trimmed(configuration["Agents:RunSpoolDirectory"]),
         ArtifactStoreDirectory = Trimmed(configuration["Artifacts:StoreDirectory"]),
         ArtifactLocalRwxShared = configuration.GetValue("Artifacts:LocalRwxShared", false),
@@ -151,9 +153,6 @@ public sealed record RuntimeSettings
     /// "kill in-flight work immediately", which nobody configures on purpose, so both land on the default too.
     /// </summary>
     private static int Positive(string? raw, int fallback) => int.TryParse(raw, out var value) && value > 0 ? value : fallback;
-
-    /// <summary>Same tolerant parse for a setting whose "not set" is null rather than a default. Zero / negative / unparseable all land on null, so a typo or a deliberate <c>0</c> falls back to the committed behaviour instead of being read as "no limit".</summary>
-    private static int? PositiveOrNull(string? raw) => int.TryParse(raw, out var value) && value > 0 ? value : null;
 
     private sealed class Scope : IDisposable
     {
