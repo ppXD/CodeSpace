@@ -729,9 +729,21 @@ public static class SupervisorDecisionGoldenScenarios
     private static SupervisorPriorDecision PriorDecision(string kind, long sequence, string payloadJson, string outcomeJson) =>
         new() { Id = Guid.Empty, Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson };
 
+    /// <summary>
+    /// The retry teeth: the target must be the FAILED subtask. A BLANK target is reported as its own miss, because it
+    /// is not a targeting error at all — the model authored no <c>retry</c> object, <c>SupervisorDecisionProjector</c>
+    /// substituted an empty subtaskId, and the bounded payload re-asks failed to recover one. Read as
+    /// "retry targeted ''" that miss looks like a model that named an empty string, sending a reader hunting a
+    /// targeting bug that is really a payload-shape one.
+    /// </summary>
     private static Func<SupervisorDecision, (bool Ok, string Note)> RetryTargets(string expectedSubtaskId) => decision =>
     {
         var subtaskId = JsonDocument.Parse(decision.PayloadJson).RootElement.TryGetProperty("subtaskId", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() : null;
-        return subtaskId == expectedSubtaskId ? (true, "ok") : (false, $"retry targeted '{subtaskId}', expected the failed subtask '{expectedSubtaskId}'");
+
+        if (subtaskId == expectedSubtaskId) return (true, "ok");
+
+        return (false, string.IsNullOrWhiteSpace(subtaskId)
+            ? $"retry authored NO target — the 'retry' object was absent and the bounded payload re-ask never recovered one; expected the failed subtask '{expectedSubtaskId}'"
+            : $"retry targeted '{subtaskId}', expected the failed subtask '{expectedSubtaskId}'");
     };
 }

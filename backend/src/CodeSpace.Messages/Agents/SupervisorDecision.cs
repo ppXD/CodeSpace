@@ -50,6 +50,16 @@ public sealed record SupervisorDecision
     public string? PayloadReaskedFromKind { get; init; }
 
     /// <summary>
+    /// How many bounded payload re-asks this decision cost — 0 on every reply the model got right first time (the
+    /// overwhelmingly common case) and on a payload the deterministic lift nested without asking, up to the decider's
+    /// <c>MaxPayloadReaskAttempts</c> when the replies kept omitting it. Counted whether or not a re-ask RECOVERED
+    /// the decision, so the fail-open — the executor about to refuse a payload the model never wrote — reads as
+    /// round-trips spent rather than as silence, which is the only thing that tells it apart from a ladder that never
+    /// ran. Carried like <see cref="PayloadReaskedFromKind"/>: NOT hashed, folded into the NON-hashed outcome.
+    /// </summary>
+    public int PayloadReaskAttempts { get; init; }
+
+    /// <summary>
     /// True when the model's FIRST reply was a <c>retry</c> aimed at a unit that was already done while other units
     /// were still failed, and ONE bounded re-ask produced the decision recorded here — including a re-ask that
     /// re-emitted the SAME target (the reply decides; the server never re-aims a retry itself). False on every reply

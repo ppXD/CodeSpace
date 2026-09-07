@@ -151,13 +151,18 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // row, so a reader can tell a decision the brain authored outright from one that cost a second round-trip.
         string? reaskedFromKind = null;
 
+        // How many bounded payload re-asks were SPENT, recovered or not. Without it the fail-open below is invisible
+        // on the tape: a decision the executor refuses reads identically whether the ladder never ran or ran to its
+        // bound and missed, and a reader scoring the eval cannot tell those apart.
+        var payloadReaskAttempts = 0;
+
         // The schema-inexpressible invariant — the chosen kind's payload sub-object must be PRESENT — is enforced
         // here on the RAW bound decision, because projection SUBSTITUTES an empty payload for a missing sub-object:
         // past that line the executor rejects a payload the model never wrote, the rendered correction quotes that
-        // substitute, and the model re-authors the same defective shape turn after turn. One bounded repair echoes
-        // the model's OWN raw reply (a top-level-flattened spawn is self-diagnosable from the echo alone); a repair
-        // that misses or is still incoherent keeps the ORIGINAL decision, so the executor's rejection path runs
-        // exactly as before this existed.
+        // substitute, and the model re-authors the same defective shape turn after turn. Each bounded repair echoes
+        // the model's OWN raw reply (a top-level-flattened spawn is self-diagnosable from the echo alone); once
+        // MaxPayloadReaskAttempts are spent without a coherent reply the ORIGINAL decision is kept, so the
+        // executor's rejection path runs exactly as before this existed.
         if (SupervisorDecisionCoherence.MissingPayload(model) is { } defect)
         {
             _logger.LogWarning("Supervisor decision chose kind '{Kind}' without a usable payload — {Defect}; raw reply: {RawReply}", model.Kind, defect, StructuredJsonText.Preview(completion.Json.GetRawText()));
@@ -178,21 +183,53 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             }
             else
             {
+                // The kind the FIRST reply named — the evidence the ledger row carries, never overwritten by a later
+                // attempt's verb, since a re-ask may legitimately land on a different one.
                 var namedKind = model.Kind;
-                var repaired = await TryRepairMissingPayloadAsync(structured, pick, context, catalog, completion, namedKind, defect, cancellationToken).ConfigureAwait(false);
 
-                if (repaired is not null && TryDeserialize(repaired.Json, out _) is { } coherent && !string.IsNullOrWhiteSpace(coherent.Kind) && SupervisorDecisionCoherence.MissingPayload(coherent) is null)
+                // Each attempt corrects the LATEST payload-less reply, never the first: a second defective answer is
+                // a different reply carrying its own defect, and echoing a superseded one would ask the model to fix
+                // a shape it has already moved off. Tracked separately from the accepted decision, which is written
+                // only on a coherent reply — so a ladder that runs out keeps the ORIGINAL decision exactly as the
+                // single attempt always did.
+                var attempted = completion;
+                var attemptedKind = namedKind;
+                var attemptedDefect = defect;
+
+                while (payloadReaskAttempts < MaxPayloadReaskAttempts)
                 {
-                    // The re-ask reply DECIDES. It may re-author the verb it first named, or choose a different one
-                    // entirely (the live miss chose 'plan' on a turn whose plan was already authored) — the server
-                    // never fabricates a payload for the abandoned verb, so whatever comes back is the decision, and
-                    // the kind it started from rides along as evidence rather than being quietly overwritten.
-                    completion = repaired;
-                    model = coherent;
-                    reaskedFromKind = namedKind;
+                    payloadReaskAttempts++;
+
+                    var repaired = await TryRepairMissingPayloadAsync(structured, pick, context, catalog, attempted, attemptedKind, attemptedDefect, cancellationToken).ConfigureAwait(false);
+
+                    // Only a reply that BOUND and is still payload-less earns another ask: a model-side miss (the
+                    // gateway refused the identical request) or a reply that cannot bind at all is a different fault,
+                    // and re-issuing the same correction against it would spend a round-trip on a certain repeat.
+                    if (repaired is null) break;
+
+                    var reply = TryDeserialize(repaired.Json, out _);
+
+                    if (reply is null || string.IsNullOrWhiteSpace(reply.Kind)) break;
+
+                    if (SupervisorDecisionCoherence.MissingPayload(reply) is not { } stillMissing)
+                    {
+                        // The re-ask reply DECIDES. It may re-author the verb it first named, or choose a different one
+                        // entirely (the live miss chose 'plan' on a turn whose plan was already authored) — the server
+                        // never fabricates a payload for the abandoned verb, so whatever comes back is the decision, and
+                        // the kind it started from rides along as evidence rather than being quietly overwritten.
+                        completion = repaired;
+                        model = reply;
+                        reaskedFromKind = namedKind;
+                        break;
+                    }
+
+                    attempted = repaired;
+                    attemptedKind = reply.Kind;
+                    attemptedDefect = stillMissing;
                 }
-                else
-                    _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' — proceeding with the original decision; the executor will refuse it", model.Kind);
+
+                if (reaskedFromKind is null)
+                    _logger.LogWarning("Supervisor decision payload repair missed for kind '{Kind}' after {Attempts} bounded re-ask(s) — proceeding with the original decision; the executor will refuse it", model.Kind, payloadReaskAttempts);
             }
         }
 
@@ -264,10 +301,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             decision = await TryRepairInvalidPlanAsync(structured, pick, context, catalog, decision, planError, cancellationToken).ConfigureAwait(false) ?? decision;
 
         // Stamped LAST so the markers survive the re-plan above (which projects a fresh decision), and only when a
-        // re-ask actually recovered something — a decision that never needed one is returned untouched.
-        return reaskedFromKind is null && !retryTargetReasked
+        // correction actually RAN — a decision that never needed one is returned untouched. The attempt count arms
+        // it too, so a ladder that spent its round-trips and recovered nothing still says so.
+        return reaskedFromKind is null && !retryTargetReasked && payloadReaskAttempts == 0
             ? decision
-            : decision with { PayloadReaskedFromKind = reaskedFromKind, RetryTargetReasked = retryTargetReasked };
+            : decision with { PayloadReaskedFromKind = reaskedFromKind, PayloadReaskAttempts = payloadReaskAttempts, RetryTargetReasked = retryTargetReasked };
     }
 
     /// <summary>
@@ -338,6 +376,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return null;
         }
     }
+
+    /// <summary>
+    /// How many bounded payload re-asks ONE decision may spend before the ladder gives up and the original decision
+    /// proceeds to the executor's refusal. TWO, not one: across the last ten real-model decision evals FOUR turns
+    /// answered with a payload-less verb, on all three wires, and 6 of the 8 re-asks those turns bought recovered —
+    /// both misses started from a degenerate reply, which a second ask is the cheapest way to move off. Pinned by a
+    /// unit test (Rule 8): dropping it back to one re-narrows the exact window this exists to widen.
+    /// </summary>
+    internal const int MaxPayloadReaskAttempts = 2;
 
     /// <summary>
     /// One bounded REPAIR round-trip after a bound-but-INCOHERENT decision — the kind names a payload sub-object the

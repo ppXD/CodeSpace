@@ -1904,7 +1904,7 @@ public class SupervisorDeciderTests
         StopField(decision, "summary").ShouldContain("every contract dimension reads settled", customMessage: "the projected stop carries the model's OWN words as its summary, not the projector's empty substitute (the rationale the projector also injects sits at the payload root, where SupervisorPublishGate does not look)");
         SupervisorStopPayload.IsSuccessOutcome(StopField(decision, "outcome")).ShouldBeFalse("the model authored no outcome, so the server's fill fails closed — a confident-sounding rationale is reasoning, not a verdict");
         StopField(decision, "outcomeAssumed").ShouldNotBeNullOrWhiteSpace("…and the payload says the label was assumed, so the journal does not present it as the model's own");
-        client.Requests.Count.ShouldBe(2, "the model still gets its one bounded repair — the floor only catches what that repair drops");
+        client.Requests.Count.ShouldBe(1 + LlmSupervisorDecider.MaxPayloadReaskAttempts, "the model still gets its bounded repairs — the floor only catches what they drop");
     }
 
     [Fact]
@@ -1997,7 +1997,7 @@ public class SupervisorDeciderTests
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "the ORIGINAL decision proceeds — the executor's rejection path is unchanged by a missed repair");
         JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtaskIds").GetArrayLength().ShouldBe(0, "the canonical empty payload, exactly as before the gate existed");
-        client.Requests.Count.ShouldBe(2, "the repair is BOUNDED — one attempt, never a loop");
+        client.Requests.Count.ShouldBe(1 + LlmSupervisorDecider.MaxPayloadReaskAttempts, "the repair is BOUNDED — it stops at the pinned attempt count, never loops");
     }
 
     [Fact]
@@ -2077,21 +2077,72 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
-    public async Task A_re_ask_that_is_still_payload_less_records_no_re_ask_and_fails_exactly_as_before()
+    public async Task A_reply_that_stays_payload_less_through_every_attempt_fails_open_and_says_how_many_it_spent()
     {
         var bare = JsonDocument.Parse("""{"kind":"plan"}""").RootElement;
-        var client = new SequencedRawJsonStructuredClient(bare);   // the re-ask replays the same bare reply
-        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+        var client = new SequencedRawJsonStructuredClient(bare);   // every re-ask replays the same bare reply
+        var logger = new CapturingLogger<LlmSupervisorDecider>();
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), logger);
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan, "the ORIGINAL decision proceeds, exactly as before the targeted re-ask existed");
         JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtasks").GetArrayLength().ShouldBe(0, "the canonical empty payload — unchanged");
         decision.PayloadReaskedFromKind.ShouldBeNull("nothing was recovered, so nothing may claim a recovery");
+        decision.PayloadReaskAttempts.ShouldBe(LlmSupervisorDecider.MaxPayloadReaskAttempts, "…but the round-trips it DID spend are on the row — otherwise this fail-open reads exactly like a ladder that never ran");
         SupervisorDecisionCoherence.MissingPayload(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })
             .ShouldBe("the decision chose kind 'plan' but carries NO 'plan' object — its payload is only read from INSIDE a 'plan' object carrying 'goal' and 'subtasks'; fields written anywhere else (e.g. at the top level of the decision) are never read",
                 customMessage: "the named defect the journal and the re-ask both quote is pinned verbatim — it is the only thing a reader gets when the re-ask misses too");
-        client.Requests.Count.ShouldBe(2, "the re-ask is BOUNDED — one attempt, never a loop");
+        client.Requests.Count.ShouldBe(1 + LlmSupervisorDecider.MaxPayloadReaskAttempts, "the ladder is BOUNDED — it stops at the pinned attempt count, never loops");
+
+        logger.Entries.ShouldContain(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning && e.Message.Contains("payload repair missed for kind 'plan' after 2 bounded re-ask(s)"),
+            customMessage: "the fail-open still warns, and now names how many attempts were spent — the operator's only clue that the executor is about to refuse a payload the model never wrote");
+    }
+
+    [Fact]
+    public async Task A_payload_recovered_on_the_SECOND_bounded_attempt_is_the_decision_and_the_row_counts_both()
+    {
+        // The evidence this bound exists for: across the last ten real-model decision evals FOUR turns answered with a
+        // payload-less verb and 6 of the 8 re-asks they bought recovered — a single attempt throws away the second ask
+        // that empirically moves a degenerate reply off its own shape.
+        var bare = JsonDocument.Parse("""{"kind":"retry","rationale":{"why":"retry s3"}}""").RootElement;
+        var full = JsonDocument.Parse("""{"kind":"retry","retry":{"subtaskId":"s3"}}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(bare, bare, full);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Retry);
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtaskId").GetString()
+            .ShouldBe("s3", "the SECOND re-ask's payload is the one projected — before this bound it was thrown away and the executor was handed the empty substitute");
+        decision.PayloadReaskedFromKind.ShouldBe(SupervisorDecisionKinds.Retry, "the kind the FIRST reply named still rides along — a later attempt's verb never overwrites it");
+        decision.PayloadReaskAttempts.ShouldBe(2, "both round-trips are accounted for, not just the one that landed");
+        client.Requests.Count.ShouldBe(3, "one first call plus the two bounded re-asks");
+    }
+
+    [Fact]
+    public async Task Each_bounded_attempt_corrects_the_LATEST_payload_less_reply_not_the_first()
+    {
+        // A second defective answer is a different reply with its own defect. Echoing the superseded one would ask the
+        // model to fix a shape it has already moved off — and would quote a verb it no longer named.
+        var firstMiss = JsonDocument.Parse("""{"kind":"plan"}""").RootElement;
+        var secondMiss = JsonDocument.Parse("""{"kind":"spawn"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(firstMiss, secondMiss);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.Requests[1].UserPrompt.ShouldContain("omitted the 'plan' object", customMessage: "the first correction quotes the first reply's own defect");
+        client.Requests[2].UserPrompt.ShouldContain("omitted the 'spawn' object", customMessage: "…and the second quotes the SECOND reply's, the shape the model actually has to fix now");
+        client.Requests[2].UserPrompt.ShouldContain("Plan-local subtask ids", customMessage: "…including that kind's own schema fragment, exactly as the first attempt renders it — no new prompt text");
+    }
+
+    [Fact]
+    public void The_payload_re_ask_bound_is_pinned()
+    {
+        // Rule 8 pin: the bound IS the behaviour. Dropping it back to one re-narrows the exact window the second
+        // attempt exists to widen (6 of 8 live re-asks recovered), and nothing else in the ladder would go red.
+        LlmSupervisorDecider.MaxPayloadReaskAttempts.ShouldBe(2, "two bounded payload re-asks — changing this changes how many degenerate replies a turn can survive");
     }
 
     [Theory]
@@ -2119,11 +2170,11 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
-    public async Task A_stop_the_re_ask_could_not_fix_is_still_filled_by_the_narration_lift_and_costs_no_second_call()
+    public async Task A_stop_the_re_asks_could_not_fix_is_still_filled_by_the_narration_lift_and_costs_no_extra_call()
     {
-        // The stop floor is A7's, not this arc's: the summary is recovered from the model's own rationale. The one
-        // bounded re-ask that already existed still runs (it may yet return an honest outcome), and NOTHING here
-        // adds a second one — a lift that can fill the payload must never be pre-empted or duplicated by a re-ask.
+        // The stop floor is A7's, not this arc's: the summary is recovered from the model's own rationale. The bounded
+        // payload re-asks that already existed still run (one may yet return an honest outcome), and NOTHING here adds
+        // a call of its own — a lift that can fill the payload must never be pre-empted or duplicated by a re-ask.
         var bare = JsonDocument.Parse("""{"kind":"stop","rationale":{"why":"Both plan units are accepted."}}""").RootElement;
         var client = new SequencedRawJsonStructuredClient(bare, bare);
         var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
@@ -2131,8 +2182,8 @@ public class SupervisorDeciderTests
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
         StopField(decision, "summary").ShouldContain("Both plan units are accepted", customMessage: "#1755's narration lift still wins — the words the model wrote become the summary");
-        decision.PayloadReaskedFromKind.ShouldBeNull("the re-ask recovered nothing; the LIFT did — the row must not credit a round-trip that missed");
-        client.Requests.Count.ShouldBe(2, "the ONE pre-existing bounded re-ask, and no more");
+        decision.PayloadReaskedFromKind.ShouldBeNull("the re-asks recovered nothing; the LIFT did — the row must not credit a round-trip that missed");
+        client.Requests.Count.ShouldBe(1 + LlmSupervisorDecider.MaxPayloadReaskAttempts, "the pre-existing bounded payload ladder, and no more");
     }
 
     [Fact]
@@ -2595,6 +2646,23 @@ public class SupervisorDeciderTests
             var json = _replies.Count > 1 ? _replies.Dequeue() : _replies.Peek();
             var finishReason = _finishReasons.Count > 1 ? _finishReasons.Dequeue() : (_finishReasons.Count == 1 ? _finishReasons.Peek() : null);
             return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new LlmUsage { FinishReason = finishReason } });
+        }
+    }
+
+    /// <summary>Records every log entry the decider writes — the seam for pinning a fail-open WARNING, which is the only thing an operator gets when a bounded ladder spends its attempts and recovers nothing.</summary>
+    private sealed class CapturingLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
         }
     }
 
