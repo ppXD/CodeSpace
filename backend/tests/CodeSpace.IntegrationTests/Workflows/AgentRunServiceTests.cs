@@ -1563,7 +1563,10 @@ public class AgentRunServiceTests
         }
 
         using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         using (var scope = _fixture.BeginScope())
         {

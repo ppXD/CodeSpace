@@ -262,9 +262,10 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken)
     {
-        // Database time is authoritative; a terminal row cannot acquire a fresh execution lease.
+        // Lock before sampling database time; UPDATE target expressions alone can be evaluated before a lock wait.
+        // A terminal row cannot acquire a fresh execution lease.
         var duration = AgentRunLiveness.LeaseDuration;
-        await _db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} WHERE id = {runId} AND status = {nameof(AgentRunStatus.Running)}", cancellationToken).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)}", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken)
@@ -272,7 +273,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // Recheck expiry in the UPDATE itself. A stale candidate list is not authority to replace a
         // renewed lease, and the first winner's fresh lease excludes concurrent contenders.
         var duration = AgentRunLiveness.LeaseDuration;
-        var reclaimed = await _db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET fence_epoch = fence_epoch + 1, reattach_attempts = reattach_attempts + 1, heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} WHERE id = {runId} AND status = {nameof(AgentRunStatus.Running)} AND (lease_expires_at <= clock_timestamp() OR (lease_expires_at IS NULL AND COALESCE(heartbeat_at, started_at, created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
+        var reclaimed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET fence_epoch = target.fence_epoch + 1, reattach_attempts = target.reattach_attempts + 1, heartbeat_at = clock_timestamp(), lease_expires_at = clock_timestamp() + {duration} FROM locked WHERE target.id = locked.id AND target.status = {nameof(AgentRunStatus.Running)} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);
         return reclaimed == 1;
     }
 

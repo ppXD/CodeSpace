@@ -100,7 +100,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         // Reclaim (the reconciler's atomic step) then re-attach: ReattachAsync resumes from the checkpoint, reads
         // the remaining lines + the exit marker, and completes — under the reclaim-bumped epoch.
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         var capture = new RecordingLogCaptureBridge();
         await ReattachAsync(runId, new ScriptedHarness(), capture);
@@ -179,7 +183,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         }
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ScriptedHarness());
 
@@ -248,7 +256,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         }
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ScriptedHarness());
 
@@ -289,7 +301,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ScriptedHarness());
 
@@ -338,7 +354,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ScriptedHarness());
 
@@ -379,7 +399,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY"));
 
@@ -428,7 +452,11 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
 
         using (var scope = _fixture.BeginScope())
+        {
+            // The original observer has stopped; advance the persisted lease into the expired state.
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+        }
 
         await ReattachAsync(runId, new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY"));
 
