@@ -27,12 +27,11 @@ public sealed record JournalReviewVerdict
     public string? ReviewerModel { get; init; }
 
     /// <summary>
-    /// TRUE when the reviewer ran on the PRODUCER's own model — the legitimate one-model-pool fallback, an
-    /// independently prompted call but NOT a second opinion. The card must not call such a review "independent". The
-    /// BACKEND owns this judgement because only it holds both halves (the verdict's reviewer and the decision's
-    /// authoring model); false when either is unknown, which reads as today's copy.
+    /// True when both reported model names match, false when both are known and differ, null when either is unknown.
+    /// This comparison does not establish statistical independence. Nullable preserves legacy boolean JSON while
+    /// omitted values remain unknown; clients must not turn unknown into a different-model or independent-review claim.
     /// </summary>
-    public bool SameModelAsProducer { get; init; }
+    public bool? SameModelAsProducer { get; init; }
 
     /// <summary>WHAT was reviewed — <see cref="OutputScope"/> (a produced change) or <see cref="PlanScope"/> (a plan verified against the repository).</summary>
     public required string Scope { get; init; }

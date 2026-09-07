@@ -89,9 +89,9 @@ public sealed class CriticPlannerDecorator : IWorkflowPlanner
     /// <summary>GATE at the planner stage: NEVER discard a usable plan — surface the reviewer's issues + verdict as RISKS, where the human who reviews the projected definition will see them. (A hard reject belongs at a downstream shipping gate, not here.)</summary>
     private static PlannedWorkflow Annotate(PlannedWorkflow plan, CriticVerdict verdict)
     {
-        // The reviewer's MODEL rides the header when the critic named one — the risks line is where a human reads the
-        // verdict, so it is where the independence claim has to be checkable against the plan's own authoring model.
-        var reviewer = string.IsNullOrWhiteSpace(verdict.ReviewerModel) ? "Independent review" : $"Independent review on {verdict.ReviewerModel}";
+        // Both agent and model verdicts reach this header. Name an observed model when available, without claiming
+        // independence from a producer whose identity has not been compared here.
+        var reviewer = string.IsNullOrWhiteSpace(verdict.ReviewerModel) ? "Review" : $"Review on {verdict.ReviewerModel}";
 
         var header = $"{reviewer} — {(verdict.Approved ? "approved" : "flagged concerns")}{(verdict.Score is { } s ? $" (score {s}/100)" : "")}: {verdict.Rationale}";
 

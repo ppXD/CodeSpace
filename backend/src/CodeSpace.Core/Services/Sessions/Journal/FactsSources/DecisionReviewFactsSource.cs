@@ -64,8 +64,8 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
         return facts;
     }
 
-    /// <summary>Whether the review ran on the producer's own model — case-insensitive, and FALSE whenever either side is unknown, so an un-attributed verdict reads as today's copy rather than as a false same-model claim. Internal for direct unit pinning.</summary>
-    internal static bool SameModel(string? reviewerModel, string? producerModel) =>
-        !string.IsNullOrWhiteSpace(reviewerModel) && !string.IsNullOrWhiteSpace(producerModel)
-        && string.Equals(reviewerModel, producerModel, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Compares reported names case-insensitively. Null when either identity is unavailable; different names alone do not establish model independence. Internal for direct unit pinning.</summary>
+    internal static bool? SameModel(string? reviewerModel, string? producerModel) =>
+        string.IsNullOrWhiteSpace(reviewerModel) || string.IsNullOrWhiteSpace(producerModel)
+            ? null : string.Equals(reviewerModel, producerModel, StringComparison.OrdinalIgnoreCase);
 }

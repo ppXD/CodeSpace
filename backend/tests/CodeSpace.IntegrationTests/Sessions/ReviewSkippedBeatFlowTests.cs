@@ -132,7 +132,7 @@ public sealed class ReviewSkippedBeatFlowTests
             Task.FromResult(new StructuredLLMCompletion
             {
                 Json = System.Text.Json.JsonDocument.Parse("""{ "approved": true, "issues": [], "rationale": "sound" }""").RootElement.Clone(),
-                Model = "claude-opus-4-8",
+                Model = "claude-opus-4-8", ObservedModel = "claude-opus-4-8",
             });
     }
 

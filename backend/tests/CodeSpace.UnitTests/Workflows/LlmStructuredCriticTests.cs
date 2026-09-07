@@ -348,7 +348,7 @@ public class LlmStructuredCriticTests
         public Task<Core.Services.Workflows.Llm.StructuredLLMCompletion> CompleteStructuredAsync(Core.Services.Workflows.Llm.StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
         {
             _captured.Add(Core.Services.Workflows.Llm.LlmCallContext.Current?.Kind);
-            return Task.FromResult(new Core.Services.Workflows.Llm.StructuredLLMCompletion { Json = Parse("""{ "approved": true, "rationale": "ok" }"""), Model = "m" });
+            return Task.FromResult(new Core.Services.Workflows.Llm.StructuredLLMCompletion { Json = Parse("""{ "approved": true, "rationale": "ok" }"""), Model = "m", ObservedModel = "m" });
         }
     }
 

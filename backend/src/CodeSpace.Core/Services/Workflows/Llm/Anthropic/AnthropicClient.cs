@@ -161,7 +161,7 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
         // JSON degrades to the prompt-only floor below; a 200 WITH a result returns here carrying its own usage.
         var (toolJson, toolParsed) = await TryStructuredViaToolAsync(request, system, messages, cancellationToken).ConfigureAwait(false);
         if (toolJson is { } viaTool)
-            return BuildCompletion(viaTool, toolParsed!, request.Model);
+            return BuildCompletion(viaTool, toolParsed!, request);
 
         var accepts = LlmModelCapabilities.AcceptsSampling(request.Model);
 
@@ -187,7 +187,7 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
             throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced tool-use OR the prompt-only fallback — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(text)}");
 
         var totalUsage = (toolParsed is null ? LlmUsage.None : UsageFrom(toolParsed)).Add(UsageFrom(parsed), string.Equals(toolParsed?.Model, parsed.Model, StringComparison.OrdinalIgnoreCase));
-        return BuildCompletion(result, parsed, request.Model) with { Usage = totalUsage };
+        return BuildCompletion(result, parsed, request) with { Usage = totalUsage };
     }
 
     /// <summary>
@@ -226,10 +226,11 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
         return (json, parsed);
     }
 
-    private static StructuredLLMCompletion BuildCompletion(JsonElement json, AnthropicMessageResponse parsed, string fallbackModel) => new()
+    private static StructuredLLMCompletion BuildCompletion(JsonElement json, AnthropicMessageResponse parsed, StructuredLLMCompletionRequest request) => new()
     {
         Json = json,
-        Model = parsed.Model ?? fallbackModel,
+        Model = parsed.Model ?? request.Model,
+        ObservedModel = ObservedLlmModel.FromWire(parsed.Model, request.Credential),
         Usage = UsageFrom(parsed)
     };
 

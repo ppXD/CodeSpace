@@ -84,12 +84,16 @@ public sealed record StructuredLLMCompletion
 {
     /// <summary>The schema-valid object the model produced.</summary>
     public required JsonElement Json { get; init; }
+    /// <summary>Compatibility model name: may fall back to the requested alias. Not evidence of reviewer identity.</summary>
     public required string Model { get; init; }
+
+    /// <summary>Bounded, nonsecret model identifier reported by the final provider response. Null when missing or untrusted; never inferred from the request. A provider claim is not independent authentication of its backing model.</summary>
+    public string? ObservedModel { get; init; }
 
     /// <summary>Provider-reported token counts + stop reason. Never null — <see cref="LlmUsage.None"/> when the provider returned no usage.</summary>
     public LlmUsage Usage { get; init; } = LlmUsage.None;
 
-    /// <summary>L4 pool failover provenance: the candidates the call skipped past on a transient / rate-limit fault before <see cref="Model"/> answered ("provider:model — category status"), in order. Empty when the first candidate answered. A caller that stamps provenance MUST read <see cref="Model"/>, never the resolved pick — after a failover they differ.</summary>
+    /// <summary>L4 pool failover provenance: the candidates the call skipped past on a transient / rate-limit fault before <see cref="Model"/> answered ("provider:model — category status"), in order. Empty when the first candidate answered. A caller that stamps observed identity must read nullable <see cref="ObservedModel"/>, never the resolved pick or compatibility fallback.</summary>
     public IReadOnlyList<string> FailedOver { get; init; } = Array.Empty<string>();
 
     /// <summary>
