@@ -66,12 +66,12 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { MaxReviseRounds = 1 });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: RevisedScript));
 
@@ -102,12 +102,12 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round fails
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { MaxReviseRounds = 2 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { MaxReviseRounds = 2 });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: RevisedScript));
 
@@ -129,7 +129,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var reviewerRowId = await SeedCriticModelAsync(teamId);
         ResetCriticScript();
 
@@ -139,7 +139,7 @@ public sealed class AgentRunReviseLoopFlowTests
 
         // GATE mode: a flag would hard-halt to NeedsReview. The sound work draws only a MINOR nitpick, and the
         // severity-authoritative projection APPROVES it (no blocker) — so the run stays Succeeded, unflagged.
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: NitpickScript, revised: RevisedScript));
 
@@ -157,7 +157,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var reviewerRowId = await SeedCriticModelAsync(teamId);
         ResetCriticScript();
 
@@ -166,7 +166,7 @@ public sealed class AgentRunReviseLoopFlowTests
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
         // Improve + no explicit budget → the executor's default ONE round (Improve MEANS improve).
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: RevisedScript));
 
@@ -189,7 +189,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var reviewerRowId = await SeedCriticModelAsync(teamId);
         ResetCriticScript();
 
@@ -200,7 +200,7 @@ public sealed class AgentRunReviseLoopFlowTests
         // Budget 3, but the "revision" never removes the flaw (both scripts carry the reject marker) → the critic
         // re-flags the IDENTICAL feedback. P1b-2: convergence recognises the unchanged re-flag and stops EARLY —
         // rounds 2 and 3 are never billed — instead of silently exhausting the whole budget on an unmovable issue.
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 3 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 3 });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: DraftScript));
 
@@ -223,7 +223,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var reviewerRowId = await SeedCriticModelAsync(teamId);
         ResetCriticScript();
 
@@ -233,7 +233,7 @@ public sealed class AgentRunReviseLoopFlowTests
 
         // Budget 1: round 1 (draft) flunks the ORACLE; the one revision half-fixes — the check passes but the
         // planted flaw remains — and the budget is spent, so the critic's flag STANDS.
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 1 });
 
         await ExecuteAsync(runId, new ReviseAwareHarness(first: DraftScript, revised: HalfFixScript));
 
@@ -259,7 +259,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
 
         // The run's OWN credential holds the ladder it may climb…
         var credentialId = await SeedModelCredentialAsync(teamId);
@@ -277,7 +277,7 @@ public sealed class AgentRunReviseLoopFlowTests
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
 
         var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -308,7 +308,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var credentialId = await SeedModelCredentialAsync(teamId);
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
         await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
@@ -318,7 +318,7 @@ public sealed class AgentRunReviseLoopFlowTests
         await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round fails its grade
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
 
         var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -353,7 +353,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var credentialId = await SeedModelCredentialAsync(teamId);
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
 
@@ -361,7 +361,7 @@ public sealed class AgentRunReviseLoopFlowTests
         await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // every round fails, so every round asks to escalate
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 2 });
 
         var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -392,7 +392,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
@@ -400,7 +400,7 @@ public sealed class AgentRunReviseLoopFlowTests
         // Exactly what AgentCodeNode / the supervisor's retry stage after a format fault — composed through the one
         // shared helper, never a re-typed literal, so this test moves with the repair instead of pinning a copy.
         var mitigated = AgentRetryCauses.ApplyFormatFaultMitigation(TaskWith(repoId));
-        var runId = await CreateRunAsync(teamId, mitigated);
+        var runId = await CreateRunAsync(teamId, userId, mitigated);
 
         var harness = new ReviseAwareHarness(first: RevisedScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -421,7 +421,7 @@ public sealed class AgentRunReviseLoopFlowTests
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
-        var teamId = await SeedTeamAsync();
+        var (teamId, userId) = await SeedTeamAsync();
         var credentialId = await SeedModelCredentialAsync(teamId);
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
         await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
@@ -430,7 +430,7 @@ public sealed class AgentRunReviseLoopFlowTests
         await remote.SeedBaseAsync(CheckScript);
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
 
-        var runId = await CreateRunAsync(teamId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1 });
 
         var harness = new ReviseAwareHarness(first: RevisedScript, revised: RevisedScript);
         await ExecuteAsync(runId, harness);
@@ -457,14 +457,14 @@ public sealed class AgentRunReviseLoopFlowTests
         PushProducedBranch = true,
     };
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentTask task)
+    private async Task<Guid> CreateRunAsync(Guid teamId, Guid userId, AgentTask task)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 
-    private async Task<Guid> SeedTeamAsync()
+    private async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync()
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -477,7 +477,7 @@ public sealed class AgentRunReviseLoopFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
-        return teamId;
+        return (teamId, userId);
     }
 
     /// <summary>An ACTIVE model credential under a provider tag no registered harness drives — so the escalation pool is real while the harness reconciliation stays a no-op (the scripted fake projects no credentials).</summary>
