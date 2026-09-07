@@ -91,7 +91,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         Temperature = 0.2,
     };
 
-    /// <summary>The typed runtime boundary also participates in the provider's existing bounded re-ask. The model corrects invalid intent; the server never invents or repairs argv or artifact requirements.</summary>
+    /// <summary>The typed runtime boundary also participates in the provider's existing bounded re-ask. What is left for it to FAIL on is the plan's own shape — no subtask at all, or a <c>subtasks</c> that binds to no <c>PlannedWorkflow</c>: there is no subtask left to degrade. An acceptance-level defect never reaches here; <see cref="AdviseModelResponse"/> reports those at the severity they cost.</summary>
     internal static IReadOnlyList<string> ValidateModelResponse(JsonElement response)
     {
         try
@@ -106,32 +106,25 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     }
 
     /// <summary>
-    /// The one acceptance defect the plan outlives: an oracle kind chosen with no payload authored for it. It rides
-    /// the SAME bounded re-ask — the model is told exactly which subtask to equip — but a reply that still skips it
-    /// costs that subtask its oracle, not the run its plan. Naming the subtask matters: "somewhere in your plan" is
-    /// not a correction a model can act on.
+    /// The acceptance defects the plan outlives — EVERY one the typed contract cannot bind, not just an absent
+    /// payload. They ride the SAME bounded re-ask, with the offending subtask and the contract's own words about it,
+    /// but a reply that still does not bind costs that subtask its oracle, not the run its plan. Naming the subtask
+    /// and the concrete defects matters twice over: "somewhere in your plan" is not a correction a model can act on,
+    /// and there is only ONE re-ask, so advice that names half the problem buys a second reply with the other half
+    /// still wrong (live run 34093741284: every acceptance missing both <c>formatVersion</c> and its payload).
     ///
-    /// <para>Each finding also CLAIMS its acceptance's own instance path, so the SCHEMA violations the same absence
-    /// raises — the per-kind <c>oneOf</c> branch no payload-less acceptance can match, and the payload's
-    /// <c>minItems</c> when one is authored empty — are read as this one degradable defect rather than as a fault.
-    /// The claim is per POSITION and only for an acceptance this contract itself calls droppable, so a fatal defect in
-    /// a sibling subtask, an unknown oracle <c>kind</c>, or anything else in the plan is untouched.</para>
+    /// <para>Each finding also CLAIMS its acceptance's own instance path, so the SCHEMA violations the same defect
+    /// raises — the per-kind <c>oneOf</c> branch it cannot match, the payload's <c>minItems</c>, the missing
+    /// <c>formatVersion</c>, the <c>kind</c> enum — are read as this one degradable defect rather than as a fault.
+    /// The claim is per POSITION and only for an acceptance this contract itself refuses to bind, so a defect in a
+    /// sibling subtask, or anywhere in the plan OUTSIDE an acceptance, is untouched and still fatal.</para>
     /// </summary>
-    internal static IReadOnlyList<StructuredResponseAdvisory> AdviseModelResponse(JsonElement response)
-    {
-        try
+    internal static IReadOnlyList<StructuredResponseAdvisory> AdviseModelResponse(JsonElement response) =>
+        PlannerAcceptanceDraft.DescribeUnboundAcceptances(response).Select(unbound => new StructuredResponseAdvisory
         {
-            return PlannerAcceptanceDraft.DescribeUnboundAcceptances(response).Select(unbound => new StructuredResponseAdvisory
-            {
-                Path = $"$.subtasks[{unbound.Index}].acceptance",
-                Message = $"Subtask '{unbound.Drop.SubtaskId}' chose acceptance kind {unbound.Drop.Kind} but authored no payload for it. {unbound.Drop.Reason} Author that payload, or omit the subtask's acceptance entirely.",
-            }).ToArray();
-        }
-        catch (JsonException)
-        {
-            return [];   // a fatal contract violation is ValidateModelResponse's to report
-        }
-    }
+            Path = $"$.subtasks[{unbound.Index}].acceptance",
+            Message = $"Subtask '{unbound.Drop.SubtaskId}' authored an acceptance this contract cannot bind, so that subtask will be graded by nothing. {unbound.Drop.Reason} Re-author the whole acceptance object correctly, or omit it entirely.",
+        }).ToArray();
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing + over-claim guard directly, without a real LLM round-trip.</summary>
     internal static string BuildUserPromptForTest(WorkflowPlanRequest request, string catalog = "", IReadOnlyList<Persistence.Entities.Lesson>? lessons = null) => BuildUserPrompt(request, catalog, lessons ?? Array.Empty<Persistence.Entities.Lesson>());

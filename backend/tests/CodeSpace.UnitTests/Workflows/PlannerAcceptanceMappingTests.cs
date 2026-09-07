@@ -59,24 +59,76 @@ public sealed class PlannerAcceptanceMappingTests
     }
 
     [Theory]
-    [InlineData("{\"kind\":\"ArtifactPresent\",\"command\":[\"test\",\"-f\",\"report.md\"]}")]
-    [InlineData("{\"formatVersion\":1,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}")]
-    [InlineData("{\"formatVersion\":99,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}")]
-    [InlineData("{\"formatVersion\":2,\"argv\":[\"true\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"],\"artifactPaths\":[\"report.md\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"artifactPaths\":[]}")]   // an EMPTY other payload is still the reinterpretable shape — rejected before "the right payload is absent" is ever considered
-    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"\",\"true\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",null]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",\"x\\u0000y\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"artifactPaths\":[\"report.md\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"artifactPaths\":[\"report.md\"],\"rubric\":{\"criteria\":[null]}}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactSchema\",\"artifactPaths\":[\"report.json\"]}")]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"UnknownOracle\",\"argv\":[\"true\"]}")]
-    public void An_unknown_legacy_or_incomplete_fresh_response_is_rejected_instead_of_dropping_or_reinterpreting_the_contract(string payload)
+    [InlineData("{\"kind\":\"ArtifactPresent\",\"command\":[\"test\",\"-f\",\"report.md\"]}", "command")]                                          // the v1 shape: the legacy key is named, never lifted into argv
+    [InlineData("{\"formatVersion\":1,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}", "formatVersion 2")]
+    [InlineData("{\"formatVersion\":99,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}", "formatVersion 2")]
+    [InlineData("{\"formatVersion\":2,\"argv\":[\"true\"]}", "oracle kinds")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"],\"artifactPaths\":[\"report.md\"]}", "never both or the other payload")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"test\",\"-f\",\"report.md\"]}", "never both or the other payload")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"artifactPaths\":[]}", "never both or the other payload")]   // an EMPTY other payload is still the reinterpretable shape — reported before "the right payload is absent" is ever considered
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"\",\"true\"]}", "non-blank executable")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",null]}", "without null values")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\",\"x\\u0000y\"]}", "NUL characters")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"\"]}", "non-blank file paths")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"],\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"r\"}]}}", "must belong to the selected oracle")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"artifactPaths\":[\"report.md\"]}", "rubric")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"artifactPaths\":[\"report.md\"],\"rubric\":{\"criteria\":[null]}}", "null entries")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactSchema\",\"artifactPaths\":[\"report.json\"]}", "schema")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[\"r.md\"],\"oraclePaths\":[\"../etc/passwd\"]}", "traversal")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"UnknownOracle\",\"argv\":[\"true\"]}", "'UnknownOracle'")]
+    [InlineData("{\"formatVersion\":2,\"kind\":\"DiffMatch\",\"argv\":[\"true\"]}", "'DiffMatch'")]                                                 // documented, no grader built — an unbuilt oracle is not a bindable one
+    [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":\"dotnet test\"}", "does not match the v2 contract")]                          // a shape the wire record itself cannot hold
+    public void An_unknown_legacy_or_incomplete_fresh_acceptance_is_dropped_with_its_reason_instead_of_being_reinterpreted(string payload, string reason)
     {
-        Should.Throw<InvalidOperationException>(() => Parse(JsonDocument.Parse(payload).RootElement));
+        // #1827's rejection theory, re-severitied. Every row still refuses to bind: nothing is assumed to be v2, no
+        // legacy `command` is lifted into `argv`, no payload is read as the other one. What is no longer fatal is the
+        // COST: live run 34093741284 hit these shapes on 4 of 4 subtasks (every acceptance missing `formatVersion`,
+        // most missing their payload), so a fatal severity here means plan-map Launch is broken on that model. An
+        // acceptance the contract cannot bind is dropped and NAMED; the plan around it lives.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply(payload));
+
+        plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "item", "sibling" });
+        plan.Subtasks[0].Acceptance.ShouldBeNull("dropped is the ONLY degrade — never a partially interpreted oracle");
+        plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "true" }, "a well-formed sibling contract survives untouched");
+
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("item");
+        drop.Reason.ShouldContain(reason, customMessage: "a drop record whose reason does not say WHY leaves an operator with an acceptance that merely evaporated");
+        drop.Reason.ShouldNotContain(nameof(PlannerAcceptanceDraft), customMessage: "the reason is read by an operator — it must name the offending JSON, not the server's own classes");
+    }
+
+    [Fact]
+    public void A_missing_format_version_is_reported_together_with_the_payload_it_would_otherwise_hide()
+    {
+        // The live shape, and the reason the version check does not short-circuit: run 34093741284's model omitted
+        // BOTH `formatVersion` and the payload on every acceptance. There is exactly ONE bounded re-ask, so advice
+        // naming only the version buys a second reply whose payload is still missing — and a second drop.
+        var drop = LlmWorkflowPlanner.Deserialize(Reply("{\"kind\":\"TestsPass\"}")).DroppedAcceptances.ShouldHaveSingleItem();
+
+        drop.Kind.ShouldBe("TestsPass", "the kind is echoed as authored — it is one of the things that can fail to bind");
+        drop.Reason.ShouldContain("formatVersion 2");
+        drop.Reason.ShouldContain("argv", customMessage: "one re-ask, so both defects have to be named in it");
+    }
+
+    [Fact]
+    public void An_acceptance_with_no_readable_kind_is_dropped_and_says_so_rather_than_naming_a_wrong_oracle()
+    {
+        var drop = LlmWorkflowPlanner.Deserialize(Reply("{\"formatVersion\":2,\"artifactPaths\":[\"report.md\"]}")).DroppedAcceptances.ShouldHaveSingleItem();
+
+        drop.Kind.ShouldBe("unbound", "an oracle the reply never named must not be reported as any particular one");
+        drop.Reason.ShouldContain("oracle kinds");
+    }
+
+    [Theory]
+    [InlineData("{\"goal\":\"g\",\"subtasks\":[{\"id\":\"s\",\"instruction\":\"I\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}}]}")]
+    [InlineData("{\"goal\":\"g\",\"subtasks\":[\"just a string\"]}")]
+    [InlineData("{\"goal\":\"g\",\"subtasks\":{}}")]
+    public void A_violation_of_the_plans_own_shape_is_still_fatal_because_there_is_no_subtask_left_to_degrade(string reply)
+    {
+        // The boundary of the widening: only `$.subtasks[i].acceptance` degrades. A subtask with no title, or a
+        // `subtasks` that is not an array of subtask objects, leaves nothing to keep — dropping it would mean
+        // inventing the plan, which is the one thing this contract never does.
+        Should.Throw<InvalidOperationException>(() => LlmWorkflowPlanner.Deserialize(JsonDocument.Parse(reply).RootElement));
     }
 
     [Fact]
@@ -92,8 +144,15 @@ public sealed class PlannerAcceptanceMappingTests
     [Fact]
     public void Case_insensitive_subtask_binding_cannot_bypass_the_fresh_acceptance_version_boundary()
     {
+        // A shifted key case binds the acceptance, so it must reach the SAME contract — and be dropped BY NAME. The
+        // hazard the case-insensitive raw read closes is a legacy acceptance that binds to nothing and is reported by
+        // nobody: an oracle silently gone, indistinguishable from one the planner never wrote.
         var legacy = JsonDocument.Parse("{\"goal\":\"g\",\"subtasks\":[{\"id\":\"s\",\"title\":\"T\",\"instruction\":\"I\",\"Acceptance\":{\"kind\":\"ArtifactPresent\",\"command\":[\"test\",\"-f\",\"report.md\"]}}]}").RootElement;
-        Should.Throw<InvalidOperationException>(() => LlmWorkflowPlanner.Deserialize(legacy));
+
+        var plan = LlmWorkflowPlanner.Deserialize(legacy);
+
+        plan.Subtasks.Single().Acceptance.ShouldBeNull("the v1 command shape is never reinterpreted as artifactPaths, whatever case its key was written in");
+        plan.DroppedAcceptances.ShouldHaveSingleItem().SubtaskId.ShouldBe("s");
     }
 
     [Theory]
@@ -115,7 +174,7 @@ public sealed class PlannerAcceptanceMappingTests
 
         var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
         drop.SubtaskId.ShouldBe("item", "an unnamed drop is indistinguishable from an acceptance the planner never wrote");
-        drop.Kind.ShouldBe(Enum.Parse<BenchmarkGradingKind>(kind));
+        drop.Kind.ShouldBe(kind);
         drop.Reason.ShouldContain(payloadName);
     }
 
@@ -189,34 +248,75 @@ public sealed class PlannerAcceptanceMappingTests
     [Theory]
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\"}", true)]
     [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[]}", true)]
+    [InlineData("{\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}", true)]                       // the live defect: a payload authored fine, no formatVersion
+    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"report.md\"]}", true)]    // WAS fatal: the reinterpretable payload
+    [InlineData("{\"formatVersion\":2,\"kind\":\"UnknownOracle\"}", true)]                              // WAS fatal: an oracle with no grader
+    [InlineData("{\"kind\":\"ArtifactPresent\",\"command\":[\"report.md\"]}", true)]                     // WAS fatal: the v1 shape
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}", false)]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"argv\":[\"report.md\"]}", false)]
-    [InlineData("{\"formatVersion\":2,\"kind\":\"UnknownOracle\"}", false)]
-    public void The_unbound_payload_earns_a_reask_while_a_fatal_violation_stays_the_validators_business(string acceptance, bool advised)
+    public void Every_acceptance_the_contract_cannot_bind_earns_the_reask_and_none_of_them_is_a_validator_fault(string acceptance, bool advised)
     {
-        // The two severities are asked separately: the ADVISOR is what makes the provider re-ask (#1837 behaviour is
-        // kept for exactly this defect), and only the VALIDATOR can turn a reply into a Malformed fault.
+        // The two severities are asked separately: the ADVISOR is what makes the provider re-ask, and only the
+        // VALIDATOR can turn a reply into a Malformed fault. Every acceptance-level shape now sits in the first list
+        // and none in the second — the rows marked WAS fatal are the ones that used to kill the plan.
         var reply = Reply(acceptance);
 
         LlmWorkflowPlanner.AdviseModelResponse(reply).Count.ShouldBe(advised ? 1 : 0);
-
-        if (advised) LlmWorkflowPlanner.ValidateModelResponse(reply).ShouldBeEmpty("a droppable defect must never be the reason a plan dies");
+        LlmWorkflowPlanner.ValidateModelResponse(reply).ShouldBeEmpty("no acceptance-level defect may be the reason a plan dies");
     }
 
     [Fact]
-    public void The_reask_advice_names_the_subtask_and_both_ways_out()
+    public void The_reask_advice_names_the_subtask_the_concrete_defects_and_both_ways_out()
     {
-        var advice = LlmWorkflowPlanner.AdviseModelResponse(Reply("{\"formatVersion\":2,\"kind\":\"LlmJudge\",\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}}")).ShouldHaveSingleItem();
+        var advice = LlmWorkflowPlanner.AdviseModelResponse(Reply("{\"kind\":\"LlmJudge\",\"rubric\":{\"criteria\":[{\"id\":\"c\",\"requirement\":\"cites sources\"}]}}")).ShouldHaveSingleItem();
 
         advice.Message.ShouldContain("'item'", customMessage: "\"somewhere in your plan\" is not a correction a model can act on");
-        advice.Message.ShouldContain("LlmJudge");
-        advice.Message.ShouldContain("artifactPaths");
+        advice.Message.ShouldContain("formatVersion 2");
+        advice.Message.ShouldContain("artifactPaths", customMessage: "one re-ask: advice that names half the defects buys a reply with the other half still wrong");
         advice.Message.ShouldContain("omit", customMessage: "omitting acceptance is the honest alternative to inventing a payload");
+    }
+
+    [Fact]
+    public void The_live_four_subtask_reply_keeps_its_whole_plan_and_names_every_lost_oracle()
+    {
+        // Lane run 34093741284, verbatim: `LlmJudge` with no paths, two `TestsPass` with no argv, one `ArtifactPresent`
+        // with no artifactPaths — and NO `formatVersion` on any of them. Under a fatal severity this reply killed the
+        // planner node with `planner.Status == Failure`, i.e. plan-map Launch was broken on that model for every plan
+        // it authored. All four subtasks must survive with their work, each lost oracle named.
+        var plan = LlmWorkflowPlanner.Deserialize(JsonDocument.Parse(LiveFourSubtaskReply).RootElement);
+
+        plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "s1", "s2", "s3", "s4" });
+        plan.Subtasks.ShouldAllBe(subtask => subtask.Acceptance == null, "not one of the four may be reinterpreted into an oracle");
+        plan.Subtasks.ShouldAllBe(subtask => subtask.Instruction.Length > 0, "the plan keeps the work — only the oracles were lost");
+
+        var dropped = plan.DroppedAcceptances.ShouldNotBeNull();
+        dropped.Select(drop => drop.SubtaskId).ShouldBe(new[] { "s1", "s2", "s3", "s4" });
+        dropped.Select(drop => drop.Kind).ShouldBe(new[] { "LlmJudge", "TestsPass", "TestsPass", "ArtifactPresent" });
+        dropped.ShouldAllBe(drop => drop.Reason.Contains("formatVersion 2"));
+        dropped.Select(drop => drop.Reason.Contains("argv")).ShouldBe(new[] { false, true, true, false });
+        dropped.Select(drop => drop.Reason.Contains("artifactPaths")).ShouldBe(new[] { true, false, false, true });
+    }
+
+    [Fact]
+    public void The_live_four_subtask_reply_advises_all_four_positions_and_faults_none_of_them()
+    {
+        var reply = JsonDocument.Parse(LiveFourSubtaskReply).RootElement;
+
+        LlmWorkflowPlanner.AdviseModelResponse(reply).Select(advice => advice.Path)
+            .ShouldBe(new[] { "$.subtasks[0].acceptance", "$.subtasks[1].acceptance", "$.subtasks[2].acceptance", "$.subtasks[3].acceptance" });
+
+        LlmWorkflowPlanner.ValidateModelResponse(reply).ShouldBeEmpty();
+
+        // Every violation the model-visible schema raises on this reply is inside one of the four claimed
+        // acceptances — which is what lets the transport read them at the severity the consumer assigned.
+        var violations = JsonSchemaValidator.Validate(reply, PlannerSchema.ResponseSchema);
+        violations.ShouldNotBeEmpty("the schema still faults this reply; the degrade is an interpretation of that fault, not a hole in it");
+        violations.ShouldAllBe(violation => JsonSchemaValidator.PathOf(violation).StartsWith("$.subtasks[") && JsonSchemaValidator.PathOf(violation).Contains("].acceptance"));
     }
 
     [Theory]
     [InlineData("{\"formatVersion\":2,\"kind\":\"TestsPass\"}")]
     [InlineData("{\"formatVersion\":2,\"kind\":\"ArtifactPresent\",\"artifactPaths\":[]}")]
+    [InlineData("{\"kind\":\"TestsPass\",\"argv\":[\"dotnet\",\"test\"]}")]   // the live defect: the schema faults the missing `formatVersion` at the same position
     // The schema reports an unmatched `oneOf` by spilling its CLOSEST branch's violations, and for a payload-less
     // LlmJudge the closest branch is a different kind's — so the reply is faulted for a `kind` the model never got
     // wrong. That spill is why attribution is scoped to the acceptance the contract itself calls droppable rather
@@ -236,6 +336,19 @@ public sealed class PlannerAcceptanceMappingTests
         atClaim.ShouldNotBeEmpty("the schema must still fault the absent payload — the degrade is an interpretation of that fault, not a hole in it");
         atClaim.ShouldAllBe(violation => JsonSchemaValidator.PathOf(violation).StartsWith(advice.Path), "every violation this reply raises is the claimed defect; anything else would be a fatal the test is not about");
     }
+
+    /// <summary>
+    /// The shape lane run 34093741284 actually died on, transcribed from its violation list: four acceptances, none
+    /// with a <c>formatVersion</c>, three with the payload their chosen oracle needs absent as well. It is a
+    /// FIXTURE of a real reply — the schema faults it in four places and the plan must still come out whole.
+    /// </summary>
+    private const string LiveFourSubtaskReply =
+        "{\"goal\":\"produce the requested result\",\"subtasks\":["
+      + "{\"id\":\"s1\",\"title\":\"Judge\",\"instruction\":\"judge the writeup\",\"acceptance\":{\"kind\":\"LlmJudge\"}},"
+      + "{\"id\":\"s2\",\"title\":\"Test\",\"instruction\":\"run the tests\",\"acceptance\":{\"kind\":\"TestsPass\"}},"
+      + "{\"id\":\"s3\",\"title\":\"Test again\",\"instruction\":\"run the other tests\",\"acceptance\":{\"kind\":\"TestsPass\"}},"
+      + "{\"id\":\"s4\",\"title\":\"Deliver\",\"instruction\":\"write the report\",\"acceptance\":{\"kind\":\"ArtifactPresent\"}}"
+      + "],\"successCriteria\":[],\"risks\":[],\"recommendedWorkflowKind\":\"coding\"}";
 
     private static PlannedSubtask Parse(JsonElement acceptance) => LlmWorkflowPlanner.Deserialize(JsonSerializer.SerializeToElement(new { goal = "verify", subtasks = new[] { new { id = "item", title = "Item", instruction = "Do the work", acceptance } } })).Subtasks.Single();
 
