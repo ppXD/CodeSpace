@@ -37,6 +37,8 @@ public sealed partial class PhysicalStructuredPostAccountingFlowTests(PostgresFi
     [InlineData("OpenAI", "schema-reask", 2)]
     [InlineData("Anthropic", "consumer-reask", 2)]
     [InlineData("OpenAI", "consumer-reask", 2)]
+    [InlineData("Anthropic", "advisory-reask", 2)]
+    [InlineData("OpenAI", "advisory-reask", 2)]
     [InlineData("Anthropic", "transport-retry", 2)]
     [InlineData("OpenAI", "transport-retry", 2)]
     [InlineData("Anthropic", "pool-failover", 4)]
@@ -79,6 +81,16 @@ public sealed partial class PhysicalStructuredPostAccountingFlowTests(PostgresFi
             result.Usage.OutputTokens.ShouldBe(205);
             result.Usage.IsPartial.ShouldBeFalse("all three complete wire envelopes survived structured parse failures");
             attempts.Sum(a => a.CostAmount).ShouldBe(0.000415m);
+        }
+        if (path == "advisory-reask")
+        {
+            // The reply that is KEPT is the first one, and both physical POSTs are still admitted, billed and
+            // recorded. An advisory-only first reply is already an answer its consumer degrades, so the re-ask is an
+            // upgrade attempt — a second reply that keeps the defect must not replace it, and must not go unpriced.
+            result.Json.GetProperty("attempt").GetString().ShouldBe("first", "only a CLEAN upgrade replaces an answer the consumer already accepted");
+            result.Usage.InputTokens.ShouldBe(110);
+            result.Usage.OutputTokens.ShouldBe(10);
+            attempts.Sum(a => a.CostAmount).ShouldBe(0.00012m);
         }
     }
 
@@ -211,6 +223,9 @@ public sealed partial class PhysicalStructuredPostAccountingFlowTests(PostgresFi
         Model = "fixture-model", Credential = Credential(provider), MaxOutputTokens = 100, SystemPrompt = "return data", UserPrompt = "approve the synthetic fixture",
         JsonSchema = JsonSerializer.SerializeToElement(path == "schema-reask" ? new { type = "object", required = new[] { "approved" } } : (object)new { type = "object" }),
         ResponseValidator = path == "consumer-reask" ? json => json.TryGetProperty("approved", out var approved) && approved.ValueKind == JsonValueKind.True ? [] : ["approved must be true"] : null,
+        // A finding the consumer DEGRADES rather than faults — the planner's own severity, exercised here for its
+        // physical accounting: every reply carries it, so neither the first nor its upgrade attempt is ever clean.
+        ResponseAdvisor = path == "advisory-reask" ? _ => [new StructuredResponseAdvisory { Message = "the synthetic detail is unusable and will be dropped", Path = "$.detail" }] : null,
     };
     private static Reply[] Replies(string provider, string path) => path switch
     {
@@ -218,6 +233,7 @@ public sealed partial class PhysicalStructuredPostAccountingFlowTests(PostgresFi
         "tool-rejected" => [new Reply(HttpStatusCode.BadRequest, "{\"error\":\"tool protocol unsupported\"}"), AcceptedText(provider)],
         "parse-reask" => [Text(provider), Text(provider), Success(provider)],
         "schema-reask" or "consumer-reask" => [Structured(provider, "{}", 100), Success(provider)],
+        "advisory-reask" => [Structured(provider, "{\"approved\":true,\"attempt\":\"first\"}", 100), Structured(provider, "{\"approved\":true,\"attempt\":\"second\"}", 10)],
         "transport-retry" => [new Reply(HttpStatusCode.ServiceUnavailable, "{\"error\":\"synthetic transient fault\"}"), Success(provider)],
         "pool-failover" => [new Reply(HttpStatusCode.ServiceUnavailable, "{}"), new Reply(HttpStatusCode.ServiceUnavailable, "{}"), new Reply(HttpStatusCode.ServiceUnavailable, "{}"), Success(provider == "Anthropic" ? "OpenAI" : "Anthropic")],
         _ => throw new ArgumentOutOfRangeException(nameof(path)),

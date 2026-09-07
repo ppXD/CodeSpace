@@ -120,6 +120,72 @@ public sealed class PlannerAcceptanceMappingTests
     }
 
     [Theory]
+    [InlineData("null", "null")]
+    [InlineData("[]", "an array")]
+    [InlineData("[{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}]", "an array")]
+    [InlineData("\"\"", "a string")]
+    [InlineData("\"TestsPass\"", "a string")]
+    [InlineData("5", "a number")]
+    [InlineData("false", "a boolean")]
+    public void A_present_acceptance_that_is_not_an_object_is_dropped_with_the_kind_it_authored_named(string authored, string named)
+    {
+        // The hole a pre-filter left: a PRESENT `acceptance` of the wrong JSON kind read as "no oracle authored", so
+        // nothing recorded a drop and no advisory CLAIMED the position — and the schema's own `expected type 'object'
+        // but got null` there was then an unexplained violation, i.e. fatal. `"acceptance": null` is exactly what a
+        // model writes when it has no oracle to offer, so the absence of a drop was itself the plan-killer.
+        var plan = LlmWorkflowPlanner.Deserialize(Reply(authored));
+
+        plan.Subtasks.Select(subtask => subtask.Id).ShouldBe(new[] { "item", "sibling" });
+        plan.Subtasks[0].Acceptance.ShouldBeNull("a non-object acceptance is never unwrapped, indexed into or parsed out of a string");
+        plan.Subtasks[1].Acceptance!.Command.ShouldBe(new[] { "true" }, "a well-formed sibling contract survives untouched");
+
+        var drop = plan.DroppedAcceptances.ShouldHaveSingleItem();
+        drop.SubtaskId.ShouldBe("item");
+        drop.Kind.ShouldBe("unbound", "a non-object acceptance has no readable kind to echo, even when a string spells one");
+        drop.Reason.ShouldContain("must be a JSON object");
+        drop.Reason.ShouldContain(named, customMessage: "the reason names the JSON kind the model actually authored, in words it reads back");
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("\"\"")]
+    [InlineData("5")]
+    [InlineData("false")]
+    public void A_non_object_acceptance_claims_the_position_the_schema_faults_its_type_at(string authored)
+    {
+        // The other half of the same hole: with no advisory claiming the path, the schema's type violation at that
+        // exact position stayed FATAL, so a re-ask that answered with the same `null` ended the call as Malformed.
+        var reply = ReplySecondUnbound(authored);
+        var advice = LlmWorkflowPlanner.AdviseModelResponse(reply).ShouldHaveSingleItem();
+
+        advice.Path.ShouldBe("$.subtasks[1].acceptance", "a claim on the wrong index would leave this defect fatal and silence a sibling's");
+        LlmWorkflowPlanner.ValidateModelResponse(reply).ShouldBeEmpty("no acceptance-level defect may be the reason a plan dies");
+
+        var violations = JsonSchemaValidator.Validate(reply, PlannerSchema.ResponseSchema);
+        violations.ShouldNotBeEmpty("the schema still faults the wrong type; the degrade is an interpretation of that fault, not a hole in it");
+        violations.ShouldAllBe(violation => JsonSchemaValidator.PathOf(violation) == advice.Path);
+    }
+
+    [Fact]
+    public void An_absurdly_long_subtask_id_cannot_truncate_the_advice_out_of_the_one_reask()
+    {
+        // The advisory's whole message is capped at 512 characters by the transport, and the subtask id inside it is
+        // MODEL-authored. An id long enough to eat that budget leaves the one bounded re-ask carrying a quoted id and
+        // no advice at all — the same failure as advising nothing.
+        var reply = JsonDocument.Parse("{\"goal\":\"verify\",\"subtasks\":[{\"id\":\"" + new string('i', 600) + "\",\"title\":\"Item\",\"instruction\":\"Do the work\",\"acceptance\":{\"kind\":\"TestsPass\"}}]}").RootElement;
+
+        var advice = LlmWorkflowPlanner.AdviseModelResponse(reply).ShouldHaveSingleItem();
+
+        advice.Message.Length.ShouldBeLessThan(512, "the advice must survive the transport's own cap with room left for the defects");
+        advice.Message.ShouldContain("formatVersion 2");
+        advice.Message.ShouldContain("argv", customMessage: "one re-ask: an id that crowds out the payload defect buys a reply with it still missing");
+        advice.Message.ShouldContain("omit", customMessage: "omitting acceptance is the honest alternative to inventing a payload");
+
+        LlmWorkflowPlanner.Deserialize(reply).DroppedAcceptances.ShouldHaveSingleItem().SubtaskId.Length.ShouldBe(64, "the same cap the authored kind gets — model-authored text reaches the drop record too");
+    }
+
+    [Theory]
     [InlineData("{\"goal\":\"g\",\"subtasks\":[{\"id\":\"s\",\"instruction\":\"I\",\"acceptance\":{\"formatVersion\":2,\"kind\":\"TestsPass\",\"argv\":[\"true\"]}}]}")]
     [InlineData("{\"goal\":\"g\",\"subtasks\":[\"just a string\"]}")]
     [InlineData("{\"goal\":\"g\",\"subtasks\":{}}")]

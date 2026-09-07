@@ -44,6 +44,13 @@ internal static class StructuredResponseValidation
     ///
     /// <para>The mirror of that rule applies to a FATAL first reply: a second one whose remaining defects are all
     /// degradable IS the answer, because an advisory defect is not a fault no matter which attempt carries it.</para>
+    ///
+    /// <para>That rule is about the transport too, not only about what the second reply says. Once the first reply is
+    /// degradable we HOLD a usable answer, so ANY <see cref="LlmApiException"/> the upgrade attempt raises — a 429, a
+    /// 5xx, a lost connection, no parseable JSON — returns the first reply with an honestly partial usage instead of
+    /// propagating. Propagating it destroyed an answer the consumer had already accepted and bought a park for the
+    /// chance of a fresh attempt; a run parked at planning is worth strictly less than the plan we were holding.
+    /// A FATAL first reply is not affected: there is no answer to keep, so its re-ask still fails the call.</para>
     /// </summary>
     public static async Task<StructuredLLMCompletion> ReaskOnceThenDecideAsync(StructuredLLMCompletion first, StructuredLLMCompletionRequest request, string provider, Func<string, Task<StructuredLLMCompletion>> reaskAsync)
     {
@@ -63,10 +70,11 @@ internal static class StructuredResponseValidation
         {
             second = await reaskAsync(feedback).ConfigureAwait(false);
         }
-        catch (LlmApiException ex) when (degradable && ex.Category == LlmErrorCategory.Malformed)
+        catch (LlmApiException) when (degradable)
         {
-            // The upgrade attempt produced no parseable JSON. Its usage died with the exception, so what remains is a
-            // subtotal — but the ANSWER is still the first reply, and it is not this call's job to fail.
+            // The upgrade attempt failed — on its content (no parseable JSON) or on the transport (rate limit,
+            // gateway fault, lost connection). Either way its usage died with the exception, so what remains is a
+            // subtotal; but the ANSWER is still the first reply, and it is not this call's job to fail.
             return first with { Usage = first.Usage with { IsPartial = true } };
         }
 
