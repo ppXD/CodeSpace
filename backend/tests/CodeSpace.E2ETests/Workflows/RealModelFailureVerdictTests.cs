@@ -21,12 +21,13 @@ namespace CodeSpace.E2ETests.Workflows;
 /// for a capability shortfall.</para>
 ///
 /// <para><b>And why the PREFIX alone is not the rule.</b> <see cref="TerminalDecider"/> stamps that same prefix over
-/// three different things: an orderly end with the objective unsolved (the brain shortfall), a run KILLED or
-/// CANCELLED mid-flight, and work that was solved but failed to be CAPTURED. The last two are engine-side losses —
-/// exactly what this lane exists to red on. Reading only the prefix would have made a capture regression stop gating
-/// the moment this fix landed, so the rule reads the arbiter's own dispositions
-/// (<see cref="HonestFailureReason.IsBrainShortfall"/>) and the fixtures below are re-derived from the renderer that
-/// writes them.</para>
+/// arms that judge two different things. It judges the BRAIN on an orderly end with the objective unsolved, and on a
+/// FORCED STOP — a run that exhausted a supervisor bound (no-progress, the spawn cap, the cost cap) instead of
+/// driving the arc, which is the bound-keeper working, not the engine failing. It judges the ENGINE or the harness
+/// on a CANCELLED run and on work that was solved but failed to be CAPTURED — engine-side losses this lane exists to
+/// red on. Reading only the prefix would have made a capture regression stop gating the moment this rule landed, so
+/// the rule reads the arbiter's own dispositions (<see cref="HonestFailureReason.IsBrainShortfall"/>) and the
+/// fixtures below are re-derived from the renderer that writes them.</para>
 ///
 /// <para>Pure logic — no Postgres, no fixture, no model. Carries the E2E lane's traits only so it RUNS: the
 /// <c>Category=E2E&amp;Surface=Engine</c> gate is the one CI lane that executes this assembly.</para>
@@ -41,10 +42,22 @@ public sealed class RealModelFailureVerdictTests
     /// <summary>The SAME prefix over a capture regression: the objective WAS solved and the produced work failed to be captured (<c>TerminalDecider:39</c>). An engine-side loss — it must keep gating.</summary>
     private const string CaptureFailed = "completion-authority: honest failure (outcome=Solved, verification=Passed, artifact=CaptureFailed, execution=Completed)";
 
-    /// <summary>The SAME prefix over a run killed mid-flight (<c>TerminalDecider:26</c>), and byte-identical to <see cref="HonestFailure"/> in every slot but <c>execution</c> — which is the whole reason the renderer writes that slot.</summary>
+    /// <summary>The SAME prefix over a run whose supervisor bound tripped (<c>TerminalDecider:26</c>), and byte-identical to <see cref="HonestFailure"/> in every slot but <c>execution</c>. The brain did not drive the arc inside its budget — a shortfall, like the orderly-end one.</summary>
     private const string ForcedStop = "completion-authority: honest failure (outcome=Unsolved, verification=Failed, artifact=Unknown, execution=ForcedStop)";
 
-    /// <summary>The cancellation twin of <see cref="ForcedStop"/> — the other half of the same decider arm.</summary>
+    /// <summary>Real-model run 34073320723's delivery-gate arm, verbatim: a forced stop whose objective was never even statable. The bound-keeper cut a brain that had not driven the arc — a shortfall, and the terminal that made round 2's rule red this lane.</summary>
+    private const string ForcedStopUnknown = "completion-authority: honest failure (outcome=Unknown, verification=Unknown, artifact=Unknown, execution=ForcedStop)";
+
+    /// <summary>A capture regression hiding behind an otherwise-shortfall terminal: byte-identical to <see cref="HonestFailure"/> in every slot but <c>artifact</c>. The objective was unsolved AND the produced work was lost — the loss outranks the shortfall, so it gates.</summary>
+    private const string CaptureFailedUnsolved = "completion-authority: honest failure (outcome=Unsolved, verification=Failed, artifact=CaptureFailed, execution=Completed)";
+
+    /// <summary>The same regression hiding behind a BOUND: byte-identical to <see cref="ForcedStopUnknown"/> in every slot but <c>artifact</c>. This is the pair that makes the artifact conjunct load-bearing on the forced-stop arm — without it, a capture loss under a tripped bound would ride the non-gating class.</summary>
+    private const string ForcedStopCaptureFailed = "completion-authority: honest failure (outcome=Unknown, verification=Unknown, artifact=CaptureFailed, execution=ForcedStop)";
+
+    /// <summary>A bound that cut off an objective already DECIDED Solved. Nothing about a settled objective is a brain shortfall, and the pair is contradictory enough to want a human — the allowlist leaves it gating rather than guessing.</summary>
+    private const string ForcedStopSolved = "completion-authority: honest failure (outcome=Solved, verification=Passed, artifact=Captured, execution=ForcedStop)";
+
+    /// <summary>The cancellation twin of <see cref="ForcedStop"/> — the other half of the same decider arm, and the half that is NOT the brain's doing: a real-model run killed mid-arc is the harness or the infrastructure.</summary>
     private const string Cancelled = "completion-authority: honest failure (outcome=Unsolved, verification=Failed, artifact=Unknown, execution=Cancelled)";
 
     /// <summary>A genuine engine death: an unhandled exception the engine folded into the run's error.</summary>
@@ -69,6 +82,10 @@ public sealed class RealModelFailureVerdictTests
     [InlineData(HonestFailure, ExecutionDisposition.Completed, OutcomeDisposition.Unsolved, VerificationDisposition.Failed, ArtifactDisposition.Unknown)]
     [InlineData(CaptureFailed, ExecutionDisposition.Completed, OutcomeDisposition.Solved, VerificationDisposition.Passed, ArtifactDisposition.CaptureFailed)]
     [InlineData(ForcedStop, ExecutionDisposition.ForcedStop, OutcomeDisposition.Unsolved, VerificationDisposition.Failed, ArtifactDisposition.Unknown)]
+    [InlineData(ForcedStopUnknown, ExecutionDisposition.ForcedStop, OutcomeDisposition.Unknown, VerificationDisposition.Unknown, ArtifactDisposition.Unknown)]
+    [InlineData(CaptureFailedUnsolved, ExecutionDisposition.Completed, OutcomeDisposition.Unsolved, VerificationDisposition.Failed, ArtifactDisposition.CaptureFailed)]
+    [InlineData(ForcedStopCaptureFailed, ExecutionDisposition.ForcedStop, OutcomeDisposition.Unknown, VerificationDisposition.Unknown, ArtifactDisposition.CaptureFailed)]
+    [InlineData(ForcedStopSolved, ExecutionDisposition.ForcedStop, OutcomeDisposition.Solved, VerificationDisposition.Passed, ArtifactDisposition.Captured)]
     [InlineData(Cancelled, ExecutionDisposition.Cancelled, OutcomeDisposition.Unsolved, VerificationDisposition.Failed, ArtifactDisposition.Unknown)]
     public void Every_fixture_is_what_the_arbiter_would_really_write(string fixture, ExecutionDisposition execution, OutcomeDisposition outcome, VerificationDisposition verification, ArtifactDisposition artifact)
     {
@@ -94,17 +111,26 @@ public sealed class RealModelFailureVerdictTests
     [InlineData(null, RealModelOutcome.CodeFault)]
     [InlineData("", RealModelOutcome.CodeFault)]
     [InlineData("the agent said: completion-authority: honest failure", RealModelOutcome.CodeFault)]
-    // The other two arms of the SAME prefix are engine-side regressions, not brain shortfalls — they must keep
-    // gating, or the lane goes quiet on exactly the losses it exists to catch.
+    // A forced stop is a supervisor BOUND tripping — the no-progress, spawn, cost or resolve budget the run was
+    // given. The bound-keeper working means the brain did not drive the arc, which is a shortfall like any other.
+    // Real-model run 34073320723 ended exactly on `ForcedStopUnknown` and reddened this REQUIRED lane for it.
+    [InlineData(ForcedStop, RealModelOutcome.CapabilityMiss)]
+    [InlineData(ForcedStopUnknown, RealModelOutcome.CapabilityMiss)]
+    // The arms that judge the ENGINE or the harness keep gating, or the lane goes quiet on exactly the losses it
+    // exists to catch: work lost in capture (under ANY execution), and a run cancelled mid-arc.
     [InlineData(CaptureFailed, RealModelOutcome.CodeFault)]
-    [InlineData(ForcedStop, RealModelOutcome.CodeFault)]
+    [InlineData(CaptureFailedUnsolved, RealModelOutcome.CodeFault)]
+    [InlineData(ForcedStopCaptureFailed, RealModelOutcome.CodeFault)]
     [InlineData(Cancelled, RealModelOutcome.CodeFault)]
+    // A bound that cut off an objective already DECIDED Solved is nobody's shortfall — the allowlist leaves the
+    // contradictory pair in the gating class rather than guessing at it.
+    [InlineData(ForcedStopSolved, RealModelOutcome.CodeFault)]
     // A pre-slot reason (a renderer that stopped writing `execution`) is unrecognised, never laundered.
     [InlineData("completion-authority: honest failure (outcome=Unsolved, verification=Failed, artifact=Unknown)", RealModelOutcome.CodeFault)]
     public void A_failed_run_is_a_capability_miss_only_when_the_arbiter_authored_the_terminal(string? runError, RealModelOutcome expected)
     {
         RealModelGate.ClassifyRunFailure(runError).ShouldBe(expected,
-            customMessage: "the verdict is read from the ARBITER's own slots — the prefix spans three arms and only the orderly-end unsolved one is a capability miss; prose that merely quotes it is an engine fault like any other unrecognised error");
+            customMessage: "the verdict is read from the ARBITER's own slots — the prefix spans arms that judge the brain (an orderly end unsolved, a bound that tripped) and arms that judge the engine (a cancellation, a capture failure); prose that merely quotes it is an engine fault like any other unrecognised error");
     }
 
     // ── The delivery-gate arm ──────────────────────────────────────────────────────────────────────────
@@ -116,6 +142,15 @@ public sealed class RealModelFailureVerdictTests
 
         verdict.Outcome.ShouldBe(RealModelOutcome.CapabilityMiss, "run 34068400279's terminal: the brain re-planned into an empty receipt set and the arbiter refused to claim success — a miss, not a regression");
         verdict.Note.ShouldContain("honest failure", customMessage: "the note must quote the arbiter so a reader of the archived summary can tell the two apart");
+        verdict.Note.ShouldNotContain("FAULTED");
+    }
+
+    [Fact]
+    public void The_delivery_gate_reports_a_bound_that_tripped_without_gating()
+    {
+        var verdict = RealModelDeliveryGateE2ETests.FailedRunVerdict(ForcedStopUnknown, "before the delivery conflict was adjudicated");
+
+        verdict.Outcome.ShouldBe(RealModelOutcome.CapabilityMiss, "run 34073320723's terminal: the brain exhausted a supervisor bound instead of driving the arc — a miss, not a regression");
         verdict.Note.ShouldNotContain("FAULTED");
     }
 
@@ -132,6 +167,8 @@ public sealed class RealModelFailureVerdictTests
 
     [Theory]
     [InlineData(WorkflowRunStatus.Failure, HonestFailure, false, RealModelOutcome.CapabilityMiss)]
+    [InlineData(WorkflowRunStatus.Failure, ForcedStopUnknown, false, RealModelOutcome.CapabilityMiss)]
+    [InlineData(WorkflowRunStatus.Failure, Cancelled, false, RealModelOutcome.CodeFault)]
     [InlineData(WorkflowRunStatus.Failure, EngineFault, false, RealModelOutcome.CodeFault)]
     [InlineData(WorkflowRunStatus.Failure, null, true, RealModelOutcome.CodeFault)]
     [InlineData(WorkflowRunStatus.Success, null, true, RealModelOutcome.Drove)]

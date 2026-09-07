@@ -747,9 +747,11 @@ public static class RealModelGate
     /// capability miss. Run 34068400279 reached it after a human had adjudicated the patch-only delivery conflict,
     /// and the delivery-gate arm reported "the engine FAULTED" over it.</para>
     ///
-    /// <para>THE PREFIX ALONE IS NOT THE RULE. <c>TerminalDecider</c> reaches HonestFailure by three arms, and only
-    /// the middle one is a brain shortfall: a ForcedStop/Cancelled end and a Solved-but-CaptureFailed artifact stamp
-    /// the very same prefix, and both are engine-side regressions this lane exists to catch. The read is
+    /// <para>THE PREFIX ALONE IS NOT THE RULE. <c>TerminalDecider</c> reaches HonestFailure by arms that judge two
+    /// different things. It judges the BRAIN on an orderly end with the objective unsolved and on a FORCED STOP (a
+    /// supervisor bound tripped — no-progress, the spawn cap, the cost cap — so the run exhausted its budget instead
+    /// of driving the arc), and it judges the ENGINE or the harness on a CANCELLED run and on a CaptureFailed artifact
+    /// under ANY execution, which are the engine-side losses this lane exists to catch. The read is
     /// <see cref="CodeSpace.Core.Services.Completion.HonestFailureReason.IsBrainShortfall"/> — the production shape's
     /// own reader, paired with the renderer that writes the terminal so a slot cannot drift between them, and MARKER
     /// never a word (matched at the START of the run's error, the slot only the arbiter writes; an agent quoting the
