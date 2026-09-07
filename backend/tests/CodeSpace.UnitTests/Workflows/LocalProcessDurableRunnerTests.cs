@@ -64,7 +64,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // The PID-reuse guard: across a restart the OS can hand our old pid to an unrelated process. A handle
         // bearing that pid but a start time that no longer matches the live process is NOT our run.
-        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+        var handle = LegacyProbeProjection(await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 }));
         handle.ProcessStartTimeUtc.ShouldNotBeNull();
 
         (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running, "the live supervisor with its matching start time probes Running");
@@ -82,7 +82,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // Back-compat: a handle persisted before the PID-reuse guard existed has no start time → the guard is
         // skipped and liveness alone decides, so an in-flight run from an older backend is never wrongly abandoned.
-        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 }) with { ProcessStartTimeUtc = null };
+        var handle = LegacyProbeProjection(await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 })) with { ProcessStartTimeUtc = null };
 
         (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running);
 
@@ -1006,10 +1006,15 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var handle = await LaunchAsync(ContractSpecs.PrintThenExit("x", 7));
         await WaitForExitMarkerAsync(handle);
 
-        var probe = await _runner.ProbeAsync(handle with { LaunchHost = "another-worker" }, default);
-
-        probe.State.ShouldBe(SandboxRunState.Exited, "the marker outranks the pid, so a foreign handle still recovers its outcome");
-        probe.ExitCode.ShouldBe(7);
+        var previousHost = Environment.GetEnvironmentVariable(LocalProcessRunner.SandboxHostEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.SandboxHostEnvVar, "another-worker");
+            var probe = await _runner.ProbeAsync(handle, default);
+            probe.State.ShouldBe(SandboxRunState.Exited, "a foreign reader can recover the bound marker without changing the host identity that minted it");
+            probe.ExitCode.ShouldBe(7);
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SandboxHostEnvVar, previousHost); }
     }
 
     [Theory]
@@ -1022,7 +1027,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var launched = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
         launched.LaunchHost.ShouldNotBeNullOrWhiteSpace("the launch stamps the host whose namespace the pid belongs to");
 
-        var handle = clearTheStamp ? launched with { LaunchHost = null } : launched;
+        var handle = clearTheStamp ? LegacyProbeProjection(launched) with { LaunchHost = null } : launched;
 
         (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running,
             "an unstamped handle keeps the pre-stamp behaviour, so upgrading never makes an in-flight run unanswerable");
@@ -1781,6 +1786,11 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         }
         finally { try { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); } catch { /* best-effort */ } }
     }
+
+    // These tests exercise the historical HANDLE reader against a real process. Clearing one field on a new
+    // receipt-backed handle represents a corrupt modern projection, not a legacy record; use an actual legacy
+    // locator with no native metadata instead. This helper does not claim to run a historical launch binary.
+    private SandboxHandle LegacyProbeProjection(SandboxHandle handle) => handle with { NativeLaunch = null, SpoolDirectory = TempDir() };
 
     private string TempDir()
     {

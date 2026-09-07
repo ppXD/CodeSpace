@@ -42,7 +42,9 @@ public sealed class NativeLaunchIsolationE2ETests : IAsyncDisposable
     {
         await LaunchFromExitingObserverAsync(timeout: 12);
         var receipt = NativeLaunchFiles.Read<NativeLaunchReceipt>(Registry, NativeLaunchProtocol.ReceiptFile);
-        kill(receipt.Guardian!.ProcessId, 19).ShouldBe(0); // SIGSTOP: guardian cannot do the cleanup being asserted.
+        var suspended = kill(receipt.Guardian!.ProcessId, 19); // SIGSTOP: guardian cannot do the cleanup being asserted.
+        var signalError = Marshal.GetLastPInvokeError();
+        suspended.ShouldBe(0, $"errno={signalError}; {NativeState(receipt)}");
         try
         {
             using var broker = Process.GetProcessById(receipt.Broker.ProcessId);
@@ -86,6 +88,22 @@ public sealed class NativeLaunchIsolationE2ETests : IAsyncDisposable
     }
 
     private long PulseLength() => File.Exists(Path.Combine(_root, "pulse")) ? new FileInfo(Path.Combine(_root, "pulse")).Length : 0;
+
+    private string NativeState(NativeLaunchReceipt receipt) => JsonSerializer.Serialize(new
+    {
+        At = DateTimeOffset.UtcNow, Deadline = _handle?.Deadline,
+        Receipt = ReadDiagnosticFile(Path.Combine(Registry, NativeLaunchProtocol.ReceiptFile)),
+        Stop = ReadDiagnosticFile(Path.Combine(Registry, NativeLaunchProtocol.StopFile)),
+        Broker = ReadDiagnosticFile($"/proc/{receipt.Broker.ProcessId}/stat"),
+        Execution = ReadDiagnosticFile($"/proc/{receipt.Execution?.ProcessId}/stat"),
+        Guardian = ReadDiagnosticFile($"/proc/{receipt.Guardian?.ProcessId}/stat"),
+    });
+
+    private static string ReadDiagnosticFile(string path)
+    {
+        try { return File.ReadAllText(path); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return error.GetType().Name; }
+    }
 
     private async Task AssertPulseStoppedAsync()
     {

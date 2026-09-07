@@ -127,7 +127,7 @@ public sealed partial class LocalProcessRunner
                 if (receipt.Broker is null || string.IsNullOrWhiteSpace(receipt.State)) throw new NativeLaunchException("indeterminate", "The committed launch receipt is incomplete; automatic re-execution is forbidden.");
                 if (receipt.SpecHash != request.SpecHash || receipt.Broker.BootId != request.BootId) throw new NativeLaunchException("receipt-conflict", "The launch receipt does not match its immutable request.");
                 if (receipt.State is "ready" or "exited" or "stopped" && receipt.Execution is { } execution)
-                    return new SandboxHandle { Kind = LocalKind, ProcessId = execution.ProcessId, ProcessStartTimeUtc = new DateTimeOffset(execution.StartTimeUtcTicks, TimeSpan.Zero), LaunchHost = request.Host, SpoolDirectory = spool, Deadline = request.Deadline, Confinement = receipt.Confinement, CgroupRunKey = receipt.CgroupRunKey, EgressNetnsKey = receipt.EgressNetnsKey };
+                    return new SandboxHandle { NativeLaunch = new(request.Version, request.SpecHash, request.Identity, execution), Kind = LocalKind, ProcessId = execution.ProcessId, ProcessStartTimeUtc = new DateTimeOffset(execution.StartTimeUtcTicks, TimeSpan.Zero), LaunchHost = request.Host, SpoolDirectory = spool, Deadline = request.Deadline, Confinement = receipt.Confinement, CgroupRunKey = receipt.CgroupRunKey, EgressNetnsKey = receipt.EgressNetnsKey };
                 if (receipt.State is "rejected" or "indeterminate" || !NativeProcess.IsAlive(receipt.Broker))
                     throw new NativeLaunchException("indeterminate", $"The start commitment was consumed without a confirmed execution receipt ({receipt.Problem ?? receipt.State}); automatic re-execution is forbidden.");
             }
@@ -153,9 +153,14 @@ public sealed partial class LocalProcessRunner
 
     private static bool NativeDeadlineExpired(SandboxHandle handle)
     {
-        try { return NativeLaunchFiles.Read<NativeLaunchStop>(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.StopFile).Reason == "deadline"; }
-        catch (FileNotFoundException) { return false; }
-        catch (DirectoryNotFoundException) { return false; }
+        try
+        {
+            var stop = NativeLaunchFiles.Read<NativeLaunchStop>(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.StopFile);
+            return stop.Reason == "deadline" && stop.At != default;
+        }
+        // An older writer can expose a partial stop file, and a malformed hint is never a deadline receipt.
+        // Core request/commitment/execution receipt reads keep their separate strict integrity behavior.
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException) { return false; }
     }
 
     private sealed record BrokerStart(string SpoolKey, SandboxSpec Spec, string Spool, string Directory);

@@ -11,7 +11,7 @@ namespace CodeSpace.UnitTests.Workflows;
 
 [Trait("Category", "Unit")]
 [Collection("LocalProcessIdleWatchdog")]
-public sealed class NativeLaunchRegistryTests
+public sealed partial class NativeLaunchRegistryTests
 {
     [Fact]
     public void Canonical_binding_preserves_exact_argv_and_all_server_only_fields()

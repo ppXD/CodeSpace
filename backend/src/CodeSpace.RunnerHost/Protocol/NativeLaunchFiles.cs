@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using CodeSpace.Messages.Agents;
 
@@ -18,18 +20,40 @@ internal static class NativeLaunchFiles
 
     public static bool TryCreate<T>(string directory, string file, T value)
     {
-        var path = PathFor(directory, file);
-        FileStream stream;
-        try { stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read); }
-        catch (IOException) when (File.Exists(path)) { return false; }
-        using (stream)
+        var destination = PathFor(directory, file);
+        var temporary = destination + ".publishing-" + Guid.NewGuid().ToString("N");
+        try
         {
-            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            JsonSerializer.Serialize(stream, value, NativeLaunchProtocol.Json);
-            stream.Flush(flushToDisk: true);
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                JsonSerializer.Serialize(stream, value, NativeLaunchProtocol.Json);
+                stream.Flush(flushToDisk: true);
+            }
+            return PublishCreateOnly(temporary, destination);
         }
-        return true;
+        finally { File.Delete(temporary); }
     }
+
+    private static bool PublishCreateOnly(string temporary, string destination)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            try { File.Move(temporary, destination, overwrite: false); return true; }
+            catch (IOException) when (File.Exists(destination)) { return false; }
+        }
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) throw new PlatformNotSupportedException("Atomic native metadata publication is unavailable on this platform.");
+        // Same-directory hard-link publication installs the completed inode or reports EEXIST atomically.
+        // Do not replace this with an existence check followed by rename, or a visible copy fallback.
+        // Only the winner has acquired a start commitment. File flush is not directory/power-loss durability.
+        if (Link(temporary, destination) == 0) return true;
+        var error = Marshal.GetLastPInvokeError();
+        if (error == 17) return false; // EEXIST on both supported Unix platforms.
+        throw new IOException("Atomic native metadata publication failed; no fallback was attempted.", new Win32Exception(error));
+    }
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int Link([MarshalAs(UnmanagedType.LPUTF8Str)] string existingPath, [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath);
 
     public static void Replace<T>(string directory, string file, T value)
     {
