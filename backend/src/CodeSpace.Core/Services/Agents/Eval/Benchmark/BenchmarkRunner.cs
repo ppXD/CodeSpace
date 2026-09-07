@@ -33,17 +33,19 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     private readonly Sandbox.ISandboxRunnerRegistry _runners;
     private readonly IBenchmarkGraderRegistry _graders;
     private readonly IBenchmarkFixtureStager _stager;
+    private readonly TaskLaunch.ITaskLaunchBenchmarkCellRunner _taskLaunchCells;
 
     private readonly Workflows.Artifacts.IArtifactStore _artifacts;
     private readonly Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> _logger;
 
-    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IBenchmarkFixtureStager stager, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
+    public BenchmarkRunner(IAgentRunService runs, IAgentRunExecutor executor, Sandbox.ISandboxRunnerRegistry runners, IBenchmarkGraderRegistry graders, IBenchmarkFixtureStager stager, TaskLaunch.ITaskLaunchBenchmarkCellRunner taskLaunchCells, Workflows.Artifacts.IArtifactStore artifacts, Microsoft.Extensions.Logging.ILogger<BenchmarkRunner> logger)
     {
         _runs = runs;
         _executor = executor;
         _runners = runners;
         _graders = graders;
         _stager = stager;
+        _taskLaunchCells = taskLaunchCells;
         _artifacts = artifacts;
         _logger = logger;
     }
@@ -55,6 +57,12 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         var selection = context.Selection;
         if (mode == BenchmarkMode.WorkflowMap)
             throw new NotSupportedException("BenchmarkMode.WorkflowMap is reserved and not yet wired: it runs through the composed planner→flow.map→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner does not orchestrate. Run the two harness-CLI modes here; the seed corpus ships only those.");
+
+        // P19: a TaskLaunch arm exercises the REAL product Launch entry (route → projection → run) instead of a
+        // directly-created AgentRun — a sibling instrument owns that whole seam; this runner never builds an
+        // AgentTask for one, so it can never accidentally take the direct (Shadow-only) path for Launch evidence.
+        if (BenchmarkModeEffort.IsTaskLaunch(mode))
+            return await _taskLaunchCells.RunAsync(task, mode, context, cancellationToken).ConfigureAwait(false);
 
         var agentTask = BuildAgentTask(task, mode, workspaceDirectory, selection);
 
@@ -293,6 +301,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             TokenUsage = SumTokenUsage(attempts),
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,
+            ObservedModel = ObservedModelOf(attempts),
             PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
         };
     }
@@ -310,4 +319,10 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         attempts
             .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.TokenUsage : null)
             .Aggregate((AgentTokenUsage?)null, AgentRunExecutor.SumTokenUsage);
+
+    /// <summary>The census's provider-wire observed model: the first attempt that reported one, harness-agnostic (mirrors <c>TaskLaunchBenchmarkCellRunner.ObservedModelOf</c>). Null (unknown) when NONE reported one — never backfilled from what was requested.</summary>
+    private static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
+        attempts
+            .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.Model : null)
+            .FirstOrDefault(model => model is not null);
 }

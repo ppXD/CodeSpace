@@ -17,6 +17,10 @@ public static class BenchmarkModeLabel
         BenchmarkMode.HarnessCli => Prefix + "cli",
         BenchmarkMode.HarnessCliWithMcp => Prefix + "cli-mcp",
         BenchmarkMode.WorkflowMap => Prefix + "workflow-map",
+        BenchmarkMode.TaskLaunchQuick => Prefix + "launch-quick",
+        BenchmarkMode.TaskLaunchStandard => Prefix + "launch-standard",
+        BenchmarkMode.TaskLaunchDeep => Prefix + "launch-deep",
+        BenchmarkMode.TaskLaunchAuto => Prefix + "launch-auto",
         _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown benchmark mode — add its scorecard label here."),
     };
 }

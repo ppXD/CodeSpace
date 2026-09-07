@@ -53,7 +53,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
 
         return new CorpusBenchmarkRun
         {
-            ExecutionPath = BenchmarkExecutionPath.DirectAgentHarness,
+            ExecutionPath = ExecutionPathFor(manifest),
             Results = results,
             Errored = errored,
             Scorecard = BenchmarkScorecard.Compute(results),
@@ -62,6 +62,12 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
             FormatFaults = BenchmarkScorecard.TallyFormatFaults(results),
         };
     }
+
+    /// <summary>P19: TaskLaunch evidence only when EVERY cell in the manifest actually enters through the real Launch entry — a suite that mixes a direct-harness mode into even one cell cannot substantiate a product Launch-mode seal, so it stays DirectAgentHarness (the conservative default <see cref="QualificationRunner.Grant"/> already gates Sealed on). Internal so the boundary is unit-pinned directly (InternalsVisibleTo), not only through a full corpus run.</summary>
+    internal static BenchmarkExecutionPath ExecutionPathFor(EvalSuiteManifest manifest) =>
+        manifest.Cells.Count > 0 && manifest.Cells.All(cell => BenchmarkModeEffort.IsTaskLaunch(cell.Mode))
+            ? BenchmarkExecutionPath.TaskLaunch
+            : BenchmarkExecutionPath.DirectAgentHarness;
 
     /// <summary>Stage → run → grade → PERSIST ONE (task,mode) pair in an isolated workspace; a non-cancellation throw is recorded as an infra error (the pair is excluded from the score), never aborting the corpus. The workspace is always reclaimed.</summary>
     private sealed record CorpusExecution(CorpusBenchmarkRequest Request, string SuiteVersion, List<BenchmarkResult> Results, List<CorpusBenchmarkError> Errored);

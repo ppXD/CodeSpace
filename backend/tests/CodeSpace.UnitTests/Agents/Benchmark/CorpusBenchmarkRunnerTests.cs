@@ -114,6 +114,47 @@ public class CorpusBenchmarkRunnerTests
     }
 
     [Fact]
+    public async Task An_unknown_fixture_is_an_infra_error_the_same_way_for_a_TaskLaunch_arm()
+    {
+        // P19: the "unknown fixture ⇒ explicit infra fault" guarantee is a property of the SHARED staging step this
+        // loop already owns — a Launch-mode task must get exactly the same treatment as a direct-harness one, never
+        // a silent skip because the cell was headed for TaskLaunchBenchmarkCellRunner instead of the direct instrument.
+        var launchModes = new[] { BenchmarkMode.TaskLaunchQuick };
+        var runner = new StubRunner(passWhen: (_, _) => true);
+        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+
+        var run = await sut.RunAsync(new[] { MakeTask("unknown-fixture-task", launchModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
+
+        run.Results.ShouldBeEmpty();
+        run.Errored.ShouldHaveSingleItem().TaskId.ShouldBe("unknown-fixture-task");
+        run.Cells!.ShouldHaveSingleItem().State.ShouldBe(CorpusCellState.InfraUnknown, "the cell occupies its slot in the fixed denominator — it is never dropped");
+        runner.Calls.ShouldBeEmpty("TaskLaunchBenchmarkCellRunner is never reached when the fixture could not even be staged");
+    }
+
+    [Theory]
+    [InlineData(new[] { BenchmarkMode.TaskLaunchQuick }, BenchmarkExecutionPath.TaskLaunch)]
+    [InlineData(new[] { BenchmarkMode.TaskLaunchQuick, BenchmarkMode.TaskLaunchDeep }, BenchmarkExecutionPath.TaskLaunch)]
+    [InlineData(new[] { BenchmarkMode.HarnessCli }, BenchmarkExecutionPath.DirectAgentHarness)]
+    [InlineData(new[] { BenchmarkMode.HarnessCli, BenchmarkMode.TaskLaunchQuick }, BenchmarkExecutionPath.DirectAgentHarness)]
+    public void ExecutionPathFor_is_TaskLaunch_only_when_every_manifest_cell_is_a_launch_arm(BenchmarkMode[] modes, BenchmarkExecutionPath expected)
+    {
+        var manifest = EvalSuite.ManifestFor(new[] { MakeTask("task-a", modes) });
+
+        CorpusBenchmarkRunner.ExecutionPathFor(manifest).ShouldBe(expected, "a suite that mixes even one direct-harness cell in cannot substantiate a product Launch-mode seal");
+    }
+
+    [Fact]
+    public async Task A_corpus_of_only_launch_arms_reports_TaskLaunch_execution_path()
+    {
+        var runner = new StubRunner(passWhen: (_, _) => true);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+
+        var run = await sut.RunAsync(new[] { MakeTask("task-a", new[] { BenchmarkMode.TaskLaunchStandard }) }, Guid.NewGuid(), selection: null, CancellationToken.None);
+
+        run.ExecutionPath.ShouldBe(BenchmarkExecutionPath.TaskLaunch);
+    }
+
+    [Fact]
     public async Task A_caller_cancellation_propagates_and_is_not_swallowed_as_an_infra_error()
     {
         var runner = new StubRunner(passWhen: (_, _) => true, cancel: true);

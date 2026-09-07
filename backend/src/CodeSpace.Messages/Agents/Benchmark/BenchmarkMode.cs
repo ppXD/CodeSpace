@@ -17,6 +17,13 @@ namespace CodeSpace.Messages.Agents.Benchmark;
 ///   ENGINE, not a single agent run, so the single-run <c>BenchmarkRunner</c> does not drive it and the seed corpus
 ///   does not list it (<c>SeedBenchmarkCorpus.DefaultModes</c>); it lands with the workflow-driving harness. The
 ///   PLAN-QUALITY axis (<c>BenchmarkResult.PlanRanCleanWithNoHumanEdits</c>) is defined now for that future mode.</item>
+/// <item><b>TaskLaunchQuick / TaskLaunchStandard / TaskLaunchDeep / TaskLaunchAuto</b> — P19: the task enters
+///   through the PRODUCT <c>ITaskLaunchService</c> entry (route → projection → run), requesting the named effort
+///   tier (<c>TaskLaunchAuto</c> requests none and lets the router classify). Unlike every mode above, these
+///   exercise real Launch routing, projection selection, and workflow-engine execution — not a directly-created
+///   <c>AgentRun</c> — so a corpus that runs them reports <see cref="BenchmarkExecutionPath.TaskLaunch"/> rather
+///   than <see cref="BenchmarkExecutionPath.DirectAgentHarness"/>. Driven by <c>TaskLaunchBenchmarkCellRunner</c>,
+///   a sibling instrument <c>BenchmarkRunner</c> delegates to — never by the direct <c>AgentRunService</c> path.</item>
 /// </list>
 /// </summary>
 public enum BenchmarkMode
@@ -29,4 +36,16 @@ public enum BenchmarkMode
 
     /// <summary>RESERVED, not yet wired: the planner→flow.map→synthesizer composed flow (workflow-engine driven, not a single agent run). Requesting it from the single-run runner throws; the seed corpus omits it until the workflow-driving harness lands.</summary>
     WorkflowMap,
+
+    /// <summary>P19: enters through the real Launch entry requesting the Quick effort tier.</summary>
+    TaskLaunchQuick,
+
+    /// <summary>P19: enters through the real Launch entry requesting the Standard effort tier.</summary>
+    TaskLaunchStandard,
+
+    /// <summary>P19: enters through the real Launch entry requesting the Deep effort tier.</summary>
+    TaskLaunchDeep,
+
+    /// <summary>P19: enters through the real Launch entry requesting no effort tier — the router's Auto-classifier picks one, recorded on the result's resolved route.</summary>
+    TaskLaunchAuto,
 }

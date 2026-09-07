@@ -232,7 +232,7 @@ public class BenchmarkRunnerBuildTaskTests
 
     // ── The respawned cell's row: the GRADED attempt's verdict, but BOTH attempts' cost ──
 
-    private static Core.Persistence.Entities.AgentRun Attempt(int inputTokens, int outputTokens, double seconds, AgentRunStatus status = AgentRunStatus.Succeeded, string exitReason = "completed")
+    private static Core.Persistence.Entities.AgentRun Attempt(int inputTokens, int outputTokens, double seconds, AgentRunStatus status = AgentRunStatus.Succeeded, string exitReason = "completed", string? model = null)
     {
         var startedAt = DateTimeOffset.UnixEpoch;
 
@@ -244,7 +244,7 @@ public class BenchmarkRunnerBuildTaskTests
             CompletedAt = startedAt.AddSeconds(seconds),
             ResultJson = System.Text.Json.JsonSerializer.Serialize(new AgentRunResult
             {
-                Status = status, ExitReason = exitReason, ReviseRounds = 2,
+                Status = status, ExitReason = exitReason, ReviseRounds = 2, Model = model,
                 TokenUsage = new AgentTokenUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
             }, Core.Services.Agents.AgentJson.Options),
         };
@@ -306,5 +306,29 @@ public class BenchmarkRunnerBuildTaskTests
 
         BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { untimed, untimed }, PassingGrade, mcpFullCatalog: false)
             .DurationSeconds.ShouldBeNull("null, never 0 — 0 would enter the latency percentiles as a real measurement");
+    }
+
+    // ── P19: the direct-harness arm's observed-model census field, harness-agnostic like the TaskLaunch arm's ──
+
+    [Fact]
+    public void The_first_attempt_to_report_an_observed_model_is_the_cells_observed_model()
+    {
+        // Mirrors TaskLaunchBenchmarkCellRunner.ObservedModelOf: the census's observed model is read off WHICHEVER
+        // attempt reported one first, harness-agnostic — a respawn still drives the same model, but the dead
+        // attempt already proved the wire before the gateway broke it.
+        var died = Attempt(inputTokens: 100, outputTokens: 40, seconds: 3, status: AgentRunStatus.Failed, exitReason: "error", model: "claude-first-wire");
+        var graded = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { died, graded }, PassingGrade, mcpFullCatalog: false)
+            .ObservedModel.ShouldBe("claude-first-wire", "the direct arm's census must be as harness-agnostic as the TaskLaunch arm's — both read the SAME AgentRunResult.Model");
+    }
+
+    [Fact]
+    public void An_attempt_that_reported_no_model_leaves_the_cells_observed_model_null_never_backfilled()
+    {
+        var only = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { only }, PassingGrade, mcpFullCatalog: false)
+            .ObservedModel.ShouldBeNull("the deterministic fake CLI reports no model — unknown stays unknown, never fabricated from what was requested");
     }
 }

@@ -96,6 +96,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
             {
                 solved = score.Solved, unsolved = score.Unsolved, abstained = score.Abstained, infraUnknown = score.InfraUnknown,
                 total = score.Total, solveRate = score.SolveRateOverSuite, solveRateLowerBound = lowerBound, evaluatorHealth = score.EvaluatorHealth, executionPath = run.ExecutionPath,
+                census = BuildCensus(run),
             }, Agents.AgentJson.Options),
             EffectiveFrom = DateTimeOffset.UtcNow,
             ExpiresAt = DateTimeOffset.UtcNow.AddDays(spec.ValidityDays),
@@ -114,6 +115,35 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         executionPath == BenchmarkExecutionPath.TaskLaunch && score.Total > 0 && lowerBound >= spec.MinSolveRateLowerBound && score.EvaluatorHealth >= spec.MinEvaluatorHealth
             ? PerformanceQualification.Sealed
             : PerformanceQualification.Shadow;
+
+    /// <summary>
+    /// P19: one census row per suite cell (route decision, resolved mode/projection, arm, observed model) — built
+    /// from the FIXED denominator (<see cref="CorpusBenchmarkRun.Cells"/>), never from
+    /// <see cref="CorpusBenchmarkRun.Results"/> alone, so a SPECIFIED arm that never ran still appears as its own
+    /// row (its cell <c>state</c> is <c>InfraUnknown</c> — the same "occupies its slot, never dropped from the
+    /// divisor" cell this suite already guarantees) instead of being silently averaged away. An unknown fixture ref
+    /// reaches this the same way: <see cref="EvalSuite.Classify"/> already folds a staging throw into an errored,
+    /// InfraUnknown cell — never a silent skip.
+    /// </summary>
+    internal static IReadOnlyList<object> BuildCensus(CorpusBenchmarkRun run)
+    {
+        var resultsByCell = run.Results.ToDictionary(r => (r.TaskId, r.Mode));
+
+        return (run.Cells ?? Array.Empty<CorpusCellOutcome>()).Select(cell =>
+        {
+            resultsByCell.TryGetValue((cell.TaskId, cell.Mode), out var result);
+
+            return (object)new
+            {
+                taskId = cell.TaskId,
+                arm = cell.Mode.ToString(),
+                state = cell.State.ToString(),
+                routeEffortMode = result?.RouteEffortMode,
+                routeProjectionKind = result?.RouteProjectionKind,
+                observedModel = result?.ObservedModel,
+            };
+        }).ToList();
+    }
 }
 
 /// <summary>The qualification statistics — pure, pinned by test.</summary>
