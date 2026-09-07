@@ -461,6 +461,25 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
+      - name: Test (live route snapshot — classify, preview, launch and retry)
+        # This PostgreSQL-backed class belongs to IntegrationTests; the E2ETests filter below cannot select it.
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelPlannerRouteSnapshot"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-route-snapshot.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the live route snapshot gate actually ran
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/scripts/assert-every-filter-clause-ran.sh \
+            backend/TestResults/real-model-route-snapshot.trx \
+            RealModelPlannerRouteSnapshot
+
       - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
         # Scoped to the DB-backed whole-loop RealModel classes in E2ETests (the supervisor arcs run on the
         # PARALLEL sibling job above — see its comment for the volume-split rationale):
@@ -516,7 +535,6 @@ jobs:
             RealModelAnswerReview \
             RealModelDeliveryGate \
             RealModelPlanner \
-            RealModelPlannerRouteSnapshot \
             RealModelSession \
             RealModelSpecPreview \
             With_no_repository_to_ground_on_the_live_compiler_refuses_to_invent_an_acceptance_check \
