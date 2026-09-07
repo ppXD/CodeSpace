@@ -1228,16 +1228,24 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
     // ─── C3 follow-up: a per-unit oracle whose only protection is DERIVED from its command (the shape every real
     // operator floor actually has — nothing in Core or the UI ever authors ProtectedPaths) must still get a base
-    // sha to restore from. Real Postgres, real git, the REAL SupervisorAcceptanceGrader — no fake at the grading
-    // seam, so the restore's git semantics are the ones actually exercised, not a scripted stand-in for them. ───
+    // sha to restore from, and ONLY for a file the run itself owns. Real Postgres, real git, the REAL
+    // SupervisorAcceptanceGrader — no fake at the grading seam, so the restore's git semantics are the ones
+    // actually exercised, not a scripted stand-in for them. ───
 
-    [Fact]
-    public async Task A_units_derived_only_protection_still_restores_a_rewritten_check_script()
+    [Theory]
+    [InlineData(true, false)]    // the run's floor runs check.sh → the unit's rewrite of it is restored and VOIDED
+    [InlineData(false, true)]    // no operator floor → the run owns no judge by that name, so the rewrite stands and the grade says so
+    public async Task A_units_derived_only_protection_restores_a_rewritten_check_script_the_run_owns(bool floorRunsTheCheck, bool expectedPass)
     {
-        // The exact per-unit shape this fix closes: before OracleBaseShaAsync consulted the SAME
+        // The per-unit shape #1865 closed: before OracleBaseShaAsync consulted the SAME
         // AcceptanceOracleProtection.MayProtect derivation the grader itself uses to decide whether to widen its
         // clone, an authored-only guard meant this unit's base sha was never resolved — the grader had nothing to
         // restore check.sh from, and a candidate that rewrote its own judge to `exit 0` graded itself a pass.
+        //
+        // The second arm is the deliberate COST of narrowing that derivation to files the run owns: with no
+        // executable floor configured, nothing on the tape says check.sh is a judge rather than a deliverable, so
+        // it is graded as the candidate left it. That is the safe direction (the alternative voids correct work on
+        // a file the goal required editing) and it is never silent — the evidence names the file.
         if (!await GitAvailableAsync()) return;
 
         using var remote = new BareRemote();
@@ -1259,15 +1267,90 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         SupervisorTurnContext ctx;
         using (var graderScope = _fixture.BeginScope())
-            ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), graderScope.Resolve<ISupervisorAcceptanceGrader>());
+            ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, floorRunsTheCheck ? Check : null), graderScope.Resolve<ISupervisorAcceptanceGrader>());
+
+        var result = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        var evidence = await EvidenceTextAsync(teamId, result.AcceptanceEvidenceId);
+
+        result.AcceptancePassed.ShouldBe(expectedPass,
+            floorRunsTheCheck
+                ? "the candidate's rewritten check.sh must be restored from base before it grades — an unrestored tampered `exit 0` would wrongly pass a candidate who did none of the required work"
+                : "with no floor to own check.sh the check runs the candidate's own copy — the verdict is that copy's real exit code");
+
+        if (floorRunsTheCheck)
+        {
+            // The RESTORED (pristine) check.sh genuinely ran and genuinely failed — not an infra collapse, and not a masked "graded UNPROTECTED".
+            result.AcceptanceDetail.ShouldStartWith("tests-failed-exit-");
+            result.AcceptanceEvidenceTail.ShouldContain("TAMPER VOIDED", Case.Insensitive, "the candidate's rewrite of check.sh must be SEEN, not just neutralized");
+        }
+        else
+        {
+            result.AcceptanceDetail.ShouldBe("tests-passed");
+            evidence.ShouldNotContain("TAMPER", Case.Insensitive, "nothing was protected, so nothing was voided — calling this tamper would be a claim the grade cannot support");
+            evidence.ShouldContain("the check EXECUTES check.sh", Case.Sensitive, "a pass off the candidate's own copy of the check must never read as a protected pass");
+        }
+    }
+
+    [Fact]
+    public async Task A_units_check_that_executes_the_file_the_goal_required_editing_grades_the_candidates_fix()
+    {
+        // The live regression (real-model lane run 34135877074): the goal was "edit solution.sh so that
+        // `sh solution.sh A B` prints the SUM", the operator floor was `sh check.sh`, and the brain authored a
+        // per-unit check whose argv named solution.sh — the file under test. The derived protection restored the
+        // WRONG stub over a correct agent's work and voided it, and the brain, reading its own verified solution
+        // as a permanent failure ("the check itself protects the very file the goal requires editing, so no retry
+        // can pass it"), re-planned until the run died in a no-progress stop.
+        if (!await GitAvailableAsync()) return;
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new()
+        {
+            ["check.sh"] = "#!/bin/sh\nsh solution.sh 7 5 | grep -qx 12\n",     // the OPERATOR floor's judge
+            ["solution.sh"] = "#!/bin/sh\necho 0\n",                            // the wrong stub the goal says to fix
+        });
+        var baseSha = await remote.HeadShaAsync();
+
+        // The candidate does exactly what the goal asked: it fixes solution.sh (and leaves the judge alone).
+        await remote.CommitOnBranchAsync("candidate", new() { ["solution.sh"] = "#!/bin/sh\nexpr \"$1\" + \"$2\"\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // The brain's per-unit check: its program position names solution.sh, so the old derivation read the
+        // DELIVERABLE as the judge. It fails on the stub and passes on the fix, so the verdict is decisive.
+        var unitCheck = new[] { "sh", "-c", "sh solution.sh 7 5 | grep -qx 12" };
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", unitCheck)));
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "candidate")));
+        await SeedManifestAsync(teamId, agentId, repoId, "candidate", baseSha: baseSha, patchArtifactId: null);
+
+        SupervisorTurnContext ctx;
+        using (var graderScope = _fixture.BeginScope())
+            ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, Check), graderScope.Resolve<ISupervisorAcceptanceGrader>());
 
         var result = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
 
-        result.AcceptancePassed.ShouldBe(false,
-            "the candidate's rewritten check.sh must be restored from base before it grades — an unrestored tampered `exit 0` would wrongly pass a candidate who did none of the required work");
-        // The RESTORED (pristine) check.sh genuinely ran and genuinely failed — not an infra collapse, and not a masked "graded UNPROTECTED".
-        result.AcceptanceDetail.ShouldStartWith("tests-failed-exit-");
-        result.AcceptanceEvidenceTail.ShouldContain("TAMPER VOIDED", Case.Insensitive, "the candidate's rewrite of check.sh must be SEEN, not just neutralized");
+        result.AcceptancePassed.ShouldBe(true,
+            "solution.sh is the SUBJECT under test, not the run's judge — restoring the stub over the candidate's correct fix is the regression this closes, and no retry could ever pass it");
+        result.AcceptanceDetail.ShouldBe("tests-passed");
+
+        var evidence = await EvidenceTextAsync(teamId, result.AcceptanceEvidenceId);
+
+        evidence.ShouldNotContain("TAMPER", Case.Insensitive, "editing the file the goal named is the work, not a tamper");
+        evidence.ShouldContain("the check EXECUTES solution.sh", Case.Sensitive, "the brain still gets told the check graded the candidate's own version of the file it edited");
+    }
+
+    /// <summary>The durable CAS evidence behind a folded grade — the text the bounded <c>AcceptanceEvidenceTail</c> is clipped from, and the only place a PASSING unit's oracle account survives (the tail rides the tape on failure only).</summary>
+    private async Task<string> EvidenceTextAsync(Guid teamId, Guid? evidenceArtifactId)
+    {
+        evidenceArtifactId.ShouldNotBeNull("every oracle grade mints evidence a receipt can bind to");
+
+        using var scope = _fixture.BeginScope();
+        var bytes = await scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>().GetBytesAsync(teamId, evidenceArtifactId!.Value, CancellationToken.None);
+
+        return System.Text.Encoding.UTF8.GetString(bytes.ShouldNotBeNull().Bytes);
     }
 
     // ─── Helpers ───
@@ -1407,10 +1490,12 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             .SingleAsync();
     }
 
-    private static SupervisorGoalConfig GoalConfig(Guid repoId) => new()
+    /// <summary><paramref name="acceptanceChecks"/> is the OPERATOR's executable floor — the run's own oracle inventory, which is what decides whether a per-unit command's program file is a judge the grader restores or the subject under test. Null (the default) is the shape most cases here need: no floor configured.</summary>
+    private static SupervisorGoalConfig GoalConfig(Guid repoId, IReadOnlyList<string>? acceptanceChecks = null) => new()
     {
         Goal = Goal,
         AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId },
+        AcceptanceChecks = acceptanceChecks,
     };
 
     /// <summary>C2 — a goal with NO repository bound: the research/report shape whose units the fold must grade from what they captured.</summary>

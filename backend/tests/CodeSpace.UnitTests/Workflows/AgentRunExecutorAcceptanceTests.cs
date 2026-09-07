@@ -707,9 +707,13 @@ public class AgentRunExecutorAcceptanceTests
         /// <summary>C3 — the oracle anchor each branch grade was handed, keyed by branch. Null (or an absent key) means that grade ran with no protection at all.</summary>
         public Dictionary<string, string?> OracleBaseShaByBranch { get; } = new();
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, CancellationToken cancellationToken)
+        /// <summary>C3 narrowing — the run's own ORACLE INVENTORY each branch grade was handed. This lane's contract IS the run's one gate, so its own program file(s) are the judge.</summary>
+        public Dictionary<string, IReadOnlyList<string>?> OracleFloorProgramsByBranch { get; } = new();
+
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken)
         {
             OracleBaseShaByBranch[branch] = oracleBaseSha;
+            OracleFloorProgramsByBranch[branch] = oracleFloorPrograms;
             return GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
         }
 
