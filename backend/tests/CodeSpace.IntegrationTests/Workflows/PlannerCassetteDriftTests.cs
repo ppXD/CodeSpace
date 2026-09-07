@@ -50,7 +50,7 @@ public sealed class PlannerCassetteDriftTests
     /// failure prints, then RE-RECORD the cassette via the RealModel live test. The pin is the trip-wire that
     /// makes "I changed the planner prompt but forgot the cassette" a build failure instead of a silent miss.
     /// </summary>
-    public const string ExpectedPlannerKey = "588bd5045fffc5037c6574f5f410e705e5516e3c393360bce6f154f290d77e6d";   // typed acceptance v2 separates argv/file paths; no committed planner cassette exists to re-record
+    public const string ExpectedPlannerKey = "a2a2bffbb059f383dc9082538ff28c48909a52fb72d5d4755290349685ba2c22";   // v2 adds explicit local oraclePaths; no committed planner cassette exists to re-record
 
     [Fact]
     public async Task Planner_request_key_is_pinned_so_a_prompt_or_schema_change_forces_a_re_record()

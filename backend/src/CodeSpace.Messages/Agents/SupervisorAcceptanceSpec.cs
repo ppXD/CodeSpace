@@ -32,6 +32,10 @@ public sealed record SupervisorAcceptanceSpec
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? ProtectedPaths { get; init; }
 
+    /// <summary>Exact workspace-relative oracle files whose pre-run bytes must remain unchanged during local, repository-free verification. Literal files only, with no symlinks or git pathspec expansion. This does not discover shell dependencies or prove filesystem isolation. Null preserves historical contracts.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? OraclePaths { get; init; }
+
     /// <summary>
     /// The acceptance check payload. Its meaning is the <see cref="Kind"/>'s: for <c>TestsPass</c> (the default) it is an
     /// ARGV the server runs against the produced workspace (non-zero exit fails); for <c>ArtifactPresent</c> it is the

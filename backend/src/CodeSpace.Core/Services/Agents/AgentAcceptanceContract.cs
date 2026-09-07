@@ -14,18 +14,16 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public static class AgentAcceptanceContract
 {
-    /// <summary>Whether the task carries a gradable contract (a non-blank command).</summary>
-    public static bool RequiresGrade(AgentTask task) =>
-        task.Acceptance is { } spec && spec.Command.Any(c => !string.IsNullOrWhiteSpace(c));
+    /// <summary>Whether a contract was authored. Empty or malformed contracts require a failed verification; only an absent contract opts out.</summary>
+    public static bool RequiresGrade(AgentTask task) => task.Acceptance is not null;
 
     /// <summary>
     /// C2 — whether the spec's oracle reads DELIVERABLE FILES (its <c>Command</c> is a path list: ArtifactPresent,
     /// LlmJudge, CitationsResolve, ArtifactSchema) rather than an ARGV. The ONE rule the repo-less lane turns on, at
     /// every tier: the executor's scratch grade, the supervisor fold's captured grade, and the capture's own
     /// declared-path derivation all read it here, so they can never disagree about what a repo-less world means.
-    /// <c>TestsPass</c> — and an absent kind, which defaults to it — presupposes a code world: running its argv in a
-    /// directory of captured documents would be a category error (a bare <c>exit 0</c> would pass vacuously), so it
-    /// stays fail-closed with no repo.
+    /// <c>TestsPass</c> consumes argv rather than file obligations. A live local workspace can execute that exact argv;
+    /// rebuilding captured artifacts alone does not establish its execution world or frozen oracle inputs.
     /// </summary>
     public static bool GradesFromDeliverables(SupervisorAcceptanceSpec? spec) =>
         spec is { Kind: not null and not BenchmarkGradingKind.TestsPass };

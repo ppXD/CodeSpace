@@ -153,6 +153,10 @@ public sealed record AgentRunResult
     /// <summary>The grader's one-line detail (exit code / missing paths / "no-branch-or-repo") — the acceptance chip's tooltip.</summary>
     public string? AcceptanceDetail { get; init; }
 
+    /// <summary>The verifier's typed failure, when supplied. Environment, integrity/grader faults and incomplete specs do not imply an agent-fixable oracle failure.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Benchmark.GradeFailureClass? AcceptanceFailureClass { get; init; }
+
     /// <summary>
     /// Whether this run's self-report contradicted its objective grade (P4-1) — a
     /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value. BOTH values are reachable on this lane:

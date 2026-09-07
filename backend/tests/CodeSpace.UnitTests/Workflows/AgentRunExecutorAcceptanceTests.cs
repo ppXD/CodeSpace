@@ -36,13 +36,14 @@ public class AgentRunExecutorAcceptanceTests
     }
 
     [Fact]
-    public async Task An_all_blank_command_reads_as_no_contract()
+    public async Task An_authored_all_blank_command_fails_typed_without_executing_a_grader()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec(" ", "")), Succeeded(), workspace: null, CancellationToken.None);
 
-        result.AcceptancePassed.ShouldBeNull();
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.SpecIncomplete);
         grader.Calls.ShouldBe(0);
     }
 
@@ -529,46 +530,56 @@ public class AgentRunExecutorAcceptanceTests
     }
 
     [Fact]
-    public async Task Blank_command_entries_are_dropped_before_grading()
+    public async Task Blank_arguments_are_preserved_exactly_when_grading_a_repository()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "ok" });
 
         await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", " ", "check.sh", "")), Succeeded(), workspace: null, CancellationToken.None);
 
-        grader.LastCommand.ShouldBe(new[] { "sh", "check.sh" });
+        grader.LastCommand.ShouldBe(new[] { "sh", " ", "check.sh", "" });
+    }
+
+    [Fact]
+    public async Task A_repository_descriptor_without_a_primary_result_does_not_enter_local_verification()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+        var task = RepoLessTaskWith(Spec("sh", "check.sh")) with { Workspace = WorkspaceSpec.FromRepository(Guid.NewGuid()) };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), task, SucceededRepoLess(), workspace: null, CancellationToken.None);
+        result.AcceptanceDetail.ShouldBe("no-branch-or-repo");
+        grader.DirectoryCalls.ShouldBe(0);
     }
 
     // ─── C2: the repo-less lane, now that EVERY repo-less run has a scratch world ─────────────────────────
 
     /// <summary>
-    /// A repo-less run's scratch world used to exist only when its contract declared deliverable paths, which meant
-    /// a TestsPass contract could never reach the directory oracle. C2 gives every repo-less run a world (the
-    /// undeclared walk needs one), so the kind rule has to be explicit — or a bare <c>exit 0</c> check would run in
-    /// a directory of documents and pass VACUOUSLY, inventing a green verdict out of a category error.
+    /// A bare workspace-shaped test object cannot reconstruct an invocation's frozen authority/continuity context.
+    /// Production local execution, including actual TestsPass commands, is covered by LocalAcceptanceExecutorFlowTests.
     /// </summary>
     [Fact]
-    public async Task A_repo_less_tests_pass_contract_stays_fail_closed_even_though_a_scratch_world_now_exists()
+    public async Task A_repo_less_command_cannot_be_graded_from_a_bare_handle_without_a_live_context()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "must-not-be-consulted" });
 
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), RepoLessTaskWith(Spec("sh", "check.sh")), SucceededRepoLess(), new FakeScratchWorkspace(), CancellationToken.None);
 
         result.AcceptancePassed.ShouldBe(false);
-        result.AcceptanceDetail.ShouldBe("no-branch-or-repo", "the exact detail this lane has always failed closed on");
-        grader.DirectoryCalls.ShouldBe(0, "an argv oracle must never be pointed at a directory of captured documents");
+        result.AcceptanceDetail.ShouldBe("grade-error: no-live-local-context");
+        result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.Environment);
+        grader.DirectoryCalls.ShouldBe(0, "no current invocation was established");
     }
 
     [Fact]
-    public async Task A_repo_less_deliverable_contract_grades_against_the_scratch_world()
+    public async Task A_repo_less_file_oracle_also_requires_a_live_context_instead_of_a_bare_path()
     {
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
 
         var spec = new SupervisorAcceptanceSpec { Command = new[] { "report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent };
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), RepoLessTaskWith(spec), SucceededRepoLess(), new FakeScratchWorkspace(), CancellationToken.None);
 
-        result.AcceptancePassed.ShouldBe(true);
-        result.AcceptanceDetail.ShouldBe("artifact-present");
-        grader.DirectoryCalls.ShouldBe(1, "the still-alive scratch directory IS the world — the same ONE directory oracle the supervisor fold rebuilds one for");
+        result.AcceptancePassed.ShouldBe(false);
+        result.AcceptanceDetail.ShouldBe("grade-error: no-live-local-context");
+        result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.Environment);
+        grader.DirectoryCalls.ShouldBe(0);
     }
 
     // ─── fixtures ────────────────────────────────────────────────────────────────
