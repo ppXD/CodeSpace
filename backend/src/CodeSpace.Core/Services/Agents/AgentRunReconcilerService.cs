@@ -306,7 +306,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
                         && !_db.AgentRunEvent.Any(e => e.AgentRunId == r.Id && e.OccurredAt >= eventThreshold))
             .OrderBy(r => r.LeaseExpiresAt)
             .Take(BatchSize)
-            .Select(r => new AgentRunReconciliationCandidate { RunId = r.Id, OwnerId = r.OwnerId, ReservationId = r.ReattachReservationId, Epoch = r.FenceEpoch, RunnerHandleJson = r.RunnerHandleJson, ReattachAttempts = r.ReattachAttempts })
+            .Select(r => new AgentRunReconciliationCandidate { RunId = r.Id, TeamId = r.TeamId, OwnerId = r.OwnerId, ReservationId = r.ReattachReservationId, Epoch = r.FenceEpoch, RunnerHandleJson = r.RunnerHandleJson, ReattachAttempts = r.ReattachAttempts })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -345,13 +345,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             if (await AdoptAdmittedLaunchAsync(candidate, adoptionDeadline, cancellationToken).ConfigureAwait(false) is { } adopted)
                 return adopted;
 
-            return await AbandonAsync(candidate, cancellationToken).ConfigureAwait(false);
+            return await AbandonAsync(candidate, AgentRunAbandonCause.NoHandle, cancellationToken).ConfigureAwait(false);
         }
 
         var probe = await ProbeQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
         if (probe is null)
-            return await AbandonAsync(candidate, cancellationToken, durable, handle).ConfigureAwait(false);   // can't probe → kill the maybe-alive orphan, then abandon (don't leave it stuck)
+            return await AbandonAsync(candidate, AgentRunAbandonCause.LeaseLapsed, cancellationToken, durable, handle).ConfigureAwait(false);   // can't probe → kill the maybe-alive orphan, then abandon (don't leave it stuck)
 
         if (probe.State == SandboxRunState.Exited)
             return await RecoverFromSpoolAsync(candidate, probe.ExitCode ?? -1, cancellationToken).ConfigureAwait(false);
@@ -360,7 +360,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             return await DeferToTheMintingHostAsync(candidate, handle, cancellationToken).ConfigureAwait(false);
 
         if (probe.State == SandboxRunState.Gone)
-            return await AbandonAsync(candidate, cancellationToken).ConfigureAwait(false);   // process already gone — nothing to kill
+            return await AbandonAsync(candidate, AgentRunAbandonCause.ProcessConfirmedDead, cancellationToken).ConfigureAwait(false);   // process already gone — nothing to kill
 
         // Running: the supervised process is still ALIVE but its worker vanished. Past the re-attach ceiling, KILL
         // it and abandon — a permanently-unattachable-but-alive run must still reach a terminal state, and leaving
@@ -369,7 +369,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         if (reattachAttempts >= MaxReattachAttempts)
         {
             _logger.LogWarning("AgentRunReconciler: agent run {RunId} is alive but exhausted {Max} re-attach attempts; killing the orphan and abandoning", runId, MaxReattachAttempts);
-            return await AbandonAsync(candidate, cancellationToken, durable, handle).ConfigureAwait(false);
+            return await AbandonAsync(candidate, AgentRunAbandonCause.LeaseLapsed, cancellationToken, durable, handle).ConfigureAwait(false);
         }
 
         return await ReattachAsync(candidate, cancellationToken).ConfigureAwait(false);
@@ -520,7 +520,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
 
         _logger.LogWarning("AgentRunReconciler: abandoning agent run {RunId} — its handle's host {LaunchHost} never answered and its deadline {Deadline} has passed, so no observer can still be completing it; its process cannot be reaped from here", runId, handle.LaunchHost, handle.Deadline);
-        return await AbandonAsync(candidate, cancellationToken).ConfigureAwait(false);
+        return await AbandonAsync(candidate, AgentRunAbandonCause.LeaseLapsed, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -551,9 +551,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// wall-clock deadline, holding the workspace and burning the injected model credential after the DB says
     /// Failed. Killing only on a won CAS means a run another replica/worker just legitimately landed (lost CAS) is
     /// never killed out from under it. The kill is best-effort; the abandon stands regardless. Appends the
-    /// abandoned-run event when it transitions.
+    /// abandoned-run event when it transitions, and closes the run's own open native-record attempt/execution
+    /// (<paramref name="cause"/> names which ladder branch gave up, for a reader of those rows) — otherwise a phantom
+    /// live process would survive in every reader of the record plane even after the Agent Run itself is Failed.
     /// </summary>
-    private async Task<StaleOutcome> AbandonAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken, ISandboxDurableRunner? durable = null, SandboxHandle? handle = null)
+    private async Task<StaleOutcome> AbandonAsync(AgentRunReconciliationCandidate candidate, AgentRunAbandonCause cause, CancellationToken cancellationToken, ISandboxDurableRunner? durable = null, SandboxHandle? handle = null)
     {
         var runId = candidate.RunId;
         var transitioned = await TerminalizeCandidateAsync(candidate, AgentRunStatus.Failed, AbandonedError, null, cancellationToken).ConfigureAwait(false);
@@ -564,6 +566,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;
+
+        // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own
+        // fencing is what makes a call here safe even if that read were ever stale.
+        await TerminalizeAbandonedHarnessExecutionQuietlyAsync(candidate.TeamId, runId, candidate.Epoch + 1, cause, cancellationToken).ConfigureAwait(false);
 
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
@@ -619,6 +625,40 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "AgentRunReconciler: failed to terminate the orphaned process for abandoned run {RunId}; it may keep running until its wall-clock deadline", runId);
+        }
+    }
+
+    /// <summary>
+    /// Close the abandoned run's own live native-record execution + any attempt still Running inside it, stamped
+    /// with the reconciler's own <paramref name="cause"/> — mirrors AgentRunExecutor.TerminalizeHarnessExecutionAsync
+    /// (best-effort and last: the run already reached Failed, and no failure here may change that). A no-op when the
+    /// deployed plane does not implement the closing side at all.
+    /// </summary>
+    private async Task TerminalizeAbandonedHarnessExecutionQuietlyAsync(Guid teamId, Guid runId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+    {
+        if (_nativeRecords is not Capture.INativeRecordExecutionPlane executions) return;
+
+        try { await executions.TerminalizeAbandonedAsync(teamId, runId, expectedEpoch, cause, cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: agent run {RunId} harness execution could not be terminalized (cause {Cause}); the row stays live for a later sweep", runId, cause);
+        }
+    }
+
+    /// <summary>
+    /// Close a spool-recovered run's own live native-record execution + any attempt still Running inside it. The
+    /// generic "never observed" reason is honest here too: the native plane's own observer never recorded this exit
+    /// — the recovery read a completely different signal (the sandbox runner's own exit marker) — so it is the same
+    /// closer the executor's forced terminals use, not a reconciler-specific cause.
+    /// </summary>
+    private async Task TerminalizeRecoveredHarnessExecutionQuietlyAsync(Guid teamId, Guid runId, long expectedEpoch, CancellationToken cancellationToken)
+    {
+        if (_nativeRecords is not Capture.INativeRecordExecutionPlane executions) return;
+
+        try { await executions.TerminalizeAsync(teamId, runId, expectedEpoch, cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: agent run {RunId} harness execution could not be terminalized after spool recovery; the row stays live for a later sweep", runId);
         }
     }
 
@@ -680,6 +720,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         // Only the winner can invalidate capture promises. A losing stale probe has no authority over its successor.
         await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence. The spool's exit
+        // code lands on the Agent Run's own result above; it never reaches the native record plane, whose own
+        // observer genuinely never saw this process exit.
+        await TerminalizeRecoveredHarnessExecutionQuietlyAsync(candidate.TeamId, runId, candidate.Epoch + 1, cancellationToken).ConfigureAwait(false);
 
         var kind = status switch
         {
