@@ -3,8 +3,7 @@ using CodeSpace.Messages.Tasks;
 namespace CodeSpace.Core.Services.Tasks.RoutePreview;
 
 /// <summary>
-/// Answers "where would this launch go?" without launching it. Read-only by contract: it opens no session,
-/// stages no run and persists nothing.
+/// Answers "where would this launch go?" without launching it. Persists a routing reference, but opens no session and stages no run.
 /// </summary>
 public interface ITaskRoutePreviewService
 {

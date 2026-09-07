@@ -15,6 +15,7 @@ using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
 
@@ -41,7 +42,7 @@ public class TaskRoutePreviewServiceTests
     private static TaskRoutePreviewService Preview(IEffortRouter router) => new(
         new TaskLaunchSeedProviderRegistry(new ITaskLaunchSeedProvider[] { new ChatSeedProvider() }),
         new AllRepositoriesInTeam(),
-        router);
+        new RoutingOnlySnapshotStore(router));
 
     private static TaskLaunchRequest Request(string goal, string? effort = null, string? recipe = null, RouteCaps? caps = null, string? shape = null) => new()
     {
@@ -115,6 +116,14 @@ public class TaskRoutePreviewServiceTests
             new[] { TaskEffortModes.Quick, TaskEffortModes.Standard, TaskEffortModes.Deep }, ignoreOrder: true);
 
         previewed.Decision!.Signals.RiskySideEffects.ShouldBeTrue("'deploy … production' is the risk signal the router escalates on regardless of model confidence");
+    }
+
+    // Persistence has real HTTP/Postgres coverage; this unit fixture isolates seed/scope/router composition.
+    private sealed class RoutingOnlySnapshotStore(IEffortRouter router) : ITaskRouteSnapshotService
+    {
+        public async Task<TaskRoutePreviewResult> CreateAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken) => new() { Route = await router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed, request), cancellationToken), DeploymentAutonomyCeiling = "Unleashed" };
+        public Task<TaskRouteSnapshotDecision> ReadAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<LaunchTaskResult> ConsumeAsync(TaskRouteSnapshotConsumption consumption, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     /// <summary>A guard that accepts every repo — tenancy itself is proven against real Postgres in the integration tier; these tests pin the routing, not the query.</summary>

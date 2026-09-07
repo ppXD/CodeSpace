@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Tasks.Contracts;
+using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Enums;
@@ -32,6 +33,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ITaskLaunchSeedProviderRegistry _seedProviders;
     private readonly ILaunchRepositoryScopeGuard _repositoryScope;
     private readonly IEffortRouter _router;
+    private readonly ITaskRouteSnapshotService _routeSnapshots;
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
     private readonly ISessionContextBuilder _sessionContext;
@@ -43,11 +45,12 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<TaskLaunchService> _logger;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, IEffortRouter router, ITaskRouteSnapshotService routeSnapshots, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
     {
         _seedProviders = seedProviders;
         _repositoryScope = repositoryScope;
         _router = router;
+        _routeSnapshots = routeSnapshots;
         _factory = factory;
         _sessions = sessions;
         _sessionContext = sessionContext;
@@ -70,18 +73,15 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         await EnsureAgentDefinitionsInTeamAsync(request, cancellationToken).ConfigureAwait(false);
 
-        var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
+        var preview = request.RouteSnapshotId is not null ? await _routeSnapshots.ReadAsync(request, seed, cancellationToken).ConfigureAwait(false) : null;
+        if (preview?.PreviousResult is { } previous) return previous;
+        var route = preview?.Route ?? await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
         EnsureAcceptanceMandate(request, route);
 
-        var profile = BuildAgentProfile(request, seed, route);
+        await EnsureSessionCanContinueAsync(request, cancellationToken).ConfigureAwait(false);
 
-        // Resolve the thread this run is a turn of: CONTINUE the named session (the run becomes its next top-level
-        // turn) or OPEN a new one. Both stage onto the same unit of work as the run, so they commit atomically — a
-        // launch that fails downstream (a rejected repo, an invalid continue target) leaves no orphan session.
-        var session = request.ContinueSessionId is { } continueId
-            ? await _sessions.ContinueAsync(continueId, request.TeamId, cancellationToken).ConfigureAwait(false)
-            : await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+        var profile = BuildAgentProfile(request, seed, route);
 
         // On a CONTINUE, prime the run with the thread's prior-turn digest — the projection folds this grounding into
         // the agent's prompt so the follow-up builds on earlier work. A fresh launch carries only the seed's own grounding.
@@ -106,6 +106,35 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var plannerModelRowId = await ResolvePlannerModelAsync(request, route, cancellationToken).ConfigureAwait(false);
 
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, CompletionMode = request.CompletionMode, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, SupervisorBrainModelPinned = brainPinned, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
+
+        // Potential model/Git preparation above runs without holding the snapshot row lock. The callback below
+        // performs only transactional session/run staging and is entered once across competing workers.
+        return request.RouteSnapshotId is not null
+            ? await _routeSnapshots.ConsumeAsync(new TaskRouteSnapshotConsumption(request, seed, () => StageAsync(request, context, cancellationToken)), cancellationToken).ConfigureAwait(false)
+            : await StageAsync(request, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureSessionCanContinueAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    {
+        if (request.ContinueSessionId is not { } id) return;
+        var status = await _db.WorkSession.AsNoTracking().Where(s => s.Id == id && s.TeamId == request.TeamId).Select(s => (WorkSessionStatus?)s.Status).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        if (status is null) throw new KeyNotFoundException($"Session {id} not found or not accessible.");
+        if (status != WorkSessionStatus.Open) throw new InvalidOperationException($"Session {id} is {status} and cannot take a new turn.");
+    }
+
+    private async Task<LaunchTaskResult> StageAsync(TaskLaunchRequest request, TaskBuildContext context, CancellationToken cancellationToken)
+    {
+        var seed = context.Seed;
+        var route = context.Route;
+
+        // Resolve the thread this run is a turn of: CONTINUE the named session (the run becomes its next top-level
+        // turn) or OPEN a new one. Both stage onto the same unit of work as the run, so they commit atomically — a
+        // launch that fails downstream (a rejected repo, an invalid continue target) leaves no orphan session.
+        var session = request.ContinueSessionId is { } continueId
+            ? await _sessions.ContinueAsync(continueId, request.TeamId, cancellationToken).ConfigureAwait(false)
+            : await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+
         // Deep/Auto: the session's chat surface — the channel the supervisor's HITL cards (ask_human, plan
         // confirmation, approvals) post into. Get-or-STAGED onto this launch's unit of work (a failed launch
         // leaves no orphan channel); every later turn of the session reuses the same room. Inert (null) for
@@ -114,8 +143,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             ? await _sessions.EnsureConversationAsync(session.SessionId, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false)
             : (Guid?)null;
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, CompletionMode = request.CompletionMode, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, SupervisorBrainModelPinned = brainPinned, ConversationId = conversationId, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId };
-
+        context = context with { ConversationId = conversationId };
         context = context with { LaunchContract = TaskLaunchContractSnapshot.Capture(request, context) };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);

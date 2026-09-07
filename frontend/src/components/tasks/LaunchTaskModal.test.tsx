@@ -26,9 +26,11 @@ vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }))
 // B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `inputSeen` records
 // the payload the composer asked with, so a test can prove BOTH that an explicit tier is never previewed (null)
 // and that the request carries the routing fields the launch itself would send.
-type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean };
+type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean; routeSnapshotId?: string };
 // The default is ANSWERED with no route: the preview settled and had nothing to confirm, so Launch is open. Every
 // pre-B1 test in this file relies on that, and a test that wants the gate CLOSED must say so explicitly.
+const releaseReference = vi.fn();
+const markLaunchAttempt = vi.fn();
 const ROUTE_ANSWERED: RouteState = { route: null, failed: false, loading: false, answered: true };
 let routeState: RouteState = ROUTE_ANSWERED;
 let inputSeen: (import("@/api/tasks").RoutePreviewInput | null)[] = [];
@@ -36,7 +38,7 @@ vi.mock("@/hooks/use-route-preview", () => ({
   useRoutePreview: (input: import("@/api/tasks").RoutePreviewInput | null) => {
     inputSeen.push(input);
     // Disabled (null) reads as answered — exactly what the real hook returns, so the gate opens immediately.
-    return input === null ? { route: null, failed: false, loading: false, answered: true } : routeState;
+    return { ...(input === null ? { route: null, failed: false, loading: false, answered: true } : routeState), releaseReference, markLaunchAttempt };
   },
 }));
 
@@ -550,20 +552,21 @@ const ROUTE: import("@/api/tasks").RoutePlan = {
 };
 
 describe("LaunchTaskModal — route preview (B1)", () => {
-  it("renders the confirm card and BLOCKS Launch until a depth is picked", () => {
-    routeState = { route: ROUTE, failed: false, loading: false, answered: true };
+  it("renders routing advice without treating low confidence as missing consent", () => {
+    routeState = { route: ROUTE, failed: false, loading: false, answered: true, routeSnapshotId: "snapshot-1" };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Refactor the auth module across several files");
 
     expect(screen.getByTestId("route-confirm-card")).toBeInTheDocument();
     expect(screen.getByText(/Heuristic guess \(cost tier high\)/)).toBeInTheDocument();
 
-    // THE gate — without it the card is decoration and the run starts anyway.
+    // Depth advice is not consent. Launch reuses the exact server-owned preview decision.
     const send = screen.getByLabelText("Launch task");
-    expect(send).toBeDisabled();
-    expect(send).toHaveAttribute("title", "Confirm the effort above to launch");
+    expect(send).not.toBeDisabled();
     fireEvent.click(send);
-    expect(launchSpy).not.toHaveBeenCalled();
+    expect(lastInput).toMatchObject({ routeSnapshotId: "snapshot-1" });
+    expect(markLaunchAttempt).toHaveBeenCalledWith("snapshot-1");
+    expect(releaseReference).toHaveBeenCalledWith("snapshot-1");
   });
 
   it("picking an option sets the effort EXPLICITLY, clears the card, and enables Launch", () => {
@@ -622,8 +625,8 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     typeTask("Drop the legacy tables and deploy the migration to production");
 
     expect(screen.getByTestId("route-risk-badge")).toBeInTheDocument();
-    expect(screen.getByText(/This looks irreversible/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Launch task")).toBeDisabled();
+    expect(screen.getByText(/Potential side effects/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Launch task")).not.toBeDisabled();
   });
 
   it("a confident route shows a one-line hint instead of a card and never blocks Launch", () => {

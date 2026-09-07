@@ -26,6 +26,12 @@ public interface IPostCommitActions
 
     /// <summary>Drain every deferred action. Invoked by <see cref="TransactionalBehavior{TRequest,TResponse}"/> once, after commit.</summary>
     Task RunAllAsync(CancellationToken cancellationToken);
+
+    /// <summary>Mark the current queue boundary before a nested transaction/savepoint stages side effects.</summary>
+    int CreateCheckpoint();
+
+    /// <summary>Discard only actions appended after the checkpoint when that nested operation rolls back.</summary>
+    void RollbackTo(int checkpoint);
 }
 
 public sealed class PostCommitActions : IPostCommitActions, IScopedDependency
@@ -75,5 +81,13 @@ public sealed class PostCommitActions : IPostCommitActions, IScopedDependency
                 _logger.LogWarning(ex, "Post-commit action failed; the reconciler will recover any dropped dispatch");
             }
         }
+    }
+
+    public int CreateCheckpoint() => _actions.Count;
+
+    public void RollbackTo(int checkpoint)
+    {
+        if (checkpoint < 0 || checkpoint > _actions.Count) throw new ArgumentOutOfRangeException(nameof(checkpoint));
+        _actions.RemoveRange(checkpoint, _actions.Count - checkpoint);
     }
 }

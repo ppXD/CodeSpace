@@ -11,6 +11,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
 import { useRepositories, useRepositoryBranches } from "@/hooks/use-repositories";
+import { ApiError } from "@/api/request";
 import { useRoutePreview } from "@/hooks/use-route-preview";
 import { useSpecPreview } from "@/hooks/use-spec-preview";
 import { useLaunchTask } from "@/hooks/use-tasks";
@@ -258,19 +259,12 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
     tier,
   };
 
-  // B1 route preview: on the AUTO tier the backend tells us where this launch WOULD go before it goes anywhere.
-  // The router has always built a confirm card for a low-confidence or risky-side-effect auto route — nothing ever
-  // showed it, so a task flagged for delete/drop/migrate/deploy/production/secrets was routed and STARTED with no
-  // human gate. Asking is free: the endpoint opens no session and stages no run. An explicit tier is already the
-  // operator's decision, so the preview is not asked for one at all (null disables it).
+  // Auto preview records the complete input and returns a reusable routing reference. Explicit effort already
+  // chooses depth, so it uses the existing launch path. Neither choice supplies execution consent.
   const routePreview = useRoutePreview(effort === "auto" ? buildRoutePreviewInput(formState) : null);
   const routeCard = routePreview.route?.needsConfirmCard ? routePreview.route : null;
-  // The gate: an auto launch WAITS on the operator's answer. Answering means picking a tier, which then rides the
-  // wire as an EXPLICIT effort — the confirmation is the tier itself, never a separate flag the backend must trust.
-  const routeConfirmPending = !!routeCard;
-  // …and it waits on the QUESTION too. Gating on the card alone leaves Launch live through the debounce window and
-  // the in-flight request, so a risky goal typed and sent inside ~1-3s would start unconfirmed — the card would
-  // arrive after the run did. A settled failure counts as answered, so an outage never wedges the button.
+  // Wait for the current preview to settle so launch can consume the decision being shown. A settled failure
+  // allows the legacy launch path, where the server computes the route and checks authority normally.
   const routeUnanswered = !routePreview.answered;
   // The one honest consequence line: the SAME sentence AgentAutonomyPolicy.DescribeNetwork will write into the run's
   // journal (shared words, pinned by networkPosture.fixture.json), plus what On actually costs. Off-tier keeps its
@@ -325,18 +319,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // submit. Standard is excluded: it verifies per item via the plan's own contracts and never sends this field for
   // ANY tier (the same `effort !== "standard"` gate the Acceptance-checks row itself is already shown/sent under).
   if (tier !== "Prototype" && effort !== "standard" && cfg.acceptanceChecks.length === 0) missing.push("an acceptance check");
-  // B1: an auto route the router wants confirmed BLOCKS the launch until the operator picks a tier, and an auto
-  // route not yet ANSWERED blocks it until the router has spoken. This is the one place the confirm card stops
-  // being decoration — a risky auto-classified task can no longer start unattended, or beat its own preview.
-  const canLaunch = missing.length === 0 && !routeConfirmPending && !routeUnanswered && !launch.isPending;
+  // Routing advice is not consent; server authorization remains independent of the displayed confidence.
+  const canLaunch = missing.length === 0 && !routeUnanswered && !launch.isPending;
 
   // A disabled send button must say WHY. Missing inputs first (the operator can act on those immediately), then
-  // the confirm card, then the still-open question — never a bare disabled button the operator reads as broken.
+  // the still-open preview — never a bare disabled button the operator reads as broken.
   const launchBlockedReason = canLaunch ? "Launch"
     : missing.length ? `Add ${missing.join(" and ")}`
-      : routeConfirmPending ? "Confirm the effort above to launch"
-        : routeUnanswered ? "Checking where this task will run…"
-          : "Launching…";
+      : routeUnanswered ? "Checking where this task will run…"
+        : "Launching…";
 
   const toggleRepo = (id: string) => {
     const short = repoName(id).split("/").pop() || "repo";
@@ -354,7 +345,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   const submit = () => {
     if (!canLaunch) return;
     // The SAME form snapshot the route preview was built from, so the launch cannot differ from what was previewed.
-    launch.mutate(buildLaunchInput(formState), { onSuccess: res => onLaunched?.(res.runId) });
+    if (routePreview.routeSnapshotId) routePreview.markLaunchAttempt(routePreview.routeSnapshotId);
+    launch.mutate({ ...buildLaunchInput(formState), ...(routePreview.routeSnapshotId ? { routeSnapshotId: routePreview.routeSnapshotId } : {}) }, { onSuccess: res => {
+      if (routePreview.routeSnapshotId) routePreview.releaseReference(routePreview.routeSnapshotId);
+      onLaunched?.(res.runId);
+    }, onError: error => {
+      // This typed rejection guarantees no new run consumed this reference. A network failure has no such
+      // guarantee, so its reference stays pinned and an exact retry can recover the committed result.
+      if (routePreview.routeSnapshotId && error instanceof ApiError && error.code === "task_route_snapshot_mismatch") routePreview.releaseReference(routePreview.routeSnapshotId);
+    } });
   };
 
   // Surface the model's intelligence in the picker: the EFFECTIVE capability tier (so the operator sees how auto ranks
@@ -834,8 +833,8 @@ const titleCase = (v: string) => (v ? v[0].toUpperCase() + v.slice(1) : v);
 /**
  * B1 — the ROUTE CONFIRM card, above the composer box. The router builds this whenever an auto route landed
  * below its confidence floor OR the classifier flagged risky side effects; until now nothing rendered it and the
- * run started anyway. It blocks the Launch button, and the only way to answer it is to pick a tier — which
- * leaves as an EXPLICIT effort, short-circuiting the classifier so the second route is deterministic.
+ * run started anyway. It offers optional depth choices; route advice is not an authorization gate.
+ * Auto launch consumes the preview reference, while an explicit choice requests a different route.
  *
  * <p>The options come from `confirm.options` (derived server-side from the live bounds presets), never a
  * hardcoded list — a new tier appears here with no frontend edit.</p>
@@ -853,7 +852,7 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
     <div className="lt3-route" data-risk={risky} data-testid="route-confirm-card">
       <div className="lt3-route-h">
         {risky ? <Ic.Triangle size={14} /> : <Ic.Compass size={14} />}
-        <span>{risky ? "This looks irreversible — confirm the depth" : "Confirm the depth before launching"}</span>
+        <span>{risky ? "Potential side effects — review the suggested depth" : "Suggested depth — adjust if needed"}</span>
         {risky && <span className="lt3-route-badge" data-testid="route-risk-badge">Risky side effects</span>}
       </div>
 
@@ -863,7 +862,7 @@ function RouteConfirmCard({ route, onPick }: { route: RoutePlan; onPick: (mode: 
 
       {route.degradedReason && <div className="lt3-route-degraded">{route.degradedReason}</div>}
 
-      <div className="lt3-route-opts" role="group" aria-label="Confirm the effort">
+      <div className="lt3-route-opts" role="group" aria-label="Choose the effort">
         {confirm.options.map(o => (
           <button
             key={o.mode}

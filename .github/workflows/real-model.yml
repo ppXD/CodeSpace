@@ -511,6 +511,7 @@ jobs:
             RealModelAnswerReview \
             RealModelDeliveryGate \
             RealModelPlanner \
+            RealModelPlannerRouteSnapshot \
             RealModelSession \
             RealModelSpecPreview
 

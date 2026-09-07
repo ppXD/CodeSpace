@@ -20,7 +20,7 @@ namespace CodeSpace.E2ETests.Infrastructure;
 /// dispatch → engine run → agent.run → executor → fake CLI → resume → terminal chain can be DRAINED after the
 /// HTTP request returns — the run actually executes, end to end, behind the real HTTP surface.
 /// </summary>
-public sealed class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.Program>, IAsyncLifetime
+public class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.Program>, IAsyncLifetime
 {
     private readonly string _adminConnectionString;
     private readonly string _testDatabaseName;
@@ -111,10 +111,14 @@ public sealed class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.P
         {
             // Singleton so deferred jobs survive past the request scope — the test drains them after the POST.
             b.RegisterType<DeferredJobClient>().As<ICodeSpaceBackgroundJobClient>().AsSelf().SingleInstance();
+            ConfigureContractTestServices(b);
         });
 
         return base.CreateHost(builder);
     }
+
+    /// <summary>Optional contract instrumentation; production services remain the default.</summary>
+    protected virtual void ConfigureContractTestServices(ContainerBuilder builder) { }
 
     /// <summary>The shared deferred-job client — the test drains it after the launch POST to run the engine + agent chain.</summary>
     public DeferredJobClient JobClient => Services.GetAutofacRoot().Resolve<DeferredJobClient>();

@@ -79,7 +79,7 @@ public class WorkflowRunsController : ControllerBase
     /// <summary>
     /// B1: preview the ROUTE a launch would take — effort / recipe / projection / bounds plus the classifier's
     /// decision and, for a low-confidence or risky-side-effect AUTO route, the confirm card the composer shows
-    /// BEFORE launching. Read-only: no session is opened, no run is staged, nothing is persisted.
+    /// BEFORE launching. Persists a routing reference for the exact input; opens no session and stages no run.
     /// </summary>
     [HttpPost("route-preview")]
     public async Task<IActionResult> RoutePreview([FromBody] PreviewTaskRouteCommand command, CancellationToken cancellationToken)

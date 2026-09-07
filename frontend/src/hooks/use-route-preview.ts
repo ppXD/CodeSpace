@@ -13,32 +13,13 @@ export const ROUTE_PREVIEW_DEBOUNCE_MS = 700;
  */
 export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 3;
 
-/**
- * B1: the route-preview lane's debounced fetch. Once the goal settles, ask the backend where this launch WOULD
- * go — which effort tier, recipe and projection, under which bounds, and whether the router wants the operator
- * to confirm before anything runs. Read-only end to end: the endpoint opens no session and stages no run.
- *
- * <p>Pass `null` to disable (the composer does so for an explicitly chosen tier — that is already the operator's
- * decision, so there is nothing to preview and nothing to confirm). Disabled reads as ANSWERED, so the launch
- * gate opens immediately.</p>
- *
- * <p><b>`answered` is the load-bearing return value, not `route`.</b> A gate built on `route?.needsConfirmCard`
- * alone is OPEN for the whole debounce window and the whole in-flight request — one to three seconds in which a
- * risky goal can be typed and launched before the router has said a word. `answered` is false from the moment
- * the goal changes until a reply (or a failure) lands for THAT goal, so the composer can hold Launch until the
- * question has actually been asked and answered.</p>
- *
- * <p>Failure still opens the gate: a transport fault records a reply with a null route, which makes `answered`
- * true and `failed` true — the composer says the preview is unavailable and allows the launch. Only a genuinely
- * outstanding question closes it. This is the deliberate trade: a preview OUTAGE must not be able to block
- * launching, but a preview still IN FLIGHT must.</p>
- *
- * <p>Staleness is handled by DERIVATION, not by clearing state in the effect (the lint-enforced
- * no-sync-setState-in-effect rule): every reply is stored WITH the key that produced it and exposed only while
- * that key is current; a sequence guard drops out-of-order resolutions of one key.</p>
- */
+/** Debounced routing preview bound to the full input. Responses are exposed only for the current key and
+ * generation; an expiring reference triggers a refresh. A failed preview remains an explicit legacy-path fallback.
+ * Routing advice is not consent. Actual launch authority is checked by the server on every request. */
+type PreviewReply = { key: string; generation: number; route: RoutePlan | null; deploymentAutonomyCeiling: string; routeSnapshotId?: string; refreshAfterMs?: number; launchAttempted?: boolean };
+
 export function useRoutePreview(input: RoutePreviewInput | null) {
-  const [reply, setReply] = useState<{ key: string; route: RoutePlan | null; deploymentAutonomyCeiling: string } | null>(null);
+  const [{ reply, generation }, setState] = useState<{ reply: PreviewReply | null; generation: number }>({ reply: null, generation: 0 });
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const seq = useRef(0);
 
@@ -56,25 +37,41 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
     const timer = setTimeout(async () => {
       setPendingKey(key);
       try {
+        const startedAt = performance.now();
         const result = await tasksApi.routePreview(JSON.parse(key) as RoutePreviewInput);
         if (seq.current !== mySeq) return;
-        setReply({ key, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "" });
+        const lifetime = Date.parse(result.expiresAt ?? "") - Date.parse(result.createdAt ?? "");
+        const refreshAfterMs = Number.isFinite(lifetime) ? Math.max(0, lifetime - (performance.now() - startedAt)) : undefined;
+        setState(previous => ({ ...previous, reply: { key, generation, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "", routeSnapshotId: result.routeSnapshotId, refreshAfterMs } }));
       } catch {
         // A failed preview is NOT a failed launch — record the miss (which counts as ANSWERED, so the gate
         // opens) and leave the route null so no card renders and nothing is blocked.
-        if (seq.current === mySeq) setReply(prev => ({ key, route: null, deploymentAutonomyCeiling: prev?.deploymentAutonomyCeiling ?? "" }));
+        if (seq.current === mySeq) setState(previous => ({ ...previous, reply: { key, generation, route: null, deploymentAutonomyCeiling: previous.reply?.deploymentAutonomyCeiling ?? "" } }));
       } finally {
         if (seq.current === mySeq) setPendingKey(p => (p === key ? null : p));
       }
     }, ROUTE_PREVIEW_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [key]);
+  }, [key, generation]);
 
-  const current = key !== null && reply?.key === key ? reply : null;
+  const current = key !== null && reply?.key === key && reply.generation === generation ? reply : null;
+  const refreshAfterMs = current?.refreshAfterMs;
+  const launchAttempted = current?.launchAttempted;
+
+  useEffect(() => {
+    if (refreshAfterMs === undefined || launchAttempted) return;
+    const timer = setTimeout(() => setState(previous => ({ ...previous, generation: previous.generation + 1 })), refreshAfterMs);
+    return () => clearTimeout(timer);
+  }, [refreshAfterMs, launchAttempted]);
 
   return {
     route: current?.route ?? null,
+    routeSnapshotId: current?.routeSnapshotId,
+    /** Preserve an attempted reference through expiry until the server resolves whether it committed a run. */
+    markLaunchAttempt: (snapshotId: string) => setState(previous => previous.reply?.routeSnapshotId === snapshotId ? { ...previous, reply: { ...previous.reply, launchAttempted: true } } : previous),
+    /** Only a conclusive success or rejection ends this admission intent; transport failures keep the reference. */
+    releaseReference: (snapshotId: string) => setState(previous => previous.reply?.routeSnapshotId === snapshotId ? { reply: null, generation: previous.generation + 1 } : previous),
     /** A reply arrived for the current key but carried no route — the preview is unavailable; say so, gate nothing. */
     failed: current !== null && current.route === null,
     loading: pendingKey !== null && pendingKey === key,

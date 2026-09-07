@@ -69,7 +69,7 @@ public class TaskLaunchContractCaptureTests
         }
 
         var separatelyRecorded = new[] { nameof(TaskLaunchRequest.TaskText), nameof(TaskLaunchRequest.SurfaceKind), nameof(TaskLaunchRequest.AcceptanceCriteria), nameof(TaskLaunchRequest.AcceptanceChecks), nameof(TaskLaunchRequest.DeliverySpec) };
-        var deliberatelyExcluded = new[] { nameof(TaskLaunchRequest.TeamId), nameof(TaskLaunchRequest.ActorUserId), nameof(TaskLaunchRequest.SurfacePayload) };
+        var deliberatelyExcluded = new[] { nameof(TaskLaunchRequest.TeamId), nameof(TaskLaunchRequest.ActorUserId), nameof(TaskLaunchRequest.SurfacePayload), nameof(TaskLaunchRequest.RouteSnapshotId) };
         mappings.Keys.Concat(separatelyRecorded).Concat(deliberatelyExcluded).Order(StringComparer.Ordinal)
             .ShouldBe(typeof(TaskLaunchRequest).GetProperties().Select(p => p.Name).Order(StringComparer.Ordinal), "a new launch control needs an explicit recorded or deliberately excluded decision");
     }
