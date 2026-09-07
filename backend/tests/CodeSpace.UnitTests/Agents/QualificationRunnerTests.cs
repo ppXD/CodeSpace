@@ -39,17 +39,26 @@ public class QualificationRunnerTests
     {
         var spec = new QualificationSpec { MinSolveRateLowerBound = 0.5, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
 
-        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 2, infra: 0), lowerBound: 0.7)
+        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 2, infra: 0), lowerBound: 0.7, BenchmarkExecutionPath.TaskLaunch)
             .ShouldBe(PerformanceQualification.Sealed);
 
-        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 2, infra: 0), lowerBound: 0.4)
+        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 2, infra: 0), lowerBound: 0.4, BenchmarkExecutionPath.TaskLaunch)
             .ShouldBe(PerformanceQualification.Shadow, "below the bound bar — measured evidence, no sealed claim");
 
-        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 0, infra: 4), lowerBound: 0.7)
+        QualificationRunner.Grant(spec, Score(solved: 18, unsolved: 0, infra: 4), lowerBound: 0.7, BenchmarkExecutionPath.TaskLaunch)
             .ShouldBe(PerformanceQualification.Shadow, "an infra-riddled round proves nothing about the model — the instrument must be healthy to seal");
 
-        QualificationRunner.Grant(spec, Score(solved: 0, unsolved: 0, infra: 0), lowerBound: 1.0)
+        QualificationRunner.Grant(spec, Score(solved: 0, unsolved: 0, infra: 0), lowerBound: 1.0, BenchmarkExecutionPath.TaskLaunch)
             .ShouldBe(PerformanceQualification.Shadow, "an empty suite seals nothing");
+    }
+
+    [Fact]
+    public void A_direct_agent_harness_cannot_seal_a_product_launch_mode()
+    {
+        var spec = new QualificationSpec { MinSolveRateLowerBound = 0.5, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
+
+        QualificationRunner.Grant(spec, Score(solved: 20, unsolved: 0, infra: 0), lowerBound: 0.9, BenchmarkExecutionPath.DirectAgentHarness)
+            .ShouldBe(PerformanceQualification.Shadow, "a direct agent harness did not exercise TaskLaunch routing, projection, workflow execution, or completion authority");
     }
 
     private static CorpusCellScore Score(int solved, int unsolved, int infra) =>

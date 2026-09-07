@@ -53,6 +53,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
 
         return new CorpusBenchmarkRun
         {
+            ExecutionPath = BenchmarkExecutionPath.DirectAgentHarness,
             Results = results,
             Errored = errored,
             Scorecard = BenchmarkScorecard.Compute(results),

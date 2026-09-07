@@ -31,6 +31,7 @@ public class CorpusBenchmarkRunnerTests
 
         var run = await sut.RunAsync(corpus, Guid.NewGuid(), selection: null, CancellationToken.None);
 
+        run.ExecutionPath.ShouldBe(BenchmarkExecutionPath.DirectAgentHarness, "this runner creates AgentRuns directly and must never label its evidence as the TaskLaunch product path");
         run.Results.Count.ShouldBe(4, "every (task × mode) pair ran — 2 tasks × 2 modes");
         run.Errored.ShouldBeEmpty();
         runner.Calls.Count.ShouldBe(4);
