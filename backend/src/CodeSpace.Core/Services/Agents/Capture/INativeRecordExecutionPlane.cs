@@ -51,6 +51,16 @@ public interface INativeRecordExecutionPlane
     /// immutable.</para>
     /// </summary>
     Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Exactly <see cref="TerminalizeAsync"/> — close the live execution and any attempt still Running inside it,
+    /// fenced the same way — but for the RECONCILER's own give-up paths rather than an executor's own terminal.
+    /// Nothing here was ever going to observe this process's exit (the run has no live worker left at all), so the
+    /// closed attempt is stamped with the reconciler's own <paramref name="cause"/> instead of the executor's generic
+    /// "never observed" reason, which is what lets an operator (or a later "is anything live?" reader) tell a
+    /// genuinely dead process apart from one the reconciler simply could not wait for any longer.
+    /// </summary>
+    Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken);
 }
 
 public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
@@ -62,6 +72,21 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     public const string ProcessOutcomeUnrecordedErrorCode = "capture.exit-unrecorded";
 
     private const string ProcessOutcomeUnrecordedMessage = "The harness execution reached a terminal with this process still open, so its outcome was never observed rather than assumed.";
+
+    /// <summary>Reason stamped on an attempt the reconciler abandoned with no durable process handle recorded for its run.</summary>
+    public const string ReconcilerAbandonedNoHandleErrorCode = "capture.reconciler-abandoned-no-handle";
+
+    /// <summary>Reason stamped on an attempt the reconciler abandoned after a liveness probe positively confirmed the process was gone.</summary>
+    public const string ReconcilerAbandonedProcessDeadErrorCode = "capture.reconciler-abandoned-process-dead";
+
+    /// <summary>Reason stamped on an attempt the reconciler abandoned because the run's lease lapsed with no worker left to renew it and no probe could confirm either outcome in time.</summary>
+    public const string ReconcilerAbandonedLeaseLapsedErrorCode = "capture.reconciler-abandoned-lease-lapsed";
+
+    private const string ReconcilerAbandonedNoHandleMessage = "The reconciler abandoned this run with no durable process handle ever recorded, so it had no way to check whether a process was still alive.";
+
+    private const string ReconcilerAbandonedProcessDeadMessage = "The reconciler abandoned this run after a liveness probe against its recorded handle positively confirmed the process was no longer running.";
+
+    private const string ReconcilerAbandonedLeaseLapsedMessage = "The reconciler abandoned this run because its lease lapsed with no worker left to renew it, and no probe could confirm either a live or a dead process before giving up.";
 
     private const string ExecutionUnlaunchedMessage = "The harness execution was closed with no process ever appended, so nothing it could have exited from was recorded.";
 
@@ -99,30 +124,51 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     /// run, and the safe direction of the two, since 0137 makes an execution's terminal state immutable while a
     /// Running row is only blocking.
     /// </summary>
-    public async Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken)
+    public Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken) =>
+        TerminalizeCoreAsync(new WorkerFence(teamId, agentRunId, expectedEpoch), ProcessOutcomeUnrecordedErrorCode, ProcessOutcomeUnrecordedMessage, cancellationToken);
+
+    public Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+    {
+        var (errorCode, errorMessage) = AbandonReason(cause);
+
+        return TerminalizeCoreAsync(new WorkerFence(teamId, agentRunId, expectedEpoch), errorCode, errorMessage, cancellationToken);
+    }
+
+    /// <summary>The vocabulary behind <see cref="AgentRunAbandonCause"/> — kept here, not on the caller, for the same reason <see cref="CloseAsync"/> decides its own Lost reason from a bare exit code: the plane owns the error-code/message pairing it persists.</summary>
+    private static (string ErrorCode, string ErrorMessage) AbandonReason(AgentRunAbandonCause cause) => cause switch
+    {
+        AgentRunAbandonCause.NoHandle => (ReconcilerAbandonedNoHandleErrorCode, ReconcilerAbandonedNoHandleMessage),
+        AgentRunAbandonCause.ProcessConfirmedDead => (ReconcilerAbandonedProcessDeadErrorCode, ReconcilerAbandonedProcessDeadMessage),
+        AgentRunAbandonCause.LeaseLapsed => (ReconcilerAbandonedLeaseLapsedErrorCode, ReconcilerAbandonedLeaseLapsedMessage),
+        _ => throw new ArgumentOutOfRangeException(nameof(cause), cause, "Unrecognized agent-run abandon cause."),
+    };
+
+    /// <summary>
+    /// Shared by <see cref="TerminalizeAsync"/> and <see cref="TerminalizeAbandonedAsync"/>: close the live execution
+    /// and any attempt still Running inside it, differing only in which reason lands on the closed attempt.
+    /// </summary>
+    private async Task TerminalizeCoreAsync(WorkerFence fence, string attemptErrorCode, string attemptErrorMessage, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
 
-        var live = await LiveExecutionAsync(db, teamId, agentRunId, cancellationToken).ConfigureAwait(false);
+        var live = await LiveExecutionAsync(db, fence.TeamId, fence.AgentRunId, cancellationToken).ConfigureAwait(false);
 
         if (live is null) return;
 
-        var fence = new WorkerFence(teamId, agentRunId, expectedEpoch);
-
         // Attempts first, in their own statement: 0137 refuses to terminalize an execution while any attempt is still
         // Running, and the guard reads the attempt rows rather than this statement's intent.
-        var unobserved = await CloseRunningAttemptsAsync(db, live, fence, cancellationToken).ConfigureAwait(false);
+        var unobserved = await CloseRunningAttemptsAsync(db, live, fence, attemptErrorCode, attemptErrorMessage, cancellationToken).ConfigureAwait(false);
 
         // An attempt still Running here is an observer that died inside the capture window: it read an unknown number
         // of frames it never made durable, so what this run's record SHOULD contain stops being knowable and its
         // completeness statement must say so rather than read as satisfied over the frames that did land.
         if (unobserved > 0 && live.WorkflowRunId is { } workflowRunId)
-            await MarkIndeterminateAsync(teamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+            await MarkIndeterminateAsync(fence.TeamId, workflowRunId, cancellationToken).ConfigureAwait(false);
 
         if (await CloseExecutionAsync(db, live, fence, cancellationToken).ConfigureAwait(false) > 0) return;
 
-        _logger.LogInformation("Native record plane closed no harness execution for agent run {RunId} at fence {Epoch}: the run's fence moved or another worker closed it first, so the row is left to whoever holds the run", agentRunId, expectedEpoch);
+        _logger.LogInformation("Native record plane closed no harness execution for agent run {RunId} at fence {Epoch}: the run's fence moved or another worker closed it first, so the row is left to whoever holds the run", fence.AgentRunId, fence.Epoch);
     }
 
     /// <summary>
@@ -200,7 +246,7 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     /// <c>PublishManifestStore.FencedUpdateAsync</c> already does, rather than being read first and trusted across the
     /// gap.</para>
     /// </summary>
-    private static async Task<int> CloseRunningAttemptsAsync(CodeSpaceDbContext db, LiveExecution live, WorkerFence fence, CancellationToken cancellationToken)
+    private static async Task<int> CloseRunningAttemptsAsync(CodeSpaceDbContext db, LiveExecution live, WorkerFence fence, string errorCode, string errorMessage, CancellationToken cancellationToken)
     {
         var closedAt = DateTimeOffset.UtcNow;
 
@@ -209,8 +255,8 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
             .Where(attempt => db.AgentRun.Any(run => run.Id == fence.AgentRunId && run.TeamId == fence.TeamId && run.FenceEpoch == fence.Epoch))
             .ExecuteUpdateAsync(set => set
                 .SetProperty(attempt => attempt.State, HarnessProcessAttemptState.Lost)
-                .SetProperty(attempt => attempt.ErrorCode, ProcessOutcomeUnrecordedErrorCode)
-                .SetProperty(attempt => attempt.ErrorMessage, ProcessOutcomeUnrecordedMessage)
+                .SetProperty(attempt => attempt.ErrorCode, errorCode)
+                .SetProperty(attempt => attempt.ErrorMessage, errorMessage)
                 .SetProperty(attempt => attempt.ExitedAt, closedAt)
                 .SetProperty(attempt => attempt.LastObservedAt, closedAt)
                 .SetProperty(attempt => attempt.LastModifiedAt, closedAt)

@@ -4,6 +4,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -314,6 +315,160 @@ public class AgentRunRecoveryFlowTests : IDisposable
             .ShouldBe(AgentRunStatus.Running, "a valid lease (a live worker) protects the run despite a stale heartbeat");
     }
 
+    // The defect the six tests below pin: the reconciler's terminal paths flip the Agent Run but never touch its own
+    // open WorkflowRunHarnessProcessAttempt / WorkflowRunHarnessExecution rows, so a phantom "live" process survives
+    // forever in every reader of the native record plane even after the run itself is Failed. Each case mirrors an
+    // existing scenario above, adding a real native-record attempt to the seeded run and asserting BOTH facts hold:
+    // the run's own terminal state is unchanged from today, and the native rows the reconciler leaves behind are
+    // closed with a cause an operator can tell apart from every other one.
+
+    [Fact]
+    public async Task Abandoned_running_run_with_no_handle_closes_its_open_native_attempt()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.FromMinutes(20), withRecentEvent: false, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Failed, "the reconciler's own terminal decision must not change");
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "an abandon with no handle must close the open attempt row it leaves behind, not leave it Running forever");
+        attempt.ExitCode.ShouldBeNull();
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedNoHandleErrorCode);
+        attempt.ClaimOwnerId.ShouldBeNull();
+
+        var execution = await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId);
+        execution.State.ShouldBe(HarnessExecutionState.Exited, "a launched process (attempt_count > 0) closes Exited, never Abandoned");
+        execution.TerminalAt.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task Durable_run_gone_without_a_marker_closes_its_open_native_attempt()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: null, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "a probe-confirmed-dead abandon must close the open attempt row");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedProcessDeadErrorCode);
+
+        (await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId)).State.ShouldBe(HarnessExecutionState.Exited);
+    }
+
+    [Fact]
+    public async Task Foreign_host_run_past_its_wall_clock_deadline_closes_its_open_native_attempt()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: null,
+            launchHost: "a-host-that-never-came-back", deadline: DateTimeOffset.UtcNow.AddMinutes(-1), fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "a lease-lapsed give-up past a foreign host's deadline must close the open attempt row");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedLeaseLapsedErrorCode);
+
+        (await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId)).State.ShouldBe(HarnessExecutionState.Exited);
+    }
+
+    [Fact]
+    public async Task Alive_durable_run_past_the_reattach_ceiling_closes_its_open_native_attempt()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var (runId, pid) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "a reattach-ceiling abandon of a still-alive-but-unattachable run must close the open attempt row");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedLeaseLapsedErrorCode);
+
+        (await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId)).State.ShouldBe(HarnessExecutionState.Exited);
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue("the kill is unrelated to the native-record close, and must still happen");
+    }
+
+    [Fact]
+    public async Task Durable_run_that_finished_unobserved_closes_its_open_native_attempt()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: 0, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        AgentRunReconcileSummary summary;
+        using (var scope = _fixture.BeginScope())
+            summary = await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        summary.RecoveredFromSpool.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Succeeded, "the exit marker recovery outcome must not change");
+
+        // The native plane's own observer genuinely never recorded this exit — the spool marker is a different, out-
+        // of-band signal — so the SAME generic reason the executor's own forced terminals use is the honest one here.
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "a spool recovery must close the native plane's own open attempt row too");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ProcessOutcomeUnrecordedErrorCode);
+
+        (await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId)).State.ShouldBe(HarnessExecutionState.Exited);
+    }
+
+    [Fact]
+    public async Task A_native_attempt_the_reconciler_abandoned_cannot_be_reopened_by_a_late_close()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.FromMinutes(20), withRecentEvent: false, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        // A late writer: the ORIGINAL worker's own executor, unaware its run was already reconciled, still reaches
+        // its ordinary happy-path close for the same attempt.
+        using (var lateScope = _fixture.BeginScope())
+            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "the reconciler's close already landed; a late writer's happy-path close must not reopen or overwrite it");
+        attempt.ExitCode.ShouldBeNull("a late writer's exit code must never overwrite an already-terminal row");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedNoHandleErrorCode);
+    }
+
     /// <summary>Plant an unanswered agent-grain decision (an AwaitingApproval <c>decision.request</c> ledger row) for a run — what the completion contract checks at recovery.</summary>
     private async Task<Guid> SeedPendingDecisionAsync(Guid teamId, Guid runId)
     {
@@ -332,8 +487,8 @@ public class AgentRunRecoveryFlowTests : IDisposable
         return id;
     }
 
-    /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes. <paramref name="launchHost"/> stamps the handle as some OTHER host's (null ⇒ unstamped, the pre-stamp shape); <paramref name="deadline"/> overrides the run's wall clock (default: an hour out).</summary>
-    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode, string? launchHost = null, DateTimeOffset? deadline = null)
+    /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes. <paramref name="launchHost"/> stamps the handle as some OTHER host's (null ⇒ unstamped, the pre-stamp shape); <paramref name="deadline"/> overrides the run's wall clock (default: an hour out); <paramref name="fenceEpoch"/> defaults to the unclaimed 0, and must be positive for a caller that also opens a native-record attempt against this run.</summary>
+    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode, string? launchHost = null, DateTimeOffset? deadline = null, long fenceEpoch = 0)
     {
         var spoolDir = Path.Combine(Path.GetTempPath(), "cs-recover-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(spoolDir);
@@ -350,7 +505,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.AgentRun.Add(new AgentRun
         {
-            Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running,
+            Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = fenceEpoch,
             StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,   // lease = last heartbeat + window (lapsed, since stamp is 20min old)
             RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
         });
@@ -364,7 +519,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
     /// state of an alive-but-unattachable run. Returns the run id + the supervisor pid so the test can assert the
     /// reconciler kills it. The process is tracked for best-effort teardown.
     /// </summary>
-    private async Task<(Guid RunId, int Pid)> SeedAliveDurableRunAsync(Guid teamId, int reattachAttempts)
+    private async Task<(Guid RunId, int Pid)> SeedAliveDurableRunAsync(Guid teamId, int reattachAttempts, long fenceEpoch = 0)
     {
         var workDir = Path.Combine(Path.GetTempPath(), "cs-kill-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workDir);
@@ -388,7 +543,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
             var db = scope.Resolve<CodeSpaceDbContext>();
             db.AgentRun.Add(new AgentRun
             {
-                Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running,
+                Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = fenceEpoch,
                 StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,
                 ReattachAttempts = reattachAttempts,
                 RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
@@ -428,7 +583,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, TimeSpan livenessAgo, bool withRecentEvent)
+    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, TimeSpan livenessAgo, bool withRecentEvent, long fenceEpoch = 0)
     {
         var runId = Guid.NewGuid();
         var stamp = DateTimeOffset.UtcNow - livenessAgo;
@@ -438,13 +593,31 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         // Lease = last heartbeat + the window, so the reconciler's lease-gate reproduces the heartbeat behaviour:
         // a 20-min-old stamp → lapsed lease (reclaimable); a 10s-old stamp → still-valid lease (left alone).
-        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window });
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, FenceEpoch = fenceEpoch, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window });
 
         if (withRecentEvent)
             db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = AgentEventKind.CommandExecuted, Text = "still working" });
 
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    /// <summary>
+    /// Open a REAL native-record capture against a manually-seeded run — mints the Running execution + attempt a
+    /// launch would, via the production plane, rather than hand-building rows that would have to satisfy 0137's
+    /// triggers by guesswork. <paramref name="fenceEpoch"/> must match the run's own seeded <c>FenceEpoch</c>, which
+    /// 0137's attempt-insert guard requires to equal the run's CURRENT fence.
+    /// </summary>
+    private async Task<NativeRecordCaptureHandle> SeedOpenAttemptAsync(Guid teamId, Guid runId, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var plane = scope.Resolve<INativeRecordPlane>();
+
+        return (await plane.OpenAsync(new NativeRecordCaptureRequest
+        {
+            TeamId = teamId, AgentRunId = runId, HarnessTypeKey = "codex-cli/v1", RunnerKind = "local",
+            RunnerLocatorJson = "{}", WorkerFenceEpoch = fenceEpoch, Channel = NativeRecordChannel.Stdout,
+        }, CancellationToken.None).ConfigureAwait(false)).ShouldNotBeNull("the plane must open a capture against a freshly seeded Running run");
     }
 
     private async Task<Guid> SeedTeamAsync()

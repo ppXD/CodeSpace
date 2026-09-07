@@ -835,6 +835,13 @@ public sealed class AgentNativeRecordPumpTests
             return Task.CompletedTask;
         }
 
+        public Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+        {
+            Terminalizations++;
+
+            return Task.CompletedTask;
+        }
+
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken)
         {
             PlainWrites++;
@@ -918,6 +925,7 @@ public sealed class AgentNativeRecordPumpTests
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class RefusingWritePlane : INativeRecordPlane
