@@ -533,6 +533,7 @@ jobs:
           bash .github/scripts/assert-every-filter-clause-ran.sh \
             backend/TestResults/real-model-wholeloop-aux.trx \
             RealModelAnswerReview \
+            CodeSpace.E2ETests.Workflows.RealModelAnswerReviewDelegationE2ETests.A_background_review_child_uses_the_live_CLI_and_its_parent_grant \
             RealModelDeliveryGate \
             RealModelPlanner \
             Live_planner_keeps_executable_content_checks_separate_from_file_obligations_and_the_real_oracle_rejects_wrong_content \
