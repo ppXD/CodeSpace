@@ -13,6 +13,10 @@ public static class CriticArtifactKinds
 {
     public const string WorkflowPlan = "workflow plan";
     public const string SupervisorDecision = "supervisor decision";
+
+    /// <summary>The S8/C1 output review's two artifact kinds — the only ones a <c>review.skipped</c> beat can carry and still be about a RESULT, never an intention (Rule 8 — the Room's fold pins the exact strings).</summary>
+    public const string AgentChange = "agent change";
+    public const string AgentAnswer = "agent answer";
 }
 
 /// <summary>What an <see cref="IStructuredCritic"/> reviews (Rule 18.1 — a data noun): the producer's output rendered as text, the kind of artifact, the mode, and the goal it should serve.</summary>

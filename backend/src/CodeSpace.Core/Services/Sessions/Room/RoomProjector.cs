@@ -821,6 +821,27 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         return $"{lead}: {(trimmed.Length <= MaxFlagReasonChars ? trimmed : trimmed[..MaxFlagReasonChars].TrimEnd() + "…")}";
     }
 
+    /// <summary>The verb the unreviewed chip leads with — the sibling of <see cref="FlaggedNoteVerb"/> for a review that was ATTEMPTED but never reached a verdict (neither an approval nor an objection).</summary>
+    private const string UnreviewedNoteVerb = "Unverified — the output review could not run";
+
+    /// <summary>
+    /// 5.6 residual — the chip's copy for a result whose configured output review EXHAUSTED both rungs (the S8 agent
+    /// reviewer and the in-process model critic) without ever producing a verdict. Distinct from <see cref="UnverifiedNote"/>
+    /// (no review was ever attempted — the ungraded-and-unconfigured case) and from <see cref="FlaggedNote"/> (a review
+    /// ran and objected): this result was neither examined nor endorsed nor rejected, so the copy says which silence it
+    /// is and — same as a flag — carries the machine's own reason rather than a bare "nothing checked this".
+    /// <paramref name="unit"/> names the branch when the run fanned out to more than one reviewed unit.
+    /// </summary>
+    internal static string UnreviewedNote(string? reason, string? unit = null)
+    {
+        var lead = string.IsNullOrWhiteSpace(unit) ? UnreviewedNoteVerb : $"{UnreviewedNoteVerb} for {ClipLabel(unit.Trim())}";
+        var trimmed = reason?.Trim();
+
+        if (string.IsNullOrEmpty(trimmed)) return $"{lead}.";
+
+        return $"{lead}: {(trimmed.Length <= MaxFlagReasonChars ? trimmed : trimmed[..MaxFlagReasonChars].TrimEnd() + "…")}";
+    }
+
     /// <summary>
     /// The containment probe for an interaction record written by the OUTPUT critic — <c>payload_json @&gt;
     /// '{"kind":"critic.output"}'</c>. Built off the critic's own <c>OutputReviewCallKind</c> const so a rename cannot
@@ -832,6 +853,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// to end, restated one rung up.</para>
     /// </summary>
     private static readonly string CriticOutputReviewProbe = JsonSerializer.Serialize(new Dictionary<string, string> { ["kind"] = Review.LlmStructuredCritic.OutputReviewCallKind });
+
+    /// <summary>
+    /// 5.6 residual — the containment probes for a <c>review.skipped</c> beat about the OUTPUT review specifically:
+    /// <c>payload_json @&gt; '{"kind":"critic.skipped","artifact_kind":"agent change"|"agent answer"}'</c>. Every critic
+    /// caller (plan, decision, output) writes the same generic <c>critic.skipped</c> kind when it can't produce a
+    /// verdict, so <c>artifact_kind</c> — the S8/C1 output review's own two values, pinned in <see cref="Review.CriticArtifactKinds"/>
+    /// — is what keeps a plan/decision review's skip from being read as this run's RESULT going unreviewed.
+    /// </summary>
+    private static readonly string CriticOutputSkippedChangeProbe = JsonSerializer.Serialize(new Dictionary<string, string> { ["kind"] = Review.LlmStructuredCritic.SkippedCallKind, ["artifact_kind"] = Review.CriticArtifactKinds.AgentChange });
+    private static readonly string CriticOutputSkippedAnswerProbe = JsonSerializer.Serialize(new Dictionary<string, string> { ["kind"] = Review.LlmStructuredCritic.SkippedCallKind, ["artifact_kind"] = Review.CriticArtifactKinds.AgentAnswer });
 
     /// <summary>
     /// C1 — whether ANY check examined this result. A run can terminalize a green Success having been graded by
@@ -867,12 +898,20 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             : Verification(graded: false, await OutputReviewAsync(runId, cellLabels, cancellationToken).ConfigureAwait(false), judgedSummary);
     }
 
-    /// <summary>The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never be widened by accident. <paramref name="review"/> is the output critic's folded verdict over every reviewed unit, or null when none recorded one.</summary>
-    internal static (bool? Verified, string? Note) Verification(bool graded, (bool Approved, string? Reason, string? Unit)? review, bool judgedSummary = false)
+    /// <summary>
+    /// The pure half of <see cref="VerificationOf"/> — pinned directly so the claim "something checked this" can never
+    /// be widened by accident. <paramref name="review"/> is the output critic's folded verdict over every reviewed
+    /// unit, or null when none recorded one. <c>Approved</c> is a TRI-STATE (5.6 residual): <c>true</c>/<c>false</c> is
+    /// a review that RAN to a verdict (endorsed / objected); <c>null</c> is a review that was ATTEMPTED but never
+    /// reached one (both rungs exhausted) — neither an endorsement nor an objection, so it must never fold into either.
+    /// </summary>
+    internal static (bool? Verified, string? Note) Verification(bool graded, (bool? Approved, string? Reason, string? Unit)? review, bool judgedSummary = false)
     {
         if (graded || review is { Approved: true }) return (true, null);
 
         if (review is { Approved: false } flag) return (false, FlaggedNote(flag.Reason, flag.Unit));
+
+        if (review is { Approved: null } unreviewed) return (false, UnreviewedNote(unreviewed.Reason, unreviewed.Unit));
 
         return (false, judgedSummary ? SummaryJudgedNote : UnverifiedNote);
     }
@@ -892,12 +931,19 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// end — but it is the only evidence such a run will ever have, and re-reading history as "no check ran" would be
     /// the same over-claim pointed the other way. So it stands as the legacy fallback, and ONLY there: every run with a
     /// recorded verdict is judged by the verdict.</para>
+    ///
+    /// <para>5.6 residual: also folds in the critic's own <c>review.skipped</c> beats (scoped to the output review's
+    /// two artifact kinds) — the durable record of a review that was ATTEMPTED and never reached a verdict. Read
+    /// alongside the <c>review.completed</c> beats in ONE fold so a fanned-out run with one branch approved and
+    /// another never reviewed cannot have the approval outrank the silence, exactly the failure shape
+    /// <see cref="FoldReviewVerdicts"/> already refuses for a flag.</para>
     /// </summary>
-    private async Task<(bool Approved, string? Reason, string? Unit)?> OutputReviewAsync(Guid runId, IReadOnlyDictionary<string, string> unitLabels, CancellationToken cancellationToken)
+    private async Task<(bool? Approved, string? Reason, string? Unit)?> OutputReviewAsync(Guid runId, IReadOnlyDictionary<string, string> unitLabels, CancellationToken cancellationToken)
     {
         var beats = await _db.WorkflowRunRecord.AsNoTracking()
-            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.ReviewCompleted)
-            .Where(r => EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe))
+            .Where(r => r.RunId == runId)
+            .Where(r => (r.RecordType == WorkflowRunRecordTypes.ReviewCompleted && EF.Functions.JsonContains(r.PayloadJson, CriticOutputReviewProbe))
+                     || (r.RecordType == WorkflowRunRecordTypes.ReviewSkipped && (EF.Functions.JsonContains(r.PayloadJson, CriticOutputSkippedChangeProbe) || EF.Functions.JsonContains(r.PayloadJson, CriticOutputSkippedAnswerProbe))))
             .OrderByDescending(r => r.Sequence)
             .Select(r => new { r.NodeId, r.IterationKey, r.Sequence, r.PayloadJson })
             .Take(MaxReviewBeatScan)
@@ -914,21 +960,26 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>
-    /// Fold the run's <c>review.completed</c> beats into ONE verdict: the LATEST beat per reviewed UNIT (so an
-    /// Improve-mode revise round is read at its final word, per branch), and an approval only when EVERY unit approved.
-    /// A flagged unit carries its own reviewer's words, and — when the run reviewed more than one — the NAME of the
-    /// branch that was flagged, since "this result" is not an answer a reader of a twelve-branch fan-out can act on.
-    /// Null when there were no beats.
+    /// Fold the run's review beats into ONE verdict: the LATEST beat per reviewed UNIT (so an Improve-mode revise
+    /// round — or a rung that finally produced a verdict after an earlier skip — is read at its final word, per
+    /// branch), and an approval only when EVERY unit approved. A non-approved unit carries its own words, and — when
+    /// the run reviewed more than one — the NAME of the branch, since "this result" is not an answer a reader of a
+    /// twelve-branch fan-out can act on. Null when there were no beats.
     ///
     /// <para>The unit is the beat's own <c>agentRunId</c>, NOT the ledger cell it landed on: a supervisor's entire
     /// per-turn fan-out shares one <c>(NodeId, IterationKey)</c> (<c>&lt;nodeId&gt;#turn{N}</c> — stamped per TURN, not
     /// per agent), so keying on the cell would re-collapse K sibling reviews into one and hand the verdict back to
     /// write order on exactly the lane this fold exists to fix. The cell is the FALLBACK for a beat that named no
-    /// agent run — still finer than the run, and the map lane's cells are already one per branch.</para>
+    /// agent run — still finer than the run, and the map lane's cells are already one per branch (a <c>review.skipped</c>
+    /// beat never names an agent run at all, so it always folds by cell).</para>
+    ///
+    /// <para>5.6 residual: <c>Approved</c> is a TRI-STATE. A unit whose latest word is a <c>review.skipped</c> beat
+    /// reads <c>null</c> — attempted, no verdict — and counts as NOT approved (so it can never be outranked by a
+    /// sibling's approval), but is reported distinctly from a <c>false</c> (a review that ran and objected).</para>
     ///
     /// <para>Pure; internal so it is unit-pinned directly rather than only through the DB tier.</para>
     /// </summary>
-    internal static (bool Approved, string? Reason, string? Unit)? FoldReviewVerdicts(IReadOnlyList<(string Cell, long Sequence, string PayloadJson)> beats, IReadOnlyDictionary<string, string> unitLabels)
+    internal static (bool? Approved, string? Reason, string? Unit)? FoldReviewVerdicts(IReadOnlyList<(string Cell, long Sequence, string PayloadJson)> beats, IReadOnlyDictionary<string, string> unitLabels)
     {
         if (beats.Count == 0) return null;
 
@@ -939,15 +990,15 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .OrderBy(u => u.Unit, StringComparer.Ordinal)
             .ToList();
 
-        var flagged = units.Where(u => !u.Verdict.Approved).ToList();
+        var notApproved = units.Where(u => u.Verdict.Approved != true).ToList();
 
-        if (flagged.Count == 0) return (true, null, null);
+        if (notApproved.Count == 0) return (true, null, null);
 
         // Named only for a real fan-out: with ONE reviewed unit there is nothing to disambiguate, and "this result" is
         // the accurate word (and the byte-identical one). A fanned-out unit no phase labelled is named honestly.
-        var name = units.Count == 1 ? null : unitLabels.TryGetValue(flagged[0].Unit, out var label) ? label : UnnamedUnit;
+        var name = units.Count == 1 ? null : unitLabels.TryGetValue(notApproved[0].Unit, out var label) ? label : UnnamedUnit;
 
-        return (false, flagged[0].Verdict.Reason, name);
+        return (notApproved[0].Verdict.Approved, notApproved[0].Verdict.Reason, name);
     }
 
     /// <summary>The ledger CELL one review beat landed on — the same <c>(NodeId, IterationKey)</c> pair the executor stamps and a phase's agent ref carries, with both absent forms normalized so a null and an empty iteration key are one cell, not two. Joined on a UNIT SEPARATOR no node id or iteration key can contain, so <c>("ab", "c")</c> and <c>("a", "bc")</c> stay two cells.</summary>
@@ -978,8 +1029,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>How many review beats the fold reads, newest first — a wide fan-out with several revise rounds each still fits, and the oldest rows dropped by the bound are superseded rounds.</summary>
     private const int MaxReviewBeatScan = 400;
 
-    /// <summary>Parse the reviewed <c>agentRunId</c> plus <c>approved</c> + <c>reason</c> out of a <c>review.completed</c> payload, in ONE pass (the fold reads every beat). A malformed / half-written beat reads as a FLAG carrying no reason — the conservative direction, since the one thing it proves is that a review ran; a beat naming no agent run falls back to its ledger cell in the fold. Internal for direct unit pinning.</summary>
-    internal static (bool Approved, string? Reason, string? AgentRunId) ReadReviewVerdict(string payloadJson)
+    /// <summary>
+    /// Parse the reviewed <c>agentRunId</c> plus <c>approved</c> + <c>reason</c> out of a review beat, in ONE pass (the
+    /// fold reads every beat, of either shape). A malformed / half-written beat reads as a FLAG carrying no reason —
+    /// the conservative direction, since the one thing it proves is that a review ran; a beat naming no agent run
+    /// falls back to its ledger cell in the fold. Internal for direct unit pinning.
+    ///
+    /// <para>5.6 residual: a <c>review.skipped</c> beat (<c>kind == "critic.skipped"</c>) reads <c>Approved: null</c> —
+    /// a review ATTEMPTED, never a verdict — regardless of any stray <c>approved</c> key, since that shape never
+    /// carries one. Every other <c>kind</c> parses exactly as before.</para>
+    /// </summary>
+    internal static (bool? Approved, string? Reason, string? AgentRunId) ReadReviewVerdict(string payloadJson)
     {
         try
         {
@@ -987,11 +1047,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return (false, null, null);
 
-            var approved = doc.RootElement.TryGetProperty("approved", out var a) && a.ValueKind == JsonValueKind.True;
             var reason = doc.RootElement.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
-            var agentRunId = doc.RootElement.TryGetProperty("agentRunId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+            var rawAgentRunId = doc.RootElement.TryGetProperty("agentRunId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+            var agentRunId = string.IsNullOrEmpty(rawAgentRunId) ? null : rawAgentRunId;
+            var skipped = doc.RootElement.TryGetProperty("kind", out var k) && k.ValueKind == JsonValueKind.String && k.GetString() == Review.LlmStructuredCritic.SkippedCallKind;
 
-            return (approved, reason, string.IsNullOrEmpty(agentRunId) ? null : agentRunId);
+            if (skipped) return (null, reason, agentRunId);
+
+            var approved = doc.RootElement.TryGetProperty("approved", out var a) && a.ValueKind == JsonValueKind.True;
+
+            return (approved, reason, agentRunId);
         }
         catch (JsonException) { return (false, null, null); }
     }

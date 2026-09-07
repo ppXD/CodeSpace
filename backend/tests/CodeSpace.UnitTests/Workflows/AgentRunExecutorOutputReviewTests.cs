@@ -88,6 +88,12 @@ public sealed class AgentRunExecutorOutputReviewTests
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a failed review is never worse than no review — fail-open");
         result.ExitReason.ShouldNotBe("output-flagged", "a review that did not run must not masquerade as a flag");
 
+        // 5.6 residual: the RESULT itself now carries the same fact — the only surface a STANDALONE run's result (no
+        // Room, no workflow ledger) ever exposes. Status/CompletionDisposition are unchanged (visibility, not
+        // punishment); a reader of the result alone can no longer read "Succeeded, no feedback" as "reviewed and clean".
+        result.UnreviewedReason.ShouldNotBeNullOrWhiteSpace("a reader of the result alone must be able to tell 'never reviewed' from 'reviewed and clean'");
+        result.UnreviewedReason.ShouldContain("revoked");
+
         // D5 — this assertion USED to be `ShouldBeEmpty()`: the change shipped ungated and the lane said nothing. A
         // STANDALONE run has no workflow ledger for the critic's review.skipped beat, so its own event stream is the
         // only surface its operator reads. Fail-open is unchanged; the silence is not.
@@ -320,6 +326,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "a broken co-check must not manufacture a flag — fail-open to the agent's approval");
+        result.UnreviewedReason.ShouldBeNull("the AGENT'S OWN verdict stood — a broken co-check is not the run going unreviewed");
         critic.CallCount.ShouldBe(1);
         runs.AppendedEvents.ShouldBeEmpty();
     }
@@ -348,6 +355,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.UnreviewedReason.ShouldBeNull("the LADDERED model call produced a real verdict — the run was reviewed, just not by the agent");
         critic.CallCount.ShouldBe(1, "the model call is the LADDER — a laddered model approval never co-signs itself");
     }
 
@@ -404,6 +412,7 @@ public sealed class AgentRunExecutorOutputReviewTests
 
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the answer lane fails open like the diff lane — a review that could not run never manufactures a flag");
         result.ExitReason.ShouldNotBe("output-flagged");
+        result.UnreviewedReason.ShouldNotBeNullOrWhiteSpace("the answer lane says WHY just as the diff lane does");
     }
 
     [Fact]

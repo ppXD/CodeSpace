@@ -2380,11 +2380,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // configured output review did not happen and the change ships ungated. A STANDALONE run (no WorkflowRunId)
         // has no workflow ledger for the critic's review.skipped beat to land on, so the agent's own event stream is
         // the only surface its operator ever reads; the beat rides here for every agent run alike.
+        //
+        // 5.6 residual: the RESULT itself now carries the same fact. Status/CompletionDisposition stay untouched
+        // (visibility, not punishment) — but a reader of the result alone (a standalone run's only surface, or any
+        // consumer that never reads the agent's own event stream) can no longer mistake "never reviewed" for "reviewed
+        // and clean" just because Status still reads Succeeded.
         if (verdict.Failed)
         {
             await AppendReviewSkippedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
 
-            return result;
+            return result with { UnreviewedReason = verdict.Rationale };
         }
 
         var feedback = RenderReviewFeedback(verdict);
@@ -2516,11 +2521,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (HasDiff(result))
-            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent change", Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind };
+            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind };
 
         var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
 
-        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind };
+        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind };
     }
 
     /// <summary>The goal the critic judges an ANSWER against — the task goal plus the acceptance criteria the operator/planner authored, so "is this done?" is asked against the stated contract rather than against the prose alone. No contract ⇒ the goal verbatim.</summary>
