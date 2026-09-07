@@ -267,13 +267,17 @@ public class SupervisorDeciderTests
         prompt.ShouldNotContain("the SUBJECT under test", Case.Sensitive, "an ordinary verdict says nothing about subjects — the clause is for the pass that had no protected judge behind it");
     }
 
-    [Fact]
-    public void A_pass_graded_on_the_candidates_own_file_under_test_says_so_in_the_prompt()
+    [Theory]
+    [InlineData("solution.sh")]   // the SUBJECT under test — a file the run never owned
+    [InlineData("check.sh")]      // the run's OWN new check script — the OTHER half SubjectDetailSuffix collapses into the same list
+    public void A_pass_graded_on_the_candidates_own_file_under_test_says_so_in_the_prompt(string file)
     {
         // The pass path is where this could hide: the fold drops the evidence tail on green (nothing to repair)
         // and the verdict line returns before rendering any evidence, so a grade that ran the candidate's OWN copy
         // of the file the check executes reached the brain reading exactly like a protected pass — and the brain
-        // was about to MERGE on it. The clause the grade's detail carries is the only carrier left.
+        // was about to MERGE on it. The clause the grade's detail carries is the only carrier left. Worded so it
+        // is TRUE for both files the collapsed detail can carry: calling either one "the SUBJECT under test"
+        // would mis-name the other (a candidate-authored check script is not the deliverable).
         var agentId = Guid.NewGuid();
         var outcome = SupervisorOutcome.FoldAgentResults(
             $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
@@ -282,7 +286,7 @@ public class SupervisorDeciderTests
                 new SupervisorAgentResult
                 {
                     AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/foo",
-                    AcceptancePassed = true, AcceptanceDetail = "tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "solution.sh",
+                    AcceptancePassed = true, AcceptanceDetail = "tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + file,
                 },
             });
 
@@ -295,8 +299,8 @@ public class SupervisorDeciderTests
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
 
         prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
-        prompt.ShouldContain("the check EXECUTES solution.sh — the SUBJECT under test", Case.Sensitive, "the brain weighing a merge is told which bytes graded themselves");
-        prompt.ShouldContain("not a protected judge", Case.Sensitive);
+        prompt.ShouldContain($"graded on the candidate's OWN {file}, not a protected judge", Case.Sensitive, "the brain weighing a merge is told which bytes graded themselves");
+        prompt.ShouldNotContain("the SUBJECT under test", Case.Sensitive, "the collapsed detail mixes a real subject with the run's own new check script — naming either one THE subject would mis-name the other");
     }
 
     [Fact]

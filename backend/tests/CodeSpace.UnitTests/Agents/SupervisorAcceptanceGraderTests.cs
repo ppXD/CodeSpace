@@ -585,7 +585,9 @@ public class SupervisorAcceptanceGraderTests
         var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("a base we cannot read protects nothing — it does not invent a verdict");
-        grade.Detail.ShouldBe("tests-passed");
+        // check.sh is the run's OWN oracle candidate (its floor runs it too) — an unreadable base still owes the
+        // brain the fact that THIS pass ran it unprotected, so the clause rides the detail same as any other unit.
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
         oracle.Context.ShouldNotBeNull();
     }
 
@@ -645,7 +647,10 @@ public class SupervisorAcceptanceGraderTests
     public async Task A_judge_that_could_have_been_protected_but_was_not_says_so(string? oracleBaseSha, string expectedNote)
     {
         // Silence was readable as protection: a decider weighing a pass, or an operator reading a receipt, could
-        // not tell "the oracle was restored and untouched" from "nobody ever anchored it".
+        // not tell "the oracle was restored and untouched" from "nobody ever anchored it". check.sh is ALSO the
+        // run's own oracle candidate (Command/Floor both name it), so an unreadable base still owes the brain the
+        // one fact it can state without probing anything: this pass ran check.sh unprotected (P4-3's own per-unit
+        // fold never reads OracleNote, so the detail clause is the only carrier that reaches it on a pass).
         var runners = new RecordingRunnerRegistry();
         runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: not a tree object" });
         var artifacts = new FakeArtifactStore();
@@ -654,9 +659,11 @@ public class SupervisorAcceptanceGraderTests
         var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor(oracleBaseSha), CancellationToken.None);
 
         grade.Passed.ShouldBeTrue("an unanchored oracle never invents a verdict — it reports honestly and grades");
-        grade.Detail.ShouldBe("tests-passed");
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
         grade.OracleNote.ShouldBe(expectedNote);
-        artifacts.Puts.ShouldBeEmpty("an ABSENCE must not mint the CAS evidence a receipt binds to — that would loosen admission on the strength of nothing");
+        artifacts.Puts.ShouldHaveSingleItem().Text.ShouldContain(
+            "a file the base does not ship, so this grade ran your own new check script", Case.Sensitive,
+            "the run-owned candidate that just ran unprotected is reported like any other subject account — the INTEGRITY note above stays the only thing an absence alone never earns");
     }
 
     [Fact]
@@ -666,6 +673,12 @@ public class SupervisorAcceptanceGraderTests
         // half: a unit whose manifest carries no base still AUTHORED an oracle, so the honest report is "nobody
         // anchored it". Reading only the derived half sent that grade down the subject path instead — silently
         // (no integrity note at all) and while minting evidence that called the authored oracle the subject.
+        //
+        // This is ALSO the no-subject, byte-identical companion to the Theory above: solution.sh is not a
+        // run-owned candidate (Floor names check.sh, not solution.sh), so UnanchoredSubject stays null and this
+        // grade carries NEITHER a detail clause NOR evidence — unlike check.sh above, which is run-owned and
+        // therefore does. Nobody should "fix" this back to carry the clause too: without a base, an authored
+        // oracle unrelated to what actually ran has decided nothing about that file worth speculating on.
         var runners = new RecordingRunnerRegistry();
         var artifacts = new FakeArtifactStore();
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners, artifacts: artifacts);

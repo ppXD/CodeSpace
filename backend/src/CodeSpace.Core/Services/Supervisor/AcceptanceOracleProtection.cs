@@ -33,6 +33,15 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// instead of a void. <c>SupervisorDecisionSchema</c>'s own field description carries the matching carve-out, so
 /// the model is told the rule rather than merely corrected by it.</para>
 ///
+/// <para><b>This carve-out is not complete — only direct.</b> It degrades an authored path only when that SAME
+/// path is itself a program-position token of the command's own argv. An authored <c>protectedPaths: ["solution.sh"]</c>
+/// beside a command like <c>sh check.sh</c>, where <c>check.sh</c> executes <c>solution.sh</c> INTERNALLY rather
+/// than in its own argv, never surfaces to this derivation at all — <c>solution.sh</c> is not a program-position
+/// token of THIS command, so it still restores and voids like any other authored oracle. The server has no way to
+/// answer "what does this script run" for a command it never interprets; the residual is closed only by
+/// <c>SupervisorDecisionSchema</c>'s instruction never to name a file the subtask is expected to modify, not by
+/// anything enforced here.</para>
+///
 /// <para>Pure by construction: repository existence is answered by a caller-supplied predicate, so the extraction
 /// rule is unit-testable without git and the production caller answers it off the clone it already has.</para>
 /// </summary>
@@ -127,6 +136,16 @@ public static class AcceptanceOracleProtection
 
         return at < 0 ? null : acceptanceDetail![(at + SubjectDetailMarker.Length)..];
     }
+
+    /// <summary>
+    /// The neutral clause a PASS carries for <paramref name="files"/> (from <see cref="SubjectFilesIn"/>) — worded
+    /// so it is TRUE whichever half of <see cref="SupervisorAcceptanceGrader"/>'s collapsed list produced it: the
+    /// SUBJECT under test (a file the run never owned) or the candidate's OWN new check script (a file the run owns
+    /// but base never shipped). Naming either one "the SUBJECT under test" mis-names the other, so this says
+    /// neither. The decider's verdict line and the recitation's compact both render this SAME phrase, so a
+    /// self-graded pass cannot read one way in one prompt section and another in the other.
+    /// </summary>
+    public static string SubjectClausePhrase(string files) => $"graded on the candidate's OWN {files}, not a protected judge";
 
     /// <summary>
     /// The program-position tokens of <paramref name="argv"/>, normalized to repo-relative pathspecs and deduped —
