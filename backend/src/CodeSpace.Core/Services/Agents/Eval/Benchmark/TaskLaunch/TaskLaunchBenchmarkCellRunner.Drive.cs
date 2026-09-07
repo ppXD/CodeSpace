@@ -10,12 +10,40 @@ using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 
 public sealed partial class TaskLaunchBenchmarkCellRunner
 {
     private const int DrivePollIntervalMs = 200;
+
+    /// <summary>
+    /// <see cref="LaunchAsync"/>, guarded against the ONE known way it can leave an orphan behind: the launch's
+    /// <c>WorkSession</c> + <c>WorkflowRun</c> commit in a SINGLE <c>SaveChangesAsync</c>
+    /// (<c>RunFromSnapshotStarter.StageAsync</c>) with NO ambient transaction — this runner calls
+    /// <see cref="ITaskLaunchService"/> directly, never through the Mediator <c>ICommand</c> pipeline that
+    /// <c>TransactionalBehavior</c> wraps — so a LATER step in the same call (route/purpose stamping, the queued-run
+    /// ledger write, or the immediate post-commit dispatch <see cref="IPostCommitActions.RunAfterCommitAsync"/> runs
+    /// inline when it finds no open transaction) throwing leaves that WorkSession/WorkflowRun durably committed with
+    /// no <see cref="LaunchTaskResult"/> ever returned to retire it. On exactly that shape of failure, recover the
+    /// newest run this borrowed Owner could have created since <paramref name="fixture"/> was staged and retire its
+    /// session artifacts before re-throwing — see <see cref="RecoverOrphanedLaunchAsync"/>.
+    /// </summary>
+    private async Task<LaunchTaskResult> LaunchOrRecoverAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, StagedFixture fixture, CancellationToken cancellationToken)
+    {
+        var attemptStartedAt = DateTimeOffset.UtcNow;
+
+        try
+        {
+            return await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverOrphanedLaunchAsync(context.TeamId, fixture.ActorUserId, attemptStartedAt, cancellationToken).ConfigureAwait(false);
+            throw;
+        }
+    }
 
     /// <summary>
     /// Build the launch request from the cell's task + arm + selection and enter through the REAL
@@ -47,6 +75,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             RequestedEffort = BenchmarkModeEffort.RequestedEffortFor(mode),
             Autonomy = selection?.Autonomy?.ToString(),
             CompletionMode = WorkflowDefinition.CompletionModeShadow,
+            Purpose = WorkflowRunPurposes.Qualification,
             Overrides = new TaskExecutionOverrides
             {
                 Harness = selection?.Harness ?? task.Harness,
@@ -61,6 +90,49 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
         };
 
         return InFreshScopeAsync(scope => scope.Resolve<ITaskLaunchService>().LaunchAsync(request, cancellationToken));
+    }
+
+    /// <summary>
+    /// Best-effort recovery for the post-commit-throw shape documented on <see cref="LaunchOrRecoverAsync"/>. Identifies
+    /// the orphan by the tightest key available WITHOUT relying on <see cref="Persistence.Entities.WorkflowRun.Purpose"/>
+    /// (the very stamp a failure here may have pre-empted): the newest <c>WorkflowRun</c> sourced from a snapshot launch,
+    /// actored by this cell's borrowed Owner, in this team, created at or after <paramref name="attemptStartedAt"/> — by
+    /// construction at most one real launch (this cell's own) can match, since the borrowed Owner never launches
+    /// concurrently on their own behalf. Re-stamps <c>Purpose</c> when it didn't land (so the run also drops out of the
+    /// team Runs index) and retires the session artifacts exactly like a normal completed cell
+    /// (<see cref="RetireSessionArtifactsAsync"/>). Internal (not private) so this is unit/integration-pinned directly
+    /// (InternalsVisibleTo) by seeding the exact orphan shape, since no existing seam injects the underlying
+    /// post-commit fault itself. Never throws — the caller re-raises the ORIGINAL launch exception regardless.
+    /// </summary>
+    internal async Task RecoverOrphanedLaunchAsync(Guid teamId, Guid actorUserId, DateTimeOffset attemptStartedAt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await InFreshScopeAsync(async scope =>
+            {
+                var db = scope.Resolve<CodeSpaceDbContext>();
+
+                var orphan = await db.WorkflowRun.AsNoTracking()
+                    .Where(r => r.TeamId == teamId && r.ActorId == actorUserId && r.SourceType == WorkflowRunSourceTypes.Snapshot && r.CreatedDate >= attemptStartedAt)
+                    .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
+                    .Select(r => new { r.Id, r.SessionId, r.Purpose })
+                    .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+                if (orphan?.SessionId is not { } sessionId) return;
+
+                if (orphan.Purpose == null)
+                    await db.WorkflowRun.Where(r => r.Id == orphan.Id)
+                        .ExecuteUpdateAsync(s => s.SetProperty(r => r.Purpose, WorkflowRunPurposes.Qualification), cancellationToken).ConfigureAwait(false);
+
+                await RetireSessionArtifactsAsync(db, sessionId, cancellationToken).ConfigureAwait(false);
+
+                _logger.LogWarning("TaskLaunchBenchmarkCellRunner: recovered an orphaned qualification launch (run {RunId}, session {SessionId}) after a post-commit failure", orphan.Id, sessionId);
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "TaskLaunchBenchmarkCellRunner: could not recover an orphaned qualification launch for team {TeamId}", teamId);
+        }
     }
 
     /// <summary>

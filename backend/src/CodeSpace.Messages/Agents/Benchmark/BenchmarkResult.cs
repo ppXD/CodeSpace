@@ -93,4 +93,14 @@ public sealed record BenchmarkResult
 
     /// <summary>P19, <see cref="BenchmarkModeEffort.IsTaskLaunch"/> modes only: the RESOLVED <c>RoutePlan.ProjectionKind</c> the real Launch entry projected this cell onto (single-agent / plan-map-synth / plan-map-dynamic / supervisor). Null for every direct-harness mode.</summary>
     public string? RouteProjectionKind { get; init; }
+
+    /// <summary>
+    /// P19, <see cref="BenchmarkModeEffort.IsTaskLaunch"/> modes only: the ACTUAL <c>WorkflowRun.CompletionEnforcementMode</c>
+    /// this cell's run was stamped with — read off the persisted run, never assumed from what the cell requested, so a
+    /// census reader never has to trust that the Shadow override actually took (an unbackable claim under Enforced
+    /// would otherwise PARK a Deep/Auto cell instead of terminaling it, since <see cref="BenchmarkTask"/> authors no
+    /// <c>AcceptanceChecks</c> — see <c>TaskLaunchBenchmarkCellRunner.LaunchAsync</c>). Null for every direct-harness
+    /// mode (no <c>WorkflowRun</c> — and so no completion-contract concept — exists for a bare <c>AgentRun</c>).
+    /// </summary>
+    public string? CompletionMode { get; init; }
 }

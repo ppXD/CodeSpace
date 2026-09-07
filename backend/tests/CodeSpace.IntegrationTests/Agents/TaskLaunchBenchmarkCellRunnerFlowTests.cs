@@ -1,10 +1,17 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
+using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Sessions;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
@@ -50,6 +57,9 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         result.RouteEffortMode.ShouldBe(TaskEffortModes.Quick, "an explicit Quick arm routes to the quick effort — no classifier confirm card");
         result.RouteProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "quick effort projects single-agent");
         result.ObservedModel.ShouldBeNull("the no-op fake CLI emits no model line — unknown stays unknown, never fabricated from what was requested");
+        // CompletionEnforcementMode.Shadow.ToString() — the STAMPED enum, not WorkflowDefinition.CompletionModeShadow's
+        // lowercase wire string (that's the DEFINITION's opt-in vocabulary; this is what actually landed on the run).
+        result.CompletionMode.ShouldBe(nameof(Messages.Contracts.CompletionEnforcementMode.Shadow), "read off the ACTUAL persisted WorkflowRun, not assumed — proves the Shadow override this cell always requests really did take");
         result.AgentRunId.ShouldNotBeNull();
 
         await AssertRealLaunchedRunAsync(result.AgentRunId!.Value, teamId);
@@ -107,7 +117,15 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         using var cli = new FakeBenchmarkCli();
         using var workspace = Fixture.Stage(checkExitCode: 0);
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        // Pinned explicitly, not by alphabetical luck: the real Launch/route/project pipeline builds the plan-map
+        // definition itself, so — unlike an authored-workflow test — nothing here can retarget a node's `provider`
+        // config directly. Seeding ONLY DeterministicCoordinatedLlmClient's row (never the other 5 test fakes
+        // SeedTeamAsync's default pool would add) is the one lever available: the null-pin selector then has
+        // exactly one structured-eligible candidate, so it resolves to it BY CONSTRUCTION — not because
+        // "TestCoordinator-model" happens to sort first among six. Its own doc explicitly covers both roles this
+        // cell needs (the plan-emitting structured call AND the plain-text synthesizer call).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, WorkflowsTestSeed.PoolModelIdFor(DeterministicCoordinatedLlmClient.ProviderTag), DeterministicCoordinatedLlmClient.ProviderTag);
 
         var result = await RunAsync(TestsPassTask(BenchmarkMode.TaskLaunchStandard), BenchmarkMode.TaskLaunchStandard, workspace.Directory, teamId);
 
@@ -117,11 +135,90 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         result.RouteProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "standard effort projects the plan-map-synth fan-out");
         result.AgentRunId.ShouldNotBeNull();
 
-        // The team's seeded in-process model pool has 6 structured-capable fakes and no pin, so the null-pin
-        // selector's total order (default desc, tier desc, THEN model-id ordinal asc) picks whichever sorts first:
-        // "TestCoordinator-model" (DeterministicCoordinatedLlmClient), whose plan half emits exactly 2 subtasks
-        // (Draft/Review) — 2 real branches.
+        // DeterministicCoordinatedLlmClient's plan half emits exactly 2 subtasks (Draft/Review) — 2 real branches.
         await AssertBranchesSucceededAsync(result.AgentRunId!.Value, teamId, expectedBranches: 2);
+    }
+
+    [Fact]
+    public async Task ReconstructWorkspaceAsync_applies_every_attempts_own_real_patch_not_just_the_last()
+    {
+        // Every fan-out flow test's CLI is the pure no-op script — it never touches the workspace, so
+        // "every attempt's captured diff, applied in dispatch order" had never actually been proven against TWO
+        // branches carrying genuinely DIFFERENT real diffs. Driving that through the full launch/route/project
+        // pipeline hits the production supervisor's OWN branch-integration step (git.integrate_run) — a real,
+        // separate concern this test has no business depending on — so this drives ReconstructWorkspaceAsync
+        // directly (InternalsVisibleTo) with two REAL git-diff-produced patches (captured off actual clones, never
+        // hand-typed) and asserts both land on the fixture.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var workspace = Fixture.Stage(checkExitCode: 0);
+        await RunGitAsync(workspace.Directory, "init", "-q", "-b", "main");
+        await File.WriteAllTextAsync(Path.Combine(workspace.Directory, "check.sh"), "#!/bin/sh\nexit 0\n");
+        await RunGitAsync(workspace.Directory, "-c", "user.email=t@t.local", "-c", "user.name=t", "add", "-A");
+        await RunGitAsync(workspace.Directory, "-c", "user.email=t@t.local", "-c", "user.name=t", "commit", "-q", "-m", "fixture init");
+
+        var patchA = await CaptureRealPatchAsync(workspace.Directory, "branch-a.txt", "from branch A\n");
+        var patchB = await CaptureRealPatchAsync(workspace.Directory, "branch-b.txt", "from branch B\n");
+
+        using var scope = _fixture.BeginScope();
+        var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+
+        await sut.ReconstructWorkspaceAsync(workspace.Directory, new[] { FakeAttempt(patchA), FakeAttempt(patchB) }, CancellationToken.None);
+
+        File.Exists(Path.Combine(workspace.Directory, "branch-a.txt")).ShouldBeTrue("the FIRST attempt's own real patch must land — not overwritten or dropped by the second");
+        File.Exists(Path.Combine(workspace.Directory, "branch-b.txt")).ShouldBeTrue("the SECOND (graded/last) attempt's own real patch must ALSO land — reconstruction must never apply only the graded attempt's diff and skip the other");
+        (await File.ReadAllTextAsync(Path.Combine(workspace.Directory, "branch-a.txt"))).ShouldBe("from branch A\n");
+        (await File.ReadAllTextAsync(Path.Combine(workspace.Directory, "branch-b.txt"))).ShouldBe("from branch B\n");
+    }
+
+    /// <summary>A REAL unified diff for a new file, captured off an actual git clone + <c>git diff --cached</c> — never hand-typed — so it applies onto <paramref name="repoDirectory"/> (its own clone parent) exactly like a real captured <c>AgentRunResult.Patch</c> would.</summary>
+    private static async Task<string> CaptureRealPatchAsync(string repoDirectory, string fileName, string content)
+    {
+        var clonePath = Path.Combine(Path.GetTempPath(), "cs-launch-cell-patch-src-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            await RunGitAsync(Path.GetTempPath(), "clone", "-q", repoDirectory, clonePath);
+            await File.WriteAllTextAsync(Path.Combine(clonePath, fileName), content);
+            await RunGitAsync(clonePath, "add", "-A");
+
+            return await RunGitCaptureAsync(clonePath, "diff", "--cached");
+        }
+        finally
+        {
+            try { Directory.Delete(clonePath, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    private static AgentRun FakeAttempt(string patch) => new()
+    {
+        Id = Guid.NewGuid(),
+        Status = Messages.Enums.AgentRunStatus.Succeeded,
+        ResultJson = System.Text.Json.JsonSerializer.Serialize(new AgentRunResult { Status = Messages.Enums.AgentRunStatus.Succeeded, ExitReason = "completed", Patch = patch }, AgentJson.Options),
+    };
+
+    private static Task RunGitAsync(string workingDirectory, params string[] args) => RunGitCaptureAsync(workingDirectory, args);
+
+    private static async Task<string> RunGitCaptureAsync(string workingDirectory, params string[] args)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+        };
+
+        foreach (var arg in args) startInfo.ArgumentList.Add(arg);
+
+        using var process = new System.Diagnostics.Process { StartInfo = startInfo };
+
+        process.Start();
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"git {string.Join(' ', args)} (cwd {workingDirectory}) failed: exit {process.ExitCode}: {stderr}");
+
+        return stdout;
     }
 
     [Fact]
@@ -163,13 +260,16 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
     }
 
     [Fact]
-    public async Task A_completed_Deep_cell_leaves_the_teams_provider_instance_list_and_the_owners_open_sessions_unchanged()
+    public async Task A_completed_Deep_cell_leaves_the_teams_provider_instances_runs_index_and_owners_conversations_unchanged()
     {
         // The data leak this closes: every cell created a real ProviderInstance (a junk "codespace-qualification"
-        // GitHub connection permanently at the top of the team's real Integrations list) and launched AS the team's
-        // real Owner, opening a real WorkSession — a Conversation too, for Deep — in that person's own history, none
-        // of it ever retired. Count-before == count-after proves the retirement actually removes the cell's
-        // footprint from what the team/owner would see, not merely that SOME cleanup step ran without throwing.
+        // GitHub connection permanently at the top of the team's real Integrations list), stamped a WorkflowRun the
+        // team's own Runs index would list right alongside genuine launches, and launched AS the team's real Owner,
+        // opening a real WorkSession — a Conversation too, for Deep — in that person's own history, none of it ever
+        // retired. Before/after over the REAL production read surfaces (IWorkflowService.ListTeamRunsAsync,
+        // ISessionReadService.ListAsync, IConversationService.ListForUserAsync) proves the retirement actually
+        // removes the cell's footprint from what the team/owner would SEE, not merely that some cleanup step ran
+        // without throwing against an ad-hoc predicate a real caller never uses.
         if (OperatingSystem.IsWindows()) return;
 
         SupervisorDecisionScript script;
@@ -191,8 +291,16 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
             var after = await LeakSurfaceAsync(teamId, ownerId);
 
             after.ProviderInstances.ShouldBe(before.ProviderInstances, "the ad-hoc qualification GitHub connection must be retired — never a permanent addition to the team's real Integrations list");
-            after.OpenSessions.ShouldBe(before.OpenSessions, "the launch's WorkSession must be archived — never a live thread left in the borrowed Owner's own session history");
-            after.OpenConversations.ShouldBe(before.OpenConversations, "the Deep launch's chat surface (Conversation) must be archived alongside its session — never a live channel left behind");
+            after.RunsIndexCount.ShouldBe(before.RunsIndexCount, "the qualification WorkflowRun's Purpose column must exclude it from the team's own Runs index — never a phantom entry there");
+            after.OwnersConversationsListed.ShouldBe(before.OwnersConversationsListed, "the Deep launch's chat surface (Conversation) must be soft-deleted alongside archival — never a live channel left in the borrowed Owner's OWN conversation list");
+
+            // KNOWN RESIDUAL (see this PR's Limitations): WorkSession has no soft-delete column, so
+            // ISessionReadService.ListAsync (no status filter at all) still returns the archived qualification
+            // session as a real row — archival only stops it from reading as an OPEN thread, it does not remove
+            // the row from the team-wide list. Asserting the exact +1 (never +0, and never more) means a
+            // regression that leaks a SECOND row, or a future soft-delete column that finally closes this gap
+            // without updating this assertion, both fail this test loudly.
+            after.AllTeamSessionsListed.ShouldBe(before.AllTeamSessionsListed + 1, "exactly one archived-but-still-listed qualification session is the disclosed residual — not zero (no fix shipped) and not more than one (no additional leak)");
         }
         finally
         {
@@ -232,6 +340,96 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         {
             script.PlanThenStop();
         }
+    }
+
+    [Fact]
+    public async Task RecoverOrphanedLaunchAsync_retires_the_newest_qualification_run_and_session_created_since_the_attempt_started()
+    {
+        // The failure shape this closes: ITaskLaunchService.LaunchAsync commits the WorkSession + WorkflowRun in a
+        // SINGLE SaveChangesAsync (RunFromSnapshotStarter.StageAsync) with NO ambient transaction on this runner's
+        // direct (non-Mediator) call path — so a step AFTER that commit throwing (route/purpose stamping, the
+        // queued-run ledger write, or the dispatcher IPostCommitActions.RunAfterCommitAsync runs INLINE with no
+        // open transaction) leaves both rows durably committed with no LaunchTaskResult ever returned to retire
+        // them. There is no existing seam to inject that fault at its real call site, so this seeds the exact
+        // committed end-state directly — Purpose still null, as it would be had the purpose stamp itself been the
+        // step that failed — and drives the recovery method by its InternalsVisibleTo seam.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var attemptStartedAt = DateTimeOffset.UtcNow;
+
+        var (runId, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, attemptStartedAt.AddSeconds(1));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, attemptStartedAt, CancellationToken.None);
+        }
+
+        using var assertScope = _fixture.BeginScope();
+        var db = assertScope.Resolve<CodeSpaceDbContext>();
+
+        var session = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == sessionId);
+        session.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Archived, "the orphaned session must be archived exactly like a normally-retired cell — never left Open in the borrowed Owner's history");
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Purpose.ShouldBe(Messages.Constants.WorkflowRunPurposes.Qualification, "the recovery must re-stamp Purpose when it never landed — otherwise the orphan would also leak into the team's Runs index");
+    }
+
+    [Fact]
+    public async Task RecoverOrphanedLaunchAsync_ignores_a_run_created_before_the_attempt_started()
+    {
+        // The lower bound matters: a genuine run this same borrowed Owner launched moments earlier (in another
+        // cell, or as real prior activity) must never be mistaken for THIS attempt's orphan and get its real
+        // session archived.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var attemptStartedAt = DateTimeOffset.UtcNow;
+
+        var (_, sessionId) = await SeedOrphanedQualificationLaunchAsync(teamId, ownerId, attemptStartedAt.AddSeconds(-30));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var sut = (TaskLaunchBenchmarkCellRunner)scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            await sut.RecoverOrphanedLaunchAsync(teamId, ownerId, attemptStartedAt, CancellationToken.None);
+        }
+
+        using var assertScope = _fixture.BeginScope();
+        var db = assertScope.Resolve<CodeSpaceDbContext>();
+
+        var session = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == sessionId);
+        session.Status.ShouldBe(Messages.Enums.WorkSessionStatus.Open, "a run created BEFORE this attempt started is never this attempt's own orphan — its session must be left untouched");
+    }
+
+    /// <summary>Seeds exactly the committed shape <c>RunFromSnapshotStarter.StageAsync</c> leaves behind: an OPEN <c>WorkSession</c> plus its <c>WorkflowRun</c> (snapshot-sourced, actored by the borrowed Owner, <c>Purpose</c> still null), <c>createdDate</c> controlling which side of the attempt-start boundary it falls on.</summary>
+    private async Task<(Guid RunId, Guid SessionId)> SeedOrphanedQualificationLaunchAsync(Guid teamId, Guid ownerId, DateTimeOffset createdDate)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var sessionId = Guid.NewGuid();
+        db.WorkSession.Add(new WorkSession
+        {
+            Id = sessionId, TeamId = teamId, Title = "qualification orphan fixture", Kind = Messages.Enums.WorkSessionKind.Task,
+            Status = Messages.Enums.WorkSessionStatus.Open, LastActivityAt = createdDate,
+            CreatedDate = createdDate, CreatedBy = ownerId, LastModifiedBy = ownerId,
+        });
+
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, WorkflowId = null, SourceType = Messages.Constants.WorkflowRunSourceTypes.Snapshot,
+            ActorType = Messages.Constants.WorkflowRunActorTypes.User, ActorId = ownerId, NormalizedPayloadJson = "{}",
+            Status = Messages.Enums.WorkflowRunRequestStatus.Consumed, ReceivedAt = createdDate, VerifiedAt = createdDate, NormalizedAt = createdDate,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, WorkflowId = null, TeamId = teamId, RunRequestId = requestId,
+            SourceType = Messages.Constants.WorkflowRunSourceTypes.Snapshot, ActorId = ownerId, SessionId = sessionId, Purpose = null,
+            Status = Messages.Enums.WorkflowRunStatus.Pending, CreatedDate = createdDate, CreatedBy = ownerId, LastModifiedBy = ownerId,
+        });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return (runId, sessionId);
     }
 
     // ─── plumbing ────────────────────────────────────────────────────────────────
@@ -284,17 +482,26 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId).OrderBy(d => d.Sequence).Select(d => d.DecisionKind).ToListAsync();
     }
 
-    /// <summary>The exact counts a real operator would see: <c>ProviderInstanceService.ListAsync</c>'s own (team, not-deleted) predicate, and the borrowed Owner's own OPEN (not-yet-archived) sessions/conversations — the surface a leaked ad-hoc qualification resource would inflate.</summary>
-    private async Task<(int ProviderInstances, int OpenSessions, int OpenConversations)> LeakSurfaceAsync(Guid teamId, Guid ownerId)
+    /// <summary>
+    /// The exact counts a real operator/owner would see, read through the SAME production entry points they use —
+    /// never an ad-hoc predicate that could drift from what those services actually filter on:
+    /// <c>ProviderInstanceService.ListAsync</c>'s own (team, not-deleted) predicate; <c>IWorkflowService.ListTeamRunsAsync</c>
+    /// (the team's own Runs index); <c>ISessionReadService.ListAsync</c> (the team-wide sessions index — NO status
+    /// filter, so an archived row still counts, the disclosed residual); and <c>IConversationService.ListForUserAsync</c>
+    /// for the borrowed Owner (the exact list that person would see).
+    /// </summary>
+    private async Task<(int ProviderInstances, int RunsIndexCount, int AllTeamSessionsListed, int OwnersConversationsListed)> LeakSurfaceAsync(Guid teamId, Guid ownerId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var providerInstances = await db.ProviderInstance.AsNoTracking().CountAsync(p => p.TeamId == teamId && p.DeletedDate == null);
-        var openSessions = await db.WorkSession.AsNoTracking().CountAsync(s => s.TeamId == teamId && s.CreatedBy == ownerId && s.Status == Messages.Enums.WorkSessionStatus.Open);
-        var openConversations = await db.Conversation.AsNoTracking().CountAsync(c => c.TeamId == teamId && !c.Archived);
 
-        return (providerInstances, openSessions, openConversations);
+        var runsPage = await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamId, RunListFilter.None, cursor: null, limit: 100, CancellationToken.None);
+        var sessionsPage = await scope.Resolve<ISessionReadService>().ListAsync(teamId, cursor: null, limit: 100, CancellationToken.None);
+        var ownersConversations = await scope.Resolve<IConversationService>().ListForUserAsync(teamId, ownerId, CancellationToken.None);
+
+        return (providerInstances, runsPage.Items.Count, sessionsPage.Items.Count, ownersConversations.Count);
     }
 
     private static BenchmarkTask TestsPassTask(BenchmarkMode mode = BenchmarkMode.TaskLaunchQuick) => new()

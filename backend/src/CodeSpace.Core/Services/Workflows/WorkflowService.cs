@@ -1202,11 +1202,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// The base team-runs query both pagination paths share. Excludes only NESTED-EXECUTION runs — a flow.subworkflow
-    /// child (SourceType `workflow.child`) runs inside its parent's Run Room, not as its own index row. NOT a
-    /// ParentRunId filter: a replay / rerun fork also carries ParentRunId (its lineage to the original), yet is a
-    /// top-level run the user launched and expects here. Agent runs are a separate entity, never WorkflowRun rows.
-    /// TeamId is on the run directly, so snapshot / task runs (null WorkflowId) are included.
+    /// The base team-runs query both pagination paths share. Excludes NESTED-EXECUTION runs — a flow.subworkflow
+    /// child (SourceType `workflow.child`) runs inside its parent's Run Room, not as its own index row — and any run
+    /// carrying a non-null <see cref="WorkflowRun.Purpose"/> (e.g. a TaskLaunch qualification/benchmark cell, which
+    /// launches through the real Launch entry as the team's own borrowed Owner but is not real work; see
+    /// <c>WorkflowRunPurposes</c>). NOT a ParentRunId filter: a replay / rerun fork also carries ParentRunId (its
+    /// lineage to the original), yet is a top-level run the user launched and expects here. Agent runs are a
+    /// separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs (null
+    /// WorkflowId) are included.
     ///
     /// LINEAGE COLLAPSE: a run + every replay/rerun fork of it share ONE lineage root (<c>RootRunId ?? Id</c>); the
     /// index shows only the LATEST attempt of each lineage, so a rerun supersedes its predecessors in-place rather than
@@ -1223,8 +1226,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// A never-rerun run (root = its own Id, no newer sibling) always survives → byte-identical to the pre-collapse list.
     /// </summary>
     private IQueryable<WorkflowRun> CollapseToLatestPerLineage(Guid teamId) =>
-        _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow
-            && !_db.WorkflowRun.Any(o => o.TeamId == teamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow
+        _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow && r.Purpose == null
+            && !_db.WorkflowRun.Any(o => o.TeamId == teamId && o.SourceType != WorkflowRunSourceTypes.ChildWorkflow && o.Purpose == null
                 && (o.RootRunId ?? o.Id) == (r.RootRunId ?? r.Id)
                 && (o.CreatedDate > r.CreatedDate || (o.CreatedDate == r.CreatedDate && o.Id.CompareTo(r.Id) > 0))));
 

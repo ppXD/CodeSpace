@@ -46,7 +46,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
         try
         {
-            launched = await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
+            launched = await LaunchOrRecoverAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
 
             await DriveToTerminalAsync(launched.RunId, DriveDeadline(task), cancellationToken).ConfigureAwait(false);
 
@@ -59,7 +59,9 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
             var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, task, context.WorkspaceDirectory, cancellationToken).ConfigureAwait(false);
 
-            return BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts));
+            var completionMode = await LoadCompletionEnforcementModeAsync(launched.RunId, cancellationToken).ConfigureAwait(false);
+
+            return BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts), completionMode);
         }
         finally
         {

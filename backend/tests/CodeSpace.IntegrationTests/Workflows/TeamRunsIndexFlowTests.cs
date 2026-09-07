@@ -61,6 +61,27 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Excludes_a_run_carrying_a_non_null_purpose_even_when_it_is_the_newest()
+    {
+        // A TaskLaunch qualification/benchmark cell (WorkflowRunPurposes.Qualification) launches through the SAME
+        // real entry as a genuine operator task — the ONLY discriminator is this column. Non-null must exclude the
+        // run from the index even though it is newer than the genuine run, so it can never bump a real launch off
+        // a keyset page or inflate the History pager's total count.
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var real = await InsertRunAsync(teamA, parentRunId: null, createdDate: t, workflowId: null);
+        await InsertRunAsync(teamA, parentRunId: null, createdDate: t.AddMinutes(1), workflowId: null, purpose: WorkflowRunPurposes.Qualification);
+
+        var result = await ListAsync(teamA, 50);
+
+        result.Select(r => r.Id).ShouldBe(new[] { real }, "the qualification-purposed run is newer but must never appear in the team's own Runs index");
+
+        var offsetPage = await OffsetPageAsync(teamA, RunListFilter.None, page: 1, pageSize: 50);
+        offsetPage.TotalCount.ShouldBe(1, "the History pager's total count must also exclude it");
+    }
+
+    [Fact]
     public async Task The_0082_backfill_walks_a_pre_migration_fork_chain_up_to_its_root()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1023,7 +1044,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null, Guid? sessionId = null, DateTimeOffset? completionParkedAt = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null, Guid? rootRunId = null, string? rerunFromNodeId = null, Guid? sessionId = null, DateTimeOffset? completionParkedAt = null, string? purpose = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1066,6 +1087,7 @@ WHERE t.id = roots.run_id AND t.root_run_id IS NULL;");
             ScopeProjectIds = projectIds ?? [],
             ActorId = actorId,
             ProjectionKind = projectionKind,   // RunKind is GENERATED from source_type — not set here
+            Purpose = purpose,   // non-null (e.g. WorkflowRunPurposes.Qualification) excludes the run from the index by default
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,

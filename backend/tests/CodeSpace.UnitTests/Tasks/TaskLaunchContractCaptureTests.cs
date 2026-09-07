@@ -69,7 +69,10 @@ public class TaskLaunchContractCaptureTests
         }
 
         var separatelyRecorded = new[] { nameof(TaskLaunchRequest.TaskText), nameof(TaskLaunchRequest.SurfaceKind), nameof(TaskLaunchRequest.AcceptanceCriteria), nameof(TaskLaunchRequest.AcceptanceChecks), nameof(TaskLaunchRequest.DeliverySpec) };
-        var deliberatelyExcluded = new[] { nameof(TaskLaunchRequest.TeamId), nameof(TaskLaunchRequest.ActorUserId), nameof(TaskLaunchRequest.SurfacePayload), nameof(TaskLaunchRequest.RouteSnapshotId) };
+        // Purpose is never an operator-facing launch control — it is an internal-caller-only marker (P19:
+        // TaskLaunchBenchmarkCellRunner stamps WorkflowRunPurposes.Qualification; every real launch surface leaves
+        // it null) that shapes no node and has no place in a contract of what the OPERATOR requested.
+        var deliberatelyExcluded = new[] { nameof(TaskLaunchRequest.TeamId), nameof(TaskLaunchRequest.ActorUserId), nameof(TaskLaunchRequest.SurfacePayload), nameof(TaskLaunchRequest.RouteSnapshotId), nameof(TaskLaunchRequest.Purpose) };
         mappings.Keys.Concat(separatelyRecorded).Concat(deliberatelyExcluded).Order(StringComparer.Ordinal)
             .ShouldBe(typeof(TaskLaunchRequest).GetProperties().Select(p => p.Name).Order(StringComparer.Ordinal), "a new launch control needs an explicit recorded or deliberately excluded decision");
     }

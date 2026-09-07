@@ -17,6 +17,12 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
                 .OrderBy(r => r.CreatedDate).ToListAsync(cancellationToken));
 
+    /// <summary>The ACTUAL <c>WorkflowRun.CompletionEnforcementMode</c> this run was stamped with — read off the persisted row for the census, never assumed from what <see cref="LaunchAsync"/> requested (see <see cref="BenchmarkResult.CompletionMode"/>).</summary>
+    private Task<string?> LoadCompletionEnforcementModeAsync(Guid runId, CancellationToken cancellationToken) =>
+        InFreshScopeAsync(scope =>
+            scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.Id == runId)
+                .Select(r => r.CompletionEnforcementMode).SingleOrDefaultAsync(cancellationToken));
+
     private static AgentRunResult? ParseResult(AgentRun run) =>
         string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
 
@@ -38,8 +44,12 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// oracle the direct instrument uses gradeable here too, without a second real clone. A fan-out whose branches
     /// conflict on the same lines cannot both apply; <see cref="RunGitAsync"/> then throws, which the caller lets
     /// propagate to the corpus loop's own infra-fault handling (a grader fault, never a false solve/unsolved verdict).
+    /// Internal (not private) so applying TWO real, distinct branch patches onto one fixture is integration-pinned
+    /// directly (InternalsVisibleTo) without driving the whole launch/route/project/git-integrate pipeline — this
+    /// method's own contract is "every attempt's diff lands", independent of whatever the production supervisor's
+    /// OWN branch-integration step later does with those same branches.
     /// </summary>
-    private async Task ReconstructWorkspaceAsync(string workspaceDirectory, IReadOnlyList<AgentRun> attempts, CancellationToken cancellationToken)
+    internal async Task ReconstructWorkspaceAsync(string workspaceDirectory, IReadOnlyList<AgentRun> attempts, CancellationToken cancellationToken)
     {
         foreach (var attempt in attempts)
         {
@@ -60,7 +70,18 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
         finally { try { File.Delete(patchFile); } catch { /* best-effort */ } }
     }
 
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, LaunchTaskResult launched, IReadOnlyList<AgentRun> attempts, BenchmarkGrade grade, string? observedModel)
+    /// <summary>
+    /// Fold every attempt this cell drove + the grade into one result row.
+    /// <para><b>NOTE for a multi-branch fan-out (Standard/Deep):</b> <paramref name="attempts"/> is every branch's
+    /// <c>AgentRun</c>, ordered by <c>CreatedDate</c> — <c>attempts[^1]</c> (the LAST-CREATED branch) is what
+    /// <see cref="BenchmarkResult.RunStatus"/>, <see cref="BenchmarkResult.AgentRunId"/> and
+    /// <see cref="BenchmarkResult.ExitReason"/> describe, mirroring the direct-harness <c>BenchmarkRunner.BuildResult</c>'s
+    /// own "graded attempt" convention — it does NOT mean only that branch was graded. <see cref="BenchmarkResult.Grade"/>
+    /// is the objective oracle's verdict over the UNION of every branch's reconstructed patch
+    /// (<see cref="ReconstructWorkspaceAsync"/> applies ALL of them), so a reader must never infer "which branch solved
+    /// it" from <c>RunStatus</c> alone — a task solved by an EARLIER branch's edit still reports the LAST branch's status here.</para>
+    /// </summary>
+    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, LaunchTaskResult launched, IReadOnlyList<AgentRun> attempts, BenchmarkGrade grade, string? observedModel, string? completionMode)
     {
         var graded = attempts[^1];
         var gradedResult = ParseResult(graded);
@@ -81,6 +102,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             ObservedModel = observedModel,
             RouteEffortMode = launched.Route.EffortMode,
             RouteProjectionKind = launched.Route.ProjectionKind,
+            CompletionMode = completionMode,
         };
     }
 

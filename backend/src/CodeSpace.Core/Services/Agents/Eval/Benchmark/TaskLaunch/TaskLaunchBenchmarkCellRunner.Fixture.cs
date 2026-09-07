@@ -133,7 +133,17 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Archive the launch's <c>WorkSession</c> (and its <c>Conversation</c> when a supervisor-tier launch opened one) — the SAME retired-thread lifecycle <see cref="WorkSessionStatus.Archived"/> already models, so the Owner the cell borrowed never sees this launch as a live thread in their own history.</summary>
+    /// <summary>
+    /// Archive the launch's <c>WorkSession</c> and SOFT-DELETE its <c>Conversation</c> (when a supervisor-tier
+    /// launch opened one) — so the Owner the cell borrowed never sees this launch as a live thread in their own
+    /// history. <c>WorkSession</c> has NO soft-delete column, so <see cref="WorkSessionStatus.Archived"/> is the
+    /// strongest retirement available for it; <c>SessionReadService.ListAsync</c> (the team-wide sessions index)
+    /// applies NO status filter, so an archived qualification session remains a row there — a disclosed residual
+    /// (see this PR's Limitations), not something this method can close without a schema change. <c>Conversation</c>
+    /// DOES have <see cref="Persistence.Entities.Conversation.DeletedDate"/>, which <c>ConversationService.ListForUserAsync</c>
+    /// actually filters on (its own <c>Archived</c> flag is set too, for any reader that keys off it instead) — so the
+    /// Conversation half of this retirement really does drop out of the team-wide conversations list.
+    /// </summary>
     private static async Task RetireSessionArtifactsAsync(CodeSpaceDbContext db, Guid sessionId, CancellationToken cancellationToken)
     {
         var conversationId = await db.WorkSession.AsNoTracking().Where(s => s.Id == sessionId)
@@ -144,6 +154,6 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
 
         if (conversationId is { } id)
             await db.Conversation.Where(c => c.Id == id)
-                .ExecuteUpdateAsync(c => c.SetProperty(x => x.Archived, true), cancellationToken).ConfigureAwait(false);
+                .ExecuteUpdateAsync(c => c.SetProperty(x => x.Archived, true).SetProperty(x => x.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
     }
 }

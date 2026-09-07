@@ -25,10 +25,17 @@ public class TaskLaunchBenchmarkCellRunnerTests
     [InlineData(WorkflowWaitKinds.Callback, false)]
     [InlineData(WorkflowWaitKinds.Timer, false)]
     [InlineData(WorkflowWaitKinds.Subworkflow, false)]
+    [InlineData(WorkflowWaitKinds.SupervisorAgentWaits, false)]
+    [InlineData(WorkflowWaitKinds.Decision, false)]
+    [InlineData(WorkflowWaitKinds.SupervisorInfraPark, false)]
     public void Only_AgentRun_and_SupervisorDecision_waits_are_advanceable(string waitKind, bool expected)
     {
-        // Everything else (ask_human's Action, an Approval/Callback/Timer/Subworkflow park) is a wait this drive
-        // loop has no seam for — DriveToTerminalAsync must fail fast on it instead of polling until its deadline.
+        // Exhaustive over all 10 WorkflowWaitKinds constants (Rule 8-style pin): everything else (ask_human's
+        // Action, an Approval/Callback/Timer/Subworkflow/Decision park, a SupervisorAgentWaits suspend marker, or
+        // a SupervisorInfraPark model-plane-outage park) is a wait this drive loop has no seam for —
+        // DriveToTerminalAsync must fail fast on it instead of polling until its deadline. A new wait kind added
+        // later has no InlineData here and so is silently treated as advanceable=false by DriveOnePendingWaveAsync
+        // (fail-fast, never a silent hang) until this Theory is deliberately widened.
         TaskLaunchBenchmarkCellRunner.IsAdvanceableWaitKind(waitKind).ShouldBe(expected);
     }
 

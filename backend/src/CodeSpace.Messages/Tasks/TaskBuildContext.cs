@@ -84,4 +84,7 @@ public sealed record TaskBuildContext
 
     /// <summary>DC-2a: the operator's OWN pre-declared delivery preference — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>deliverySpec</c>, PER FIELD authoritative over the model's plan-time proposal (<c>SupervisorDeliveryClamp</c> enforces this at plan-persist time). Null ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
     public DeliverySpec? DeliverySpec { get; init; }
+
+    /// <summary>Carried verbatim from <see cref="TaskLaunchRequest.Purpose"/> — NOT read by any builder (it shapes no node), only by <c>TaskRunSnapshotFactory</c>'s post-commit stamp onto <c>WorkflowRun.Purpose</c>. Null for every real launch surface (byte-identical).</summary>
+    public string? Purpose { get; init; }
 }

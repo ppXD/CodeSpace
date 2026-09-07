@@ -90,6 +90,16 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public string RunKind { get; private set; } = "";
 
     /// <summary>
+    /// An open marker (see <c>WorkflowRunPurposes</c>) for a run that is NOT a genuine operator launch — e.g. a
+    /// TaskLaunch qualification/benchmark cell, which launches through the real <c>ITaskLaunchService</c> as the
+    /// team's own borrowed Owner but is not real work. NULL (the overwhelming default) is a genuine launch. Stamped
+    /// once, post-commit, by <c>TaskRunSnapshotFactory</c> from the launch request; never read by the engine.
+    /// <c>WorkflowService.CollapseToLatestPerLineage</c> excludes any non-null value from the team Runs index by
+    /// default — the smallest honest mechanism so an internal instrument's footprint never looks like real team work.
+    /// </summary>
+    public string? Purpose { get; set; }
+
+    /// <summary>
     /// The projection / coordination MODE of a task run (single-agent / plan-map-synth / supervisor / …; an open string,
     /// see <c>TaskProjectionKinds</c>). NULL for an authored / non-task run. Denormalised from the route's projection
     /// kind at the snapshot creation site — it is NOT derivable from a column (it lives in the snapshot node graph).

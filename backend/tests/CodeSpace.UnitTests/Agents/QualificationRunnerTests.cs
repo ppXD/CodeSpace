@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -74,6 +75,7 @@ public class QualificationRunnerTests
             TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
             Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false,
             RouteEffortMode = "quick", RouteProjectionKind = "single-agent", ObservedModel = "claude-example",
+            CompletionMode = WorkflowDefinition.CompletionModeShadow,
         };
 
         var run = new CorpusBenchmarkRun
@@ -98,10 +100,12 @@ public class QualificationRunnerTests
         ranRow.GetProperty("routeEffortMode").GetString().ShouldBe("quick");
         ranRow.GetProperty("routeProjectionKind").GetString().ShouldBe("single-agent");
         ranRow.GetProperty("observedModel").GetString().ShouldBe("claude-example");
+        ranRow.GetProperty("completionMode").GetString().ShouldBe("shadow", "a TaskLaunch cell always forces Shadow — the census must show it, never omit it");
 
         var missingRow = rows.Single(r => r.GetProperty("arm").GetString() == "TaskLaunchDeep");
         missingRow.GetProperty("state").GetString().ShouldBe("InfraUnknown", "a specified-but-unrun arm reads as InfraUnknown, the suite's own never-dropped-from-the-divisor cell state");
         missingRow.GetProperty("observedModel").ValueKind.ShouldBe(JsonValueKind.Null, "an arm that never ran has no observed model to report — unknown stays unknown, never backfilled");
+        missingRow.GetProperty("completionMode").ValueKind.ShouldBe(JsonValueKind.Null, "an arm that never ran has no run to read a completion mode off");
     }
 
     [Fact]

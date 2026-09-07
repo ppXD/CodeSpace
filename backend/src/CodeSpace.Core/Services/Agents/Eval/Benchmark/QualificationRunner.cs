@@ -117,8 +117,10 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
             : PerformanceQualification.Shadow;
 
     /// <summary>
-    /// P19: one census row per suite cell (route decision, resolved mode/projection, arm, observed model) — built
-    /// from the FIXED denominator (<see cref="CorpusBenchmarkRun.Cells"/>), never from
+    /// P19: one census row per suite cell (route decision, resolved mode/projection, arm, observed model, completion
+    /// mode — a TaskLaunch cell always forces <c>WorkflowDefinition.CompletionModeShadow</c>; this reports the
+    /// ACTUAL persisted <c>WorkflowRun.CompletionEnforcementMode</c>, never an assumption, so a reader never has to
+    /// trust that the override took) — built from the FIXED denominator (<see cref="CorpusBenchmarkRun.Cells"/>), never from
     /// <see cref="CorpusBenchmarkRun.Results"/> alone, so a SPECIFIED arm that never ran still appears as its own
     /// row (its cell <c>state</c> is <c>InfraUnknown</c> — the same "occupies its slot, never dropped from the
     /// divisor" cell this suite already guarantees) instead of being silently averaged away. An unknown fixture ref
@@ -141,6 +143,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
                 routeEffortMode = result?.RouteEffortMode,
                 routeProjectionKind = result?.RouteProjectionKind,
                 observedModel = result?.ObservedModel,
+                completionMode = result?.CompletionMode,
             };
         }).ToList();
     }
