@@ -25,6 +25,7 @@ import type {
   PlanChecklistItem,
   RoomAction,
   RoomAgentCard,
+  RoomAttemptDelta,
   RoomBlock,
   RoomFilePreview,
   RoomFileIdentity,
@@ -798,7 +799,7 @@ function AssistantTurn({ turn, anchored, nowMs, onOpenRun, onSummonPane, onSummo
  * shown attempt reads "shown". Attempts are a TURN property — the whole turn reran — so this lives on the turn header,
  * not one agent card (a per-agent rerun switches inside the agent's terminal instead).
  */
-function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttempt[]; nowMs: number; onOpenRun: (runId: string) => void }) {
+export function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttempt[]; nowMs: number; onOpenRun: (runId: string) => void }) {
   const [open, setOpen] = useState(false);
 
   if (attempts.length < 2) return null;
@@ -824,16 +825,49 @@ function TurnAttempts({ attempts, nowMs, onOpenRun }: { attempts: RoomTurnAttemp
                 role="menuitem"
                 onClick={() => { setOpen(false); if (!a.isCurrent) onOpenRun(a.runId); }}
               >
-                <span className="room-attempt-dot" />
-                <span className="room-attempt-n">attempt {a.attemptNumber}</span>
-                <span className="room-attempt-status">{turnHeaderWord(a, false)}</span>
-                <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
-                {a.isCurrent && <span className="room-attempt-shown">shown</span>}
+                <div className="room-attempt-row">
+                  <span className="room-attempt-dot" />
+                  <span className="room-attempt-n">attempt {a.attemptNumber}</span>
+                  <span className="room-attempt-status">{turnHeaderWord(a, false)}</span>
+                  <span className="room-attempt-when">· {compactAge(a.at, nowMs)}</span>
+                  {a.isCurrent && <span className="room-attempt-shown">shown</span>}
+                </div>
+                {a.delta && <AttemptDeltaLine delta={a.delta} statusWord={a.statusWord} />}
               </button>
             ))}
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The "since previous attempt" line under one rung of the ladder (item 7.2) — a rerun used to tell the reader only
+ * THAT a retry happened, never WHAT changed. Renders ONLY the fields the backend says actually differ (model /
+ * outcome / acceptance / cost); a field the backend left null is simply absent, never shown as "unchanged". The
+ * outcome word reuses the SAME shared lexicon (`turnHeaderWord`) as the rung's own status pill, paired with that
+ * rung's own `statusWord` override, so a park can never read "Waiting" here while the pill above reads "Parked".
+ */
+function AttemptDeltaLine({ delta, statusWord }: { delta: RoomAttemptDelta; statusWord?: string | null }) {
+  const segments: { text: string; tone?: "ok" | "err"; title?: string }[] = [];
+
+  if (delta.model) segments.push({ text: `model ${delta.model}` });
+  if (delta.outcome) segments.push({ text: turnHeaderWord({ status: delta.outcome, statusWord }, false) });
+  if (delta.acceptancePassed != null)
+    segments.push({ text: delta.acceptancePassed ? "checks passed" : "checks failed", tone: delta.acceptancePassed ? "ok" : "err", title: delta.acceptanceDetail ?? undefined });
+  if (delta.costDeltaUsd != null) segments.push({ text: formatCostDeltaUsd(delta.costDeltaUsd) });
+
+  if (segments.length === 0) return null;
+
+  return (
+    <div className="room-attempt-delta">
+      <span className="room-attempt-delta-label">since previous:</span>
+      {segments.map((seg, i) => (
+        <span key={i} className={seg.tone ? `room-attempt-delta-${seg.tone}` : undefined} title={seg.title}>
+          {i > 0 ? `· ${seg.text}` : seg.text}
+        </span>
+      ))}
     </div>
   );
 }
@@ -1077,6 +1111,12 @@ function formatCostUsd(usd: number): string {
   if (usd === 0) return "$0";
   if (usd > 0 && usd < 0.00005) return "<$0.0001";
   return usd < 0.01 ? `$${usd.toFixed(4)}` : usd < 1 ? `$${usd.toFixed(3)}` : `$${usd.toFixed(2)}`;
+}
+
+/** A signed cost DELTA between two attempts — reuses formatCostUsd's magnitude-aware precision on the absolute value,
+ *  with an explicit +/- sign so a cheaper rerun and a costlier one are never confused with a plain per-call cost. */
+function formatCostDeltaUsd(usd: number): string {
+  return `${usd > 0 ? "+" : "-"}${formatCostUsd(Math.abs(usd))}`;
 }
 
 /** Per-call latency reads on a millisecond scale (most calls are sub-second) — so show "NNNms" below a second and "N.Ns"
