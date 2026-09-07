@@ -2325,7 +2325,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // model critic when the agent can't produce a verdict (no branch, staging/parse failure) — an agent review is
         // never worse than a model review, and a model review is never worse than none.
         var verdict = task.ReviewerAgent
-            ? await ReviewWithAgentAsync(task, result, run, cancellationToken).ConfigureAwait(false)
+            ? await ReviewWithAgentAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false)
             : CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: not requested");
 
         var agentReviewed = !verdict.Failed;
@@ -2441,13 +2441,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Run the S8 AGENT reviewer from a fresh scope (it stages + executes a first-class run — the heartbeat-loop scope pattern). Never throws (the reviewer is itself fail-closed to a failed verdict).</summary>
-    private async Task<CriticVerdict> ReviewWithAgentAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    /// <summary>Run the S8 AGENT reviewer from a fresh scope (it stages + executes a first-class run — the heartbeat-loop scope pattern). Authority and ownership refusal propagate; other failures become a failed verdict.</summary>
+    private async Task<CriticVerdict> ReviewWithAgentAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
 
         return await scope.ServiceProvider.GetRequiredService<Review.IAgentOutputReviewer>()
-            .ReviewAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+            .ReviewAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The critic's verdict as one feedback string — persisted on the result (WHY the run was flagged) and fed back verbatim by an Improve revise round.</summary>

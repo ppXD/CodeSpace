@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Agents;
@@ -14,6 +15,11 @@ public sealed record AgentExecutionAuthority
     public Guid? ActivationId { get; init; }
     public Guid? ActivationRevision { get; init; }
     public Guid? ParentRunId { get; init; }
+    /// <summary>Server-stamped agent delegation, distinct from a workflow's parent run. Caller copies grant nothing.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? ParentAgentRunId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ParentAuthorityHash { get; init; }
     public required AgentAutonomyLevel GrantedCeiling { get; init; }
     public required DateTimeOffset IssuedAt { get; init; }
     public required IReadOnlyList<AgentAuthoritySubject> Subjects { get; init; }

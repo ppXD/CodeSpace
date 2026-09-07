@@ -1,6 +1,8 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Services.Agents.Workspace;
+using System.Text.Json.Serialization;
+using CodeSpace.Core.Services.Agents.Authority.Exceptions;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -16,7 +18,7 @@ namespace CodeSpace.Core.Services.Agents.Review;
 /// with the caller's review instructions + the pinned <c>VERDICT:</c> final-message contract; execute it through the
 /// production executor (its own claim, heartbeat, spool, billing); parse the verdict FAIL-CLOSED. RECURSION-PROOF by
 /// construction — the review task pins <c>OutputReviewMode=None</c>, <c>ReviewerAgent=false</c>, <c>MaxReviseRounds=0</c>,
-/// no acceptance, no push. NEVER throws (cancellation aside): every failure returns
+/// no acceptance, no push. Authority and ownership refusal propagate. Other failures return
 /// <see cref="CriticVerdict.ReviewFailed"/> so the caller can ladder down to the in-process model critic.
 /// </summary>
 public sealed class AgentReviewRunner : IScopedDependency
@@ -47,7 +49,9 @@ public sealed class AgentReviewRunner : IScopedDependency
         {
             var task = BuildReviewTask(spec, PickReviewerHarness(spec.ProducerHarness, _harnesses.All));
 
-            var reviewRun = await _runs.CreateAsync(task, spec.TeamId, spec.WorkflowRunId, spec.NodeId, spec.IterationKey, cancellationToken).ConfigureAwait(false);
+            var reviewRun = spec.ParentOwner is { } parentOwner
+                ? await _runs.CreateReviewAsync(new(parentOwner, spec.TeamId, task), cancellationToken).ConfigureAwait(false)
+                : await _runs.CreateAsync(task, spec.TeamId, spec.WorkflowRunId, spec.NodeId, spec.IterationKey, cancellationToken).ConfigureAwait(false);
 
             await ExecuteAsync(reviewRun.Id, cancellationToken).ConfigureAwait(false);
 
@@ -60,7 +64,7 @@ public sealed class AgentReviewRunner : IScopedDependency
 
             return ParseVerdict(summary);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentAuthorityDeniedException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "The agent reviewer ({Key}) failed; laddering down to the model critic", spec.IterationKey);
             return CriticVerdict.ReviewFailed(ReviewMode.Gate, $"agent-reviewer: {ex.Message}");
@@ -96,7 +100,13 @@ public sealed class AgentReviewRunner : IScopedDependency
         Harness = reviewerHarness,
         ModelCredentialModelId = spec.ReviewerModelId,
         RepositoryId = spec.RepositoryId,
-        Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(spec.RepositoryId, Array.Empty<WorkspaceRepositorySpec>(), primaryRef: spec.BaseRef, primaryPinnedSha: spec.PinnedSha),
+        Workspace = new WorkspaceSpec
+        {
+            Repositories = [new WorkspaceRepositorySpec { RepositoryId = spec.RepositoryId, Alias = WorkspaceSpec.DefaultAlias, Ref = spec.BaseRef, PinnedSha = spec.PinnedSha, Access = WorkspaceAccess.Read, IsPrimary = true }],
+        },
+        Tools = spec.ProducerTools,
+        RunnerKind = spec.ProducerRunnerKind,
+        EnableMcpEndpoint = false,
         Autonomy = AgentAutonomyLevel.Confined,
         Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined),
         TimeoutSeconds = ReviewerTimeoutSeconds,
@@ -163,6 +173,13 @@ public sealed class AgentReviewRunner : IScopedDependency
 /// <summary>One agent-review request — everything the runner needs to stage, link, and judge an independent review run.</summary>
 public sealed record AgentReviewSpec
 {
+    /// <summary>Only the output executor can supply its invocation token. Never serialize it into a model input.</summary>
+    [JsonIgnore]
+    public AgentRunOwnerToken? ParentOwner { get; init; }
+
+    public IReadOnlyList<string>? ProducerTools { get; init; }
+    public string? ProducerRunnerKind { get; init; }
+
     /// <summary>The review body — WHAT to inspect and judge (the runner appends the shared verdict contract).</summary>
     public required string SubjectInstructions { get; init; }
 

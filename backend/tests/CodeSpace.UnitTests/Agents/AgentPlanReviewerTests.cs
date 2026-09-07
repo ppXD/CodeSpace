@@ -58,7 +58,10 @@ public sealed class AgentPlanReviewerTests
         }, "codex-cli");
 
         task.RepositoryId.ShouldBe(repositoryId);
-        task.Workspace.ShouldBeNull("no BaseRef ⇒ no pinned-ref workspace — the executor clones the repository's DEFAULT branch, the tree the plan's first agent would see");
+        task.Workspace!.Repositories.Single().RepositoryId.ShouldBe(repositoryId);
+        task.Workspace.Repositories.Single().Ref.ShouldBeNull("no BaseRef still means the repository's default branch");
+        task.Workspace.Repositories.Single().PinnedSha.ShouldBeNull();
+        task.Workspace.Repositories.Single().Access.ShouldBe(WorkspaceAccess.Read, "readonly intent is explicit for every review workspace");
         task.Autonomy.ShouldBe(AgentAutonomyLevel.Confined, "the reviewer READS — it never writes");
         task.Goal.ShouldContain(AgentReviewRunner.VerdictMarker, customMessage: "the shared final-message contract rides every review goal");
     }

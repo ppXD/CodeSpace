@@ -20,7 +20,7 @@ namespace CodeSpace.Core.Services.Agents.Authority;
 /// consent to external actions, or authority from a model/route. A receipt bounds autonomous execution; each tool's
 /// own permissions, risk and approval rules still apply. Principals and standing are read afresh, even within one MCP session.
 /// </summary>
-public sealed class ExecutionAuthorityService : IScopedDependency
+public sealed partial class ExecutionAuthorityService : IScopedDependency
 {
     public const int ReceiptVersion = 1;
     public const string PolicyVersion = "team-permissions-intersection/v1";
@@ -73,12 +73,22 @@ public sealed class ExecutionAuthorityService : IScopedDependency
 
     public async Task EnsureAgentActionAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
     {
+        await EnsureAgentActionCoreAsync(agentRunId, teamId, new HashSet<Guid>(), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<AgentTask> EnsureAgentActionCoreAsync(Guid agentRunId, Guid teamId, HashSet<Guid> lineage, CancellationToken cancellationToken)
+    {
+        if (!lineage.Add(agentRunId)) throw Denied("cyclic-agent-delegation");
         var agent = await _db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == agentRunId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false) ?? throw Denied("unknown-agent-run");
         if (agent.Status is not (AgentRunStatus.Queued or AgentRunStatus.Running)) throw Denied("agent-terminal");
         var task = JsonSerializer.Deserialize<AgentTask>(agent.TaskJson, AgentJson.Options) ?? throw Denied("unreadable-task");
         var receipt = task.ExecutionAuthority;
 
-        if (agent.WorkflowRunId is { } workflowRunId)
+        if (receipt?.SourceKind == ReviewSourceKind)
+        {
+            await ValidateReviewDelegationAsync(agent, task, receipt, lineage, cancellationToken).ConfigureAwait(false);
+        }
+        else if (agent.WorkflowRunId is { } workflowRunId)
         {
             var run = await LoadWorkflowAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
             var canonical = await ReadWorkflowReceiptAsync(run, new HashSet<Guid>(), cancellationToken).ConfigureAwait(false);
@@ -98,6 +108,7 @@ public sealed class ExecutionAuthorityService : IScopedDependency
         if (!Enum.IsDefined(task.Autonomy) || task.Autonomy > ceiling) throw Denied("ceiling-tightened");
         var maximum = AgentAutonomyPolicy.Derive(ceiling);
         if (maximum.Network == AgentNetworkAccess.Off && task.Permissions.Network != AgentNetworkAccess.Off || maximum.WriteScope == AgentWriteScope.ReadOnly && task.Permissions.WriteScope != AgentWriteScope.ReadOnly) throw Denied("permissions-exceed-ceiling");
+        return task with { ExecutionAuthority = receipt };
     }
 
     private async Task<AgentExecutionAuthority> MintCoreAsync(WorkflowAdmission admission, HashSet<Guid> lineage, CancellationToken cancellationToken)

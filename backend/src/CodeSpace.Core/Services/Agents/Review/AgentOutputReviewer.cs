@@ -22,13 +22,16 @@ public sealed class AgentOutputReviewer : IAgentOutputReviewer, IScopedDependenc
 
     public AgentOutputReviewer(AgentReviewRunner runner) { _runner = runner; }
 
-    public async Task<CriticVerdict> ReviewAsync(AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    public async Task<CriticVerdict> ReviewAsync(AgentRunOwnerToken parentOwner, AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(result.ProducedBranch) || producerTask.RepositoryId is not { } repositoryId)
+        if (string.IsNullOrEmpty(result.ProducedBranch) || (producerTask.Workspace?.Primary?.RepositoryId ?? producerTask.RepositoryId) is not { } repositoryId)
             return CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: no produced branch to clone — nothing for an agent to inspect");
 
         return await _runner.RunAsync(new AgentReviewSpec
         {
+            ParentOwner = parentOwner,
+            ProducerTools = producerTask.Tools,
+            ProducerRunnerKind = producerTask.RunnerKind,
             SubjectInstructions = BuildReviewInstructions(producerTask.Goal, result),
             RepositoryId = repositoryId,
             BaseRef = result.ProducedBranch,

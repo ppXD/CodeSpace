@@ -637,6 +637,7 @@ public sealed class AgentRunExecutorPushTests
             return Task.CompletedTask;
         }
 
+        public Task<AgentRun> CreateReviewAsync(CodeSpace.Core.Services.Agents.Review.AgentReviewCreation request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRunReattachReservation?> ReserveReattachAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken) => throw new NotSupportedException();

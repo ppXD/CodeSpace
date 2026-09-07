@@ -66,6 +66,8 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
     }
 
     // ── pure delegation ───────────────────────────────────────────────────────
+    public Task<AgentRun> CreateReviewAsync(CodeSpace.Core.Services.Agents.Review.AgentReviewCreation request, CancellationToken cancellationToken) => _inner.CreateReviewAsync(request, cancellationToken);
+
     public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => _inner.CreateAsync(task, teamId, workflowRunId, nodeId, iterationKey, cancellationToken);
 
     public Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => _inner.RejectQueuedAsync(runId, result, cancellationToken);
