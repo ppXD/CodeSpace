@@ -9,16 +9,10 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 
 /// <summary>
-/// The DURABLE-runner half of <see cref="LocalProcessRunner"/> (<see cref="ISandboxDurableRunner"/>): launch
-/// the command under a <c>/bin/sh</c> supervisor that redirects its output to on-disk spool files and records
-/// an exit-code marker, then observe the run by TAILING that spool. Decoupling the run's output from a parent
-/// pipe is what lets a restarted backend recover the run from its persisted <see cref="SandboxHandle"/>
-/// instead of losing it. On Linux the supervisor is launched under <c>setsid</c> so it leads its own session
-/// and outlives a graceful-shutdown signal aimed at the API's process group — so the run keeps going for the
-/// reconciler to recover/re-attach. The supervisor self-reports its pid via a pid file because <c>setsid</c>
-/// may exec the shell in place or fork it (depending on whether setsid is a process-group leader), so the
-/// launched process's own id isn't a reliable handle either way. POSIX-only (needs <c>/bin/sh</c>); a
-/// non-POSIX host falls back to the streaming path.
+/// Durable log observation and confinement command construction. LaunchOrDiscover delegates process admission to
+/// the bundled native broker: an immutable request and create-only start commitment precede its exact-PID exec
+/// bootstrap. Broker/guardian lifetimes are independent of API observers; the existing shell owns bounded spool
+/// copiers and exit markers. Legacy handles remain observable, but an unreceipted legacy spool cannot start again.
 /// </summary>
 public sealed partial class LocalProcessRunner
 {
@@ -99,12 +93,6 @@ public sealed partial class LocalProcessRunner
     /// <summary>Per-poll read cap so a burst can't allocate unbounded; the next poll continues from the new offset.</summary>
     private const int MaxReadChunk = 8 * 1024 * 1024;
 
-    /// <summary>How long LaunchAsync waits for the supervisor to self-report its pid before treating the launch as failed.</summary>
-    private static readonly TimeSpan PidFileWait = TimeSpan.FromSeconds(2);
-
-    /// <summary>Poll cadence while waiting for the supervisor's pid file to appear at launch.</summary>
-    private static readonly TimeSpan PidPollInterval = TimeSpan.FromMilliseconds(20);
-
     /// <summary>PID-reuse guard tolerance: a live process whose start time is within this many seconds of the recorded one is "the same supervisor"; beyond it, the pid was recycled.</summary>
     private const int StartTimeToleranceSeconds = 2;
 
@@ -154,74 +142,6 @@ public sealed partial class LocalProcessRunner
 
     /// <summary>How long the filtered-egress netns setup may take before the launch fails closed — the ip/nft/sysctl commands are sub-second, so a slow setup is a host problem, not a long-running run.</summary>
     private const int EgressSetupTimeoutSeconds = 20;
-
-    public async Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var spoolDir = SpoolDirectoryFor(spoolKey);
-        Directory.CreateDirectory(spoolDir);
-
-        // B4: when a memory/cpu cap is requested AND the operator delegated a cgroup root (on a cgroup-v2 host), create
-        // the per-run cgroup leaf FIRST so the supervisor chain self-adds into it OUTERMOST and the whole subtree is
-        // resource-capped on the host. Fail-closed: a setup failure throws, so the run lands Failed rather than uncapped.
-        var cgroup = await SetupCgroupAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            // B3.2b: when a deny-by-default egress allowlist is requested AND this runner can enforce it (ip+nft+privilege),
-            // set up a filtered network namespace and run the whole supervisor chain inside it. Fail-closed: a setup
-            // failure throws, so the run lands a clean Failed rather than launching with unfiltered (or no) egress.
-            var egress = await SetupEgressNetnsAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false);
-
-            try
-            {
-                using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir, egress.ExecPrefix, cgroup.ExecPrefix) };
-                process.Start();
-
-                // The launched process may be `setsid` (Linux); its own id isn't a reliable handle for the supervisor
-                // (setsid execs the shell in place or forks it). Read the pid the supervisor self-reported, then capture
-                // that process's start time as a PID-reuse guard for later probes.
-                var supervisorPid = await ResolveSupervisorPidAsync(spoolDir, process, cancellationToken).ConfigureAwait(false);
-
-                return new SandboxHandle
-                {
-                    Kind = LocalKind,
-                    ProcessId = supervisorPid,
-                    ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
-                    LaunchHost = CurrentHost,
-                    SpoolDirectory = spoolDir,
-                    Deadline = spec.TimeoutSeconds is { } secs && secs > 0 ? DateTimeOffset.UtcNow.AddSeconds(secs) : DateTimeOffset.MaxValue,
-                    EgressNetnsKey = egress.Key,
-                    CgroupRunKey = cgroup.Key,
-                    // What this launch ACTUALLY did about confinement, from the same probe + the same network inputs
-                    // AppendChildCommand builds the argv from — so the record can neither claim a severance the
-                    // command line did not request nor miss one it did. Persisted by the executor; read back by
-                    // everything that would otherwise have to hedge about whether "network off" was enforced.
-                    Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(spec, egress.ExecPrefix), EgressAllowlist(spec, egress.ExecPrefix)),
-                };
-            }
-            catch
-            {
-                // The netns was set up but the launch itself failed (e.g. the supervisor never reported its pid) — tear
-                // the namespace down here so a failed launch never leaks one (the handle that would carry the reap key is
-                // never returned).
-                if (egress.Key is { Length: > 0 } orphanKey)
-                    await FilteredEgressNetns.TeardownAsync(orphanKey, CancellationToken.None).ConfigureAwait(false);
-
-                throw;
-            }
-        }
-        catch
-        {
-            // The cgroup was created but the launch (or the egress setup) failed — reap it here so a failed launch never
-            // leaks the cgroup (the handle that would carry the reap key is never returned).
-            if (cgroup.Key is { Length: > 0 } orphanCgroup && CgroupResourceLimit.CgroupRoot is { } root)
-                await CgroupResourceLimit.TeardownAsync(root, orphanCgroup, CancellationToken.None).ConfigureAwait(false);
-
-            throw;
-        }
-    }
 
     public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
     [
@@ -439,41 +359,6 @@ public sealed partial class LocalProcessRunner
         }
     }
 
-    /// <summary>
-    /// Resolve the supervisor's real pid: it writes <c>$$</c> to the pid file as its first action, so poll
-    /// briefly for that (under <c>setsid</c> the launched process's own id isn't a reliable handle). Fall back
-    /// to the launched process's own id only when it's still our shell (the non-detached macOS path); a
-    /// detached launch that never reported a pid is a genuine launch failure and throws so the run lands a
-    /// clean Failed rather than tracking the wrong pid.
-    /// </summary>
-    private static async Task<int> ResolveSupervisorPidAsync(string spoolDir, Process launched, CancellationToken ct)
-    {
-        var pidPath = Path.Combine(spoolDir, PidFile);
-        var deadline = DateTimeOffset.UtcNow + PidFileWait;
-
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            if (TryReadPid(pidPath, out var pid)) return pid;
-
-            await Task.Delay(PidPollInterval, ct).ConfigureAwait(false);
-        }
-
-        if (TryReadPid(pidPath, out var late)) return late;
-
-        if (!OperatingSystem.IsLinux() && !launched.HasExited) return launched.Id;
-
-        throw new InvalidOperationException($"Durable launch supervisor did not report its pid at '{pidPath}' within {PidFileWait.TotalSeconds:0}s.");
-    }
-
-    /// <summary>Read the supervisor's pid from its pid file: present, parseable, and positive. A missing / mid-write file returns false so the caller keeps polling.</summary>
-    private static bool TryReadPid(string pidPath, out int pid)
-    {
-        pid = 0;
-
-        try { return File.Exists(pidPath) && int.TryParse(File.ReadAllText(pidPath).Trim(), out pid) && pid > 0; }
-        catch { return false; }
-    }
-
     public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
     {
         var stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
@@ -503,6 +388,8 @@ public sealed partial class LocalProcessRunner
                 await onCheckpoint(advanced, cancellationToken).ConfigureAwait(false);
 
             offset = advanced;
+
+            if (NativeDeadlineExpired(handle)) return await TimeoutAsync(handle, offset, onStdoutFrame, cancellationToken).ConfigureAwait(false);
 
             if (TryReadExitCode(exitPath, out var code))
                 return await CompleteFromSpoolAsync(handle, offset, code, onStdoutFrame, cancellationToken).ConfigureAwait(false);
@@ -819,7 +706,7 @@ public sealed partial class LocalProcessRunner
         return newOffset;
     }
 
-    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, IReadOnlyList<string>? egressExecPrefix = null, IReadOnlyList<string>? cgroupExecPrefix = null)
+    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, IReadOnlyList<string>? egressExecPrefix = null, IReadOnlyList<string>? cgroupExecPrefix = null, bool bootstrapSession = false)
     {
         var info = new ProcessStartInfo
         {
@@ -828,7 +715,9 @@ public sealed partial class LocalProcessRunner
             WorkingDirectory = spec.WorkingDirectory ?? string.Empty,
         };
 
-        // On Linux, run the supervisor under `setsid` so it LEADS A NEW SESSION: a graceful-shutdown signal
+        // The native exec bootstrap already owns its session on both POSIX hosts. Keep the legacy command-builder
+        // shape for independent callers/tests; production supplies bootstrapSession=true and avoids another fork.
+        // On Linux, the legacy path runs under `setsid` so it LEADS A NEW SESSION: a graceful-shutdown signal
         // aimed at the API's process group (a dev terminal's Ctrl-C, systemd KillMode=process) no longer reaches
         // it, so the run outlives the restart for the reconciler to recover/re-attach. `setsid` either execs the
         // shell in place or forks it, so the supervisor self-reports its real pid via the pid file rather than us
@@ -836,7 +725,7 @@ public sealed partial class LocalProcessRunner
         // namespace — systemd KillMode=control-group or a container teardown still stops it; that broader survival
         // is a heavier, separate concern.) macOS dev has no setsid, so run /bin/sh directly (no detach) — the
         // streaming + recovery paths are unaffected.
-        if (OperatingSystem.IsLinux())
+        if (OperatingSystem.IsLinux() && !bootstrapSession)
         {
             info.FileName = "setsid";
             info.ArgumentList.Add("/bin/sh");
@@ -1235,13 +1124,6 @@ public sealed partial class LocalProcessRunner
         catch { return false; }
 
         return Math.Abs((actual - expected).TotalSeconds) > StartTimeToleranceSeconds;
-    }
-
-    /// <summary>Capture a process's start time (UTC) for the PID-reuse guard; null when the host can't report it (the guard is then skipped on probe).</summary>
-    private static DateTimeOffset? TryReadStartTimeUtc(int pid)
-    {
-        try { using var p = Process.GetProcessById(pid); return p.StartTime.ToUniversalTime(); }
-        catch { return null; }
     }
 
     /// <summary>Terminate the supervisor's process tree, then boundedly wait for the producer to close its spool handles. A recycled pid is never touched — nor a pid from another host, where that number is either nothing or an unrelated local process this worker would kill instead (the start-time guard cannot catch that: it is skipped whenever the handle recorded no start time).</summary>

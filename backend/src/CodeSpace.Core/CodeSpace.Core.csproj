@@ -5,6 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>CodeSpace.Core</RootNamespace>
+    <!-- This library now exports a native apphost. Preserve the consumer's RID through the project graph;
+         otherwise cross-publishing a Linux API from macOS silently bundles a macOS bootstrap. -->
+    <IsRidAgnostic>false</IsRidAgnostic>
   </PropertyGroup>
 
   <ItemGroup>
@@ -59,7 +62,23 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeSpace.Messages\CodeSpace.Messages.csproj" />
+    <ProjectReference Include="../CodeSpace.RunnerHost/CodeSpace.RunnerHost.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <Compile Include="../CodeSpace.RunnerHost/Protocol/*.cs" Link="Services/Agents/Sandbox/NativeLaunch/%(Filename)%(Extension)" />
   </ItemGroup>
+
+  <!-- Export the standalone bootstrap as transitive content: every Core consumer (API, worker and tests)
+       receives the apphost and runtime sidecars in both build and publish output. Missing output fails the build. -->
+  <Target Name="IncludeNativeRunnerHost" BeforeTargets="AssignTargetPaths" DependsOnTargets="ResolveProjectReferences">
+    <PropertyGroup>
+      <NativeRunnerHostRidDirectory Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)/</NativeRunnerHostRidDirectory>
+      <NativeRunnerHostOutput>$(MSBuildThisFileDirectory)../CodeSpace.RunnerHost/bin/$(Configuration)/$(TargetFramework)/$(NativeRunnerHostRidDirectory)</NativeRunnerHostOutput>
+    </PropertyGroup>
+    <ItemGroup>
+      <NativeRunnerHostFiles Include="$(NativeRunnerHostOutput)*" />
+      <Content Include="@(NativeRunnerHostFiles)" Link="runner-host/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(NativeRunnerHostOutput)codespace-runner-host.dll')" Text="Native runner host output is missing; durable launch cannot safely fall back to the old process launcher." />
+  </Target>
 
   <ItemGroup>
     <!-- Expose `internal` members to the unit-test project so defensive helpers like
