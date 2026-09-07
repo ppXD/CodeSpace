@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { RoutePlan, TaskSurfaceKind } from "@/api/tasks";
-import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, describeNetwork, effectiveAutonomy, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, effectiveAutonomy, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, tierGrantsNetwork, type LaunchBooleanOverride, type LaunchFormState } from "@/lib/launchInput";
 import { presetOf, QUALITY_PRESETS, type QualityTier } from "@/lib/qualityPresets";
 import { Combo, type Option } from "@/components/common/Combo";
 import { DecisionLadderDiagram, EvaluationPipelineDiagram, HelpTip, PlanCriticDiagram } from "@/components/tasks/LaunchHelp";
@@ -269,17 +269,15 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Wait for the current preview to settle so launch can consume the decision being shown. A settled failure
   // allows the legacy launch path, where the server computes the route and checks authority normally.
   const routeUnanswered = !routePreview.answered;
-  // The one honest consequence line: the SAME sentence AgentAutonomyPolicy.DescribeNetwork will write into the run's
-  // journal (shared words, pinned by networkPosture.fixture.json), plus what On actually costs. Off-tier keeps its
-  // own copy — there the resolved ceiling is not known yet, so it names the reason instead of claiming one.
-  //
-  // The deployment's own ceiling (Sandbox:MaxAutonomy) rides in from the preview: it is a bound the operator cannot
-  // lift by switching effort tier, so when it denies network the sentence has to name IT rather than the route's.
-  // Blank until a preview has reported it (an explicitly-tiered launch asks for none) — the sentence then states
-  // only what the route accounts for, and the server clamps regardless.
-  const networkPosture = !tierGrantsNetwork(effort)
-    ? `Network: off${NETWORK_CONFINEMENT_CAVEAT} — this tier's ceiling is Standard, which has no network. Switch Effort to Standard or Deep to choose.`
-    : `${describeNetwork(autonomyShown, ceilingShown, routePreview.deploymentAutonomyCeiling)}.${networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`;
+  // The one honest consequence line: the route preview's OWN posture — AgentAutonomyPolicy.DescribeNetwork, computed
+  // server-side (arc3 item 3.2) from the SAME resolved route this preview carries, plus what On actually costs. This
+  // is no longer a FE mirror: the composer states exactly what the server said, never a guess it derived itself, so
+  // it cannot show a posture the launch would not also reach. Unresolved (the debounce window, an in-flight
+  // request, or a failed preview) says so instead of predicting one.
+  const posture = routePreview.posture;
+  const networkPosture = posture
+    ? `${posture.network}.${posture.networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`
+    : "Checking the network posture…";
   // Answering the card picks a TIER, which rides the wire as an explicit effort and short-circuits the classifier —
   // so the shape the card was raised about has to ride along too, or every confirmed launch silently reverts to the
   // coding projection. Stored with the text it was classified for; see formState for the staleness guard.

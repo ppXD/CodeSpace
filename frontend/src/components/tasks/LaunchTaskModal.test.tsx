@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { TaskSpecSuggestion, TaskSpecRepositoryObservation, TaskSpecModelCall, TaskAcceptanceCompatibility } from "@/api/tasks";
+import type { TaskSpecSuggestion, TaskSpecRepositoryObservation, TaskSpecModelCall, TaskAcceptanceCompatibility, TaskRoutePosture } from "@/api/tasks";
+import { routeCeiling } from "@/lib/launchInput";
 
 const launchSpy = vi.fn();
 let lastInput: Record<string, unknown> | null = null;
@@ -29,7 +30,7 @@ vi.mock("@/hooks/use-spec-preview", () => ({ useSpecPreview: () => specState }))
 // B1 route preview. The hook is mocked so the card's inputs are exactly the backend contract; `inputSeen` records
 // the payload the composer asked with, including an explicit tier's adapter preview,
 // and that the request carries the routing fields the launch itself would send.
-type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean; routeSnapshotId?: string; acceptanceCompatibility?: TaskAcceptanceCompatibility };
+type RouteState = { route: import("@/api/tasks").RoutePlan | null; failed: boolean; loading: boolean; answered: boolean; routeSnapshotId?: string; acceptanceCompatibility?: TaskAcceptanceCompatibility; posture?: TaskRoutePosture };
 // The default is ANSWERED with no route: the preview settled and had nothing to confirm, so Launch is open. Every
 // pre-B1 test in this file relies on that, and a test that wants the gate CLOSED must say so explicitly.
 const releaseReference = vi.fn();
@@ -38,12 +39,40 @@ const COMPATIBLE: TaskAcceptanceCompatibility = { state: "Compatible", projectio
 const ROUTE_ANSWERED: RouteState = { route: null, failed: false, loading: false, answered: true, acceptanceCompatibility: COMPATIBLE };
 let routeState: RouteState = ROUTE_ANSWERED;
 let inputSeen: (import("@/api/tasks").RoutePreviewInput | null)[] = [];
+
+const NETWORK_ON_TIERS = new Set(["Trusted", "Unleashed"]);
+
+/**
+ * A minimal stand-in for the server's posture (AgentAutonomyPolicy.DescribeNetwork), reactive to the SAME input the
+ * real preview would receive — reusing `routeCeiling`, the REAL production function the component itself relies on
+ * for its (unrelated) control-gating, so the mock's ceiling can never disagree with what the component assumes.
+ * Only the on/off wording template is duplicated (three lines); the real derivation is pinned server-side
+ * (AgentAutonomyPolicyTests, NetworkPostureWordingDriftTests) and this never needs to reproduce every nuance — a
+ * test that wants a specific wording (e.g. a deployment-ceiling clamp, which this never produces) sets
+ * `routeState.posture` explicitly instead, exactly like `ROUTE` is hand-set for route-shaped tests.
+ */
+const defaultPosture = (input: import("@/api/tasks").RoutePreviewInput): TaskRoutePosture => {
+  const autonomy = input.autonomy ?? "Standard";
+  const networkOn = NETWORK_ON_TIERS.has(autonomy);
+  const ceiling = routeCeiling(input.effort ?? "auto", input.autonomyCeiling);
+  const network = networkOn
+    ? `Network: on (${autonomy})`
+    : NETWORK_ON_TIERS.has(ceiling)
+      ? `Network: off (${autonomy}) — severed only where the sandbox confines`
+      : `Network: clamped off by policy (ceiling ${ceiling}) — severed only where the sandbox confines`;
+  return { autonomy, networkOn, network, completionMode: "Shadow" };
+};
+
 vi.mock("@/hooks/use-route-preview", () => ({
   useRoutePreview: (input: import("@/api/tasks").RoutePreviewInput | null) => {
     inputSeen.push(input);
     // Disabled (null) reads as answered — exactly what the real hook returns, so the gate opens immediately.
     const state = input && input.effort !== "auto" && routeState.route ? { ...routeState, route: { ...routeState.route, effortMode: input.effort!, wasAutoClassified: false, needsConfirmCard: false, confirm: null } } : routeState;
-    return { ...(input === null ? { route: null, failed: false, loading: false, answered: true } : state), releaseReference, markLaunchAttempt };
+    const resolved = input === null ? { route: null, failed: false, loading: false, answered: true } : state;
+    // A failed preview carries no posture either (the real hook's catch branch sets none) — every other case gets
+    // the test's own explicit posture, or the reactive default above.
+    const posture = input === null ? undefined : (resolved.posture ?? (resolved.failed ? undefined : defaultPosture(input)));
+    return { ...resolved, posture, releaseReference, markLaunchAttempt };
   },
 }));
 
@@ -148,7 +177,8 @@ describe("LaunchTaskModal (minimal box)", () => {
     // On Auto the tier isn't resolved yet, so the network tier isn't offered and the row says so instead of arming.
     expect(screen.queryByText("Trusted")).toBeNull();
     expect(screen.queryByText("Unleashed")).toBeNull();
-    expect(screen.getByTestId("network-posture")).toHaveTextContent(/Network: off/);
+    // Untouched Auto + Standard permission: the route preview's OWN posture, sourced from the server, not a guess.
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by policy (ceiling Standard)");
     // Time limit survives — it is the one control this tab's dead trio pointed back to.
     expect(screen.getByText("Time limit")).toBeInTheDocument();
   });
@@ -206,9 +236,11 @@ describe("LaunchTaskModal (minimal box)", () => {
   it.each([["Fast"], [undefined]])("withholds the Network access control on the %s tier — it cannot grant network", tier => {
     openPermissions(tier);
 
-    // A muted read-only row, never an armed switch the wire would silently drop.
+    // A muted read-only row, never an armed switch the wire would silently drop. The posture row states the SAME
+    // "clamped off by policy" fact the Coordination-ceiling case below does — the tier's own preset ceiling denies
+    // network exactly the way an explicit override would, and the server's sentence does not distinguish the two.
     expect(screen.getByText("Off — only Standard and Deep can grant it")).toBeInTheDocument();
-    expect(screen.getByTestId("network-posture")).toHaveTextContent(/this tier's ceiling is Standard/);
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by policy (ceiling Standard)");
   });
 
   it("turning Network access On sends autonomy=Trusted — the one tier that grants network", () => {
@@ -283,6 +315,23 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(posture).toHaveTextContent(/your LAN, and cloud metadata endpoints/);
     expect(posture).toHaveTextContent(/model credential is present in the agent's environment/);
     expect(posture.textContent).not.toMatch(/team policy/);
+  });
+
+  it("renders a posture wording the composer cannot derive itself, verbatim from the preview (arc3 item 3.2)", () => {
+    // The deployment ceiling (Sandbox:MaxAutonomy) is a bound the FE never sees a value for on its own — only the
+    // route preview reports it. A component that still computed its own sentence could not produce this wording at
+    // all; showing it verbatim is the proof the row is a genuine pass-through of the server's posture.
+    routeState = { ...ROUTE_ANSWERED, posture: { autonomy: "Standard", networkOn: false, network: "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines", completionMode: "Enforced" } };
+    openPermissions("Deep");
+
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by deployment ceiling (Standard)");
+  });
+
+  it("shows a checking placeholder instead of guessing when the preview has not reported a posture", () => {
+    routeState = { route: null, failed: true, loading: false, answered: true };
+    openPermissions("Deep");
+
+    expect(screen.getByTestId("network-posture")).toHaveTextContent("Checking the network posture");
   });
 
   it("Time limit shows the tier's own untouched default (Deep = 2h) and stays byte-identical on the wire", () => {
