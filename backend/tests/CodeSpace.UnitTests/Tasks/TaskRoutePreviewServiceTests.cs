@@ -14,6 +14,10 @@ using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
+using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -42,7 +46,7 @@ public class TaskRoutePreviewServiceTests
     private static TaskRoutePreviewService Preview(IEffortRouter router) => new(
         new TaskLaunchSeedProviderRegistry(new ITaskLaunchSeedProvider[] { new ChatSeedProvider() }),
         new AllRepositoriesInTeam(),
-        new RoutingOnlySnapshotStore(router));
+        new RoutingOnlySnapshotStore(router), new TaskProjectionRegistry([new SingleAgentDefinitionBuilder(), new SupervisorDefinitionBuilder(), new PlanMapSynthDefinitionBuilder()]));
 
     private static TaskLaunchRequest Request(string goal, string? effort = null, string? recipe = null, RouteCaps? caps = null, string? shape = null) => new()
     {
@@ -116,6 +120,37 @@ public class TaskRoutePreviewServiceTests
             new[] { TaskEffortModes.Quick, TaskEffortModes.Standard, TaskEffortModes.Deep }, ignoreOrder: true);
 
         previewed.Decision!.Signals.RiskySideEffects.ShouldBeTrue("'deploy … production' is the risk signal the router escalates on regardless of model confidence");
+    }
+
+    [Theory]
+    [InlineData(TaskEffortModes.Quick, true, TaskAcceptanceCompatibilityState.Compatible)]
+    [InlineData(TaskEffortModes.Quick, false, TaskAcceptanceCompatibilityState.Incompatible)]
+    [InlineData(TaskEffortModes.Deep, true, TaskAcceptanceCompatibilityState.Compatible)]
+    [InlineData(TaskEffortModes.Deep, false, TaskAcceptanceCompatibilityState.Incompatible)]
+    [InlineData(TaskEffortModes.Standard, true, TaskAcceptanceCompatibilityState.Incompatible)]
+    public async Task Adapter_compatibility_comes_from_the_actual_builder_and_workspace(string effort, bool withRepository, TaskAcceptanceCompatibilityState expected)
+    {
+        var preview = await Preview(Router()).PreviewAsync(Request("Validate the report", effort) with { RepositoryId = withRepository ? Guid.NewGuid() : null }, CancellationToken.None);
+        preview.AcceptanceCompatibility.ShouldNotBeNull();
+        preview.AcceptanceCompatibility.State.ShouldBe(expected);
+        preview.AcceptanceCompatibility.ProjectionKind.ShouldBe(preview.Route.ProjectionKind);
+        if (effort != TaskEffortModes.Standard)
+        {
+            preview.AcceptanceCompatibility.GradingKind.ShouldBe("TestsPass");
+            preview.AcceptanceCompatibility.RequiresRepository.ShouldBe(true);
+        }
+        preview.Route.WasAutoClassified.ShouldBeFalse("asking about an explicit route's adapter must not classify the goal");
+    }
+
+    [Fact]
+    public async Task Unadvertised_projection_compatibility_stays_unknown_without_changing_the_route_identity()
+    {
+        var request = Request("Inspect this task", TaskEffortModes.Quick) with { RepositoryId = Guid.NewGuid() };
+        var service = new TaskRoutePreviewService(new TaskLaunchSeedProviderRegistry([new ChatSeedProvider()]), new AllRepositoriesInTeam(), new RoutingOnlySnapshotStore(Router()), new TaskProjectionRegistry([]));
+        var unknown = await service.PreviewAsync(request, CancellationToken.None);
+        var known = await Preview(Router()).PreviewAsync(request, CancellationToken.None);
+        unknown.AcceptanceCompatibility!.State.ShouldBe(TaskAcceptanceCompatibilityState.Unknown);
+        JsonSerializer.Serialize(unknown.Route, Json).ShouldBe(JsonSerializer.Serialize(known.Route, Json));
     }
 
     // Persistence has real HTTP/Postgres coverage; this unit fixture isolates seed/scope/router composition.

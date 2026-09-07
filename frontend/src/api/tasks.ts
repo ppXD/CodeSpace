@@ -114,10 +114,11 @@ export interface LaunchTaskResult {
 }
 
 /** One compiled suggestion set from the spec-preview lane (P5-7) — mirrors the backend `TaskSpecSuggestion`.
- *  Every field maps onto an EXISTING launch field; these are editable proposals, never stakes. `openPullRequest` /
+ *  Evidence assessments are preview-only; supported source claims still require route compatibility. `openPullRequest` /
  *  `targetBranch` ride along for when the modal wires DeliverySpec — the card ignores them until then. */
 export interface TaskSpecSuggestion {
   acceptanceChecks: string[];
+  acceptanceProposal?: TaskSpecAcceptanceProposal | null;
   acceptanceCriteria: string[];
   openPullRequest?: boolean | null;
   targetBranch?: string | null;
@@ -125,11 +126,44 @@ export interface TaskSpecSuggestion {
   confidence: number;
 }
 
+export interface TaskSpecAcceptanceProposal {
+  version: number;
+  argv: string[];
+  source: "user-explicit" | "repository-evidence" | "proposed-unverified";
+  status: "Unknown" | "Supported" | "Contradicted";
+  reason: string;
+  evidence: { sourceId: string; kind: string; path?: string | null; reference?: string | null; contentDigest: string; quote: string }[];
+  dependencies: { requirement: string; validationStrategy: string }[];
+  commandDigest: string;
+  sourceDigest: string;
+}
+
+export interface TaskSpecRepositoryObservation {
+  state: "Unknown" | "NotRequested" | "Unavailable" | "ObservedEmpty" | "Observed";
+  repositoryId?: string | null;
+  reference?: string | null;
+  detail: string;
+}
+
+export interface TaskSpecModelCall {
+  phase: string;
+  outcome: string;
+  selectedModel?: string | null;
+  actualModel?: string | null;
+  failedOver: string[];
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  usageMayBeIncomplete: boolean;
+  elapsedMilliseconds: number;
+}
+
 /** Mirror of the backend `CompileTaskSpecResult`. A null/absent `suggestion` is the documented degrade
  *  (no structured model / model-path miss) — the composer renders nothing, never an empty scaffold. */
 export interface CompileTaskSpecResult {
   suggestion?: TaskSpecSuggestion | null;
   grounded: boolean;
+  repositoryObservation?: TaskSpecRepositoryObservation | null;
+  modelCalls?: TaskSpecModelCall[] | null;
 }
 
 /** One selectable effort tier on a route confirm card — mirrors the backend `ConfirmCardOption`. `mode` is the
@@ -192,7 +226,16 @@ export interface RoutePlan {
 }
 
 /** Mirror of the backend `TaskRoutePreviewResult`. */
+export interface TaskAcceptanceCompatibility {
+  state: "Unknown" | "Compatible" | "Incompatible";
+  projectionKind: string;
+  gradingKind?: string | null;
+  requiresRepository?: boolean | null;
+  detail: string;
+}
+
 export interface TaskRoutePreviewResult {
+  acceptanceCompatibility?: TaskAcceptanceCompatibility | null;
   /** Optional for compatibility with an older server. Current previews always return the reference and database timestamps. */
   routeSnapshotId?: string;
   expiresAt?: string;

@@ -29,6 +29,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 {
     /// <summary>The projection kind this variant registers under (the key <c>ITaskProjectionRegistry</c> resolves by).</summary>
     public abstract string ProjectionKind { get; }
+    public TaskProjectionAcceptanceContract OperatorAcceptance => new(false, null);
 
     /// <summary>The body agent's goal binding over the planner's subtask objects — e.g. <c>"{{item.instruction}}"</c>.</summary>
     protected abstract string BranchGoal { get; }

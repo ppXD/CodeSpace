@@ -2,27 +2,34 @@ using System.Text.Json.Serialization;
 
 namespace CodeSpace.Messages.Tasks;
 
-/// <summary>
-/// P5-7: the spec compiler's reply — a nullable suggestion (null = no model available / the model path degraded /
-/// the model had nothing useful to suggest; the composer simply shows nothing) plus whether repo grounding was
-/// available to it. Pure data nouns (Rule 18.1); the suggestion's fields mirror the launch surface 1:1 so the FE
-/// pre-fills EXISTING fields — there is deliberately no field here the launch cannot carry.
-/// </summary>
+/// <summary>Spec proposals, server-observed source evidence, and model call outcomes. Source review does not establish execution compatibility, a passed check, or authority to run.</summary>
 public sealed record CompileTaskSpecResult
 {
     /// <summary>The compiled suggestions, or null when unavailable — the caller renders nothing, never an empty scaffold.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public TaskSpecSuggestion? Suggestion { get; init; }
 
-    /// <summary>Whether the repo's top-level grounding reached the compiler — a checks suggestion without grounding is a guess about the toolchain, and the FE may caveat it.</summary>
+    /// <summary>Legacy coarse observation flag. Use RepositoryObservation to distinguish unreadable, absent, and observed empty repositories.</summary>
     public bool Grounded { get; init; }
+
+    /// <summary>What the server actually observed. Missing on legacy replies means Unknown, never an empty repository.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TaskSpecRepositoryObservation? RepositoryObservation { get; init; }
+
+    /// <summary>Both generation and semantic-review calls, including failures and provider-reported usage. Missing usage is unknown, not free.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<TaskSpecModelCall>? ModelCalls { get; init; }
 }
 
-/// <summary>One compiled suggestion set. Every field maps onto an existing <c>LaunchTaskCommand</c> field; the operator edits or discards freely — these are proposals, not stakes.</summary>
+/// <summary>One compiled suggestion set with a preview-only evidence assessment. Applying a field requires separate execution compatibility; durable launch provenance is not established by this reply.</summary>
 public sealed record TaskSpecSuggestion
 {
-    /// <summary>The suggested EXECUTABLE acceptance argv (the launch's <c>AcceptanceChecks</c> floor). Empty when the compiler could not name a check it believes exists — a wrong argv is worse than none (it mints Failed/InfraUnknown noise and withholds good work).</summary>
+    /// <summary>Source-supported candidate argv for existing consumers. Empty for unknown or contradicted evidence. The route adapter must independently accept this input before adoption; no execution is claimed.</summary>
     public IReadOnlyList<string> AcceptanceChecks { get; init; } = Array.Empty<string>();
+
+    /// <summary>The proposed argv, its assessed source and the evidence behind adoption. Supported is a model assessment, not an execution receipt or authority grant.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TaskSpecAcceptanceProposal? AcceptanceProposal { get; init; }
 
     /// <summary>Suggested definition-of-done bullets (the launch's <c>AcceptanceCriteria</c>). Prompt-rendered guidance, never executed.</summary>
     public IReadOnlyList<string> AcceptanceCriteria { get; init; } = Array.Empty<string>();

@@ -1666,13 +1666,8 @@ public sealed partial class SupervisorTurnService
         return ids is { Count: > 0 } ? ids : null;
     }
 
-    /// <summary>Normalise the operator's acceptance command (L4 A3) into a runnable argv: drop blank elements, and — UNLIKE the tool tri-state — collapse an empty/all-blank list to <c>null</c> ("no objective grade; the resolver self-report marker stands"), so a configured-but-empty list never grades.</summary>
-    private static IReadOnlyList<string>? NormalizeCommand(IReadOnlyList<string>? command)
-    {
-        var argv = command?.Where(a => !string.IsNullOrWhiteSpace(a)).ToList();
-
-        return argv is { Count: > 0 } ? argv : null;
-    }
+    /// <summary>Preserve argv boundaries exactly. A blank executable or invalid token never promotes a later argument into the executable.</summary>
+    private static IReadOnlyList<string>? NormalizeCommand(IReadOnlyList<string>? command) => command is { Count: > 0 } && !string.IsNullOrWhiteSpace(command[0]) && command.All(a => a is not null && !a.Contains('\0')) ? command.ToArray() : null;
 
     /// <summary>
     /// How many WorkflowRun ancestors this supervisor run already has (PR-E E5 depth cap) — walks the

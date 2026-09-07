@@ -20,6 +20,19 @@ namespace CodeSpace.UnitTests.Tasks;
 [Trait("Category", "Unit")]
 public class TaskSpecCompilerTests
 {
+    [Theory]
+    [InlineData("The tests for the payment retry path are flaky; make them deterministic.")]
+    [InlineData("Do not run `go test ./... -count=5`; investigate the report without assuming a Go toolchain.")]
+    public async Task A_model_command_without_independent_source_assessment_never_becomes_a_mandatory_check(string goal)
+    {
+        var client = new RecordingStructuredClient("""{"acceptanceChecks":["sh","-c","go test ./... -count=5"],"acceptanceCriteria":["Retry behavior is deterministic"],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.9,"rationale":"No repository evidence, so no command is suggested."}""");
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        var result = await compiler.CompileAsync(Guid.NewGuid(), goal, null, CancellationToken.None);
+        result.Suggestion.ShouldNotBeNull();
+        result.Suggestion.AcceptanceChecks.ShouldBeEmpty("a generated argv and a confident rationale do not establish its source, dependencies or semantic support");
+        result.Suggestion.AcceptanceCriteria.ShouldBe(["Retry behavior is deterministic"]);
+    }
+
     // ── ToSuggestion: the pure mapping ──────────────────────────────────────────────
 
     [Fact]
@@ -34,7 +47,9 @@ public class TaskSpecCompilerTests
         });
 
         suggestion.ShouldNotBeNull();
-        suggestion!.AcceptanceChecks.ShouldBe(new[] { "dotnet", "test" }, "argv tokens are trimmed");
+        suggestion!.AcceptanceChecks.ShouldBeEmpty("unassessed model output is never a mandatory floor");
+        suggestion.AcceptanceProposal!.Argv.ShouldBe(new[] { " dotnet ", "test" }, "argv tokens preserve their exact semantics rather than being trimmed");
+        suggestion.AcceptanceProposal.Status.ShouldBe(TaskSpecEvidenceStatus.Unknown);
         suggestion.AcceptanceCriteria.ShouldBe(new[] { "builds green", "no new warnings" }, "criteria are trimmed + deduped");
         suggestion.OpenPullRequest.ShouldBe(true);
         suggestion.TargetBranch.ShouldBe("release/2.0");
@@ -90,7 +105,7 @@ public class TaskSpecCompilerTests
 
         schema.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse();
         schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(
-            new[] { "acceptanceChecks", "acceptanceCriteria", "hasDeliveryOpinion", "openPullRequest", "confidence", "rationale" },
+            new[] { "acceptanceChecks", "evidencePaths", "dependencies", "acceptanceCriteria", "hasDeliveryOpinion", "openPullRequest", "confidence", "rationale" },
             "the commit-contract: a drift here is a reviewer-visible contract change");
         schema.GetProperty("properties").GetProperty("targetBranch").GetProperty("description").GetString()!
             .ShouldContain("never guess a branch");
@@ -121,7 +136,8 @@ public class TaskSpecCompilerTests
 
         result.Grounded.ShouldBeTrue();
         result.Suggestion.ShouldNotBeNull();
-        result.Suggestion!.AcceptanceChecks.ShouldBe(new[] { "dotnet", "test" });
+        result.Suggestion!.AcceptanceChecks.ShouldBeEmpty("layout names plus a generation reply cannot establish semantic source support");
+        result.Suggestion.AcceptanceProposal!.Argv.ShouldBe(new[] { "dotnet", "test" });
         result.Suggestion.OpenPullRequest.ShouldBe(true);
         result.Suggestion.TargetBranch.ShouldBeNull("an empty targetBranch means the repo default — never an empty string on the wire");
 
@@ -165,7 +181,89 @@ public class TaskSpecCompilerTests
         selector.SeenCeiling.ShouldBe(InProcessStructuredModel.CheapBrainCeiling, "the spec-preview compiler is one of D2's four cheap callers");
     }
 
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("timed-out")]
+    [InlineData("malformed")]
+    public async Task A_failed_semantic_review_keeps_the_proposal_and_criteria_with_honest_call_accounting(string reviewOutcome)
+    {
+        var client = new SequenceStructuredClient(reviewOutcome);
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        var result = await compiler.CompileAsync(Guid.NewGuid(), SequenceStructuredClient.Goal, null, CancellationToken.None);
+        result.Suggestion.ShouldNotBeNull();
+        result.Suggestion.AcceptanceChecks.ShouldBeEmpty();
+        result.Suggestion.AcceptanceProposal!.Argv.ShouldBe(["custom-audit", "--check"]);
+        result.Suggestion.AcceptanceProposal.Status.ShouldBe(TaskSpecEvidenceStatus.Unknown);
+        result.Suggestion.AcceptanceCriteria.ShouldBe(["The report meets the requested requirements."]);
+        result.ModelCalls!.Count.ShouldBe(2);
+        result.ModelCalls[0].Outcome.ShouldBe("succeeded");
+        result.ModelCalls[0].InputTokens.ShouldBe(10);
+        result.ModelCalls[1].Phase.ShouldBe("semantic-review");
+        result.ModelCalls[1].Outcome.ShouldBe(reviewOutcome);
+        if (reviewOutcome != "malformed")
+        {
+            result.ModelCalls[1].ActualModel.ShouldBeNull();
+            result.ModelCalls[1].InputTokens.ShouldBeNull("unknown provider usage must not turn into zero cost");
+            result.ModelCalls[1].UsageMayBeIncomplete.ShouldBeTrue();
+        }
+    }
+
+    [Fact]
+    public async Task Independent_review_sees_original_sources_without_the_proposers_rationale_and_records_the_actual_failover_model()
+    {
+        var client = new SequenceStructuredClient("failover-success");
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        var result = await compiler.CompileAsync(Guid.NewGuid(), SequenceStructuredClient.Goal, null, CancellationToken.None);
+        result.Suggestion!.AcceptanceChecks.ShouldBe(["custom-audit", "--check"]);
+        result.Suggestion.AcceptanceProposal!.Source.ShouldBe(TaskSpecCheckSource.UserExplicit);
+        client.Requests.Count.ShouldBe(2);
+        client.Requests[1].UserPrompt.ShouldContain(SequenceStructuredClient.Goal);
+        client.Requests[1].UserPrompt.ShouldNotContain("PROPOSER_SELF_ENDORSEMENT");
+        client.Requests[1].JsonSchema.GetProperty("required").EnumerateArray().Select(p => p.GetString()).ShouldContain("citations");
+        var trace = result.ModelCalls![1];
+        trace.SelectedModel.ShouldBe("test-model");
+        trace.ActualModel.ShouldBe("fallback-model");
+        trace.FailedOver.ShouldBe(["TestSpec:test-model — transient 503"]);
+        trace.InputTokens.ShouldBe(20);
+        trace.OutputTokens.ShouldBe(7);
+        trace.UsageMayBeIncomplete.ShouldBeTrue("the failed-over attempt's billed usage was not reported");
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_propagates_instead_of_turning_into_a_successful_unknown_preview()
+    {
+        var client = new SequenceStructuredClient("failover-success");
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Should.ThrowAsync<OperationCanceledException>(() => compiler.CompileAsync(Guid.NewGuid(), SequenceStructuredClient.Goal, null, cancelled.Token));
+        client.Requests.ShouldBeEmpty();
+    }
+
     // ── Fakes at the honest seams ───────────────────────────────────────────────────
+
+    private sealed class SequenceStructuredClient : ILLMClient, IStructuredLLMClient
+    {
+        public const string Goal = "Use custom-audit --check for final validation.";
+        private readonly string _reviewOutcome;
+        public List<StructuredLLMCompletionRequest> Requests { get; } = [];
+        public SequenceStructuredClient(string reviewOutcome) { _reviewOutcome = reviewOutcome; }
+        public string Provider => "TestSpec";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            if (Requests.Count == 1) return Task.FromResult(new StructuredLLMCompletion
+            {
+                Model = "proposal-model", Usage = new LlmUsage { InputTokens = 10, OutputTokens = 5 },
+                Json = JsonDocument.Parse("""{"acceptanceChecks":["custom-audit","--check"],"evidencePaths":[],"dependencies":[{"requirement":"Validator input exists","validationStrategy":"Inspect input and invoke the requested validator"}],"acceptanceCriteria":["The report meets the requested requirements."],"hasDeliveryOpinion":false,"openPullRequest":false,"confidence":0.8,"rationale":"PROPOSER_SELF_ENDORSEMENT"}""").RootElement.Clone(),
+            });
+            if (_reviewOutcome == "failed") throw new IOException("review transport unavailable");
+            if (_reviewOutcome == "timed-out") throw new OperationCanceledException("review request deadline");
+            var json = _reviewOutcome == "malformed" ? "[]" : JsonSerializer.Serialize(new TaskSpecReview { Source = "user-explicit", Support = "supported", Citations = [new TaskSpecReviewCitation("goal", Goal)], Reason = "The original user explicitly requested this command; it has not been executed." });
+            return Task.FromResult(new StructuredLLMCompletion { Model = "fallback-model", Json = JsonDocument.Parse(json).RootElement.Clone(), Usage = new LlmUsage { InputTokens = 20, OutputTokens = 7 }, FailedOver = ["TestSpec:test-model — transient 503"] });
+        }
+    }
 
     private sealed class EmptyRegistry : ILLMClientRegistry
     {
@@ -239,20 +337,23 @@ public class TaskSpecCompilerTests
         public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
     }
 
-    private sealed class NullGrounding : IRepoGroundingProvider
+    private sealed class NullGrounding : ITaskSpecEvidenceReader
     {
-        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+        public Task<TaskSpecEvidenceContext> CaptureAsync(TaskSpecEvidenceRequest request, CancellationToken cancellationToken) => Task.FromResult(TaskSpecEvidenceContext.TaskOnly(request, TaskSpecRepositoryState.NotRequested, "No repository."));
+        public Task<TaskSpecEvidenceContext> ReadFilesAsync(TaskSpecEvidenceContext context, IReadOnlyList<string> paths, CancellationToken cancellationToken) => Task.FromResult(context);
     }
 
-    private sealed class FixedGrounding : IRepoGroundingProvider
+    private sealed class FixedGrounding : ITaskSpecEvidenceReader
     {
         private readonly string _text;
         public FixedGrounding(string text) => _text = text;
-        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken) => Task.FromResult<string?>(_text);
+        public Task<TaskSpecEvidenceContext> CaptureAsync(TaskSpecEvidenceRequest request, CancellationToken cancellationToken) => Task.FromResult(new TaskSpecEvidenceContext(request, new TaskSpecRepositoryObservation { State = TaskSpecRepositoryState.Observed, Reference = "abc123", Detail = "Root observed" }, [TaskSpecSource.Create("goal", "user-goal", request.Goal), TaskSpecSource.Create("repository-layout", "repository-layout", _text, reference: "abc123")]));
+        public Task<TaskSpecEvidenceContext> ReadFilesAsync(TaskSpecEvidenceContext context, IReadOnlyList<string> paths, CancellationToken cancellationToken) => Task.FromResult(context);
     }
 
-    private sealed class ThrowingGrounding : IRepoGroundingProvider
+    private sealed class ThrowingGrounding : ITaskSpecEvidenceReader
     {
-        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, string? reference, CancellationToken cancellationToken) => throw new InvalidOperationException("grounding down");
+        public Task<TaskSpecEvidenceContext> CaptureAsync(TaskSpecEvidenceRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException("grounding down");
+        public Task<TaskSpecEvidenceContext> ReadFilesAsync(TaskSpecEvidenceContext context, IReadOnlyList<string> paths, CancellationToken cancellationToken) => throw new InvalidOperationException("grounding down");
     }
 }

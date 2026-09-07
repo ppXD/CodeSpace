@@ -289,13 +289,24 @@ public class SingleAgentDefinitionBuilderTests
     // ── S5: the quick tier's operator checks floor becomes the single agent's contract ──
 
     [Fact]
-    public void The_operator_checks_floor_bakes_as_the_agents_acceptance_with_blanks_dropped()
+    public void The_advertised_operator_adapter_bakes_exact_argv_including_blank_arguments()
     {
-        var def = Builder.Build(Context(Seed(), profile: null) with { AcceptanceChecks = new[] { "sh", " ", "check.sh" } });
+        var def = Builder.Build(Context(Seed(), profile: null) with { AcceptanceChecks = new[] { "sh", " ", "check.sh", "" } });
 
         var acceptance = def.Nodes.Single(n => n.TypeKey == "agent.run").Config.GetProperty("acceptance");
-        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", " ", "check.sh", "" });
+        Builder.OperatorAcceptance.AcceptsCommand.ShouldBe(true);
+        Builder.OperatorAcceptance.GradingKind.ToString().ShouldBe("TestsPass");
         acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void A_blank_executable_does_not_promote_a_later_argument(string executable)
+    {
+        var config = AgentConfigOf(Builder.Build(Context(Seed(), profile: null) with { AcceptanceChecks = new[] { executable, "must-not-run" } }));
+        config.TryGetProperty("acceptance", out _).ShouldBeFalse();
     }
 
     [Fact]
@@ -349,7 +360,7 @@ public class SingleAgentDefinitionBuilderTests
 
         withShape.GetRawText().ShouldBe(withDefaultRoute.GetRawText(), "an explicit code shape and the default route must emit the SAME agent config");
 
-        withShape.GetProperty("acceptance").GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "check.sh" });
+        withShape.GetProperty("acceptance").GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", " ", "check.sh" });
         withShape.GetProperty("acceptanceAuthority").GetString().ShouldBe("Operator");
         withShape.GetProperty("goal").GetString().ShouldNotContain("DELIVERABLE.md", customMessage: "a coding run is never told to write a deliverable file");
     }
