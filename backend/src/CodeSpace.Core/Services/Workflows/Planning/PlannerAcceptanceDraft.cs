@@ -128,12 +128,21 @@ internal sealed record PlannerAcceptanceDraft
     /// <para>A shape the wire record itself cannot hold (a v1 <c>command</c> key, a wrongly-typed field) is caught here
     /// rather than at the reply boundary. That was the last route by which one subtask's acceptance could still take a
     /// whole plan down.</para>
+    ///
+    /// <para>A PRESENT acceptance that is not an object at all (<c>null</c>, <c>[]</c>, <c>""</c>, <c>5</c>) is a defect
+    /// like any other, NOT "no oracle authored". Reading it as an absence reported nothing and claimed no path, so the
+    /// schema's own <c>expected type 'object' but got null</c> at that position stayed unexplained — i.e. fatal — and
+    /// <c>"acceptance": null</c> is exactly what a model writes when it has no oracle to offer.</para>
     /// </summary>
     internal static SupervisorAcceptanceSpec? Bind(JsonElement acceptance, out string? defect)
     {
         defect = null;
 
-        if (acceptance.ValueKind != JsonValueKind.Object) return null;   // an absent / non-object acceptance is "no oracle authored" — nothing to report
+        if (acceptance.ValueKind != JsonValueKind.Object)
+        {
+            defect = $"Planner acceptance must be a JSON object; this one authored {DescribeKind(acceptance.ValueKind)}.";
+            return null;
+        }
 
         try
         {
@@ -188,7 +197,9 @@ internal sealed record PlannerAcceptanceDraft
         {
             var at = index++;
 
-            if (!TryReadProperty(subtask, "acceptance", out var acceptance) || acceptance.ValueKind != JsonValueKind.Object) continue;
+            // PRESENCE is the only pre-filter: a subtask that authored no acceptance at all lost no oracle and has
+            // nothing to report. Everything a model DID author — of any JSON kind — goes to the contract itself.
+            if (!TryReadProperty(subtask, "acceptance", out var acceptance)) continue;
 
             if (Bind(acceptance, out var defect) is not null || defect is null) continue;
 
@@ -211,6 +222,17 @@ internal sealed record PlannerAcceptanceDraft
     private static string ReadKind(JsonElement acceptance) =>
         TryReadProperty(acceptance, "kind", out var kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() is { Length: > 0 } authored ? Cap(authored) : "unbound";
 
+    /// <summary>The JSON kind an acceptance was authored as, in the words a MODEL reads back rather than the serializer's enum names ("Array", "True"). Only reached for a kind that cannot be an acceptance at all, so no oracle name flows through here.</summary>
+    private static string DescribeKind(JsonValueKind kind) => kind switch
+    {
+        JsonValueKind.Null => "null",
+        JsonValueKind.Array => "an array",
+        JsonValueKind.String => "a string",
+        JsonValueKind.Number => "a number",
+        JsonValueKind.True or JsonValueKind.False => "a boolean",
+        _ => "a non-object value",
+    };
+
     /// <summary>Model-authored text reaches both the drop record and the re-ask prompt, so an absurd value must not be able to bloat either.</summary>
     private static string Cap(string authored) => authored.Length > 64 ? authored[..64] : authored;
 
@@ -225,7 +247,8 @@ internal sealed record PlannerAcceptanceDraft
         return false;
     }
 
-    private static string ReadId(JsonElement subtask) => TryReadProperty(subtask, "id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() ?? "" : "";
+    /// <summary><see cref="Cap"/>ped for the same reason the authored kind is: this id rides into the ONE bounded re-ask, whose whole message is capped downstream at 512 characters, so a model-authored id long enough to fill that budget would truncate the advice itself away. No consumer joins on the recorded id (<c>plan.author</c> logs it and emits it), and no plan-local id a planner really writes comes near the cap.</summary>
+    private static string ReadId(JsonElement subtask) => TryReadProperty(subtask, "id", out var id) && id.ValueKind == JsonValueKind.String ? Cap(id.GetString() ?? "") : "";
 
     /// <summary>
     /// <c>droppedAcceptances</c> is SERVER-stamped — the planner's own record of which acceptance it could not bind.

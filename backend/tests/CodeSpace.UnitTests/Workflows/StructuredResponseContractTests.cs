@@ -201,6 +201,51 @@ public sealed class StructuredResponseContractTests
     [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
+    public async Task An_acceptance_authored_as_null_survives_its_reask_instead_of_faulting_the_plan(string provider)
+    {
+        // `"acceptance": null` is what a model writes when it has no oracle to offer, and it used to read as "no
+        // oracle authored" — so no advisory claimed the position and the schema's `expected type 'object' but got
+        // null` there was fatal. Two identical replies therefore ended the call as Malformed and the planner node
+        // parked the run over a subtask whose WORK was perfectly good.
+        var reply = PlannerReplyWithAcceptance("null");
+        var handler = new WireHandler(provider, [reply, reply]);
+
+        var response = await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
+
+        handler.Bodies.Count.ShouldBe(2, "the re-ask stays bounded to one");
+        handler.Bodies[1].ShouldContain("must be a JSON object");
+        handler.Bodies[1].ShouldNotContain("did NOT conform", customMessage: "a reply the consumer is about to accept must not be told it was invalid");
+
+        var plan = LlmWorkflowPlanner.Deserialize(response.Json);
+        plan.Subtasks.Single().Acceptance.ShouldBeNull("nothing is unwrapped out of a non-object acceptance");
+        plan.DroppedAcceptances.ShouldHaveSingleItem().Reason.ShouldContain("authored null");
+    }
+
+    [Theory]
+    [InlineData("Anthropic", HttpStatusCode.TooManyRequests)]
+    [InlineData("OpenAI", HttpStatusCode.TooManyRequests)]
+    [InlineData("Anthropic", HttpStatusCode.ServiceUnavailable)]
+    [InlineData("OpenAI", HttpStatusCode.ServiceUnavailable)]
+    public async Task A_reask_that_fails_on_the_transport_returns_the_first_advisory_reply(string provider, HttpStatusCode status)
+    {
+        // The upgrade attempt can fail for a reason that has nothing to do with what it authored — a 429, a 5xx, a
+        // dropped connection. Only `Malformed` was caught, so any of those DESTROYED a first reply the consumer had
+        // already accepted, and the planner node parked the run to earn a fresh attempt at a plan we were holding.
+        // We already have a usable answer: no transport failure on the upgrade attempt is worth losing it.
+        var handler = new WireHandler(provider, [PlannerReply("TestsPass"), "{\"error\":{\"message\":\"synthetic re-ask failure\"}}"]) { Statuses = [HttpStatusCode.OK, status] };
+
+        var response = await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
+
+        handler.Bodies.Count.ShouldBe(2, "a 429 / 5xx propagates out of the provider's own attempt rather than degrading to its prompt-only floor");
+        LlmWorkflowPlanner.Deserialize(response.Json).DroppedAcceptances.ShouldHaveSingleItem().SubtaskId.ShouldBe("s1", "the drop is recorded from the reply that was actually kept");
+
+        response.Usage.InputTokens.ShouldBe(12, "the failed attempt's usage died with its exception — only the kept reply's own counts are known");
+        response.Usage.IsPartial.ShouldBeTrue("a subtotal must say so rather than price the whole call");
+    }
+
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
     public async Task The_live_four_subtask_reply_survives_its_reask_with_all_four_oracles_dropped(string provider)
     {
         // Lane run 34093741284 end to end over the real wire: four acceptances, none with `formatVersion`, three also
@@ -212,6 +257,16 @@ public sealed class StructuredResponseContractTests
 
         handler.Bodies.Count.ShouldBe(2);
         handler.Bodies[1].ShouldContain("left part of itself unusable", customMessage: "four degradable defects are still four advisories, never a fault");
+
+        // One re-ask for four defective acceptances: advice that names some of them buys a reply with the rest still
+        // wrong. (An apostrophe rides the request body JSON-escaped, so undo that one escape rather than asserting on
+        // the encoder's spelling of it.)
+        var advice = handler.Bodies[1].Replace("\\u0027", "'");
+        foreach (var id in new[] { "s1", "s2", "s3", "s4" })
+            advice.ShouldContain($"Subtask '{id}' authored an acceptance this contract cannot bind", customMessage: "every degraded subtask has to be named, not just the first");
+        advice.ShouldContain("requires formatVersion 2", customMessage: "the defect all four share");
+        advice.ShouldContain("non-empty argv array");
+        advice.ShouldContain("non-empty artifactPaths array", customMessage: "both payload classes are wrong in this reply; naming one of them is naming half the problem");
 
         var plan = LlmWorkflowPlanner.Deserialize(response.Json);
         plan.Subtasks.Count.ShouldBe(4, "the sibling subtasks were never evidence about each other's acceptance");
@@ -308,10 +363,17 @@ public sealed class StructuredResponseContractTests
     private sealed class WireHandler(string provider, string[] responses) : HttpMessageHandler
     {
         public List<string> Bodies { get; } = [];
+
+        /// <summary>The HTTP status of the Nth reply, defaulting to 200 for every one it does not cover. A non-200 entry returns its queued body verbatim as the gateway's error payload, so an arm can fail a re-ask on the TRANSPORT rather than on what it authored.</summary>
+        public HttpStatusCode[] Statuses { get; init; } = [];
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Bodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
             var content = responses[Math.Min(Bodies.Count - 1, responses.Length - 1)];
+            var status = Bodies.Count <= Statuses.Length ? Statuses[Bodies.Count - 1] : HttpStatusCode.OK;
+
+            if (status != HttpStatusCode.OK) return new HttpResponseMessage(status) { Content = new StringContent(content, Encoding.UTF8, "application/json") };
 
             // A queued entry that is not a JSON object is PROSE — what a model returns when it answers in text
             // instead of the forced tool/function call. Both clients then find no JSON, degrade to their prompt-only
