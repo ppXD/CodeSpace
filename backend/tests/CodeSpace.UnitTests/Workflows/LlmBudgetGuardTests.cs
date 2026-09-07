@@ -158,7 +158,7 @@ public class LlmBudgetGuardTests
     }
 
     [Fact]
-    public void The_pessimistic_estimate_is_committed_and_directionally_safe()
+    public void Admission_estimates_are_available_for_priced_models()
     {
         LlmBudgetGuard.DefaultMaxOutputTokensEstimate.ShouldBe(8192);
         LlmBudgetGuard.EstimateUsd("claude-opus-4-8", new string('x', 3000), new string('y', 3000), maxOutputTokens: null)
@@ -166,7 +166,32 @@ public class LlmBudgetGuardTests
         LlmBudgetGuard.EstimateUsd("totally-unknown-model", "s", "u", 100).ShouldBeNull();
     }
 
-    private sealed class RecordingLedger(bool admit) : IBudgetLedger
+    [Fact]
+    public async Task An_unrepresentable_positive_admission_estimate_cannot_create_a_free_claim()
+    {
+        var ledger = new RecordingLedger(admit: true);
+        var scope = Scope(ledger, 1m) with { ModelPrices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>
+        {
+            ["tiny"] = new() { InputPerMillionUsd = 0.0000000000000000000000000001m, OutputPerMillionUsd = 0m },
+        } };
+        var called = false;
+        await Should.ThrowAsync<UnpricedModelUnderCapException>(() => LlmBudgetGuard.GuardedAsync(scope, "tiny", "s", "u", 1, _ => { called = true; return Task.FromResult(1); }, _ => null, CancellationToken.None));
+        called.ShouldBeFalse();
+        ledger.Reserves.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_replayed_logical_claim_never_authorizes_another_provider_request()
+    {
+        var ledger = new RecordingLedger(admit: true, replay: true);
+        var called = false;
+        var refusal = await Should.ThrowAsync<LlmBudgetExceededException>(() => LlmBudgetGuard.GuardedAsync(Scope(ledger, 1m), "claude-opus-4-8", "s", "u", 10, _ => { called = true; return Task.FromResult(1); }, _ => 0m, CancellationToken.None));
+        called.ShouldBeFalse();
+        ledger.Settles.ShouldBe(0);
+        refusal.Message.ShouldContain("cannot authorize another provider request");
+    }
+
+    private sealed class RecordingLedger(bool admit, bool replay = false) : IBudgetLedger
     {
         public int Reserves;
         public int Settles;
@@ -178,7 +203,7 @@ public class LlmBudgetGuardTests
         {
             Reserves++;
             LastExpiresAt = expiresAt;
-            return Task.FromResult(new BudgetAdmission(admit, admit ? Guid.NewGuid() : null, 4.9m, capUsd, admit ? null : "cap"));
+            return Task.FromResult(new BudgetAdmission(admit, admit ? Guid.NewGuid() : null, 4.9m, capUsd, admit ? null : "cap") { IsReplay = replay });
         }
 
         public Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken)

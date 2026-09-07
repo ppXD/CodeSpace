@@ -12,20 +12,19 @@ namespace CodeSpace.Core.Services.Workflows.Budget;
 
 public interface IBudgetSettlementService
 {
-    /// <summary>One settlement pass: settle live agent-attempt reservations whose attempt folded a terminal result (at the PRICED actual), release the ones whose attempt never materialized on a terminal run, and expire the overdue. Returns (settled, released, expired).</summary>
+    /// <summary>Settle known folded agent-attempt costs, retain unknown or missing outcomes, release separate terminal map-branch claims and expire overdue reservations. Returns confirmed settlements, releases and expirations.</summary>
     Task<(int Settled, int Released, int Expired)> SweepAsync(int batchSize, CancellationToken cancellationToken);
 }
 
 /// <summary>
 /// W-hard 2b: the settlement half of the atomic budget ledger — eventually-consistent by design (admission stays
-/// pessimistic and correct meanwhile; settlement only FREES over-estimated headroom for later waves). The sweep
+/// conservative meanwhile; a confirmed cost can correct the estimate in either direction). The sweep
 /// maps each live agent-attempt reservation back to its attempt through the TAPE's own ordered facts: a terminal
 /// spawn/retry decision's staged agent ids are positional with the wave, and the reservation scope keys are the
 /// per-spawn iteration keys ({node}#turn{N}#{k}) minted at admission — so results[k] settles reservation #k at the
-/// PRICED actual (the same AgentCostPricing the runtime bound folds). A live reservation on a TERMINAL run whose
-/// attempt never folded a result releases (the attempt never ran to a durable fact — its claim returns); overdue
-/// reservations expire to Indeterminate via the ledger (holding their claim). Never touches a live run's
-/// reservations beyond expiry — an in-flight wave keeps its full claim.
+/// priced actual. A terminal run with no folded outcome retains an uncertain claim: a missing ACK does not
+/// prove that no provider was billed. Unknown claims remain eligible for late evidence and rotate by their last
+/// inspection time, so an unresolved prefix does not permanently hide later reservations.
 /// </summary>
 public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedDependency
 {
@@ -43,8 +42,8 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
     public async Task<(int Settled, int Released, int Expired)> SweepAsync(int batchSize, CancellationToken cancellationToken)
     {
         var live = await _db.BudgetReservation.AsNoTracking()
-            .Where(r => r.Kind == "agent-attempt" && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight))
-            .OrderBy(r => r.CreatedDate)
+            .Where(r => r.Kind == "agent-attempt" && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight || r.State == BudgetReservationStates.Indeterminate || r.State == BudgetReservationStates.Reconciled))
+            .OrderBy(r => r.LastModifiedDate).ThenBy(r => r.Id)
             .Take(batchSize)
             .Select(r => new { r.WorkflowRunId, r.TeamId, r.ScopeKey })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -68,10 +67,9 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
 
         released += await ReleaseTerminalMapBranchesAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
-        // W-hard slice 2: the llm:* kinds have no fact source to settle from (the guard settles in-band; only
-        // orphans reach here) — reconcile them pessimistically so a teardown's dangling claim is terminal
-        // bookkeeping, never a forever-live row every later admission of the run keeps paying for.
-        released += await _ledger.ReconcileDanglingAsync("llm:", batchSize, cancellationToken).ConfigureAwait(false);
+        // Close recovery bookkeeping for llm:* claims that missed in-band settlement. Their actual stays
+        // unknown and their estimates continue to count toward committed budget until confirmed evidence arrives.
+        await _ledger.ReconcileDanglingAsync("llm:", batchSize, cancellationToken).ConfigureAwait(false);
 
         var expired = await _ledger.ExpireOverdueAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
@@ -157,24 +155,30 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
 
                 if (key is null) continue;
 
-                // The fold is the durable actual; a null price (unknown model) settles PESSIMISTICALLY at reserved.
-                var actual = Agents.Cost.AgentCostPricing.CostUsd(results[k].Model, results[k].InputTokens, results[k].OutputTokens, modelPrices);
+                // A folded known price is an actual; an unknown model keeps the existing claim uncertain.
+                // Compact legacy agent results already default missing usage to zero and do not carry completeness.
+                // This pricer prevents arithmetic loss; full CLI usage provenance requires the harness receipt path.
+                var actual = Agents.Cost.LlmUsageCost.Usd(results[k].Model, new Llm.LlmUsage { InputTokens = results[k].InputTokens, OutputTokens = results[k].OutputTokens }, modelPrices);
 
                 await _ledger.SettleAsync(runId, teamId, "agent-attempt", key, actual, cancellationToken).ConfigureAwait(false);
                 matchedKeys.Add(key);
-                settled++;
+                if (actual is not null) settled++;
             }
         }
-
-        var releasedCount = 0;
 
         if (runIsTerminal)
             foreach (var orphanKey in liveScopeKeys.Except(matchedKeys))
             {
-                await _ledger.ReleaseAsync(runId, teamId, "agent-attempt", orphanKey, cancellationToken).ConfigureAwait(false);
-                releasedCount++;
+                // A missing outcome is also compatible with a billed attempt whose completion ACK was lost.
+                // Keep uncertainty separate from workflow completion; terminal status does not prove no spend.
+                await _ledger.SettleAsync(runId, teamId, "agent-attempt", orphanKey, null, cancellationToken).ConfigureAwait(false);
             }
 
-        return (settled, releasedCount);
+        // Even an active attempt with no result must rotate through a bounded global sweep. This changes only
+        // inspection time on still-unsettled rows, never an actual receipt or its state.
+        await _db.BudgetReservation.Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.Kind == "agent-attempt" && liveScopeKeys.Contains(r.ScopeKey) && r.State != BudgetReservationStates.Settled)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+        return (settled, 0);
     }
 }

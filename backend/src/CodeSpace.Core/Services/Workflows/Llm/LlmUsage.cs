@@ -19,6 +19,12 @@ public sealed record LlmUsage
     /// <summary>The provider's stop reason — Anthropic <c>stop_reason</c> ("end_turn" / "max_tokens" / "tool_use" / "stop_sequence"), OpenAI <c>finish_reason</c> ("stop" / "length" / "tool_calls" / "content_filter"). Null when the provider didn't report one.</summary>
     public string? FinishReason { get; init; }
 
+    /// <summary>True when this envelope contains only a subtotal: a billed sub-call omitted usage, failed before its usage could be recovered, or the aggregate token count overflowed. Known token counts remain useful evidence but cannot price the complete call.</summary>
+    public bool IsPartial { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasCompleteTokenCounts => !IsPartial && InputTokens is >= 0 && OutputTokens is >= 0;
+
     /// <summary>The empty usage — the default on every completion so <c>Usage</c> is never null (a provider response with no usage block yields this).</summary>
     public static readonly LlmUsage None = new();
 
@@ -26,17 +32,23 @@ public sealed record LlmUsage
     /// Sum this usage with a LATER one — used to total the SEVERAL billed sub-calls one structured completion makes
     /// (a forced tool/function attempt that degrades to a prompt-only floor, each re-asked once on a schema miss) so
     /// the returned usage reflects what the provider actually BILLED, not just the final POST. Token counts add (two
-    /// nulls stay null; a null on one side is treated as 0 so a reported count is never lost). The finish reason is the
+    /// nulls stay null; a null on one side preserves the known subtotal and marks it partial). The finish reason is the
     /// LATER one UNCONDITIONALLY — the final/accepted sub-call's, even when that's null: the degraded/rejected earlier
     /// attempts' reasons (a "tool_use" that produced no usable JSON, a schema-invalid round) are NOT the answer's and
     /// must never surface in place of the accepted call's. Null honestly means "the accepted call reported no reason".
     /// </summary>
-    public LlmUsage Add(LlmUsage later) => new()
+    public LlmUsage Add(LlmUsage later, bool sameModel = true) => new()
     {
         InputTokens = AddTokens(InputTokens, later.InputTokens),
         OutputTokens = AddTokens(OutputTokens, later.OutputTokens),
-        FinishReason = later.FinishReason
+        FinishReason = later.FinishReason,
+        IsPartial = !sameModel || !HasCompleteTokenCounts || !later.HasCompleteTokenCounts || (long)(InputTokens ?? 0) + (later.InputTokens ?? 0) > int.MaxValue || (long)(OutputTokens ?? 0) + (later.OutputTokens ?? 0) > int.MaxValue,
     };
 
-    private static int? AddTokens(int? a, int? b) => a is null && b is null ? null : (a ?? 0) + (b ?? 0);
+    private static int? AddTokens(int? a, int? b)
+    {
+        if (a is null && b is null) return null;
+        var sum = (long)(a ?? 0) + (b ?? 0);
+        return sum is >= 0 and <= int.MaxValue ? (int)sum : null;
+    }
 }

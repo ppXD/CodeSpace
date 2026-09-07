@@ -68,7 +68,7 @@ public sealed class InteractionSpendTests
 
         row.InputTokens.ShouldBe(0);
         row.OutputTokens.ShouldBe(0);
-        row.CostUsd.ShouldBe(0m, "a known model with zero usage prices to a real $0, not unknown");
+        row.CostUsd.ShouldBeNull("missing usage is not a provider-reported zero");
     }
 
     [Fact]
@@ -126,6 +126,42 @@ public sealed class InteractionSpendTests
 
         row.CostUsd.ShouldBe(12m);
         BrainPlaneSpendSummary.From(new[] { row }).UnpricedModel.ShouldBeNull("everything priced");
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"inputTokens\": 1}")]
+    [InlineData("{\"inputTokens\": -1, \"outputTokens\": 1}")]
+    [InlineData("{\"inputTokens\": 1, \"outputTokens\": 1, \"isPartial\": true}")]
+    public void Incomplete_or_invalid_usage_cannot_become_a_known_cost(string usageJson)
+    {
+        var record = Record("{\"kind\":\"critic.review\",\"model\":\"claude-opus-4-8\",\"usage\":" + usageJson + "}");
+        var row = InteractionSpend.From(record);
+        row.CostUsd.ShouldBeNull();
+        BrainPlaneSpendSummary.From(new[] { row }).UnpricedModel.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public void A_positive_cost_smaller_than_decimal_can_represent_remains_unknown()
+    {
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>
+        {
+            ["tiny"] = new() { InputPerMillionUsd = 0.0000000000000000000000000001m, OutputPerMillionUsd = 0m },
+        };
+        var row = InteractionSpend.From(Record("""{"kind":"critic.review","model":"tiny","usage":{"inputTokens":1,"outputTokens":0}}"""), prices);
+        row.CostUsd.ShouldBeNull("a positive bill below decimal precision cannot be recorded as an actual zero");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_known_usage_subtotal_cannot_hide_an_unreported_subcall(bool missingFirst)
+    {
+        var known = new CodeSpace.Core.Services.Workflows.Llm.LlmUsage { InputTokens = 10, OutputTokens = 5 };
+        var unknown = CodeSpace.Core.Services.Workflows.Llm.LlmUsage.None;
+        var total = missingFirst ? unknown.Add(known) : known.Add(unknown);
+        var payload = System.Text.Json.JsonSerializer.Serialize(new { kind = "critic.review", model = "claude-opus-4-8", usage = total }, new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+        InteractionSpend.From(Record(payload)).CostUsd.ShouldBeNull("the complete total is unknown even though a reported subtotal is available");
     }
 
     private static WorkflowRunRecord Record(string payloadJson) => new()
