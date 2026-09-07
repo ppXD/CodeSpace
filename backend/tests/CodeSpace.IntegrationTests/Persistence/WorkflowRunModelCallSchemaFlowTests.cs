@@ -13,7 +13,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Persistence;
 
 /// <summary>
-/// Real-Postgres pins for migration 0124. These assertions deliberately cover the database constraints as well as
+/// Real-Postgres pins for the model-call migrations. These assertions deliberately cover the database constraints as well as
 /// EF round-trip: a model-call identity or usage counter written outside EF must not be able to bypass the contract.
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -37,13 +37,14 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
         }.Order());
         (await ColumnsAsync("workflow_run_model_call_attempt")).ShouldBe(new[]
         {
-            "attempt_ordinal", "cache_read_tokens", "cache_write_tokens", "capture_completeness", "capture_source", "completed_at",
+            "attempt_ordinal", "budget_reservation_id", "cache_read_tokens", "cache_write_tokens", "candidate_id", "candidate_model", "candidate_ordinal",
+            "capture_completeness", "capture_source", "completed_at",
             "cost_amount", "cost_currency", "created_by", "created_date", "effective_model", "effective_model_row_id", "effective_provider",
             "endpoint_fingerprint", "error_artifact_id", "error_code", "finish_reason", "first_token_at", "http_status_code", "id",
-            "input_tokens", "last_modified_by", "last_modified_date", "model_call_id", "output_tokens", "pricing_version",
+            "input_tokens", "last_modified_by", "last_modified_date", "model_call_id", "output_tokens", "pricing_snapshot_json", "pricing_version",
             "provider_request_id", "reasoning_tokens", "request_artifact_id", "response_artifact_id", "schema_version", "started_at",
             "status", "source_evidence_revision", "source_native_record_id", "source_started_record_id", "source_terminal_record_id", "team_id",
-            "transport_kind", "unavailable_figures", "workflow_run_id",
+            "transport_kind", "unavailable_figures", "usage_is_partial", "workflow_run_id",
         }.Order());
 
         var indexes = await IndexesAsync();
@@ -58,6 +59,7 @@ public sealed class WorkflowRunModelCallSchemaFlowTests
         indexes.ShouldContain("ux_workflow_run_model_call_attempt_source_terminal");
         indexes.ShouldContain("ix_workflow_run_model_call_attempt_late_start");
         indexes.ShouldContain("ux_workflow_run_model_call_attempt_source_native_record");
+        indexes.ShouldContain("ux_model_call_attempt_budget_reservation");
     }
 
     /// <summary>

@@ -22,6 +22,14 @@ public class WorkflowRunModelCallAttempt : IEntity<Guid>, IAuditable
     /// <summary>One-based physical attempt order within the logical call.</summary>
     public int AttemptOrdinal { get; set; }
 
+    /// <summary>Native structured provider candidate and its one-based order; distinct from every physical POST.</summary>
+    public Guid? CandidateId { get; set; }
+    public int? CandidateOrdinal { get; set; }
+    public string? CandidateModel { get; set; }
+    public Guid? BudgetReservationId { get; set; }
+    /// <summary>Frozen effective operator price table; billing metadata only, never provider payload or credentials.</summary>
+    public string? PricingSnapshotJson { get; set; }
+
     /// <summary>
     /// Exact immutable <c>interaction.started</c> source row when observed. Null is honest missing/late evidence;
     /// it may be filled once, never replaced or removed.
@@ -77,6 +85,9 @@ public class WorkflowRunModelCallAttempt : IEntity<Guid>, IAuditable
     public long? InputTokens { get; set; }
 
     public long? OutputTokens { get; set; }
+
+    /// <summary>Native subtotal evidence cannot become complete merely because a later observation omits usage.</summary>
+    public bool UsageIsPartial { get; set; }
 
     public long? CacheReadTokens { get; set; }
 

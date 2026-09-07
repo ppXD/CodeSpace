@@ -834,8 +834,10 @@ public class SupervisorDeciderTests
             PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
         };
 
+        // Scoped to the per-unit verdict's own indent, not to the word anywhere in the prompt: the turn roster names
+        // the 'amend_acceptance' verb on every turn, and a bare substring match would read that as a unit verdict.
         LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn))
-            .ShouldNotContain("acceptance", Case.Insensitive, "an ungraded unit renders no acceptance line — byte-identical to pre-slice");
+            .ShouldNotContain("      acceptance", Case.Insensitive, "an ungraded unit renders no acceptance line — byte-identical to pre-slice");
     }
 
     [Fact]
@@ -1328,15 +1330,39 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
-    public void The_system_prompt_vocabulary_names_every_verb_the_schema_accepts()
+    public void The_turn_roster_names_every_verb_the_schema_accepts_when_nothing_is_masked()
     {
-        // The sentence self-describes as "a fixed vocabulary" — a verb missing from it reads to the model as a verb
-        // that does not exist. 'resolve' was omitted while the schema accepted it, so the only guidance pointing at
-        // a conflicted integration named a DIFFERENT verb (the M0 verb-off-the-copy failure class).
-        var system = LlmSupervisorDecider.SystemPromptForTest;
+        // The vocabulary a verb is missing from reads to the model as a verb that does not exist — 'resolve' was
+        // once omitted while the schema accepted it, so the only guidance pointing at a conflicted integration named
+        // a DIFFERENT verb (the M0 verb-off-the-copy failure class). The obligation moved with the roster: it is now
+        // the per-TURN block that must name every verb, on a turn where the mask withholds none of them. The verbs
+        // are read off the SCHEMA rather than listed here, so a new one cannot be added to the contract and quietly
+        // left off the menu — which is exactly how 'amend_acceptance' was missing while a golden graded it.
+        var unmasked = Context(turnNumber: 3, AmendableSpawn(sequence: 1), MergeDecision(ConflictedMergeOutcome)) with { MaxResolveAttempts = 2 };
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(unmasked);
 
-        foreach (var verb in new[] { "'plan'", "'spawn'", "'retry'", "'merge'", "'resolve'", "'ask_human'", "'stop'" })
-            system.ShouldContain(verb, Case.Sensitive, $"the fixed-vocabulary sentence must name {verb} — the schema accepts it");
+        var verbs = SupervisorDecisionSchema.ResponseSchema.GetProperty("properties").GetProperty("kind").GetProperty("enum")
+            .EnumerateArray().Select(v => v.GetString()!).ToList();
+
+        verbs.Count.ShouldBe(8, "the schema's verb enum is a pinned commit contract — a change to it is a change to this menu");
+
+        foreach (var verb in verbs)
+            prompt.ShouldContain($"- {verb} — ", Case.Sensitive, $"the turn's roster must name {verb} — the schema accepts it and nothing on this tape withholds it");
+
+        prompt.ShouldNotContain(SupervisorActionMask.Header, Case.Sensitive, "…and nothing may be withheld on this tape, or the assertion above is measuring a different turn");
+    }
+
+    /// <summary>A spawn whose one unit's check COULD NOT RUN — the shape that leaves <c>amend_acceptance</c> genuinely available. Folded by the production folder, so a fixture the server could not produce cannot make this green.</summary>
+    private static SupervisorPriorDecision AmendableSpawn(long sequence)
+    {
+        var unit = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = "grade-error: npm: command not found" };
+        var outcome = SupervisorOutcome.FoldAgentResults(JsonSerializer.Serialize(new { agentRunIds = new[] { unit.AgentRunId }, agentCount = 1 }, AgentJson.Options), new[] { unit });
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = JsonSerializer.Serialize(new { subtaskIds = new[] { "s1" } }, AgentJson.Options), OutcomeJson = outcome,
+        };
     }
 
     [Fact]

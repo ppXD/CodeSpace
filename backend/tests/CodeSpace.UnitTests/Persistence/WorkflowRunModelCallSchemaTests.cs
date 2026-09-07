@@ -84,17 +84,19 @@ public sealed class WorkflowRunModelCallSchemaTests
         entity.GetTableName().ShouldBe("workflow_run_model_call_attempt");
         entity.GetProperties().Select(p => p.Name).Order().ShouldBe(new[]
         {
-            "AttemptOrdinal", "CacheReadTokens", "CacheWriteTokens", "CaptureCompleteness", "CaptureSource", "CompletedAt",
+            "AttemptOrdinal", "BudgetReservationId", "CandidateId", "CandidateOrdinal", "CandidateModel", "CacheReadTokens", "CacheWriteTokens", "CaptureCompleteness", "CaptureSource", "CompletedAt",
             "CostAmount", "CostCurrency", "CreatedBy", "CreatedDate", "EffectiveModel", "EffectiveModelRowId", "EffectiveProvider",
             "EndpointFingerprint", "ErrorArtifactId", "ErrorCode", "FinishReason", "FirstTokenAt", "HttpStatusCode", "Id",
-            "InputTokens", "LastModifiedBy", "LastModifiedDate", "ModelCallId", "OutputTokens", "PricingVersion", "ProviderRequestId",
+            "InputTokens", "LastModifiedBy", "LastModifiedDate", "ModelCallId", "OutputTokens", "PricingVersion", "PricingSnapshotJson", "ProviderRequestId",
             "ReasoningTokens", "RequestArtifactId", "ResponseArtifactId", "SchemaVersion", "SourceEvidenceRevision", "SourceNativeRecordId",
             "SourceStartedRecordId", "SourceTerminalRecordId", "StartedAt", "Status", "TeamId", "TransportKind", "UnavailableFigures",
-            "WorkflowRunId",
+            "WorkflowRunId", "UsageIsPartial",
         }.Order());
 
-        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetPrecision().ShouldBe(18);
-        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetScale().ShouldBe(8);
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetColumnType().ShouldBe("numeric");
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetPrecision().ShouldBeNull();
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostAmount))!.GetScale().ShouldBeNull();
+        entity.FindProperty(nameof(WorkflowRunModelCallAttempt.PricingSnapshotJson))!.GetColumnType().ShouldBe("jsonb");
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.CostCurrency))!.GetMaxLength().ShouldBe(3);
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.ProviderRequestId))!.GetMaxLength().ShouldBe(512);
         entity.FindProperty(nameof(WorkflowRunModelCallAttempt.TransportKind))!.GetMaxLength().ShouldBe(64);
@@ -107,6 +109,10 @@ public sealed class WorkflowRunModelCallSchemaTests
         var parent = entity.GetForeignKeys().Single(f => f.PrincipalEntityType.ClrType == typeof(WorkflowRunModelCall));
         parent.Properties.Select(p => p.Name).ShouldBe(new[] { "ModelCallId", "TeamId", "WorkflowRunId" });
         parent.DeleteBehavior.ShouldBe(DeleteBehavior.Cascade);
+        var budget = entity.GetForeignKeys().Single(f => f.PrincipalEntityType.ClrType == typeof(BudgetReservation));
+        budget.Properties.Select(p => p.Name).ShouldBe(new[] { "BudgetReservationId", "TeamId", "WorkflowRunId" });
+        budget.DeleteBehavior.ShouldBe(DeleteBehavior.Restrict);
+        Index(entity, "ux_model_call_attempt_budget_reservation").IsUnique.ShouldBeTrue();
 
         var ordinal = Index(entity, "ux_workflow_run_model_call_attempt_ordinal");
         ordinal.IsUnique.ShouldBeTrue();
@@ -142,6 +148,7 @@ public sealed class WorkflowRunModelCallSchemaTests
 
         entity.GetCheckConstraints().Select(c => c.Name).ShouldBe(new[]
         {
+            "ck_model_call_attempt_physical_receipt",
             "ck_workflow_run_model_call_attempt_capture_completeness",
             "ck_workflow_run_model_call_attempt_cost",
             "ck_workflow_run_model_call_attempt_http_status",

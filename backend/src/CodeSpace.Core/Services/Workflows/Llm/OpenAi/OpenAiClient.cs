@@ -40,7 +40,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 /// context limit). So a pinned param never 400s a reasoning endpoint, and a plain gateway model is sent the widely-supported
 /// shape.</para>
 /// </summary>
-public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, IStreamingLLMClient
 {
     public const string DefaultApiBaseUrl = "https://api.openai.com/v1";
 
@@ -148,18 +148,19 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingL
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
+        using var physical = PhysicalLlmCallContext.EnterProvider(request, Provider);
         // Get the JSON via the progressive path (with a re-ask when it produces NO parseable JSON at all), then VALIDATE
         // it against the requested schema — a recovered object that is missing a required field / has a wrong-typed value
         // / an invalid enum is NOT success. On a validation miss, RE-ASK ONCE with the exact violations named, then
         // re-validate; a second miss is a typed Malformed fault.
         var first = await FirstOrReaskOnParseFailureAsync(request, cancellationToken).ConfigureAwait(false);
         var errors = StructuredResponseValidation.Validate(first.Json, request);
-        if (errors.Count == 0) return first;
+        if (errors.Count == 0) return PhysicalLlmCallContext.Aggregate(first, candidateOnly: true);
 
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = StructuredResponseValidation.Validate(second.Json, request);
-        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) };   // total billed = the first (invalid) attempt + the re-ask
+        if (errors2.Count == 0) return PhysicalLlmCallContext.Aggregate(second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) }, candidateOnly: true);   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
@@ -310,6 +311,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingL
     private async Task<OpenAiChatResponse> PostChatAsync(OpenAiChatRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
         var (http, message) = BuildRequest(body, credential);
+        PhysicalLlmCallContext.Attach(http, message, PhysicalLlmEnvelopeReaders.OpenAi);
 
         using (message)
             return await LlmHttpTransport.SendForJsonAsync<OpenAiChatResponse>(http, message, Provider, ResponseJsonOptions, cancellationToken).ConfigureAwait(false);
