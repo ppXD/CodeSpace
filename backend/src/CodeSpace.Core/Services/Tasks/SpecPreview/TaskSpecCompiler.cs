@@ -108,7 +108,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
             {
                 Phase = phase, Outcome = outcome, SelectedModel = request.Model, ActualModel = completion?.Model,
                 FailedOver = completion?.FailedOver ?? [], InputTokens = completion?.Usage.InputTokens, OutputTokens = completion?.Usage.OutputTokens,
-                UsageMayBeIncomplete = completion is null || completion.FailedOver.Count > 0 || completion.Usage.InputTokens is null || completion.Usage.OutputTokens is null,
+                UsageMayBeIncomplete = completion is null || completion.FailedOver.Count > 0 || !completion.Usage.HasCompleteTokenCounts,
                 ElapsedMilliseconds = elapsed.ElapsedMilliseconds,
             };
             calls.Add(trace);
