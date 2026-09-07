@@ -97,7 +97,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
         using var process = new Process { StartInfo = invocation.StartInfo };
 
-        process.Start();
+        await ProcessLaunchThread.StartAsync(process, cancellationToken).ConfigureAwait(false);
         using var pipes = new CommandPipeLifetime(process, _logger);
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(pipes.Token);
@@ -126,7 +126,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         await using var invocation = await PrepareCommandAsync(spec, cancellationToken).ConfigureAwait(false);
         using var process = new Process { StartInfo = invocation.StartInfo };
 
-        process.Start();
+        await ProcessLaunchThread.StartAsync(process, cancellationToken).ConfigureAwait(false);
         using var pipes = new CommandPipeLifetime(process, _logger);
 
         // stderr captured in full (diagnostic context for the result); stdout is pumped line-by-line to the consumer.
