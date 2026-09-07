@@ -957,6 +957,38 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_rerun_shows_what_changed_since_the_previous_attempt()
+    {
+        // Item 7.2: the ladder used to tell the reader only THAT a rerun happened. Escalate the model, flip the
+        // acceptance grade, and roughly double the token spend on the retry — the delta must name all three, computed
+        // from each attempt's own durable AgentRun facts, never from the rerun request.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Escalated after a failure");
+        var now = DateTimeOffset.UtcNow;
+
+        var original = await SeedAttemptAsync(teamId, sessionId, turnIndex: 1, rootRunId: null, status: WorkflowRunStatus.Failure, source: WorkflowRunSourceTypes.Snapshot, createdAt: now.AddMinutes(-10));
+        await SeedAgentNodeAsync(teamId, original, summary: "First try.", changedFiles: new[] { "a.txt" },
+            model: "claude-sonnet-4-6", acceptancePassed: true, acceptanceDetail: "tests-passed", tokenUsage: new AgentTokenUsage { InputTokens = 1000, OutputTokens = 500 });
+
+        var winner = await SeedAttemptAsync(teamId, sessionId, turnIndex: null, rootRunId: original, status: WorkflowRunStatus.Success, source: WorkflowRunSourceTypes.Rerun, createdAt: now);
+        await SeedAgentNodeAsync(teamId, winner, summary: "Escalated retry.", changedFiles: new[] { "a.txt" },
+            model: "claude-opus-4-8", acceptancePassed: false, acceptanceDetail: "tests-failed-exit-1", tokenUsage: new AgentTokenUsage { InputTokens = 2000, OutputTokens = 1000 });
+
+        var turn = (await ProjectByRunAsync(winner, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+
+        turn.Attempts[0].Delta.ShouldBeNull("the first attempt has no predecessor to diff against");
+
+        var delta = turn.Attempts[1].Delta;
+        delta.ShouldNotBeNull("the rerun changed its model, status, acceptance grade and cost — the ladder must say WHAT changed, not just that a rerun happened");
+        delta!.Model.ShouldBe("claude-opus-4-8");
+        delta.Outcome.ShouldBe(WorkflowRunStatus.Success, "attempt 1 failed; the rerun succeeded");
+        delta.AcceptancePassed.ShouldBe(false, "attempt 1's check passed; the escalated retry's own check failed");
+        delta.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
+        delta.CostDeltaUsd.ShouldNotBeNull("both attempts ran a priced model, so the spend difference is knowable");
+        delta.CostDeltaUsd!.Value.ShouldBeGreaterThan(0, "the escalated model plus roughly double the tokens costs strictly more");
+    }
+
+    [Fact]
     public async Task A_parked_turns_clock_freezes_at_the_stamp_and_its_ladder_says_parked_too()
     {
         // A park is non-terminal, so every clock in the room ran the LIVE path: the sticky bar pulsed "Working" over a
@@ -1339,7 +1371,7 @@ public class RoomProjectorFlowTests
     }
 
     /// <summary>Seed a plain single-agent (non-supervisor) run: a node.started/completed ledger pair for the agent node (the workflow_run_node view surfaces it), the AgentRun wait that links the node to its run, and the AgentRun row whose persisted AgentRunResult carries the summary + changed files. No supervisor decisions. Call it MORE THAN ONCE with distinct <paramref name="nodeId"/>s for the multi-unit (fanned-out) shape; <paramref name="goal"/> gives that unit the display name the room labels it by; <paramref name="acceptancePassed"/> stamps its per-unit objective grade.</summary>
-    private async Task<Guid> SeedAgentNodeAsync(Guid teamId, Guid runId, string summary, string[] changedFiles, string nodeId = "agent", string? goal = null, bool? acceptancePassed = null, string? acceptanceDetail = null)
+    private async Task<Guid> SeedAgentNodeAsync(Guid teamId, Guid runId, string summary, string[] changedFiles, string nodeId = "agent", string? goal = null, bool? acceptancePassed = null, string? acceptanceDetail = null, string? model = null, AgentTokenUsage? tokenUsage = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1356,7 +1388,7 @@ public class RoomProjectorFlowTests
             Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now,
         });
 
-        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, AcceptancePassed = acceptancePassed, AcceptanceDetail = acceptanceDetail };
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, AcceptancePassed = acceptancePassed, AcceptanceDetail = acceptanceDetail, Model = model, TokenUsage = tokenUsage };
         db.AgentRun.Add(new AgentRun
         {
             Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = "",

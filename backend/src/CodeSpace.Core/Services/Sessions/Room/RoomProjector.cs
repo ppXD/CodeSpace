@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Decisions;
@@ -108,7 +109,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 ? await _cache.GetOrAddRoomAsync(turn.RunId, () => BuildTurnAsync(turn, null, teamId, cancellationToken)).ConfigureAwait(false)
                 : await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
             if (!isFocused && WorkflowRunState.IsTerminal(turn.RunStatus))
-                assistant = assistant with { Attempts = AttemptsOf(turn, assistant.RunId) };
+                assistant = assistant with { Attempts = await AttemptsOf(turn, assistant.RunId, teamId, cancellationToken).ConfigureAwait(false) };
 
             cursor = Math.Max(cursor, assistant.Seq);
             blocks.Add(assistant);
@@ -174,7 +175,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             StatusWord = parked ? RoomNarrative.ParkedWord : null,
             ParkedAt = parked ? focus.CompletionParkedAt : null,
             CompletionNote = CompletionNoteOf(turn, focus, facts.PolicyBoundedStage),
-            Attempts = AttemptsOf(turn, runId),
+            Attempts = await AttemptsOf(turn, runId, teamId, cancellationToken).ConfigureAwait(false),
         };
     }
 
@@ -245,22 +246,105 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         return row is null ? latest : new FocusRun(anchor, row.Status, row.Error, row.CreatedDate, row.StartedAt, row.CompletedAt, row.CompletionParkedAt, IsLatest: anchor == turn.RunId);
     }
 
-    /// <summary>The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt). <paramref name="focusRunId"/> marks the shown one (the attempt the room is currently focused on), so switching to a prior attempt re-marks it "shown".</summary>
-    private static IReadOnlyList<RoomTurnAttempt> AttemptsOf(SessionTurn turn, Guid focusRunId)
+    /// <summary>
+    /// The turn's attempt timeline (oldest → newest) — projected only when it was rerun (&gt; 1 attempt).
+    /// <paramref name="focusRunId"/> marks the shown one (the attempt the room is currently focused on), so switching
+    /// to a prior attempt re-marks it "shown". Every rung beyond the first also carries its <see cref="RoomAttemptDelta"/>
+    /// against the rung immediately before it, sourced from ONE batched query over the whole ladder (never N+1) — so an
+    /// unreran turn (the overwhelming majority) still pays zero extra cost.
+    /// </summary>
+    private async Task<IReadOnlyList<RoomTurnAttempt>> AttemptsOf(SessionTurn turn, Guid focusRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var attempts = turn.Attempts ?? Array.Empty<SessionTurnAttempt>();
 
         if (attempts.Count < 2) return Array.Empty<RoomTurnAttempt>();
 
-        return attempts
-            .OrderBy(a => a.AttemptNumber)
-            .Select(a => new RoomTurnAttempt
+        var ordered = attempts.OrderBy(a => a.AttemptNumber).ToList();
+        var facts = await AttemptOutcomeFactsAsync(ordered.Select(a => a.RunId).ToList(), teamId, cancellationToken).ConfigureAwait(false);
+
+        var rungs = new List<RoomTurnAttempt>();
+
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var attempt = ordered[i];
+            var previous = i == 0 ? null : ordered[i - 1];
+
+            rungs.Add(new RoomTurnAttempt
             {
-                RunId = a.RunId, AttemptNumber = a.AttemptNumber, Status = a.Status, At = a.CreatedDate, IsCurrent = a.RunId == focusRunId,
-                StatusWord = IsCompletionParked(a.Status, a.CompletionParkedAt) ? RoomNarrative.ParkedWord : null,
-            })
-            .ToList();
+                RunId = attempt.RunId, AttemptNumber = attempt.AttemptNumber, Status = attempt.Status, At = attempt.CreatedDate, IsCurrent = attempt.RunId == focusRunId,
+                StatusWord = IsCompletionParked(attempt.Status, attempt.CompletionParkedAt) ? RoomNarrative.ParkedWord : null,
+                Delta = previous is null ? null : AttemptDeltaOf(previous, attempt, facts.GetValueOrDefault(previous.RunId), facts.GetValueOrDefault(attempt.RunId)),
+            });
+        }
+
+        return rungs;
     }
+
+    /// <summary>Per-attempt facts (model / priced spend / acceptance grade), folded from each attempt run's OWN AgentRun rows in ONE batched query keyed by <c>WorkflowRunId</c> — the source <see cref="AttemptDeltaOf"/> diffs into each rung's "since previous attempt" line. An attempt with no AgentRun rows (an authored, non-agent turn) is simply absent from the result — <see cref="Dictionary{TKey,TValue}.GetValueOrDefault(TKey)"/> then reads it as the all-null default, never a fabricated change.</summary>
+    private async Task<IReadOnlyDictionary<Guid, AttemptOutcomeFacts>> AttemptOutcomeFactsAsync(IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId != null && r.TeamId == teamId && runIds.Contains(r.WorkflowRunId.Value))
+            .Select(r => new { RunId = r.WorkflowRunId!.Value, r.Id, r.Status, r.Error, r.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(r => r.RunId)
+            .ToDictionary(g => g.Key, g => FoldAttemptOutcomeFacts(g.Select(r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson)).ToList()));
+    }
+
+    /// <summary>
+    /// One attempt's model / priced spend / acceptance grade, folded from its agent(s)' compact results — the same
+    /// shape a quick-lane single agent or a supervisor's whole spawned roster reduces to. <see cref="Model"/> is the
+    /// one model when every agent named the SAME one, else null (never a confident guess across a mixed roster).
+    /// <see cref="CostUsd"/> sums only the PRICEABLE agents (null when none priced — the fail-open "unknown", never a
+    /// misleading $0). <see cref="AcceptancePassed"/> folds every GRADED, non-vacuous agent: any rejection fails the
+    /// attempt; all-pass passes; nothing graded is null. Deliberately lighter than the turn's own official verdict
+    /// (<see cref="ResultVerdict"/>, which also reads the stop's head grade and waive dispositions off the decision
+    /// tape) — this is a compact "did this attempt's work check out" signal for the ladder, not a re-derivation of the
+    /// Result card's authority.
+    /// </summary>
+    internal static AttemptOutcomeFacts FoldAttemptOutcomeFacts(IReadOnlyList<SupervisorAgentResult> results)
+    {
+        var models = results.Select(r => r.Model).Where(m => !string.IsNullOrWhiteSpace(m)).Distinct(StringComparer.Ordinal).ToList();
+
+        var priced = results.Select(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens)).Where(c => c is not null).Select(c => c!.Value).ToList();
+
+        var graded = results.Where(r => r.AcceptancePassed is not null && !AgentAcceptanceContract.IsVacuousPass(r.AcceptanceDetail)).ToList();
+        var failedUnit = graded.FirstOrDefault(r => r.AcceptancePassed == false);
+
+        return new AttemptOutcomeFacts(
+            Model: models.Count == 1 ? models[0] : null,
+            CostUsd: priced.Count == 0 ? null : priced.Sum(),
+            AcceptancePassed: graded.Count == 0 ? null : failedUnit is null,
+            AcceptanceDetail: graded.Count == 0 ? null : (failedUnit ?? graded[0]).AcceptanceDetail);
+    }
+
+    /// <summary>
+    /// What changed between two consecutive attempts — only the facts that actually differ, null when none do
+    /// (including the case neither attempt has any comparable fact at all). <see cref="RoomAttemptDelta.Outcome"/>
+    /// treats a status that stayed the SAME enum value but flipped parked-ness (the one case two Suspended runs can
+    /// still mean something different) as a change too, matching <see cref="IsCompletionParked"/>'s own discriminator.
+    /// Pure; internal so it is unit-pinned directly (InternalsVisibleTo).
+    /// </summary>
+    internal static RoomAttemptDelta? AttemptDeltaOf(SessionTurnAttempt previous, SessionTurnAttempt current, AttemptOutcomeFacts previousFacts, AttemptOutcomeFacts currentFacts)
+    {
+        var model = currentFacts.Model is { Length: > 0 } && previousFacts.Model is { Length: > 0 } && currentFacts.Model != previousFacts.Model ? currentFacts.Model : null;
+
+        var parkedChanged = IsCompletionParked(current.Status, current.CompletionParkedAt) != IsCompletionParked(previous.Status, previous.CompletionParkedAt);
+        var outcome = current.Status != previous.Status || parkedChanged ? current.Status : (Messages.Enums.WorkflowRunStatus?)null;
+
+        var acceptancePassed = currentFacts.AcceptancePassed is { } cp && previousFacts.AcceptancePassed is { } pp && cp != pp ? cp : (bool?)null;
+        var acceptanceDetail = acceptancePassed is null ? null : currentFacts.AcceptanceDetail;
+
+        var costDeltaUsd = currentFacts.CostUsd is { } cc && previousFacts.CostUsd is { } pc && cc != pc ? cc - pc : (decimal?)null;
+
+        return model is null && outcome is null && acceptancePassed is null && costDeltaUsd is null
+            ? null
+            : new RoomAttemptDelta { Model = model, Outcome = outcome, AcceptancePassed = acceptancePassed, AcceptanceDetail = acceptanceDetail, CostDeltaUsd = costDeltaUsd };
+    }
+
+    /// <summary>One attempt's folded outcome facts (see <see cref="FoldAttemptOutcomeFacts"/>). A struct so a ladder rung with no AgentRun rows reads as this type's default — all-null, never a null-reference off a missing dictionary key.</summary>
+    internal readonly record struct AttemptOutcomeFacts(string? Model, decimal? CostUsd, bool? AcceptancePassed, string? AcceptanceDetail);
 
     /// <summary>
     /// The completion-park discriminator — Suspended AND stamped. Both Suspended shapes reach the room, so the stamp is

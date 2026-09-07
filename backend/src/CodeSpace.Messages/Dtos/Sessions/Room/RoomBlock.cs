@@ -109,6 +109,36 @@ public sealed record RoomTurnAttempt
 
     /// <summary>True for the attempt the turn currently shows (the newest) — rendered as "shown", not an open link.</summary>
     public required bool IsCurrent { get; init; }
+
+    /// <summary>What changed since the PREVIOUS attempt (model / outcome / acceptance / cost) — null on the first attempt and whenever nothing comparable differs. See <see cref="RoomAttemptDelta"/>.</summary>
+    public RoomAttemptDelta? Delta { get; init; }
+}
+
+/// <summary>
+/// What differs in one attempt vs the one immediately before it, so a rerun finally shows WHY it was worth another
+/// try rather than just that one happened. Populated ONLY for the facts that actually changed — a reader who already
+/// sees each rung's own status pill isn't told the outcome again when it did not change. Computed by
+/// <c>RoomProjector</c> from each attempt's OWN durable AgentRun facts (its harness-reported model, priced token
+/// spend, objective acceptance grade) — never from the rerun request, so a delta can never claim a change the
+/// attempt's own record does not back. Null (never all-null-fields) when there is no previous attempt, or when
+/// nothing comparable differs.
+/// </summary>
+public sealed record RoomAttemptDelta
+{
+    /// <summary>This attempt's model, present only when it differs from the previous attempt's (and both are known). Null when unchanged, or either attempt's model is unknown.</summary>
+    public string? Model { get; init; }
+
+    /// <summary>This attempt's terminal status, present only when it differs from the previous attempt's — the frontend renders it through the SAME shared status lexicon as <see cref="RoomTurnAttempt.Status"/>, so the two can never speak different words for one status. Null when unchanged.</summary>
+    public WorkflowRunStatus? Outcome { get; init; }
+
+    /// <summary>This attempt's objective acceptance verdict, present only when it differs from the previous attempt's (a passed/failed flip). Null when unchanged, or neither attempt graded anything.</summary>
+    public bool? AcceptancePassed { get; init; }
+
+    /// <summary>The grader detail behind <see cref="AcceptancePassed"/> (e.g. "tests-failed-exit-1") — present only alongside a non-null <see cref="AcceptancePassed"/>, mirroring <see cref="PlanChecklistItem.AcceptanceDetail"/>'s own contract.</summary>
+    public string? AcceptanceDetail { get; init; }
+
+    /// <summary>This attempt's priced spend minus the previous attempt's, in USD (signed — negative is a cheaper rerun). Null when either attempt's spend is unpriceable, or the two are equal.</summary>
+    public decimal? CostDeltaUsd { get; init; }
 }
 
 /// <summary>The tidy node-graph stepper on top of a turn — backend-ordered lifecycle stages as labeled steps, each with a status + an optional one-word detail.</summary>

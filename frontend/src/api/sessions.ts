@@ -422,6 +422,27 @@ export interface RoomTurnAttempt {
   at: string;
   /// The attempt the turn currently shows (the newest) — rendered as "shown", not an open link.
   isCurrent: boolean;
+  /// What changed since the PREVIOUS attempt (model / outcome / acceptance / cost) — null on the first attempt and
+  /// whenever nothing comparable differs. Mirrors backend `RoomAttemptDelta`.
+  delta?: RoomAttemptDelta | null;
+}
+
+/// What differs in one attempt vs the one immediately before it — populated ONLY for the facts that actually
+/// changed. Computed backend-side from each attempt's own durable AgentRun facts, never from the rerun request.
+/// Mirrors backend `RoomAttemptDelta`.
+export interface RoomAttemptDelta {
+  /// This attempt's model, present only when it differs from the previous attempt's (and both are known).
+  model?: string | null;
+  /// This attempt's terminal status, present only when it differs from the previous attempt's — render through the
+  /// SAME shared status lexicon (`statusWord`) as every other rung, so the two never speak different words.
+  outcome?: WorkflowRunStatus | null;
+  /// This attempt's objective acceptance verdict, present only when it differs from the previous attempt's.
+  acceptancePassed?: boolean | null;
+  /// The grader detail behind `acceptancePassed` (e.g. "tests-failed-exit-1") — present only alongside a non-null `acceptancePassed`.
+  acceptanceDetail?: string | null;
+  /// This attempt's priced spend minus the previous attempt's, in USD (signed — negative is a cheaper rerun). Null
+  /// when either attempt's spend is unpriceable, or the two are equal.
+  costDeltaUsd?: number | null;
 }
 
 export type RoomBlock =
