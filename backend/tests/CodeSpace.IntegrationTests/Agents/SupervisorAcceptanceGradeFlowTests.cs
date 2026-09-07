@@ -110,12 +110,18 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         var teamId = await SeedTeamAsync();
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
-        // A model-authored command naming a binary that isn't on PATH surfaces as a process-start failure; it must NOT
-        // crash the supervisor turn — acceptance can't be verified, so it fails closed to "not accepted".
+        // The direct runner reports a start error; Linux's isolation launcher can start and report exec failure 127.
+        // Both actual runner outcomes must refuse acceptance without crashing the supervisor turn.
         var grade = await GradeAsync(repoId, teamId, "acc/pass", command: new[] { "codespace-no-such-binary-xyz" });
 
         grade.Passed.ShouldBeFalse("a check that cannot even start is not a silent pass");
-        grade.Detail.ShouldContain("grade-error");
+        if (grade.Detail.StartsWith("grade-error", StringComparison.Ordinal)) grade.EvidenceArtifactId.ShouldBeNull("a binary that never started has no command output receipt");
+        else
+        {
+            grade.Detail.ShouldBe("tests-failed-exit-127");
+            grade.Class.ShouldBe(GradeFailureClass.Genuine);
+            grade.EvidenceArtifactId.ShouldNotBeNull("a started launcher reports its real exit and retained command evidence");
+        }
     }
 
     [Fact]

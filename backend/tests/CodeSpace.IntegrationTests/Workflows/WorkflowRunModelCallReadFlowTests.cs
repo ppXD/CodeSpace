@@ -136,7 +136,7 @@ public sealed class WorkflowRunModelCallReadFlowTests
     {
         var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT", earlierForeignPrompt: "WRONG SOURCE");
         using var scope = _fixture.BeginScope();
-        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+        await ProjectSeededCallAsync(seeded.RunId);
 
         var part = await scope.Resolve<IWorkflowRunModelCallReader>().ReadPartAsync(
             new WorkflowRunModelCallPartReadRequest(seeded.RunId, seeded.Sequence, seeded.TeamId, WorkflowRunModelCallPart.UserPrompt), CancellationToken.None);
@@ -151,7 +151,7 @@ public sealed class WorkflowRunModelCallReadFlowTests
     {
         var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT");
         using var scope = _fixture.BeginScope();
-        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+        await ProjectSeededCallAsync(seeded.RunId);
 
         var page = await scope.Resolve<IWorkflowRunModelCallReader>().ReadPageAsync(seeded.RunId, seeded.TeamId, cursor: null, limit: 20, CancellationToken.None);
 
@@ -167,7 +167,7 @@ public sealed class WorkflowRunModelCallReadFlowTests
     {
         var seeded = await SeedCallAsync(includeMissingSystemPrompt: false, result: "RESULT");
         using var scope = _fixture.BeginScope();
-        await scope.Resolve<IWorkflowRunModelCallProjector>().SweepAsync(50, CancellationToken.None);
+        await ProjectSeededCallAsync(seeded.RunId);
         var db = scope.Resolve<CodeSpaceDbContext>();
         var tiedAt = DateTimeOffset.UtcNow.AddDays(1);
         var tiedIds = new[]
@@ -197,6 +197,23 @@ public sealed class WorkflowRunModelCallReadFlowTests
         ids.ShouldContain(tiedIds[1]);
         ids.ShouldContain(tiedIds[2]);
         second.NextCursor.ShouldBeNull();
+    }
+
+    private async Task ProjectSeededCallAsync(Guid runId)
+    {
+        // The projector takes a global batch. Earlier tests can leave more than one batch of valid source records;
+        // a successful sweep is not proof that this test's source was selected, nor that a legacy fallback used it.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var projector = scope.Resolve<IWorkflowRunModelCallProjector>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        for (var batch = 0; batch < 100; batch++)
+        {
+            await projector.SweepAsync(50, deadline.Token);
+            if (await db.WorkflowRunModelCall.AsNoTracking().AnyAsync(call => call.WorkflowRunId == runId, deadline.Token)) return;
+        }
+
+        Assert.Fail("The seeded model call was not projected within the bounded fixture setup; reader assertions require its actual projected row.");
     }
 
     private async Task<(Guid RunId, Guid TeamId, long Sequence)> SeedCallAsync(bool includeMissingSystemPrompt, string result, string? earlierForeignPrompt = null)
