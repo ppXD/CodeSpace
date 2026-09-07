@@ -966,10 +966,12 @@ public sealed partial class SupervisorTurnService
     {
         try
         {
-            // A candidate grade that never actually RAN (an infra-classed detail — clone/setup/timeout faults) has
-            // nothing a differential could compare against: skip the baseline entirely instead of paying a second
-            // full clone against the same unreachable repo / doubling a judge's model spend for an unusable pair.
-            if (Agents.AgentAcceptanceContract.IsInfraFailure(candidateGrade, workPresent: !string.IsNullOrEmpty(result.ProducedBranch))) return null;
+            // A candidate grade that never actually RAN has nothing a differential could compare against: skip the
+            // baseline entirely instead of paying a second full clone against the same unreachable repo / doubling
+            // a judge's model spend for an unusable pair. Asked through the NAMED predicate so the work-present
+            // half is the SHARED read, never ProducedBranch alone: a patch-only unit pushes nothing, so a
+            // branch-only test read this grade GENUINE where the decider read it INFRA, and bought the pair anyway.
+            if (!SupervisorOutcome.CandidateGradeRan(result, candidateGrade)) return null;
 
             var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                ?? goalConfig?.AgentProfile?.RepositoryId;

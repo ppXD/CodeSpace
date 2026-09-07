@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -22,8 +23,10 @@ namespace CodeSpace.UnitTests.Completion;
 /// whose agent had really written files, folding to Verification=Failed → Outcome=Unsolved →
 /// <c>completion-authority: honest failure</c> over an arc that had been human-adjudicated to completion.</para>
 ///
-/// <para>These pin the closure: ONE definition (<see cref="AgentWorkPresence"/>) read by all three sites, so no
-/// publish policy can make the model's verdict and the ledger's verdict disagree about the same unit again. The
+/// <para>These pin the closure: ONE definition (<see cref="AgentWorkPresence"/>) read by every site that classifies
+/// a <c>no-branch-or-repo</c> grade — including the baseline-capture spend gate, whose disagreement cost a wasted
+/// clone + judge call rather than a wrong verdict — so no publish policy can make the model's verdict and the
+/// ledger's verdict disagree about the same unit again. The
 /// work-FREE case is pinned alongside — a unit that genuinely produced nothing still grades <c>Failed</c>, because
 /// there the fix IS to do the work, which an agent pass can do.</para>
 /// </summary>
@@ -52,12 +55,12 @@ public class PatchOnlyWorkPresenceTests
         SupervisorOutcome.ResultShowsWork(Compact(changedFiles, producedBranch, repos)).ShouldBe(expected, "the supervisor-side name the decider calls must stay the SAME fact");
     }
 
-    // ── The three readers of that fact classify one fixture identically ────────────────────────────────
+    // ── The four readers of that fact classify one fixture identically ─────────────────────────────────
 
     [Theory]
     [InlineData(true, VerificationDisposition.InfraUnknown)]   // the patch-only unit: work exists, the publish is what failed
     [InlineData(false, VerificationDisposition.Failed)]        // regression pin: no work anywhere is a genuine miss
-    public void The_three_no_branch_or_repo_readers_agree_on_one_fixture(bool workProduced, VerificationDisposition expected)
+    public void The_four_no_branch_or_repo_readers_agree_on_one_fixture(bool workProduced, VerificationDisposition expected)
     {
         var compact = Compact(changedFiles: workProduced, producedBranch: null, Array.Empty<RepositoryRunResult>()) with { AcceptancePassed = false, AcceptanceDetail = PatchOnlyGrade };
         var raw = Raw(changedFiles: workProduced, producedBranch: null, Array.Empty<RepositoryRunResult>()) with { AcceptancePassed = false, AcceptanceDetail = PatchOnlyGrade };
@@ -77,6 +80,15 @@ public class PatchOnlyWorkPresenceTests
         //    site's one line; the real composer is driven end-to-end in SingleAgentSpineFlowTests.
         VerificationDispositions.Classify(raw.AcceptancePassed, raw.AcceptanceDetail, AgentWorkPresence.ShowsWork(raw))
             .ShouldBe(expected, "the single-agent lane mints its receipts off the raw result — same fact, same verdict");
+
+        // 4. The BASELINE-CAPTURE spend gate — the VERY predicate SupervisorTurnService.Rehydrate's
+        //    CaptureUnitBaselineAsync is gated on, not a mirror of it: "did this unit's candidate grade actually
+        //    RUN?" decides whether a differential baseline is worth a second full clone + a second judge call. It
+        //    read the SAME grade as GENUINE while the decider read it INFRA — the identical split-brain as the
+        //    receipt above, paid in spend rather than in a false Failed: a baseline measured against a candidate
+        //    grade that never ran can compare nothing.
+        SupervisorOutcome.CandidateGradeRan(compact, new BenchmarkGrade { Passed = false, Detail = PatchOnlyGrade })
+            .ShouldBe(!expectInfra, "the differential's spend gate must agree with the receipt the very same unit mints");
     }
 
     // ── What an InfraUnknown acceptance does downstream ────────────────────────────────────────────────
