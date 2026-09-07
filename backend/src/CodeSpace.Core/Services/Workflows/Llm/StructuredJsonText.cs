@@ -32,17 +32,18 @@ internal static class StructuredJsonText
     }
 
     /// <summary>
-    /// Augment the base system prompt with the ADVISORY findings from a previous attempt — the reply CONFORMED to the
-    /// schema but left a payload its consumer needs unauthored. The wording is deliberately not
-    /// <see cref="WithValidationFeedback"/>'s: telling a model its schema-valid reply "did NOT conform … (invalid)"
-    /// is a false correction on the very reply that is about to be accepted, and it invites re-authoring the parts
-    /// that were already right. The findings themselves carry what to author and the honest alternative to inventing
-    /// it (for the planner: omit that subtask's acceptance).
+    /// Augment the base system prompt with the ADVISORY findings from a previous attempt — the reply left a payload
+    /// its consumer needs unauthored, and is going to be ACCEPTED with that part dropped. The wording is deliberately
+    /// not <see cref="WithValidationFeedback"/>'s: telling a model its reply "did NOT conform … (invalid)" when the
+    /// consumer is about to accept it is a false correction, and it invites re-authoring the parts that were already
+    /// right. It equally does not claim the reply conformed — a schema precise enough to require the payload faults
+    /// this same reply, and the point is the SEVERITY, not which checker noticed. The findings themselves carry what
+    /// to author and the honest alternative to inventing it (for the planner: omit that subtask's acceptance).
     /// </summary>
     public static string WithAdvisoryFeedback(string systemPrompt, IReadOnlyList<string> advisories, JsonElement previous)
     {
         var feedback =
-            "Your previous response conformed to the required JSON Schema but left a required payload unauthored, so part of it cannot be used. Fix exactly these problems and respond again with ONLY the corrected JSON object:\n" +
+            "Your previous response left a required payload unauthored, so that part of it cannot be used; everything else in it is accepted as authored. Fix exactly these problems and respond again with ONLY the corrected JSON object:\n" +
             string.Join("\n", advisories.Select(a => "- " + a)) +
             "\n\nYour previous response was:\n" + previous.GetRawText();
 

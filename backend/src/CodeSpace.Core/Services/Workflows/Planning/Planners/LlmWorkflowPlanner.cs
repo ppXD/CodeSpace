@@ -110,13 +110,22 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     /// the SAME bounded re-ask — the model is told exactly which subtask to equip — but a reply that still skips it
     /// costs that subtask its oracle, not the run its plan. Naming the subtask matters: "somewhere in your plan" is
     /// not a correction a model can act on.
+    ///
+    /// <para>Each finding also CLAIMS its acceptance's own instance path, so the SCHEMA violations the same absence
+    /// raises — the per-kind <c>oneOf</c> branch no payload-less acceptance can match, and the payload's
+    /// <c>minItems</c> when one is authored empty — are read as this one degradable defect rather than as a fault.
+    /// The claim is per POSITION and only for an acceptance this contract itself calls droppable, so a fatal defect in
+    /// a sibling subtask, an unknown oracle <c>kind</c>, or anything else in the plan is untouched.</para>
     /// </summary>
-    internal static IReadOnlyList<string> AdviseModelResponse(JsonElement response)
+    internal static IReadOnlyList<StructuredResponseAdvisory> AdviseModelResponse(JsonElement response)
     {
         try
         {
-            PlannerAcceptanceDraft.ReadResponse(response, out var dropped);
-            return dropped.Select(drop => $"Subtask '{drop.SubtaskId}' chose acceptance kind {drop.Kind} but authored no payload for it. {drop.Reason} Author that payload, or omit the subtask's acceptance entirely.").ToArray();
+            return PlannerAcceptanceDraft.DescribeUnboundAcceptances(response).Select(unbound => new StructuredResponseAdvisory
+            {
+                Path = $"$.subtasks[{unbound.Index}].acceptance",
+                Message = $"Subtask '{unbound.Drop.SubtaskId}' chose acceptance kind {unbound.Drop.Kind} but authored no payload for it. {unbound.Drop.Reason} Author that payload, or omit the subtask's acceptance entirely.",
+            }).ToArray();
         }
         catch (JsonException)
         {
