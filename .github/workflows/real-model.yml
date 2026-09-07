@@ -1438,7 +1438,7 @@ jobs:
   real-model-stop-hook:
     name: real model (in-loop acceptance stop-hook)
     runs-on: ubuntu-latest
-    # THE live behavioral proof of P3.3 (loop-engineer in-loop verify): a REAL claude AND a REAL codex agent are each
+    # Live measured file-outcome coverage for P3.3 (loop-engineer in-loop verify): a REAL claude AND a REAL codex agent are each
     # given a goal that never mentions creating a file, but the task's Acceptance command only passes once that file
     # exists. Each arm records native CLI/model execution and the file outcome; it does not independently attest
     # that the injected Stop hook (settings.json for Claude, hooks.json for Codex) fired. REPORT-ONLY on
@@ -1449,9 +1449,8 @@ jobs:
     # a CLI are absent (skip ≠ pass; a fork stays green at zero cost).
     timeout-minutes: 30
 
-    # Same UNCONFINED rationale as the injection lane: this gate's signal is whether the Stop hook fires + the model
-    # reacts, not sandbox confinement (proven fail-closed in the dedicated sandbox lane), and bwrap on a plain runner
-    # is flaky.
+    # Same UNCONFINED rationale as the injection lane: this gate measures CLI/model execution and the file outcome;
+    # confinement is tested separately in the dedicated sandbox lane, since bwrap on a plain runner is flaky.
     services:
       postgres:
         image: postgres:18-alpine
