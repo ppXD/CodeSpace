@@ -1128,8 +1128,10 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
             "no row may claim bytes that were never placed");
     }
 
-    [Fact]
-    public async Task A_routed_team_never_gains_new_local_disk_bytes_when_a_pre_route_blob_is_missing()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_routed_team_never_gains_new_local_disk_bytes_when_a_pre_route_blob_is_missing(bool streaming)
     {
         // The dedup self-heal restores a missing local blob. For a team that has since adopted a route, that restore
         // would write NEW bytes to local disk — the same silent fallback the write path refuses — and would make the
@@ -1144,9 +1146,82 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
         await SeedRouteAsync(teamId, await SeedProfileAsync(teamId, NewRoot()));
         File.Delete(localPath);
 
-        (await PutAsync(teamId, content)).ShouldBe(artifactId, "dedup still answers for content the store already knows");
+        var failure = await Should.ThrowAsync<ArtifactContentUnavailableException>(() => streaming ? PutStreamAsync(teamId, new ReopenableByteSource(content)) : PutAsync(teamId, content));
+        failure.ArtifactId.ShouldBe(artifactId);
+        failure.Kind.ShouldBe(ArtifactContentUnavailableKind.PhysicalObjectMissing);
         File.Exists(localPath).ShouldBeFalse(
-            "a routed team must not gain new local-disk bytes; the dead reference surfaces as a typed read failure instead");
+            "a routed team must not gain new local-disk bytes; a duplicate write cannot certify the missing content as saved");
+        var unchanged = await RowAsync(artifactId);
+        unchanged.StorageUrl.ShouldBe(LocalUrlFor(sha));
+        unchanged.CasArtifactObjectId.ShouldBeNull("dedup must not silently migrate a historical placement");
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().ArtifactObject.CountAsync(row => row.TeamId == teamId)).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_unrouted_duplicate_restores_its_missing_bytes_before_returning_the_same_artifact(bool streaming)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('r', 20_000));
+        var artifactId = await PutAsync(teamId, content);
+        File.Delete(new Uri((await RowAsync(artifactId)).StorageUrl!).LocalPath);
+
+        var restored = streaming ? await PutStreamAsync(teamId, new ReopenableByteSource(content)) : await PutAsync(teamId, content);
+        restored.ShouldBe(artifactId);
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, restored, CancellationToken.None)).ShouldNotBeNull().Bytes.ShouldBe(content);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_restore_ack_without_content_cannot_return_a_successful_dedup_receipt(bool streaming)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('a', 20_000));
+        var artifactId = await PutAsync(teamId, content);
+        var location = (await RowAsync(artifactId)).StorageUrl!;
+        File.Delete(new Uri(location).LocalPath);
+        using var original = _fixture.BeginScope();
+        var backend = new AcknowledgingMissingBackend(original.Resolve<IArtifactBlobBackend>(), location);
+        using var faulty = _fixture.BeginScope(builder => builder.RegisterInstance(backend).As<IArtifactBlobBackend>());
+        var failure = await Should.ThrowAsync<ArtifactContentUnavailableException>(() => streaming
+            ? faulty.Resolve<IArtifactStreamStore>().PutAsync(new ArtifactStreamWriteRequest(teamId, "text/plain", new ReopenableByteSource(content)), CancellationToken.None)
+            : faulty.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None));
+        failure.ArtifactId.ShouldBe(artifactId);
+        failure.Kind.ShouldBe(ArtifactContentUnavailableKind.PhysicalObjectMissing);
+        backend.Writes.ShouldBe(1, "one failed restoration must not trigger an unbounded side-effect retry");
+        (await RowAsync(artifactId)).StorageUrl.ShouldBe(location);
+        File.Exists(new Uri(location).LocalPath).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_unique_constraint_race_must_restore_the_winners_missing_local_content(bool streaming)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var content = Encoding.UTF8.GetBytes(new string('w', 20_000));
+        var winnerId = Guid.NewGuid();
+        using var original = _fixture.BeginScope();
+        var backend = new CompetingPlacementBackend(original.Resolve<IArtifactBlobBackend>(), async location =>
+        {
+            using var winner = _fixture.BeginScope();
+            var db = winner.Resolve<CodeSpaceDbContext>();
+            db.WorkflowArtifact.Add(new WorkflowArtifact { Id = winnerId, TeamId = teamId, Sha256 = ArtifactStore.ComputeSha256Hex(content), ContentType = "text/plain", SizeBytes = content.LongLength, StorageUrl = location, CreatedAt = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+            File.Delete(new Uri(location).LocalPath);
+        });
+        using var contender = _fixture.BeginScope(builder => builder.RegisterInstance(backend).As<IArtifactBlobBackend>());
+        var returned = streaming
+            ? await contender.Resolve<IArtifactStreamStore>().PutAsync(new ArtifactStreamWriteRequest(teamId, "text/plain", new ReopenableByteSource(content)), CancellationToken.None)
+            : await contender.Resolve<IArtifactStore>().PutAsync(teamId, content, "text/plain", CancellationToken.None);
+        returned.ShouldBe(winnerId, "the independent connection won the actual PostgreSQL unique constraint");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<IArtifactStore>().GetBytesAsync(teamId, returned, CancellationToken.None)).ShouldNotBeNull().Bytes.ShouldBe(content);
+        backend.Writes.ShouldBe(2, "the loser must verify and repair the winner's missing placement before returning its receipt");
     }
 
     [Fact]
@@ -1745,6 +1820,27 @@ public sealed class ArtifactStoreRoutedDestinationFlowTests : IAsyncLifetime
             OpenCount++;
             return ValueTask.FromResult<Stream>(new ObservedReadStream(_bytes, requested => LargestReadRequest = Math.Max(LargestReadRequest, requested)));
         }
+    }
+
+    private sealed class AcknowledgingMissingBackend(IArtifactBlobBackend inner, string location) : IArtifactBlobBackend, IArtifactBlobStreamWriter
+    {
+        public int Writes { get; private set; }
+        public Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) { Writes++; return Task.FromResult(location); }
+        public Task<string> WriteStreamAsync(string sha256, Stream content, long contentLength, CancellationToken cancellationToken) { Writes++; return Task.FromResult(location); }
+        public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) => inner.ExistsAsync(storageUrl, cancellationToken);
+        public Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken) => inner.ReadAsync(storageUrl, cancellationToken);
+        public Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken) => inner.ReadRangeAsync(storageUrl, offset, length, cancellationToken);
+    }
+
+    private sealed class CompetingPlacementBackend(IArtifactBlobBackend inner, Func<string, Task> firstWrite) : IArtifactBlobBackend, IArtifactBlobStreamWriter
+    {
+        public int Writes { get; private set; }
+        public async Task<string> WriteAsync(string sha256, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken) => await PublishedAsync(await inner.WriteAsync(sha256, bytes, cancellationToken));
+        public async Task<string> WriteStreamAsync(string sha256, Stream content, long contentLength, CancellationToken cancellationToken) => await PublishedAsync(await ((IArtifactBlobStreamWriter)inner).WriteStreamAsync(sha256, content, contentLength, cancellationToken));
+        private async Task<string> PublishedAsync(string location) { if (++Writes == 1) await firstWrite(location); return location; }
+        public Task<bool> ExistsAsync(string storageUrl, CancellationToken cancellationToken) => inner.ExistsAsync(storageUrl, cancellationToken);
+        public Task<byte[]> ReadAsync(string storageUrl, CancellationToken cancellationToken) => inner.ReadAsync(storageUrl, cancellationToken);
+        public Task<ArtifactBlobRange> ReadRangeAsync(string storageUrl, long offset, int length, CancellationToken cancellationToken) => inner.ReadRangeAsync(storageUrl, offset, length, cancellationToken);
     }
 
     private sealed class ChangingByteSource : IArtifactWriteSource
