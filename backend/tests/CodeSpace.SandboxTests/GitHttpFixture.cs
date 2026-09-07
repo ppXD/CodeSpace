@@ -18,6 +18,7 @@ internal sealed class GitHttpFixture : IAsyncDisposable
     public string Url { get; private set; } = "";
     public string BaseSha { get; private set; } = "";
     public string TipSha { get; private set; } = "";
+    public int AuthenticatedPushRequests { get; private set; }
 
     public async Task StartAsync()
     {
@@ -72,6 +73,18 @@ internal sealed class GitHttpFixture : IAsyncDisposable
     {
         try
         {
+            var isPush = context.Request.Url!.AbsolutePath.EndsWith("/git-receive-pack", StringComparison.Ordinal) || context.Request.QueryString["service"] == "git-receive-pack";
+            if (isPush)
+            {
+                var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:fixture-only-token"));
+                if (!string.Equals(context.Request.Headers["Authorization"], expected, StringComparison.Ordinal))
+                {
+                    context.Response.StatusCode = 401;
+                    context.Response.Headers["WWW-Authenticate"] = "Basic realm=\"fixture\"";
+                    return;
+                }
+                AuthenticatedPushRequests++;
+            }
             using var input = new MemoryStream();
             await context.Request.InputStream.CopyToAsync(input, _stopping.Token);
             var info = StartInfo(Root, new[] { "http-backend" });

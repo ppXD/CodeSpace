@@ -52,6 +52,7 @@ public sealed class GitWorkspaceIsolationE2ETests
         }, CancellationToken.None);
         result.Status.ShouldBe(IntegrationStatus.Clean, result.Reason);
         result.AppliedCount.ShouldBe(1);
+        origin.AuthenticatedPushRequests.ShouldBeGreaterThan(0, "the remote must validate the actual push credential");
         (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "show", "codespace/integration-test:README.md" })).ShouldBe("integrated\n");
         (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "rev-parse", "main" })).Trim().ShouldBe(origin.TipSha);
         var directory = runner.Specs.Single(spec => spec.Args.Contains("clone")).WorkingDirectory.ShouldNotBeNull();
@@ -117,6 +118,7 @@ public sealed class GitWorkspaceIsolationE2ETests
             (await push.PushChangesAsync("codespace/test-isolated", CancellationToken.None)).ShouldBe("codespace/test-isolated");
             var actualTip = (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "rev-parse", "refs/heads/codespace/test-isolated" })).Trim();
             push.LastPushedCommitSha().ShouldBe(actualTip);
+            origin.AuthenticatedPushRequests.ShouldBeGreaterThan(0, "the remote must validate the actual push credential");
             (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "show", "codespace/test-isolated:produced.txt" })).ShouldBe("artifact-from-real-workspace\n");
             (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "rev-parse", "main" })).Trim().ShouldBe(origin.TipSha);
             recorder.Specs.ShouldContain(spec => spec.Args.Contains("fetch"));
