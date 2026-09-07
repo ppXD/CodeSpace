@@ -43,9 +43,18 @@ public class AgentToolRegistryTests
             Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
     }
 
-    private static AgentToolRegistry Build(params INodeRuntime[] nodes) => new(nodes, Array.Empty<IAgentTool>(), NullLoggerFactory.Instance);
+    private static AgentToolRegistry Build(params INodeRuntime[] nodes) => BuildWith(nodes, Array.Empty<IAgentTool>());
 
-    private static AgentToolRegistry BuildWith(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstParty) => new(nodes, firstParty, NullLoggerFactory.Instance);
+    private static AgentToolRegistry BuildWith(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstParty)
+    {
+        var runtimes = nodes.ToArray();
+        return new AgentToolRegistry(runtimes, firstParty, new TestNodeInvocations(runtimes), NullLoggerFactory.Instance);
+    }
+
+    private sealed class TestNodeInvocations(IReadOnlyList<INodeRuntime> nodes) : INodeInvocationExecutor
+    {
+        public Task<NodeResult> ExecuteAsync(NodeInvocation invocation, CancellationToken cancellationToken) => nodes.Single(node => node.TypeKey == invocation.TypeKey).RunAsync(invocation.Context, cancellationToken);
+    }
 
     /// <summary>A minimal first-party (non-node) tool, the shape DecisionRequestTool registers under.</summary>
     private sealed class FakeFirstPartyTool : IAgentTool
@@ -221,7 +230,7 @@ public class AgentToolRegistryTests
         // CONNECTION credential), making the "not a wider attack surface" claim true.
         var pr = new CapturingPullRequestService();
         var node = ActAsUserNode(kind, pr);
-        var tool = new NodeAgentTool(node, NullLogger.Instance);
+        var tool = new NodeAgentTool(node, new TestNodeInvocations(new[] { node }), NullLogger.Instance);
 
         var teamId = Guid.NewGuid();
         var victim = Guid.NewGuid();   // a teammate the model tries to impersonate

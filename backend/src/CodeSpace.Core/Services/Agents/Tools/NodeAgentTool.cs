@@ -24,11 +24,13 @@ public sealed class NodeAgentTool : IAgentTool
     private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement.Clone();
 
     private readonly INodeRuntime _node;
+    private readonly INodeInvocationExecutor _invocations;
     private readonly ILogger _logger;
 
-    public NodeAgentTool(INodeRuntime node, ILogger logger)
+    public NodeAgentTool(INodeRuntime node, INodeInvocationExecutor invocations, ILogger logger)
     {
         _node = node;
+        _invocations = invocations;
         _logger = logger;
     }
 
@@ -85,7 +87,7 @@ public sealed class NodeAgentTool : IAgentTool
             Observability = NodeObservability.NoOp,
         };
 
-        var result = await _node.RunAsync(context, cancellationToken).ConfigureAwait(false);
+        var result = await _invocations.ExecuteAsync(new NodeInvocation(_node.TypeKey, context), cancellationToken).ConfigureAwait(false);
 
         return result.Status switch
         {

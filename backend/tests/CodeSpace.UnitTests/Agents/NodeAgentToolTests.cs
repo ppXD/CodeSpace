@@ -64,7 +64,16 @@ public class NodeAgentToolTests
         }
     }
 
-    private static NodeAgentTool Tool(INodeRuntime node) => new(node, NullLogger.Instance);
+    private static NodeAgentTool Tool(INodeRuntime node) => new(node, new TestNodeInvocations(node), NullLogger.Instance);
+
+    private sealed class TestNodeInvocations(INodeRuntime node) : INodeInvocationExecutor
+    {
+        public Task<NodeResult> ExecuteAsync(NodeInvocation invocation, CancellationToken cancellationToken)
+        {
+            invocation.TypeKey.ShouldBe(node.TypeKey);
+            return node.RunAsync(invocation.Context, cancellationToken);
+        }
+    }
 
     [Fact]
     public void A_read_only_node_maps_to_a_safe_unguarded_tool()
