@@ -172,8 +172,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     /// <summary>
     /// Internal (not private) so the DTO-bind boundary is unit-pinned directly — the failure it converts escaped as
     /// an unhandled crash for as long as nothing tested it. <paramref name="declaredDeliverablePaths"/> defaults to
-    /// none, so every existing caller that does not carry an operator-declared deliverable list keeps its current
-    /// behavior — a bare planner-authored <c>ArtifactPresent</c> is then always self-certifying and always dropped
+    /// <c>null</c> — no declaration source at all — so every existing caller that does not carry an
+    /// operator-declared deliverable list still admits a planner-authored <c>ArtifactPresent</c> PAIRED with an
+    /// ArtifactSchema/LlmJudge content check (promoted to that companion's kind); a bare (unpaired) one is always
+    /// self-certifying and always dropped regardless
     /// (see <see cref="PlannerAcceptanceDraft.ReconcileArtifactPresent(PlannedWorkflow, IReadOnlyCollection{string}?, out IReadOnlyList{DroppedAcceptance})"/>).
     /// </summary>
     internal static PlannedWorkflow Deserialize(JsonElement json, IReadOnlyCollection<string>? declaredDeliverablePaths = null)

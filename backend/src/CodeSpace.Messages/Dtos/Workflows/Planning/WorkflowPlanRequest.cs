@@ -92,13 +92,17 @@ public sealed record WorkflowPlanRequest
 
     /// <summary>
     /// Workspace-relative deliverable paths the GOAL/OPERATOR declared for this plan — the only paths a
-    /// planner-authored <c>ArtifactPresent</c> acceptance may cite. A path the planner invents on its own is
-    /// self-certifying (the same subtask that instructs the agent to write it would also be the only witness that
-    /// it exists), so <c>PlannerAcceptanceDraft</c> drops any <c>ArtifactPresent</c> whose path is not in this set —
-    /// the subtask keeps its work and falls back to the operator's own acceptance floor. Null/empty ⇒ no path is
-    /// declared, so every planner-authored <c>ArtifactPresent</c> is dropped (byte-identical to before this field
-    /// existed). Nothing populates this yet; a future caller wires it from wherever the operator names expected
-    /// deliverables.
+    /// planner-authored <c>ArtifactPresent</c> acceptance may cite once a declaration source exists. A path the
+    /// planner invents that is outside this set is self-certifying (the same subtask that instructs the agent to
+    /// write it would also be the only witness that it exists), so <c>PlannerAcceptanceDraft</c> drops any
+    /// <c>ArtifactPresent</c> naming it — the subtask keeps its work and is graded by nothing (unverified
+    /// downstream); this lane has no operator acceptance floor to fall back to. <c>Null</c> ⇒ no declaration
+    /// source exists at all (nothing populates this field today), so membership cannot be judged — a
+    /// planner-authored <c>ArtifactPresent</c> is then admitted whenever it is paired with an
+    /// <c>ArtifactSchema</c>/<c>LlmJudge</c> content check, and dropped otherwise. An explicitly EMPTY list is NOT
+    /// the same as null: it means the operator declared zero deliverables, so every path is outside it and every
+    /// <c>ArtifactPresent</c> drops regardless of pairing. A future caller wires this from wherever the operator
+    /// names expected deliverables.
     /// </summary>
     public IReadOnlyList<string>? DeclaredDeliverablePaths { get; init; }
 }
