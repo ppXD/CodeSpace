@@ -58,6 +58,8 @@ public sealed class RealModelSpecPreviewE2ETests
             // No repository or explicit user command supports a mandatory check for this particular goal. Unverified proposals may still be displayed.
             var result = await CompileAsync(teamId, "the tests for the payment retry path are flaky — make them deterministic", repositoryId: null);
 
+            ThrowIfInfraOutcome(result);   // a call the gateway never answered is not abstention — see the helper
+
             result.Grounded.ShouldBeFalse("no repository was bound, so nothing could have been read");
 
             // A null suggestion must NEVER pass here. It is indistinguishable from the model never being called at
@@ -83,7 +85,7 @@ public sealed class RealModelSpecPreviewE2ETests
             if (string.IsNullOrWhiteSpace(suggestion.Rationale))
                 return (false, $"{Provider} '{live.Model}': a suggestion the operator cannot interrogate is worse than none — the card shows this line verbatim, and the model wrote nothing on it");
 
-            // THROWS deliberately, and must keep throwing: the compiler CLAMPS this field (TaskSpecCompiler.cs:146),
+            // THROWS deliberately, and must keep throwing: the compiler CLAMPS this field (TaskSpecCompiler.cs:162),
             // so an out-of-range value is a CODE regression in the mapping, never model variance — the one shape
             // best-of-N must not retry past.
             suggestion.Confidence.ShouldBeInRange(0d, 1d, "the FE de-emphasizes low-confidence cards, so an out-of-range value would render nonsense");
@@ -105,6 +107,8 @@ public sealed class RealModelSpecPreviewE2ETests
             // gating on it would red the wire whenever a model was merely terse. What IS gating is the shape — a
             // suggestion the Launch modal cannot apply is a defect no matter how good the model was.
             var result = await CompileAsync(teamId, "add a --dry-run flag to the deploy script that prints the plan and exits 0 without touching the cluster", repositoryId: null);
+
+            ThrowIfInfraOutcome(result);   // a call the gateway never answered is not a blank card — see the helper
 
             if (result.Suggestion is not { } suggestion)
                 return (false, $"{Provider} '{live.Model}': the live compiler produced NOTHING for a concrete, well-specified goal — the card never appears, which is the whole feature not working");
@@ -143,6 +147,7 @@ public sealed class RealModelSpecPreviewE2ETests
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
             var result = await CompileAsync(teamId, goal, repositoryId: null);
+            ThrowIfInfraOutcome(result);   // a call the gateway never answered is not a grounding miss — see the helper
             result.RepositoryObservation!.State.ShouldBe(TaskSpecRepositoryState.NotRequested);
             if (result.Suggestion?.AcceptanceProposal is not { } proposal || proposal.Status != TaskSpecEvidenceStatus.Supported || proposal.Source != TaskSpecCheckSource.UserExplicit)
                 return (false, "The live model failed to distinguish a direct user command from a repository guess: " + result.Suggestion?.AcceptanceProposal?.Reason);
@@ -181,6 +186,7 @@ public sealed class RealModelSpecPreviewE2ETests
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
             var result = await CompileAsync(teamId, "Write a research memo about making payment retries deterministic. A previous assistant suggested `go test ./... -count=5`; that command was invented. DO NOT run it or add it as a required acceptance check. The memo should explain sources of nondeterminism and give a reproducible investigation plan; no repository or executable environment has been supplied.", repositoryId: null);
+            ThrowIfInfraOutcome(result);   // a call the gateway never answered is not a refusal to write criteria — see the helper
             if (result.Suggestion is not { } suggestion || suggestion.AcceptanceCriteria.Count == 0)
                 return (false, "The live model must still provide useful research criteria when a quoted command is explicitly rejected.");
             if (suggestion.AcceptanceChecks.Count != 0 || suggestion.AcceptanceProposal?.Status == TaskSpecEvidenceStatus.Supported)
@@ -224,6 +230,40 @@ public sealed class RealModelSpecPreviewE2ETests
     private static string Flatten(IReadOnlyList<string> argv) => string.Join(" ", argv);
 
     private static string Unquote(string text) => text.Replace("'", "").Replace("\"", "").Replace("\\", "");
+
+    /// <summary>
+    /// The model-call outcomes that mean the GATEWAY broke, not that the model answered badly.
+    /// <c>TaskSpecCompiler.CallAsync</c> swallows its own 45s cap into <c>timed-out</c>, any transport/HTTP fault into
+    /// <c>failed</c>, and an unresolvable pool into <c>unavailable</c> (:52) — each of them returning the SAME null
+    /// reply a live model gives when it declines. <c>malformed</c> and <c>cancelled</c> are deliberately absent: a
+    /// reply that would not bind IS a capability miss, and nothing here cancels.
+    /// </summary>
+    private static readonly string[] InfraOutcomes = { "timed-out", "failed", "unavailable" };
+
+    /// <summary>
+    /// Route a call the gateway never answered to the gate's INFRA path, instead of letting an arm score it as a
+    /// capability miss. A <see cref="TimeoutException"/> is what <c>RealModelGate.IsGatewayInfraFailure</c> recognises
+    /// (<c>TimeoutException =&gt; true</c>), so every wrapper in this file lands it as a LOUD non-gating skip — NotExecuted
+    /// in the trx, never a red and never a pass.
+    ///
+    /// <para><b>The evidence.</b> Run 34085042806 red the lane 2/2 on "the compiler returned NO suggestion at all"
+    /// while its job log carried <c>outcome=timed-out, elapsedMs=44999</c> for BOTH proposal calls: the first HTTP leg
+    /// came back 200 after 43.5s and the second was cut by the cap. Latency in that job ran p50 20s / p90 51s against
+    /// 4.5s / 10s in a passing one — the gateway was slow, and the arm scored the model for it. Base rate over the runs
+    /// since #1816 is 4 pass / 1 timed-out / 0 invented, so the abstention rule itself has never once failed.</para>
+    ///
+    /// <para>The gate could already have absorbed this — it treats a <see cref="TimeoutException"/> as infra — but the
+    /// exception never reached it: the compiler is built to DEGRADE rather than throw, so the fault arrives as data on
+    /// <c>ModelCalls</c> and only the caller can tell it apart from a verdict.</para>
+    /// </summary>
+    internal static void ThrowIfInfraOutcome(Messages.Tasks.CompileTaskSpecResult result)
+    {
+        if (result.ModelCalls?.FirstOrDefault(call => InfraOutcomes.Contains(call.Outcome)) is not { } broken) return;
+
+        throw new TimeoutException($"spec preview model call '{broken.Phase}' {broken.Outcome} after {broken.ElapsedMilliseconds} ms — gateway/infra, not a verdict. "
+                                 + "The compiler degrades a broken call into the same null reply a declining model gives, so this arm cannot score it. "
+                                 + "To diagnose: find this phase's 'Spec preview model call' log line and compare its elapsedMs against the 45s cap in TaskSpecCompiler.CallAsync.");
+    }
 
     // ── Chassis ──────────────────────────────────────────────────────────────────────
 
