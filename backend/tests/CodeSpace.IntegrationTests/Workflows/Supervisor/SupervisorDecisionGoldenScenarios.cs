@@ -736,7 +736,7 @@ public static class SupervisorDecisionGoldenScenarios
     /// "retry targeted ''" that miss looks like a model that named an empty string, sending a reader hunting a
     /// targeting bug that is really a payload-shape one.
     /// </summary>
-    private static Func<SupervisorDecision, (bool Ok, string Note)> RetryTargets(string expectedSubtaskId) => decision =>
+    internal static Func<SupervisorDecision, (bool Ok, string Note)> RetryTargets(string expectedSubtaskId) => decision =>
     {
         var subtaskId = JsonDocument.Parse(decision.PayloadJson).RootElement.TryGetProperty("subtaskId", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() : null;
 

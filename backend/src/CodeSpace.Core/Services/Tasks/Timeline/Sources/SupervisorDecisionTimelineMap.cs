@@ -189,7 +189,7 @@ public static class SupervisorDecisionTimelineMap
 
         if (SupervisorOutcome.ReadPayloadReaskedFromKind(d.OutcomeJson) is { } kind)
             notes.Add($"Payload re-asked from '{kind}' — the first reply named that action without its payload.");
-        else if (SupervisorOutcome.ReadPayloadReaskAttempts(d.OutcomeJson) is var spent && spent > 0)
+        else if (SupervisorOutcome.ReadPayloadReaskAttempts(d.OutcomeJson) is > 0 and var spent)
             notes.Add($"Payload re-asked {spent} time{(spent == 1 ? "" : "s")} without recovering one — the action was recorded as the model first wrote it, without its payload.");
 
         if (SupervisorOutcome.ReadRetryTargetReasked(d.OutcomeJson))

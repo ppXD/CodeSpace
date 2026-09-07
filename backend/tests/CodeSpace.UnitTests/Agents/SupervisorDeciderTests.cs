@@ -2132,9 +2132,33 @@ public class SupervisorDeciderTests
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
-        client.Requests[1].UserPrompt.ShouldContain("omitted the 'plan' object", customMessage: "the first correction quotes the first reply's own defect");
-        client.Requests[2].UserPrompt.ShouldContain("omitted the 'spawn' object", customMessage: "…and the second quotes the SECOND reply's, the shape the model actually has to fix now");
+        client.Requests[1].UserPrompt.ShouldContain("omitted or left incomplete the 'plan' object", customMessage: "the first correction quotes the first reply's own defect");
+        client.Requests[2].UserPrompt.ShouldContain("omitted or left incomplete the 'spawn' object", customMessage: "…and the second quotes the SECOND reply's, the shape the model actually has to fix now");
+        client.Requests[2].UserPrompt.ShouldContain("""{"kind":"spawn"}""", customMessage: "…and ECHOES the second reply, not the superseded first — the echo is the load-bearing half of the correction, and a header that names the new verb over a stale echo asks the model to fix a shape it never wrote");
+        client.Requests[2].UserPrompt.ShouldNotContain("""{"kind":"plan"}""", customMessage: "…so the first reply, which the model has already moved off, is nowhere in the second correction");
         client.Requests[2].UserPrompt.ShouldContain("Plan-local subtask ids", customMessage: "…including that kind's own schema fragment, exactly as the first attempt renders it — no new prompt text");
+    }
+
+    [Fact]
+    public async Task A_re_ask_reply_that_FLATTENS_the_payload_is_nested_deterministically_without_spending_another_ask()
+    {
+        // The deterministic lift is the dominant repair (68 flattened decisions in one eval run) but it ran ONCE, on the
+        // first reply. A correction that answers with the payload at the ROOT is exactly as salvageable — every field is
+        // present under its own name — yet it scored as still-missing, burned the next attempt, and on the LAST one was
+        // discarded in favour of the projector's empty substitute for a payload the model demonstrably wrote.
+        var absent = JsonDocument.Parse("""{"kind":"retry","rationale":{"why":"s3 failed"}}""").RootElement;
+        var flattened = JsonDocument.Parse("""{"kind":"retry","subtaskId":"s3"}""").RootElement;
+        var client = new SequencedRawJsonStructuredClient(absent, flattened);
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(), new FakeHarnesses(), FakePersonas.Empty(), new FakeTapeStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Retry);
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("subtaskId").GetString()
+            .ShouldBe("s3", "the re-ask's own fields are nested where the contract reads them — the model authored the target, so the server never has to invent one");
+        decision.PayloadReaskedFromKind.ShouldBe(SupervisorDecisionKinds.Retry, "a re-ask DID produce this decision, so the row still credits the round-trip it cost");
+        decision.PayloadReaskAttempts.ShouldBe(1, "…exactly ONE, because the reply was deterministically salvageable and the ladder stops the moment it lands");
+        client.Requests.Count.ShouldBe(2, "one first call plus the single re-ask — a second correction would spend a round-trip recovering information the first one already delivered");
     }
 
     [Fact]
@@ -2165,6 +2189,7 @@ public class SupervisorDeciderTests
         var reask = client.Requests[1].UserPrompt;
 
         reask.ShouldContain($"'{property}'", customMessage: "the re-ask names the sub-object by the key the contract reads");
+        reask.ShouldContain($"omitted or left incomplete the '{property}' object", customMessage: "the header states the shortfall in terms true of BOTH shapes the coherence check catches — an ABSENT object and a PRESENT one missing a required field — so it is never contradicted by the reply echoed below it; the 'Defect:' line says which one it was");
         reask.ShouldContain(fragmentMarker, customMessage: $"the re-ask quotes the '{property}' object's own JSON-schema fragment, so the model is shown the shape rather than asked to recall it");
         reask.ShouldContain($"\"kind\": \"{kind}\"", customMessage: "…and it spells out the COMPLETE decision envelope the reply must have");
     }
@@ -2201,6 +2226,11 @@ public class SupervisorDeciderTests
 
         decision.PayloadJson.ShouldContain("do a");
         client.Requests.Count.ShouldBe(2, "an empty plan is unexecutable authorship at decide time — repairable, exactly like an empty fan-out");
+
+        client.Requests[1].UserPrompt.ShouldContain("omitted or left incomplete the 'plan' object",
+            customMessage: "the correction's header is honest about the shape the model ACTUALLY wrote — half the coherence check's arms are a PRESENT object missing a required field, and this is one of them");
+        client.Requests[1].UserPrompt.ShouldNotContain("omitted the 'plan' object",
+            customMessage: "…never the flat omission claim, which the model's own reply — echoed two lines below it in the same prompt — visibly contradicts");
     }
 
     [Fact]
@@ -2222,7 +2252,7 @@ public class SupervisorDeciderTests
         reask.ShouldContain("[s1]");
         reask.ShouldContain("[s2]");
         reask.ShouldContain("build failed: missing symbol", customMessage: "…and the evidence the corrected decision should act on");
-        reask.ShouldContain("omitted the 'spawn' object", customMessage: "the correction itself still rides at the TAIL — the recency-biased position");
+        reask.ShouldContain("omitted or left incomplete the 'spawn' object", customMessage: "the correction itself still rides at the TAIL — the recency-biased position");
     }
 
     [Fact]
