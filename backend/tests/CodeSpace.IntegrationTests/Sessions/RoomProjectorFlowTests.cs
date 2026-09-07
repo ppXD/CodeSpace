@@ -599,6 +599,51 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_run_whose_output_review_could_NOT_run_is_NOT_verified_and_says_why()
+    {
+        // 5.6 residual: both reviewer rungs (the S8 agent sub-run and the in-process model critic) can fail for
+        // reasons that are NOT a disapproval — an unavailable reviewer model, a staging fault, a faulted call. The
+        // OLD fold read this beat exactly like "no review was ever configured" (LlmStructuredCritic's own
+        // review.skipped beat was never read here), losing the one thing worth keeping: WHY nothing landed.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Review could not run");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Which runtime should we pick?", resultSummary: null);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Rust is the safer choice.");
+        await SeedUnreviewedOutputAsync(run, "No reviewer model is available in the team's pool.");
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "the review was ATTEMPTED, not skipped by configuration — but it never reached a verdict");
+        result.VerificationNote.ShouldBe("Unverified — the output review could not run: No reviewer model is available in the team's pool.",
+            "the card says WHY nothing landed, the same treatment a flag already gets — not just that nothing did");
+        result.Text.ShouldBe("Rust is the safer choice.", "the answer is preserved verbatim — the chip qualifies it, it does not replace it");
+    }
+
+    [Fact]
+    public async Task A_siblings_APPROVAL_cannot_outrank_a_branch_whose_review_never_ran()
+    {
+        // The same over-claim FoldReviewVerdicts already refuses for a flag, restated for the review ladder's OWN
+        // silence: a fan-out where one branch's review exhausted both rungs must not have a sibling's clean approval
+        // paint the whole turn as verified.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "One branch never reviewed");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Split the work across branches", resultSummary: null);
+
+        var parser = await SeedAgentNodeAsync(teamId, run, summary: "Parser written.", changedFiles: new[] { "p.cs" }, nodeId: "implement-parser", goal: "Implement the parser");
+        var migration = await SeedAgentNodeAsync(teamId, run, summary: "Migration written.", changedFiles: new[] { "m.sql" }, nodeId: "write-migration", goal: "Write the migration");
+
+        await SeedUnreviewedOutputAsync(run, "No reviewer model is available in the team's pool.", nodeId: "implement-parser");
+        await SeedReviewVerdictAsync(run, approved: true, reason: "The migration is reversible.", nodeId: "write-migration", agentRunId: migration);
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "one reviewed unit never reached a verdict — a sibling's approval cannot stand in for it");
+        result.VerificationNote.ShouldBe("Unverified — the output review could not run for Implement the parser: No reviewer model is available in the team's pool.",
+            "the card NAMES the unreviewed branch, so a reader of a wide fan-out knows which card to open");
+    }
+
+    [Fact]
     public async Task The_LATEST_output_review_verdict_wins_so_a_revise_round_that_fixed_the_flag_reads_verified()
     {
         // Improve mode: the first pass was flagged, the agent revised, the second review approved. The run's final
@@ -1596,6 +1641,24 @@ public class RoomProjectorFlowTests
         {
             Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewCompleted, NodeId = nodeId, IterationKey = iterationKey, OccurredAt = DateTimeOffset.UtcNow,
             PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId, approved, reason }),
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// 5.6 residual — the OUTPUT review's <c>review.skipped</c> beat: both the S8 agent reviewer and the model-critic
+    /// fallback exhausted without a verdict, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it (no
+    /// <c>agentRunId</c> key at all — it never names the unit, only the CELL it lands on).
+    /// </summary>
+    private async Task SeedUnreviewedOutputAsync(Guid runId, string reason, string nodeId = "agent", string iterationKey = "")
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.ReviewSkipped, NodeId = nodeId, IterationKey = iterationKey, OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.SkippedCallKind, mode = "Gate", artifact_kind = CriticArtifactKinds.AgentChange, reason }),
         });
         await db.SaveChangesAsync();
     }

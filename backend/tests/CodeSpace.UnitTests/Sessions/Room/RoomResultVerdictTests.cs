@@ -171,6 +171,89 @@ public class RoomResultVerdictTests
             .ShouldBe("Unverified — the output review flagged this result.", "an empty rationale must not degrade to the ungraded copy, which claims nothing looked");
     }
 
+    // ── 5.6 residual: a review ATTEMPTED but never reaching a verdict (both rungs exhausted) ──
+
+    [Fact]
+    public void A_review_that_could_not_run_is_NOT_verified_and_carries_the_machines_own_reason()
+    {
+        // Both the S8 agent reviewer and the model-critic fallback exhausted without a verdict. This is neither an
+        // endorsement nor an objection — the OLD fold read it exactly like "no review was ever configured", losing
+        // the one thing this reader exists to keep: WHY nothing landed.
+        var verification = RoomProjector.Verification(graded: false, review: (null, "No reviewer model is available in the team's pool.", null));
+
+        verification.Verified.ShouldBe(false);
+        verification.Note.ShouldBe("Unverified — the output review could not run: No reviewer model is available in the team's pool.",
+            "the note says WHY, not just that nothing landed — the same treatment a flag already gets");
+    }
+
+    [Fact]
+    public void An_unreviewed_result_with_no_reason_still_says_which_silence_it_is()
+    {
+        RoomProjector.Verification(graded: false, review: (null, null, null)).Note
+            .ShouldBe("Unverified — the output review could not run.", "an empty reason must not degrade to the ungraded copy, which claims no review was ever attempted");
+    }
+
+    [Fact]
+    public void A_GRADED_pass_outranks_an_unreviewed_result()
+    {
+        // Same precedence as a flag: an executed objective check outranks the review ladder's own silence.
+        RoomProjector.Verification(graded: true, review: (null, "no reviewer model", null)).Verified.ShouldBe(true);
+    }
+
+    [Fact]
+    public void The_unreviewed_branchs_name_reaches_the_chip_copy()
+    {
+        RoomProjector.Verification(graded: false, review: (null, "No reviewer model is available in the team's pool.", "parser")).Note
+            .ShouldBe("Unverified — the output review could not run for parser: No reviewer model is available in the team's pool.");
+    }
+
+    [Fact]
+    public void A_skipped_beat_reads_as_UNREVIEWED_not_as_a_flag_or_an_approval()
+    {
+        // The critic's own review.skipped payload never carries an "approved" key at all — a naive reader that
+        // defaulted a missing key to false would silently relabel "never examined" as "examined and rejected".
+        var verdict = RoomProjector.ReadReviewVerdict(SkippedVerdict("No reviewer model is available in the team's pool."));
+
+        verdict.Approved.ShouldBeNull("attempted, never a verdict — not an approval and not a flag");
+        verdict.Reason.ShouldBe("No reviewer model is available in the team's pool.");
+    }
+
+    [Fact]
+    public void One_branchs_APPROVAL_can_no_longer_outrank_a_siblings_UNREVIEWED_silence()
+    {
+        // The same defect FoldReviewVerdicts already refuses for a flag, restated for the OTHER non-approved state: a
+        // fan-out where one branch's review never ran must not have a sibling's approval paper over it.
+        var fold = RoomProjector.FoldReviewVerdicts(
+            new[]
+            {
+                (Cell("implement-parser", ""), 10L, SkippedVerdict("No reviewer model is available in the team's pool.")),
+                (Cell("write-migration", ""), 11L, Verdict(Migration, approved: true, "Clean.")),
+            },
+            UnitLabels);
+
+        fold.ShouldNotBeNull();
+        fold!.Value.Approved.ShouldBeNull("one unit was never reviewed — the run cannot read as fully verified");
+        fold.Value.Reason.ShouldBe("No reviewer model is available in the team's pool.");
+        fold.Value.Unit.ShouldBe("parser");
+    }
+
+    [Fact]
+    public void A_later_verdict_supersedes_an_earlier_skip_for_the_SAME_unit()
+    {
+        // Improve mode: the first critic call could not resolve a reviewer; a later round's call succeeded and
+        // approved. The unit's LATEST word is the approval, so the earlier skip must not keep the run flagged as
+        // unreviewed forever.
+        var fold = RoomProjector.FoldReviewVerdicts(
+            new[]
+            {
+                (Cell("agent", ""), 10L, SkippedVerdict("no reviewer model")),
+                (Cell("agent", ""), 11L, Verdict(null, approved: true, "Clean on the second pass.")),
+            },
+            UnitLabels);
+
+        fold.ShouldBe((true, (string?)null, (string?)null));
+    }
+
     [Fact]
     public void A_GRADED_pass_outranks_a_flagged_review()
     {
@@ -204,8 +287,8 @@ public class RoomResultVerdictTests
     {
         // A half-written beat proves exactly one thing: a review ran. Reading its silence as approval is the same
         // over-claim in a smaller font.
-        RoomProjector.ReadReviewVerdict("""{"kind":"critic.output"}""").Approved.ShouldBeFalse();
-        RoomProjector.ReadReviewVerdict("not json at all").Approved.ShouldBeFalse();
+        RoomProjector.ReadReviewVerdict("""{"kind":"critic.output"}""").Approved.ShouldBe(false);
+        RoomProjector.ReadReviewVerdict("not json at all").Approved.ShouldBe(false);
         RoomProjector.ReadReviewVerdict("""{"kind":"critic.output","agentRunId":"a1","approved":true,"reason":"Fine."}""").ShouldBe((true, "Fine.", "a1"));
         RoomProjector.ReadReviewVerdict("""{"kind":"critic.output","approved":true}""").AgentRunId.ShouldBeNull("a beat that named no agent run falls back to its ledger cell, never to a bogus id");
     }
@@ -227,7 +310,7 @@ public class RoomResultVerdictTests
             UnitLabels);
 
         fold.ShouldNotBeNull();
-        fold!.Value.Approved.ShouldBeFalse("a run is verified only when EVERY reviewed unit approved — one flag is a flagged run");
+        fold!.Value.Approved.ShouldBe(false, "a run is verified only when EVERY reviewed unit approved — one flag is a flagged run");
         fold.Value.Reason.ShouldBe("The parser drops the trailing field.", "the FLAGGING reviewer's words are the ones that reach the card");
         fold.Value.Unit.ShouldBe("parser", "the fan-out NAMES the flagged branch — 'this result' is not something a reader of twelve branches can act on");
     }
@@ -247,7 +330,7 @@ public class RoomResultVerdictTests
             },
             UnitLabels);
 
-        fold!.Value.Approved.ShouldBeFalse("two agents, one turn cell — the later approval is a different unit's verdict, not this one's");
+        fold!.Value.Approved.ShouldBe(false, "two agents, one turn cell — the later approval is a different unit's verdict, not this one's");
         fold.Value.Unit.ShouldBe("parser");
     }
 
@@ -263,7 +346,7 @@ public class RoomResultVerdictTests
             },
             UnitLabels);
 
-        fold!.Value.Approved.ShouldBeFalse();
+        fold!.Value.Approved.ShouldBe(false);
         fold.Value.Unit.ShouldBe("parser", "the cell arm of the label map answers for a beat that named no agent run");
     }
 
@@ -304,7 +387,7 @@ public class RoomResultVerdictTests
             },
             UnitLabels);
 
-        fold!.Value.Approved.ShouldBeFalse();
+        fold!.Value.Approved.ShouldBe(false);
         fold.Value.Unit.ShouldBe("migrations", "the migration's LATEST word is the flag; the parser's latest word is its approval");
         fold.Value.Reason.ShouldBe("No backfill for the dropped column.");
     }
@@ -490,4 +573,8 @@ public class RoomResultVerdictTests
     /// <summary>One <c>review.completed</c> payload, in the shape <c>AgentRunExecutor</c> writes it.</summary>
     private static string Verdict(string? agentRunId, bool approved, string reason) =>
         JsonSerializer.Serialize(new { kind = "critic.output", agentRunId, approved, reason });
+
+    /// <summary>One <c>review.skipped</c> payload, in the shape <c>LlmStructuredCritic.RecordSkippedAsync</c> writes it — no <c>agentRunId</c> key at all, so the fold always falls back to the ledger cell.</summary>
+    private static string SkippedVerdict(string reason) =>
+        JsonSerializer.Serialize(new { kind = "critic.skipped", mode = "Gate", artifact_kind = "agent change", reason });
 }
