@@ -203,7 +203,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
     internal static bool IsDirty(SessionSummarySourceBinding fresh, SessionSummarySourceBinding? stored) =>
         stored is not null && (fresh.EffectiveRunId != stored.EffectiveRunId || fresh.ResultFingerprint != stored.ResultFingerprint || fresh.AssessmentId != stored.AssessmentId);
 
-    /// <summary>Distill the existing summary + the newly scrolled-out turns into an updated summary. Returns null (fail-open) when no provider/model is available or the LLM call fails. Internal so the real-model eval can drive the live distillation directly (DB-free), pinning that the summary actually preserves older turns.</summary>
+    /// <summary>Best-effort production entry point: <see cref="DistillAsync"/> wrapped in the fail-open contract. Returns null when no provider/model is available or the LLM call fails; never throws.</summary>
     internal async Task<string?> TryDistillAsync(Guid teamId, string? existingSummary, IReadOnlyList<TurnRow> newTurns, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> manifestsByRunId, CancellationToken cancellationToken)
     {
         // The WHOLE resolve → select → complete path is fail-open: model resolution DECRYPTS the credential
@@ -211,21 +211,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
         // can throw — ANY of these must leave the summary unchanged rather than fail the launch (the contract).
         try
         {
-            var resolved = await InProcessTextModel.ResolveAsync(_clientRegistry, _modelSelector, teamId, pinnedModel: null, cancellationToken).ConfigureAwait(false);
-
-            if (resolved is not { } model) return null;   // no registered provider has a credentialed team model — fail open
-
-            var completion = await model.Client.CompleteAsync(new LLMCompletionRequest
-            {
-                Model = model.Pick.ModelId,
-                Credential = model.Pick.Credential,
-                SystemPrompt = SystemPrompt,
-                UserPrompt = BuildUserPrompt(existingSummary, newTurns, manifestsByRunId),
-                MaxOutputTokens = 1024,
-                Temperature = 0.2,
-            }, cancellationToken).ConfigureAwait(false);
-
-            return completion.Text;
+            return await DistillAsync(teamId, existingSummary, newTurns, manifestsByRunId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -234,6 +220,34 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
             _logger.LogWarning(ex, "Session summary distillation failed for team {TeamId}; leaving the rolling summary unchanged", teamId);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Distill the existing summary + the newly scrolled-out turns into an updated summary. Returns null only for
+    /// "no registered provider has a credentialed team model" (a real fail-open case, not an error). Every other
+    /// fault — a credential decrypt, model resolution, or the LLM call itself — PROPAGATES here, unlike
+    /// <see cref="TryDistillAsync"/> which catches it. Internal so the real-model eval can drive the live distillation
+    /// directly (DB-free), pinning that the summary actually preserves older turns, WHILE still telling a genuinely
+    /// empty completion (a real quality miss) apart from a gateway/transport fault (non-gating infra) — the two
+    /// collapsed into the same "null" once <see cref="TryDistillAsync"/> swallowed both alike.
+    /// </summary>
+    internal async Task<string?> DistillAsync(Guid teamId, string? existingSummary, IReadOnlyList<TurnRow> newTurns, IReadOnlyDictionary<Guid, IReadOnlyList<PublishManifest>> manifestsByRunId, CancellationToken cancellationToken)
+    {
+        var resolved = await InProcessTextModel.ResolveAsync(_clientRegistry, _modelSelector, teamId, pinnedModel: null, cancellationToken).ConfigureAwait(false);
+
+        if (resolved is not { } model) return null;   // no registered provider has a credentialed team model — fail open
+
+        var completion = await model.Client.CompleteAsync(new LLMCompletionRequest
+        {
+            Model = model.Pick.ModelId,
+            Credential = model.Pick.Credential,
+            SystemPrompt = SystemPrompt,
+            UserPrompt = BuildUserPrompt(existingSummary, newTurns, manifestsByRunId),
+            MaxOutputTokens = 1024,
+            Temperature = 0.2,
+        }, cancellationToken).ConfigureAwait(false);
+
+        return completion.Text;
     }
 
     /// <summary>The distillation prompt: the running summary so far + the next older turns to fold in. Internal so a test can pin the framing without a real LLM round-trip.</summary>
