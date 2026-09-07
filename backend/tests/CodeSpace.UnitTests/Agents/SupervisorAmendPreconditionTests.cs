@@ -148,6 +148,71 @@ public class SupervisorAmendPreconditionTests
         SupervisorAmendPrecondition.Reject(context, Amend()).ShouldBeNull();
     }
 
+    // ── the evidence SCOPE: a re-plan may supersede an instruction, never the grade an amendment answers ──
+
+    [Fact]
+    public void A_replan_does_not_hide_the_infra_graded_attempt_the_amendment_answers()
+    {
+        // The window-vs-tape split this gate shipped with: SupervisorPlanWindow closes over the spawn that produced
+        // the grade, so the arms below answered "never been attempted" while SupervisorAmendObligation.StandingFor,
+        // the decider's Discarded steer and the turn roster all read the whole tape. Golden
+        // 'amended-oracle-discarded-by-replan' is that contradiction rendered into one prompt: steered at the verb,
+        // one screen under a menu reporting it unavailable (decision eval 34085079257, 24/25 — the model answered
+        // with a third verb). Re-anchoring a repaired check to the NEW plan is exactly what the verb is for, so the
+        // pre-re-plan attempt is the evidence, not stale.
+        var context = RePlannedOver(Context(Unit(passed: false, detail: "grade-error: npm: command not found")));
+
+        SupervisorPlanWindow.Read(context.PriorDecisions).Decisions.Count
+            .ShouldBe(1, "the re-plan must really be the window boundary, or this scenario measures nothing it claims to");
+
+        SupervisorAmendPrecondition.Reject(context, Amend())
+            .ShouldBeNull("the check still cannot run and no co-sign is in force — a re-plan discarded the repair, it did not un-grade the attempt");
+        SupervisorAmendPrecondition.AnyAmendableUnit(context)
+            .ShouldBeTrue("…so the roster must OFFER the verb its own steer sends the model at");
+    }
+
+    [Fact]
+    public void A_unit_with_no_graded_attempt_anywhere_on_the_tape_is_still_refused()
+    {
+        // Widening the SCOPE of the evidence read must not widen the SET of admissible targets to "anything the
+        // model names": an id with no graded attempt on the whole tape has no warrant, re-plan or no re-plan.
+        var attemptedS1 = RePlannedOver(Context(Unit(passed: false, detail: "grade-error: npm: command not found")));
+
+        SupervisorAmendPrecondition.Reject(attemptedS1, Amend("s2"))
+            .ShouldNotBeNull("'s2' was never attempted — the tape carries a grade for 's1' and nothing else")
+            .ShouldContain("never been attempted");
+
+        var nothingAttempted = new SupervisorTurnContext { Goal = "g", PriorDecisions = new[] { RePlan(1) } };
+
+        SupervisorAmendPrecondition.Reject(nothingAttempted, Amend()).ShouldNotBeNull().ShouldContain("never been attempted");
+        SupervisorAmendPrecondition.AnyAmendableUnit(nothingAttempted).ShouldBeFalse("a planned-but-unattempted run has nothing to amend, so the roster must withhold the verb");
+    }
+
+    [Fact]
+    public void A_work_classed_failure_a_replan_closed_over_is_refused_on_the_work_channel()
+    {
+        // The pair that proves the widening is a SCOPE change and not an amnesty: the same re-plan that stops hiding
+        // an infra grade must not launder a work-classed one into "never been attempted" either — the model is sent
+        // back to the work, with the verdict quoted, exactly as it is on an unwindowed tape.
+        var context = RePlannedOver(Context(Unit(passed: false, detail: "tests-failed-exit-1")));
+
+        SupervisorAmendPrecondition.Reject(context, Amend())
+            .ShouldNotBeNull().ShouldContain("evidence against the WORK", customMessage: "a re-plan is not a route around the mark-its-own-homework gate");
+        SupervisorAmendPrecondition.AnyAmendableUnit(context).ShouldBeFalse();
+    }
+
+    /// <summary>The same tape with a valid re-plan appended LAST — the plan-generation boundary that closes <see cref="SupervisorPlanWindow"/> over every attempt before it.</summary>
+    private static SupervisorTurnContext RePlannedOver(SupervisorTurnContext context) =>
+        context with { PriorDecisions = context.PriorDecisions.Append(RePlan(context.PriorDecisions.Count + 1)).ToList() };
+
+    /// <summary>A structurally VALID plan — <see cref="SupervisorPlanWindow.IsValidBoundary"/> ignores an empty, malformed or failed one, so a fixture that skimped here would open no generation and pin nothing.</summary>
+    private static SupervisorPriorDecision RePlan(long sequence) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = sequence, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan,
+        PayloadJson = """{"goal":"g","subtasks":[{"id":"s1","title":"S1","instruction":"re-author the s1 check"}]}""",
+        OutcomeJson = """{"planned":["s1"],"count":1}""",
+    };
+
     // ── the raw-verdict card suffix ────────────────────────────────────────────────────────────────────
 
     [Fact]
