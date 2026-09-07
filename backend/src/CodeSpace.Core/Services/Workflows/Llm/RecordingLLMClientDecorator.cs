@@ -62,7 +62,7 @@ public class RecordingLLMClientDecorator : ILLMClient
             // call's Failed row — legible, never a silent skip. A scope without a ledger+cap passes through.
             completion = await LlmBudgetGuard.GuardedAsync(scope, request.Model, request.SystemPrompt, request.UserPrompt, request.MaxOutputTokens,
                 ct => _inner.CompleteAsync(request, ct),
-                c => Agents.Cost.AgentCostPricing.CostUsd(c.Model, c.Usage.InputTokens ?? 0, c.Usage.OutputTokens ?? 0, scope?.ModelPrices),
+                c => Agents.Cost.LlmUsageCost.Usd(c.Model, c.Usage, scope.ModelPrices),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -198,7 +198,7 @@ public class RecordingLLMClientDecorator : ILLMClient
             kind = scope.Kind,
             provider,
             model,
-            usage = new { inputTokens = usage.InputTokens, outputTokens = usage.OutputTokens, finishReason = usage.FinishReason },
+            usage = new { inputTokens = usage.InputTokens, outputTokens = usage.OutputTokens, finishReason = usage.FinishReason, isPartial = usage.IsPartial },
             output,
         });
 

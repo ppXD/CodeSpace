@@ -240,6 +240,24 @@ public class TaskSpecCompilerTests
         client.Requests.ShouldBeEmpty();
     }
 
+    [Theory]
+    [InlineData(20, 7, true, true)]
+    [InlineData(-1, 7, false, true)]
+    [InlineData(20, -1, false, true)]
+    [InlineData(0, 0, false, false)]
+    public async Task Preview_trace_preserves_usage_completeness_even_without_a_failover(int input, int output, bool partial, bool incomplete)
+    {
+        var client = new SequenceStructuredClient("success") { ReviewUsage = new LlmUsage { InputTokens = input, OutputTokens = output, IsPartial = partial }, ReviewFailedOver = [] };
+        var compiler = new TaskSpecCompiler(new SingleRegistry(client), new OnePickSelector(), new NullGrounding(), NullLogger<TaskSpecCompiler>.Instance);
+        var result = await compiler.CompileAsync(Guid.NewGuid(), SequenceStructuredClient.Goal, null, CancellationToken.None);
+        var trace = result.ModelCalls![1];
+        trace.Outcome.ShouldBe("succeeded");
+        trace.FailedOver.ShouldBeEmpty();
+        trace.InputTokens.ShouldBe(input);
+        trace.OutputTokens.ShouldBe(output);
+        trace.UsageMayBeIncomplete.ShouldBe(incomplete);
+    }
+
     // ── Fakes at the honest seams ───────────────────────────────────────────────────
 
     private sealed class SequenceStructuredClient : ILLMClient, IStructuredLLMClient
@@ -248,6 +266,8 @@ public class TaskSpecCompilerTests
         private readonly string _reviewOutcome;
         public List<StructuredLLMCompletionRequest> Requests { get; } = [];
         public SequenceStructuredClient(string reviewOutcome) { _reviewOutcome = reviewOutcome; }
+        public LlmUsage ReviewUsage { get; init; } = new() { InputTokens = 20, OutputTokens = 7 };
+        public IReadOnlyList<string> ReviewFailedOver { get; init; } = ["TestSpec:test-model — transient 503"];
         public string Provider => "TestSpec";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
@@ -261,7 +281,7 @@ public class TaskSpecCompilerTests
             if (_reviewOutcome == "failed") throw new IOException("review transport unavailable");
             if (_reviewOutcome == "timed-out") throw new OperationCanceledException("review request deadline");
             var json = _reviewOutcome == "malformed" ? "[]" : JsonSerializer.Serialize(new TaskSpecReview { Source = "user-explicit", Support = "supported", Citations = [new TaskSpecReviewCitation("goal", Goal)], Reason = "The original user explicitly requested this command; it has not been executed." });
-            return Task.FromResult(new StructuredLLMCompletion { Model = "fallback-model", Json = JsonDocument.Parse(json).RootElement.Clone(), Usage = new LlmUsage { InputTokens = 20, OutputTokens = 7 }, FailedOver = ["TestSpec:test-model — transient 503"] });
+            return Task.FromResult(new StructuredLLMCompletion { Model = "fallback-model", Json = JsonDocument.Parse(json).RootElement.Clone(), Usage = ReviewUsage, FailedOver = ReviewFailedOver });
         }
     }
 

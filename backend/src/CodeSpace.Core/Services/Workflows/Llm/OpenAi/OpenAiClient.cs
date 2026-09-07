@@ -159,7 +159,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingL
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = JsonSchemaValidator.Validate(second.Json, request.JsonSchema);
-        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage) };   // total billed = the first (invalid) attempt + the re-ask
+        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage, string.Equals(first.Model, second.Model, StringComparison.OrdinalIgnoreCase)) };   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
@@ -175,7 +175,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingL
         catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.Malformed)
         {
             var feedbackSystem = StructuredJsonText.WithMalformedFeedback(request.SystemPrompt, ex.ProviderMessage);
-            return await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+            var recovered = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+            // The failed attempt's usage did not survive the parse exception. A successful re-ask provides only
+            // its own subtotal; never present that as the bill for all preceding physical requests.
+            return recovered with { Usage = recovered.Usage with { IsPartial = true } };
         }
     }
 
@@ -222,7 +225,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient, IStreamingL
             throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced function-calling OR the prompt-only fallback — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
         }
 
-        var totalUsage = (funcParsed is null ? LlmUsage.None : UsageFrom(funcParsed)).Add(UsageFrom(parsed));
+        var totalUsage = (funcParsed is null ? LlmUsage.None : UsageFrom(funcParsed)).Add(UsageFrom(parsed), string.Equals(funcParsed?.Model, parsed.Model, StringComparison.OrdinalIgnoreCase));
         return BuildCompletion(result, parsed, request.Model) with { Usage = totalUsage };
     }
 

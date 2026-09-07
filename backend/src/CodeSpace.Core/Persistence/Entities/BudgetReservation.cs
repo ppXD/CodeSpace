@@ -1,9 +1,9 @@
 namespace CodeSpace.Core.Persistence.Entities;
 
 /// <summary>
-/// W-hard: one atomic budget reservation — see 0104's header for the state machine and THE admission invariant
-/// (settled + live ≤ hard cap, enforced under a per-run advisory lock). <see cref="ScopeKey"/> is the idempotency
-/// coordinate (an attempt id, a turn key) — a crash-replayed producer lands on its own row.
+/// One logical budget claim with a frozen admission intent and a separately recorded actual cost. An uncertain
+/// claim retains ReservedUsd; this is an estimate unless its producer proves a provider wire upper bound.
+/// ScopeKey identifies retries of the same claim, not permission for an additional physical request.
 /// </summary>
 public class BudgetReservation : IEntity<Guid>, IAuditable
 {
@@ -15,6 +15,8 @@ public class BudgetReservation : IEntity<Guid>, IAuditable
     public string ScopeKey { get; set; } = string.Empty;
     public string State { get; set; } = string.Empty;
     public decimal ReservedUsd { get; set; }
+    /// <summary>The cap of the original reservation intent. Null on legacy rows whose complete intent was not persisted.</summary>
+    public decimal? CapUsd { get; set; }
     public decimal? SettledUsd { get; set; }
     public string PriceVersion { get; set; } = string.Empty;
     public DateTimeOffset? ExpiresAt { get; set; }

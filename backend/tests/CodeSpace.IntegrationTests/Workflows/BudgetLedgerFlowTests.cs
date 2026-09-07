@@ -84,7 +84,7 @@ public sealed class BudgetLedgerFlowTests
     }
 
     [Fact]
-    public async Task The_settlement_sweep_settles_folded_attempts_and_releases_terminal_orphans()
+    public async Task The_settlement_sweep_retains_unknown_folded_costs_and_unconfirmed_terminal_orphans()
     {
         var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
@@ -93,7 +93,7 @@ public sealed class BudgetLedgerFlowTests
         var db = scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
         var ledger = scope.Resolve<IBudgetLedger>();
 
-        // Wave of 2 reserved at turn 1 (admission's key arithmetic), plus a third slice whose attempt never ran.
+        // Wave of 2 reserved at turn 1, plus a third slice whose attempt outcome never arrived.
         await ledger.ReserveAsync(runId, teamId, "agent-attempt", "sup#turn1#0", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
         await ledger.ReserveAsync(runId, teamId, "agent-attempt", "sup#turn1#1", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
         await ledger.ReserveAsync(runId, teamId, "agent-attempt", "sup#turn2#0", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
@@ -108,16 +108,80 @@ public sealed class BudgetLedgerFlowTests
                 new { agentRunId = Guid.NewGuid(), status = "Failed" },
             } }, CodeSpace.Core.Services.Agents.AgentJson.Options));
 
-        // Terminal run → the never-ran slice must release.
+        // A terminal run with no folded result still has no proof that the provider was never billed.
         var run = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.SingleAsync(db.WorkflowRun, r => r.Id == runId);
         run.Status = Messages.Enums.WorkflowRunStatus.Success;
         await db.SaveChangesAsync();
 
         var (settled, released, _) = await scope.Resolve<IBudgetSettlementService>().SweepAsync(batchSize: 100, CancellationToken.None);
 
-        settled.ShouldBe(2, "both folded attempts settled (pessimistically at reserved — unknown model is unpriceable)");
-        released.ShouldBe(1, "the never-ran slice on a terminal run releases its claim");
-        (await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None)).ShouldBe(4m, "2+2 settled, the released slice returned its headroom");
+        settled.ShouldBe(0, "neither folded result contains a confirmed bill");
+        released.ShouldBe(0, "terminal status and a missing outcome do not prove that a provider was never billed");
+        (await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None)).ShouldBe(6m, "all three unresolved claims retain their headroom");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_real_sweep_can_settle_late_usage_after_unknown_or_reconciled_bookkeeping(bool reconcileFirst)
+    {
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var agentRunId = Guid.NewGuid();
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+            var ledger = seed.Resolve<IBudgetLedger>();
+            await ledger.ReserveAsync(runId, teamId, "agent-attempt", "sup#turn0#0", 5m, 5m, "test-v1", null, null, CancellationToken.None);
+            await SeedDecisionAsync(db, runId, teamId, 0, Messages.Agents.SupervisorDecisionKinds.Spawn, "{}", System.Text.Json.JsonSerializer.Serialize(new { agentResults = new[] { new Messages.Agents.SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded" } } }, CodeSpace.Core.Services.Agents.AgentJson.Options));
+            await seed.Resolve<IBudgetSettlementService>().SweepAsync(100, CancellationToken.None);
+            if (reconcileFirst) await ledger.ReconcileDanglingAsync("agent-attempt", 100, CancellationToken.None);
+        }
+
+        using (var receipt = _fixture.BeginScope())
+        {
+            var db = receipt.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+            var reservation = await db.BudgetReservation.AsNoTracking().SingleAsync(r => r.WorkflowRunId == runId);
+            reservation.SettledUsd.ShouldBeNull();
+            reservation.State.ShouldBe(reconcileFirst ? BudgetReservationStates.Reconciled : BudgetReservationStates.Indeterminate, "the fixture must actually have passed through unknown-cost settlement before late usage arrives");
+            var decision = await db.SupervisorDecisionRecord.SingleAsync(r => r.SupervisorRunId == runId);
+            decision.OutcomeJson = System.Text.Json.JsonSerializer.Serialize(new { agentResults = new[] { new Messages.Agents.SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", Model = "claude-haiku-4-5", InputTokens = 1_000_000, OutputTokens = 0 } } }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+            await db.SaveChangesAsync();
+        }
+
+        using (var sweep = _fixture.BeginScope()) await sweep.Resolve<IBudgetSettlementService>().SweepAsync(100, CancellationToken.None);
+        using var verify = _fixture.BeginScope();
+        var settled = await verify.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>().BudgetReservation.AsNoTracking().SingleAsync(r => r.WorkflowRunId == runId);
+        settled.State.ShouldBe(BudgetReservationStates.Settled);
+        settled.SettledUsd.ShouldBe(1m, "late usage must reach the real settlement consumer after either uncertain state");
+    }
+
+    [Fact]
+    public async Task A_bounded_sweep_rotates_past_unresolved_attempts_to_later_known_usage()
+    {
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var activeRun = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var knownRun = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+            var ledger = seed.Resolve<IBudgetLedger>();
+            await ledger.ReserveAsync(activeRun, teamId, "agent-attempt", "sup#turn0#0", 5m, 5m, "test-v1", null, null, CancellationToken.None);
+            await ledger.ReserveAsync(knownRun, teamId, "agent-attempt", "sup#turn0#0", 5m, 5m, "test-v1", null, null, CancellationToken.None);
+            var outcome = System.Text.Json.JsonSerializer.Serialize(new { agentResults = new[] { new Messages.Agents.SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Model = "claude-haiku-4-5", InputTokens = 1_000_000, OutputTokens = 0 } } }, CodeSpace.Core.Services.Agents.AgentJson.Options);
+            await SeedDecisionAsync(db, knownRun, teamId, 0, Messages.Agents.SupervisorDecisionKinds.Spawn, "{}", outcome);
+            await db.BudgetReservation.Where(r => r.WorkflowRunId == activeRun).ExecuteUpdateAsync(setters => setters.SetProperty(r => r.LastModifiedDate, DateTimeOffset.UnixEpoch));
+            await db.BudgetReservation.Where(r => r.WorkflowRunId == knownRun).ExecuteUpdateAsync(setters => setters.SetProperty(r => r.LastModifiedDate, DateTimeOffset.UnixEpoch.AddSeconds(1)));
+        }
+
+        using (var first = _fixture.BeginScope()) await first.Resolve<IBudgetSettlementService>().SweepAsync(1, CancellationToken.None);
+        using (var second = _fixture.BeginScope()) await second.Resolve<IBudgetSettlementService>().SweepAsync(1, CancellationToken.None);
+        using var verify = _fixture.BeginScope();
+        var rows = await verify.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>().BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == activeRun || r.WorkflowRunId == knownRun).ToListAsync();
+        rows.Single(r => r.WorkflowRunId == activeRun).State.ShouldBe(BudgetReservationStates.Reserved, "inspecting an unfinished attempt changes neither authority nor accounting state");
+        rows.Single(r => r.WorkflowRunId == knownRun).SettledUsd.ShouldBe(1m, "an unresolved prefix must not consume every bounded sweep forever");
     }
 
     private static async Task SeedDecisionAsync(CodeSpace.Core.Persistence.Db.CodeSpaceDbContext db, Guid runId, Guid teamId, int sequence, string kind, string payloadJson, string outcomeJson)
@@ -176,7 +240,7 @@ public sealed class BudgetLedgerFlowTests
         var rows = await db.BudgetReservation.AsNoTracking().Where(r => r.TeamId == teamId).ToListAsync();
         var orphan = rows.Single(r => r.ScopeKey == "orphan-1");
         orphan.State.ShouldBe(BudgetReservationStates.Reconciled, "the audit trail says decided-pessimistically, distinct from a fact-based settle");
-        orphan.SettledUsd.ShouldBe(0.5m, "never lower than the claim it held");
+        orphan.SettledUsd.ShouldBeNull("reconciliation closes bookkeeping without inventing actual spend");
         rows.Single(r => r.ScopeKey == "live-1").State.ShouldBe(BudgetReservationStates.Reserved);
         rows.Single(r => r.ScopeKey == "s1#a1").State.ShouldBe(BudgetReservationStates.Reserved, "the kind prefix scopes the pass — agent-attempt reconciliation stays fact-based");
 
