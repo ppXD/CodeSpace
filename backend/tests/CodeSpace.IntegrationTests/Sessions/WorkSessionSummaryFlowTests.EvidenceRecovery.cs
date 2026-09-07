@@ -171,6 +171,38 @@ public partial class WorkSessionSummaryFlowTests
         digest.ShouldNotContain(secondAssessmentId.ToString(), customMessage: "the new assessment's own id is not rendered — only the bound one, with a flag");
     }
 
+    [Fact]
+    [Trait("P17", "Regression")]
+    public async Task Carried_forward_block_recovers_a_turn_folded_with_no_assessment_once_one_is_recorded()
+    {
+        // Turn 1 folds out of the window BEFORE its run has ever been assessed — its binding is written with
+        // AssessmentId = null. The FIRST assessment for that run then lands AFTER the fold, before the summarizer
+        // runs again (a resumed session is not the only way a digest gets rebuilt). A null-bound turn must not be a
+        // permanent blind spot for the launch(es) between that assessment landing and the next successful fold
+        // (SessionSummarizer's own dirty-check self-heals the binding, but only starting the NEXT fold).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-test");
+        var sessionId = await SeedSessionAsync(teamId);
+        for (var turn = 1; turn <= 8; turn++) await SeedTurnAsync(teamId, sessionId, turn, $"goal-{turn}", "result");
+
+        // Fold turn 1 out of the window while its run still has NO assessment — its binding's AssessmentId is null.
+        await SeedTurnAsync(teamId, sessionId, 9, "goal-9", "result-9");
+        await RunSummarizerAsync(teamId, sessionId, new CapturingLlmClient { Return = "folded" });
+
+        var beforeAssessment = await BuildDigestAsync(sessionId, teamId);
+        beforeAssessment.ShouldNotContain("UNRESOLVED CONTRACT", customMessage: "sanity: the run had no assessment when it was folded");
+
+        var (runId, assessmentId) = await AddUnresolvedAssessmentAsync(teamId, sessionId);
+
+        var digest = await BuildDigestAsync(sessionId, teamId);
+
+        digest.ShouldContain("UNRESOLVED CONTRACT", customMessage: "a turn bound with no assessment must not stay a permanent blind spot once one is recorded for its run");
+        digest.ShouldContain("verification=Failed");
+        digest.ShouldContain(runId.ToString(), customMessage: "a recovered fact must still identify its effective source run");
+        digest.ShouldContain(assessmentId.ToString(), customMessage: "the newly recorded assessment is addressable");
+        digest.ShouldContain("[an assessment was recorded for this run AFTER the last fold]", customMessage: "recovered from a null binding (not the fold's own bound id) must be flagged as such, not presented as an unqualified fold-time verdict");
+    }
+
     private async Task<(Guid RunId, Guid AssessmentId)> AddUnresolvedAssessmentAsync(Guid teamId, Guid sessionId)
     {
         using var scope = _fixture.BeginScope();
