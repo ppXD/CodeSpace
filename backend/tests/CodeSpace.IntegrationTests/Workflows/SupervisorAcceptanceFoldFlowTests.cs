@@ -59,6 +59,12 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         grader.LastCall.Value.Branch.ShouldBe("codespace/resolve/x", "the resolver's produced branch is graded");
         grader.LastCall.Value.Command.ShouldBe(Command, "the operator's acceptance command is the graded argv");
 
+        // This gate IS the operator's floor, so its own program file is the run's oracle inventory. Without it the
+        // grade protects nothing and then reports the operator's own check.sh as "the SUBJECT under test" rather
+        // than saying it went unanchored — the floor-less overload greens either way, so this is the only red.
+        grader.LastAnchor!.Value.FloorPrograms.ShouldBe(new[] { "check.sh" });
+        grader.LastAnchor.Value.BaseSha.ShouldBeNull("this lane resolves no base — the grade says UNPROTECTED, it does not invent an anchor");
+
         var resolve = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Resolve);
         SupervisorOutcome.ReadAcceptanceGradePassed(resolve.OutcomeJson).ShouldBe(true, "the objective verdict is folded into the in-memory outcome");
         SupervisorOutcome.ReadResolutionVerdict(resolve.OutcomeJson).ShouldBe(SupervisorResolutionVerdict.Verified);
@@ -1554,6 +1560,15 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
         public int PatchCallCount { get; private set; }
+
+        /// <summary>The C3 anchor the branch grade was handed. Recorded because it is otherwise unobservable: the floor-less overload compiles and greens while silently reducing the grade to authored-only protection — which on this lane is none — so nothing but this would red if the inventory were dropped.</summary>
+        public OracleAnchor? LastAnchor { get; private set; }
+
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken)
+        {
+            LastAnchor = anchor;
+            return GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {

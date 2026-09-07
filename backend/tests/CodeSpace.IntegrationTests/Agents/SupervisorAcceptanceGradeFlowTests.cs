@@ -46,7 +46,10 @@ public sealed class SupervisorAcceptanceGradeFlowTests
 
         var pass = await GradeAsync(repoId, teamId, "acc/pass");
         pass.Passed.ShouldBeTrue("the cloned branch's check exits 0 → objectively accepted");
-        pass.Detail.ShouldBe("tests-passed");
+        // This helper grades through the deliberately UNANCHORED overload — no base, no oracle inventory — so the
+        // run owns no judge by that name and check.sh ran exactly as the branch left it. The clause says so; the
+        // oracle's own verdict is still returned untouched in front of it.
+        pass.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
 
         var fail = await GradeAsync(repoId, teamId, "acc/fail");
         fail.Passed.ShouldBeFalse("the cloned branch's check exits 1 → not accepted, by the branch's own tests not any self-report");
@@ -296,7 +299,7 @@ public sealed class SupervisorAcceptanceGradeFlowTests
         var grade = await GradeAsync(repoId, teamId, "acc/needs-setup", setupCommand: new[] { "sh", "-c", "echo ok > setup-marker.txt" });
 
         grade.Passed.ShouldBeTrue("the setup step created the marker file the check requires, before the check ran");
-        grade.Detail.ShouldBe("tests-passed");
+        grade.Detail.ShouldBe("tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "check.sh");
     }
 
     [Fact]

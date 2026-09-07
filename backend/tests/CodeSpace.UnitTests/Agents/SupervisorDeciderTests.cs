@@ -264,6 +264,39 @@ public class SupervisorDeciderTests
         prompt.ShouldContain(expectedHeadline, Case.Sensitive, "the per-unit verdict reaches the decide prompt");
         prompt.ShouldContain(expectedGuidance, Case.Insensitive, "the verdict carries the act-on-it guidance");
         if (!passed) prompt.ShouldContain("tests-failed-exit-1", Case.Insensitive, "a failed verdict surfaces its detail");
+        prompt.ShouldNotContain("the SUBJECT under test", Case.Sensitive, "an ordinary verdict says nothing about subjects — the clause is for the pass that had no protected judge behind it");
+    }
+
+    [Fact]
+    public void A_pass_graded_on_the_candidates_own_file_under_test_says_so_in_the_prompt()
+    {
+        // The pass path is where this could hide: the fold drops the evidence tail on green (nothing to repair)
+        // and the verdict line returns before rendering any evidence, so a grade that ran the candidate's OWN copy
+        // of the file the check executes reached the brain reading exactly like a protected pass — and the brain
+        // was about to MERGE on it. The clause the grade's detail carries is the only carrier left.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/foo",
+                    AcceptancePassed = true, AcceptanceDetail = "tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "solution.sh",
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
+        prompt.ShouldContain("the check EXECUTES solution.sh — the SUBJECT under test", Case.Sensitive, "the brain weighing a merge is told which bytes graded themselves");
+        prompt.ShouldContain("not a protected judge", Case.Sensitive);
     }
 
     [Fact]

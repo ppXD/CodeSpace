@@ -21,9 +21,17 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// runs it: when the check EXECUTES the deliverable (<c>sh solution.sh 7 5</c>, <c>python main.py</c>,
 /// <c>node app.js</c>) that file is the SUBJECT under test, and restoring it from base voids exactly the work the
 /// goal asked for. So the derived set is intersected with the files the run's OWN oracle inventory names — the
-/// OPERATOR FLOOR's program files (<c>SupervisorGoalConfig.AcceptanceChecks</c>) — while an authored
-/// <c>ProtectedPaths</c> still wins outright. A command's other program files are reported (the grade says the
-/// check ran the candidate's own copy) and graded, never restored.</para>
+/// OPERATOR FLOOR's program files (<c>SupervisorGoalConfig.AcceptanceChecks</c>). A command's other program files
+/// are reported (the grade says the check ran the candidate's own copy) and graded, never restored.</para>
+///
+/// <para><b>The AUTHORED door obeys the same fence.</b> An authored <c>ProtectedPaths</c> still outranks the
+/// derivation for every file the check does not EXECUTE — fixtures, data, a judge script this command never runs.
+/// But the brain that authors <c>sh solution.sh 7 5</c> against a goal that says "edit solution.sh" is exactly the
+/// brain that would then list <c>solution.sh</c> in <c>protectedPaths</c>, and honoring that re-opens the live
+/// regression verbatim: the stub goes back over a correct agent's work and no retry can pass. So an authored path
+/// that is ALSO a program-position file of the SAME check and is NOT floor-owned degrades to the subject note
+/// instead of a void. <c>SupervisorDecisionSchema</c>'s own field description carries the matching carve-out, so
+/// the model is told the rule rather than merely corrected by it.</para>
 ///
 /// <para>Pure by construction: repository existence is answered by a caller-supplied predicate, so the extraction
 /// rule is unit-testable without git and the production caller answers it off the clone it already has.</para>
@@ -49,16 +57,40 @@ public static class AcceptanceOracleProtection
         RunOwned(ProgramCandidates(argv), oracleFloorPrograms).Where(repoFileExists).ToList();
 
     /// <summary>
-    /// Whether <paramref name="spec"/> can be protected at all — AUTHORED <c>ProtectedPaths</c>, or a RUN-OWNED
-    /// program candidate from its command — decided from the contract alone, before any clone or base-sha lookup.
+    /// Whether <paramref name="spec"/> can be protected at all — an AUTHORED <c>ProtectedPaths</c> that is not just
+    /// this check's own subject, or a RUN-OWNED program candidate from its command — decided from the contract
+    /// alone, before any clone or base-sha lookup.
     /// The ONE derivation both the grader (to widen its clone before the restore) and the per-unit base-sha
-    /// resolver (<c>SupervisorTurnService.Rehydrate.cs</c>'s <c>OracleBaseShaAsync</c>) must share: before that
+    /// resolver (<c>SupervisorTurnService.Rehydrate.cs</c>'s <c>OracleAnchorAsync</c>) must share: before that
     /// resolver consulted this same function it anchored a restore ONLY on an authored spec, so a per-unit oracle
     /// whose only protection was DERIVABLE (the shape every real operator floor actually has — nothing in Core or
     /// the UI ever authors <c>ProtectedPaths</c>) never got a base sha to restore from at all.
     /// </summary>
     public static bool MayProtect(SupervisorAcceptanceSpec spec, IReadOnlyList<string>? oracleFloorPrograms) =>
-        spec.ProtectedPaths is { Count: > 0 } || CommandOracleCandidates(spec, oracleFloorPrograms).Count > 0;
+        AuthoredOracleCandidates(spec, oracleFloorPrograms).Count > 0 || CommandOracleCandidates(spec, oracleFloorPrograms).Count > 0;
+
+    /// <summary>
+    /// The AUTHORED <c>ProtectedPaths</c> this grade may actually restore: every path the contract named EXCEPT one
+    /// this same check executes in a program position without the run's floor owning it — the SUBJECT under test,
+    /// which the model is as able to mis-name as the derivation was to mis-derive. Empty (the caller falls through
+    /// to the derived set) when the contract authored nothing, or authored only its own subject.
+    /// </summary>
+    public static IReadOnlyList<string> AuthoredOracleCandidates(SupervisorAcceptanceSpec spec, IReadOnlyList<string>? oracleFloorPrograms)
+    {
+        if (spec.ProtectedPaths is not { Count: > 0 } authored) return Array.Empty<string>();
+
+        var subject = SubjectPrograms(spec, oracleFloorPrograms);
+
+        return subject.Count == 0 ? authored : authored.Where(p => !subject.Contains(p, StringComparer.Ordinal)).ToList();
+    }
+
+    /// <summary>The program files the command EXECUTES that the run does NOT own — the SUBJECT under test, whatever the contract calls them.</summary>
+    private static IReadOnlyList<string> SubjectPrograms(SupervisorAcceptanceSpec spec, IReadOnlyList<string>? oracleFloorPrograms)
+    {
+        var owned = CommandOracleCandidates(spec, oracleFloorPrograms);
+
+        return CommandProgramCandidates(spec).Where(p => !owned.Contains(p, StringComparer.Ordinal)).ToList();
+    }
 
     /// <summary>
     /// The RUN-OWNED program candidates of a TestsPass-shaped acceptance command: its program-position files that
@@ -79,6 +111,22 @@ public static class AcceptanceOracleProtection
     /// </summary>
     public static IReadOnlyList<string> CommandProgramCandidates(SupervisorAcceptanceSpec spec) =>
         spec.Kind is null or BenchmarkGradingKind.TestsPass ? ProgramCandidates(spec.Command) : Array.Empty<string>();
+
+    /// <summary>
+    /// The clause a PASSING grade's <c>Detail</c> carries when the check ran a program file this grade did not
+    /// protect. It rides the DETAIL because that is the one string a pass survives with: both folds drop the
+    /// evidence tail on a pass (nothing to repair) and the decider's pass branch renders no evidence at all, so a
+    /// self-graded pass reached the brain with no mention that no protected judge stood behind it.
+    /// </summary>
+    public const string SubjectDetailMarker = " \u2014 graded on the candidate's own ";
+
+    /// <summary>The file list <paramref name="acceptanceDetail"/>'s <see cref="SubjectDetailMarker"/> carries, or null when this grade protected everything it ran. The ONE reader for the decider prompt and the recitation, so the two prompt sections cannot disagree about a row.</summary>
+    public static string? SubjectFilesIn(string? acceptanceDetail)
+    {
+        var at = acceptanceDetail?.IndexOf(SubjectDetailMarker, StringComparison.Ordinal) ?? -1;
+
+        return at < 0 ? null : acceptanceDetail![(at + SubjectDetailMarker.Length)..];
+    }
 
     /// <summary>
     /// The program-position tokens of <paramref name="argv"/>, normalized to repo-relative pathspecs and deduped —

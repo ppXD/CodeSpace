@@ -55,17 +55,22 @@ public interface ISupervisorAcceptanceGrader
         Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: captured-deliverable grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
 
     /// <summary>
-    /// P3a-3 (B+V0+): grade with ORACLE RESTORE — when the attempt's base sha is known and the spec names oracle
-    /// bytes the run OWNS, the grader restores those paths from the base before running, voiding any candidate
-    /// tamper of its own judge (recorded in the evidence). Owned means an AUTHORED <c>ProtectedPaths</c>, or a
-    /// program file of the acceptance argv that <paramref name="oracleFloorPrograms"/> — the run's own oracle
-    /// inventory, the OPERATOR FLOOR's program files through
-    /// <c>AcceptanceOracleProtection.ProgramCandidates</c> — also names. Every other program file the command
+    /// P3a-3 (B+V0+): grade with ORACLE RESTORE — when <paramref name="anchor"/> carries a base sha and the spec
+    /// names oracle bytes the run OWNS, the grader restores those paths from that base before running, voiding any
+    /// candidate tamper of its own judge (recorded in the evidence). Owned means an AUTHORED <c>ProtectedPaths</c>
+    /// the check does not itself execute, or a program file of the acceptance argv that the anchor's FLOOR PROGRAMS
+    /// — the run's own oracle inventory, the OPERATOR FLOOR's program files through
+    /// <c>AcceptanceOracleProtection.ProgramCandidates</c> — also name. Every other program file the command
     /// executes is the SUBJECT under test (<c>sh solution.sh 7 5</c> runs the deliverable), so it is graded on the
     /// candidate's own bytes and merely reported: restoring it voids the work the goal asked for and no retry can
-    /// pass. Default forwards to the plain overload (fakes and non-git graders are unaffected).
+    /// pass.
+    ///
+    /// <para>The base and the inventory arrive as ONE <see cref="OracleAnchor"/> because either alone silently
+    /// disables the protection the other half is for, and both have been forgotten in production — the pair cannot
+    /// come apart when it is one value. Default forwards to the plain, deliberately UNANCHORED overload (fakes and
+    /// non-git graders are unaffected).</para>
     /// </summary>
-    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, string? oracleBaseSha, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
+    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken) =>
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, cancellationToken);
 
     /// <summary>
@@ -81,7 +86,7 @@ public interface ISupervisorAcceptanceGrader
     /// </summary>
     Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 
-    /// <summary>The patch lane's ORACLE-RESTORE twin: <paramref name="oracleFloorPrograms"/> is the run's own oracle inventory, exactly as on <see cref="GradeAsync(Guid, Guid, string, SupervisorAcceptanceSpec, int, string?, IReadOnlyList{string}?, CancellationToken)"/> — a patch-only candidate can rewrite the judge it is graded with just as a branch's can. Default forwards to the floor-less overload (fakes and non-git graders are unaffected).</summary>
+    /// <summary>The patch lane's ORACLE-RESTORE twin: <paramref name="oracleFloorPrograms"/> is the run's own oracle inventory, exactly as the anchor's floor half is on <see cref="GradeAsync(Guid, Guid, string, SupervisorAcceptanceSpec, int, OracleAnchor, CancellationToken)"/> — a patch-only candidate can rewrite the judge it is graded with just as a branch's can. It takes the inventory ALONE rather than a whole anchor because its restore base IS its own required <paramref name="baseSha"/> argument: there is no half to forget here, and a second base could only disagree with the one the clone is built from. Default forwards to the floor-less overload (fakes and non-git graders are unaffected).</summary>
     Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
         GradePatchAsync(repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, cancellationToken);
 

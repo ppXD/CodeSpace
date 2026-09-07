@@ -39,6 +39,21 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void An_accepted_row_graded_on_the_candidates_own_file_under_test_says_so()
+    {
+        // The compact and the decider's verdict line must never give the weak brain contradictory framings of one
+        // row, so both render the SAME clause off the SAME detail. "done (accepted)" alone reads as a protected
+        // pass, which is precisely what a check running the candidate's own copy of the file under test is not.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: true, acceptanceDetail: "tests-passed" + AcceptanceOracleProtection.SubjectDetailMarker + "solution.sh")),
+        };
+
+        SupervisorRecitation.Render(priors)!.ShouldContain("- [s1] First: done (accepted) — graded on the candidate's OWN solution.sh, not a protected judge");
+    }
+
+    [Fact]
     public void A_retry_supersedes_the_original_spawn()
     {
         var priors = new[]

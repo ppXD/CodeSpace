@@ -120,6 +120,28 @@ public class SupervisorDecisionSchemaTests
         retry.GetProperty("properties").TryGetProperty("rationale", out _).ShouldBeFalse("retry's rationale moved to the decision root — it must not remain nested");
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("amendAcceptance")]
+    public void The_protected_paths_field_warns_off_the_file_the_check_is_meant_to_verify(string verb)
+    {
+        // The server-side fence (AcceptanceOracleProtection) degrades an authored path the check itself EXECUTES to
+        // an evidence note, but the field description is what the model actually reads. Before this it said "name
+        // them whenever the acceptance command executes repo-resident files the worker could rewrite" — which is a
+        // direct instruction to name `solution.sh` for a check reading `sh solution.sh 7 5`, the exact live
+        // regression (run 34135877074) where the restore put a stub back over a correct agent's work and no retry
+        // could pass. Telling the model the rule is not optional just because the server also enforces it.
+        var acceptance = verb == "plan"
+            ? Schema.GetProperty("properties").GetProperty("plan").GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance")
+            : Schema.GetProperty("properties").GetProperty("amendAcceptance").GetProperty("properties").GetProperty("acceptance");
+
+        var description = acceptance.GetProperty("properties").GetProperty("protectedPaths").GetProperty("description").GetString()!;
+
+        description.ShouldContain("EXECUTES", Case.Sensitive, "the carve-out must name the shape that caused the regression: the file the command runs as its subject");
+        description.ShouldContain("candidate's own copy", Case.Insensitive, "the model must be told what the server actually does with the file under test, not merely forbidden");
+        description.ShouldNotContain("whenever the acceptance command executes", Case.Insensitive, "the old invitation is the regression's own wording");
+    }
+
     [Fact]
     public void The_schema_carries_no_graph_topology_reference_anywhere()
     {

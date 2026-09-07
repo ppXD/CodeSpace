@@ -675,8 +675,13 @@ public sealed partial class SupervisorTurnService
             var spec = new SupervisorAcceptanceSpec { Command = command };
             var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(command);
 
+            // The branch arm carries the SAME inventory the patch arm below does. The floor-less overload compiles
+            // and greens, but it silently reduces the grade to authored-only protection — which on this lane means
+            // none at all — and then reports the operator's own check.sh as "the SUBJECT under test" instead of
+            // saying it went unanchored. There is no base sha to pair it with here (this lane resolves none), and
+            // the anchor is what keeps that from reading as an oversight.
             if (!string.IsNullOrEmpty(resolver?.ProducedBranch))
-                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, resolver.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, resolver.ProducedBranch, spec, SupervisorLane.AcceptanceGradeTimeoutSeconds, new OracleAnchor(null, oracleFloorPrograms), cancellationToken).ConfigureAwait(false);
 
             var manifest = resolver is not null ? await ResolveUnitManifestAsync(resolver.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false) : null;
 
@@ -892,9 +897,9 @@ public sealed partial class SupervisorTurnService
 
             if (!string.IsNullOrEmpty(result.ProducedBranch))
             {
-                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, repositoryId.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
+                var anchor = await OracleAnchorAsync(result.AgentRunId, repositoryId.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, oracleBaseSha, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, spec, timeoutSeconds, anchor, cancellationToken).ConfigureAwait(false);
             }
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
@@ -1042,9 +1047,9 @@ public sealed partial class SupervisorTurnService
             BenchmarkGrade grade;
             try
             {
-                var oracleBaseSha = await OracleBaseShaAsync(result.AgentRunId, target.RepositoryId!.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
+                var anchor = await OracleAnchorAsync(result.AgentRunId, target.RepositoryId!.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseSha, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(target.RepositoryId!.Value, teamId, target.ProducedBranch!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, anchor, cancellationToken).ConfigureAwait(false);
             }
             catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1125,12 +1130,16 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>The unit's manifest row for THIS repository (I2 — the single source of truth; never re-derived from the decision's own outcome snapshot), or null when none exists (the unit made no changes here, or hasn't been recorded yet). Mirrors <c>RealSupervisorActionExecutor.DependencyStaging.cs</c>'s per-repo manifest lookup.</summary>
     /// <summary>
-    /// P3a-3 (B+V0+): the base sha the grader restores the spec's protected paths from — the unit's recorded
-    /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec can be
-    /// PROTECTED AT ALL (<see cref="AcceptanceOracleProtection.MayProtect"/> — authored, or derivable from the
-    /// command AND owned by the run's own floor, the SAME test the grader itself uses to decide whether to widen
-    /// its clone) — no extra read, and no full-history clone, on a spec that owns no oracle; null = grader grades
-    /// exactly as before. Before this shared the grader's own derivation, an authored-only guard here meant a
+    /// P3a-3 (B+V0+): the ORACLE ANCHOR this unit's grade runs under — the run's own oracle inventory, plus the
+    /// base sha the grader restores the spec's protected paths from (the unit's recorded manifest BaseSha, the S1
+    /// immutable base its work was cut from). The two leave here as ONE value because a grade handed the base
+    /// without the inventory silently protects nothing but an authored path.
+    ///
+    /// <para>The BASE half is resolved only when the spec can be PROTECTED AT ALL
+    /// (<see cref="AcceptanceOracleProtection.MayProtect"/> — authored, or derivable from the command AND owned by
+    /// the run's own floor, the SAME test the grader itself uses to decide whether to widen its clone), so a spec
+    /// that owns no oracle costs no extra read and no full-history clone; a base-less anchor grades exactly as
+    /// before. Before this shared the grader's own derivation, an authored-only guard here meant a
     /// per-unit oracle whose only protection was DERIVED (nothing in Core or the UI ever authors
     /// <c>ProtectedPaths</c>, so this is the shape every real operator floor has) never got a base sha at all —
     /// the grader could detect that it went unprotected but never had the bytes to restore.
@@ -1146,13 +1155,13 @@ public sealed partial class SupervisorTurnService
     /// (<c>BenchmarkGrade.OracleNote</c> — "graded UNPROTECTED"): before C3 that case was silent, and silence
     /// from an unanchored oracle is indistinguishable from a protected one that was left alone.</para>
     /// </summary>
-    private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, IReadOnlyList<string> oracleFloorPrograms, Guid teamId, CancellationToken cancellationToken)
+    private async Task<OracleAnchor> OracleAnchorAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, IReadOnlyList<string> oracleFloorPrograms, Guid teamId, CancellationToken cancellationToken)
     {
-        if (!AcceptanceOracleProtection.MayProtect(spec, oracleFloorPrograms)) return null;
+        if (!AcceptanceOracleProtection.MayProtect(spec, oracleFloorPrograms)) return new OracleAnchor(null, oracleFloorPrograms);
 
         var manifest = await ResolveUnitManifestAsync(agentRunId, repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return manifest?.BaseSha;
+        return new OracleAnchor(manifest?.BaseSha, oracleFloorPrograms);
     }
 
     /// <summary>
@@ -1566,7 +1575,7 @@ public sealed partial class SupervisorTurnService
                     // by rewriting the check script the operator's floor runs. The floor's inventory gates BOTH
                     // gates: the model's own tightening command can name a file the goal required editing, and
                     // restoring that would void the very work the stop is shipping.
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, new OracleAnchor(oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms), cancellationToken).ConfigureAwait(false);
                 }
                 catch (Workflows.Llm.LlmBudgetExceededException refused)
         {

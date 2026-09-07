@@ -2195,7 +2195,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // with. The patch lane always had this anchor; the BRANCH lane discarded it and graded the candidate's
             // bytes as the judge.
             grade = hasBranch
-                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, result.BaseSha, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false)
+                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, new OracleAnchor(result.BaseSha, OracleFloorPrograms(fullSpec)), cancellationToken).ConfigureAwait(false)
                 : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
@@ -2289,7 +2289,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             try
             {
                 // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
-                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, target.BaseSha, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false);
+                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, new OracleAnchor(target.BaseSha, OracleFloorPrograms(fullSpec)), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
             {
