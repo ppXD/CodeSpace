@@ -17,7 +17,7 @@ public sealed record JournalReviewVerdict
     /// <summary>The evidence-attached issues, each pre-rendered as "text (evidence: …)" — empty on an approval.</summary>
     public IReadOnlyList<string> Issues { get; init; } = Array.Empty<string>();
 
-    /// <summary>The reviewer's own agent run — the frontend deep-links its terminal ("view reviewer run →"). NULL for a MODEL critic's verdict (an in-process call, no run to open) — the card then reads "model critic — independently prompted".</summary>
+    /// <summary>The reviewer's own agent run — the frontend deep-links its terminal ("view reviewer run →"). NULL for a MODEL critic's verdict (an in-process call, no run to open) — the card then names the reported model, qualified by <see cref="SameModelAsProducer"/>, instead of deep-linking.</summary>
     public Guid? ReviewerRunId { get; init; }
 
     /// <summary>The harness the reviewer ran on (e.g. <c>claude-code</c> when the producer ran <c>codex-cli</c>) — the independence line the card shows. Null when unknown / a model critic.</summary>

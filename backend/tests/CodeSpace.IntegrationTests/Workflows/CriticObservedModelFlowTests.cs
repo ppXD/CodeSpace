@@ -92,6 +92,55 @@ public sealed class CriticObservedModelFlowTests(PostgresFixture fixture)
         }
     }
 
+    /// <summary>
+    /// The SHARED integration double (registered once, reused by dozens of pre-existing flows through the critic)
+    /// now echoes a known wire identity by default instead of leaving every one of those flows in the
+    /// unknown-identity branch by omission. Proven through the REAL <see cref="LlmStructuredCritic"/> resolved from
+    /// DI (not an ad-hoc HTTP mock, unlike the theory above) and the REAL <see cref="DecisionReviewFactsSource"/> —
+    /// the known identity a real run's Room card reads.
+    /// </summary>
+    [Fact]
+    public async Task The_shared_critic_fake_reports_a_known_identity_that_survives_the_journal_round_trip()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, inProcessPool: false);
+        using var scope = fixture.BeginScopeAs(userId, teamId);
+        var (_, criticRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+
+        var critic = scope.Resolve<IStructuredCritic>();
+        var verdict = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = "completed output", Goal = "review" }, teamId, criticRowId, CancellationToken.None);
+
+        verdict.Failed.ShouldBeFalse();
+        verdict.ReviewerModel.ShouldBe("critic-model", "the shared fake now echoes a known wire identity, not just the compatibility Model field");
+
+        var runId = Guid.NewGuid();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var outcome = SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage("{}", new SupervisorModelUsage { Model = "producer-model" }),
+            [new SupervisorDecisionReview { Approved = verdict.Approved, Rationale = verdict.Rationale, ReviewerModelId = verdict.ReviewerModel, Scope = "decision" }]);
+        var decisionId = Guid.NewGuid();
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord { Id = decisionId, TeamId = teamId, SupervisorRunId = runId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"shared-critic-fake:{decisionId:N}", InputHash = new string('0', 64), Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome });
+        await db.SaveChangesAsync();
+
+        using var read = fixture.BeginScopeAs(userId, teamId);
+        var review = (await read.Resolve<DecisionReviewFactsSource>().GatherAsync(runId, teamId, CancellationToken.None))[DecisionReviewTimelineMap.EventId(decisionId, 0)].Review.ShouldNotBeNull();
+        review.ReviewerModel.ShouldBe("critic-model", "the known identity the shared fake now reports reaches the journal facts a real run's Room card reads");
+        review.SameModelAsProducer.ShouldBe(false, "a known, differently-named reviewer is known-and-different, not unknown");
+    }
+
+    /// <summary>The shared fake's ONE deliberate unknown-identity flow (<see cref="DeterministicCriticLlmClient.UnknownIdentityMarker"/>) — proves the default-known-identity change above did not erase the unknown branch from the fake's own repertoire.</summary>
+    [Fact]
+    public async Task The_shared_critic_fakes_unknown_identity_marker_still_reports_no_observed_model()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, inProcessPool: false);
+        using var scope = fixture.BeginScopeAs(userId, teamId);
+        var (_, criticRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+
+        var critic = scope.Resolve<IStructuredCritic>();
+        var verdict = await critic.ReviewAsync(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = "agent answer", Artifact = DeterministicCriticLlmClient.UnknownIdentityMarker, Goal = "review" }, teamId, criticRowId, CancellationToken.None);
+
+        verdict.Failed.ShouldBeFalse("a missing wire identity does not fail the review — only the reviewer name goes unknown");
+        verdict.ReviewerModel.ShouldBeNull();
+    }
+
     private static string Response(bool anthropic, string? observed)
     {
         var verdict = new { approved = true, score = 9, issues = Array.Empty<object>(), rationale = "ready" };

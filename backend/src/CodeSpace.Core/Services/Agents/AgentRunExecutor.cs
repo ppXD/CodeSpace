@@ -1782,7 +1782,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return $"The objective acceptance check failed: {detail}";
 
         if (task.OutputReviewMode == ReviewMode.Improve && result is { Status: AgentRunStatus.NeedsReview, ExitReason: "output-flagged", ReviewFeedback: { Length: > 0 } feedback })
-            return $"An independent reviewer flagged the change: {feedback}";
+            return $"The output review flagged the change: {feedback}";
 
         return null;
     }

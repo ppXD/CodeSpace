@@ -63,8 +63,8 @@ public sealed class PhysicalLlmAccountingHandler(IOptions<PhysicalLlmObservation
                 {
                     using var document = await JsonDocument.ParseAsync(stream, cancellationToken: observation.Token).ConfigureAwait(false);
                     var envelope = dispatch.ReadEnvelope(document.RootElement);
-                    var model = candidate.Redact(envelope.Model);
-                    receipt = receipt with { ObservedModel = model == envelope.Model ? model : null, Usage = envelope.Usage with { FinishReason = candidate.Redact(envelope.Usage.FinishReason) } };
+                    var model = ObservedLlmModel.FromWire(envelope.Model, candidate.CredentialRedactor, scope.CaptureRedactor);
+                    receipt = receipt with { ObservedModel = model, Usage = envelope.Usage with { FinishReason = candidate.Redact(envelope.Usage.FinishReason) } };
                 }
                 finally { if (stream.CanSeek) stream.Position = 0; }
             }

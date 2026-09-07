@@ -177,6 +177,29 @@ public sealed partial class PhysicalStructuredPostAccountingFlowTests(PostgresFi
         (await read.Resolve<CodeSpaceDbContext>().BudgetReservation.SingleAsync(r => r.WorkflowRunId == scenario.RunId)).SettledUsd.ShouldBeNull();
     }
 
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
+    public async Task A_format_character_forged_wire_model_cannot_be_persisted_as_the_effective_model(string provider)
+    {
+        var scenario = await SeedAsync();
+        var response = Success(provider);
+        // A right-to-left override embedded in the wire "model" field — the same forged value CriticObservedModelTests
+        // pins for the critic path. No credential/capture secret matches it, so only the shared control/format-char
+        // rejection (not redaction) can catch it here.
+        response = response with { Body = response.Body.Replace("\"fixture-model\"", "\"fixture\u202Eforged\"") };
+        using var handler = new ProtocolHandler(provider, new[] { response }, () => ReservationIdsAsync(scenario));
+        using var services = HttpServices(handler);
+        using var scope = fixture.BeginScope();
+        StructuredLLMCompletion result;
+        using (Push(scope, scenario)) result = await Decorated(provider, services.GetRequiredService<IHttpClientFactory>()).CompleteStructuredAsync(Request(provider, "single"), CancellationToken.None);
+        result.Json.GetProperty("approved").GetBoolean().ShouldBeTrue();
+        using var read = fixture.BeginScope();
+        var attempt = await read.Resolve<CodeSpaceDbContext>().WorkflowRunModelCallAttempt.AsNoTracking().SingleAsync(a => a.WorkflowRunId == scenario.RunId);
+        attempt.EffectiveModel.ShouldBeNull("a format-character-forged wire model must degrade to unknown, never persist verbatim into the accounting trail");
+        (await read.Resolve<CodeSpaceDbContext>().BudgetReservation.SingleAsync(r => r.WorkflowRunId == scenario.RunId)).SettledUsd.ShouldBeNull();
+    }
+
     private async Task<object> CensusAsync(Scenario scenario, ProtocolHandler handler, StructuredLLMCompletion result)
     {
         using var scope = fixture.BeginScope();
