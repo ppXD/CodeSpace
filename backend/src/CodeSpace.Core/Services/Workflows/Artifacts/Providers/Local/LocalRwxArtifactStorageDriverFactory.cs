@@ -82,12 +82,16 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
             {
                 if (request.Condition == ArtifactStorageWriteCondition.CreateOnly)
                 {
-                    var placementError = await PlaceCreateOnlyAsync(request.ObjectKey, temporaryPath, path, cancellationToken).ConfigureAwait(false);
+                    var placementError = LocalRwxAtomicFilePublication.CreateOnly(temporaryPath, path);
                     if (placementError != null)
                     {
                         TryDelete(temporaryPath);
                         return ArtifactStoragePutResult.Failed(placementError);
                     }
+
+                    // Publication has committed. A crash or failed cleanup may leave an upload alias, but cannot
+                    // undo the complete object or turn a committed write into a reported failure and blind retry.
+                    TryDelete(temporaryPath);
                 }
                 else
                 {
@@ -335,48 +339,6 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
-    private async Task<ArtifactStorageError?> PlaceCreateOnlyAsync(string objectKey, string temporaryPath, string destinationPath, CancellationToken cancellationToken)
-    {
-        var lockDirectory = Path.Combine(_root, ".codespace", "create-locks");
-        Directory.CreateDirectory(lockDirectory);
-        var lockName = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(objectKey)));
-        var lockPath = Path.Combine(lockDirectory, lockName);
-        var deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * 5d);
-
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            FileStream? placementLock = null;
-            try
-            {
-                placementLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.None);
-                if (File.Exists(destinationPath)) return Error(ArtifactStorageErrorCode.AlreadyExists, $"Object '{objectKey}' already exists.");
-                File.Move(temporaryPath, destinationPath, overwrite: false);
-                return null;
-            }
-            catch (IOException) when (File.Exists(destinationPath))
-            {
-                return Error(ArtifactStorageErrorCode.AlreadyExists, $"Object '{objectKey}' already exists.");
-            }
-            catch (IOException) when (placementLock == null && Stopwatch.GetTimestamp() < deadline)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
-            }
-            catch (IOException ex) when (placementLock == null)
-            {
-                return Error(ArtifactStorageErrorCode.Unavailable, $"Timed out acquiring atomic placement for object '{objectKey}': {ex.Message}", isRetryable: true);
-            }
-            finally
-            {
-                if (placementLock != null)
-                {
-                    await placementLock.DisposeAsync().ConfigureAwait(false);
-                    TryDelete(lockPath);
-                }
-            }
         }
     }
 
