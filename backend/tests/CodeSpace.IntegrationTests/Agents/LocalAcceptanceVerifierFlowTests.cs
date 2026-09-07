@@ -21,6 +21,38 @@ namespace CodeSpace.IntegrationTests.Agents;
 [Trait("Category", "Integration")]
 public sealed class LocalAcceptanceVerifierFlowTests(PostgresFixture fixture)
 {
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("same-size")]
+    [InlineData("inline")]
+    public async Task A_declared_receipt_cannot_pass_after_its_stored_object_is_lost_or_corrupted(string damage)
+    {
+        using var seed = await SeedAsync(["report.txt"], kind: BenchmarkGradingKind.ArtifactPresent);
+        var content = System.Security.Cryptography.RandomNumberGenerator.GetBytes(damage == "inline" ? 100 : 20_000);
+        await File.WriteAllBytesAsync(Path.Combine(seed.Directory, "report.txt"), content);
+        using var scope = fixture.BeginScope();
+        var verifier = scope.Resolve<LocalAcceptanceVerifier>();
+        using var context = await verifier.PrepareAsync(seed.Preparation, CancellationToken.None);
+        (await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(seed.Task, seed.Directory, seed.Owner.RunId, null, seed.TeamId, seed.Owner.Epoch, CancellationToken.None)).ShouldBe(1);
+        var receipt = (await scope.Resolve<IArtifactManifestStore>().ListForAgentRunAsync(seed.Owner.RunId, seed.TeamId, CancellationToken.None)).ShouldHaveSingleItem();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var artifact = await db.WorkflowArtifact.AsNoTracking().SingleAsync(row => row.Id == receipt.ContentArtifactId);
+        if (damage == "missing") File.Delete(new Uri(artifact.StorageUrl!).LocalPath);
+        else if (damage == "same-size") await File.WriteAllBytesAsync(new Uri(artifact.StorageUrl!).LocalPath, new byte[content.Length]);
+        else
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact DISABLE TRIGGER workflow_artifact_enforce_immutability");
+            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_artifact SET inline_bytes = {new byte[content.Length]} WHERE id = {artifact.Id}");
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_artifact ENABLE TRIGGER workflow_artifact_enforce_immutability");
+            await transaction.CommitAsync();
+        }
+        var grade = await verifier.GradeAsync(seed.Request(context), CancellationToken.None);
+        grade.Passed.ShouldBeFalse("a correct workspace file and metadata cannot substitute for physically readable stored work");
+        grade.Class.ShouldBe(GradeFailureClass.GraderFault);
+        grade.Detail.ShouldStartWith("grade-error: declared-deliverable-");
+    }
+
     [Fact]
     public async Task An_authority_denial_from_the_grader_callback_preserves_its_original_exception()
     {
@@ -260,7 +292,7 @@ public sealed class LocalAcceptanceVerifierFlowTests(PostgresFixture fixture)
         var grade = await verifier.GradeAsync(seed.Request(context), CancellationToken.None);
         grade.Passed.ShouldBeFalse();
         grade.Class.ShouldBe(GradeFailureClass.GraderFault);
-        grade.Detail.ShouldStartWith("grade-error: declared-deliverable-receipt-");
+        grade.Detail.ShouldBe(mismatch == "artifact-team" ? "grade-error: declared-deliverable-content-MetadataMissing" : "grade-error: declared-deliverable-receipt-missing");
     }
 
     private async Task<Seed> SeedAsync(IReadOnlyList<string> argv, IReadOnlyList<string>? oraclePaths = null, IReadOnlyList<string>? protectedPaths = null, BenchmarkGradingKind? kind = null)

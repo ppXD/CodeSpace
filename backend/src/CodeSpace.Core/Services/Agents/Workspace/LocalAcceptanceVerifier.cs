@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 
@@ -21,7 +22,7 @@ public abstract class LocalAcceptanceContext : IDisposable
     public abstract void Dispose();
 }
 /// <summary>Verifies an already selected local invocation world under fresh run authority and ownership. Directory continuity is observed, not a new filesystem access grant. No context is reconstructed from a durable handle after host loss.</summary>
-public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuthorityService authority, ISupervisorAcceptanceGrader grader, IArtifactManifestStore manifests, IArtifactStore artifacts) : IScopedDependency
+public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuthorityService authority, ISupervisorAcceptanceGrader grader, IArtifactManifestStore manifests, IArtifactContentVerifier contentVerifier) : IScopedDependency
 {
     public async Task<LocalAcceptanceContext> PrepareAsync(LocalAcceptancePreparation request, CancellationToken cancellationToken)
     {
@@ -70,8 +71,8 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
 
     /// <summary>
     /// Cover each exact declared logical path with a current receipt from this run/team/owner epoch and the same
-    /// observed regular-file bytes. Exact duplicates coalesce, while two paths may share one CAS object. Metadata
-    /// is not a fresh physical storage read; the receipt records the capture write, not arbitrary future availability.
+    /// observed regular-file bytes and a fresh complete physical storage verification. Exact duplicates coalesce,
+    /// while two paths may share one CAS object. This observation does not promise arbitrary future availability.
     /// </summary>
     private async Task<BenchmarkGrade?> CheckDeclaredReceiptsAsync(Context context, CancellationToken cancellationToken)
     {
@@ -85,13 +86,15 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
                 if (current.Count != 1) return Failed("declared-deliverable-receipt-missing", GradeFailureClass.GraderFault);
                 var receipt = current[0];
                 var file = await LocalAcceptanceWorkspace.ObserveFileAsync(context.Workspace!.Directory, path, cancellationToken).ConfigureAwait(false);
-                var metadata = await artifacts.GetMetadataAsync(context.TeamId, receipt.ContentArtifactId, cancellationToken).ConfigureAwait(false);
-                if (metadata == null || metadata.SizeBytes != receipt.SizeBytes || !string.Equals(metadata.Sha256, receipt.Sha256, StringComparison.OrdinalIgnoreCase))
-                    return Failed("declared-deliverable-receipt-unavailable", GradeFailureClass.GraderFault);
                 if (file.SizeBytes != receipt.SizeBytes || !string.Equals(file.Sha256, receipt.Sha256, StringComparison.OrdinalIgnoreCase))
                     return Failed("declared-deliverable-bytes-changed", GradeFailureClass.GraderFault);
+                await contentVerifier.VerifyAsync(new(context.TeamId, receipt.ContentArtifactId, receipt.Sha256, receipt.SizeBytes), cancellationToken).ConfigureAwait(false);
             }
             return null;
+        }
+        catch (ArtifactContentUnavailableException ex)
+        {
+            return Failed($"declared-deliverable-content-{ex.Kind}", GradeFailureClass.GraderFault);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not Exceptions.AgentRunOwnershipLostException and not AgentAuthorityDeniedException)
         {
