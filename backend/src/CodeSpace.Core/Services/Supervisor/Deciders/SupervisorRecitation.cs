@@ -118,6 +118,14 @@ public static class SupervisorRecitation
             && SupervisorAmendObligation.StandingFor(priors, subtaskId) == SupervisorAmendStanding.Discarded)
             return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — a re-plan already DISCARDED the co-signed repair; propose 'amend_acceptance' again or ask a human, do not re-plan and do not retry";
 
+        // The SAME fixed point with no co-sign in it, and the far commoner tape: a re-plan has already been spent on
+        // this unit and its verdict did not move (SupervisorReplanStanding). Describe's infra arm would recite
+        // "re-plan the check" — the move the run has already made here — one screen under a results block that has
+        // just withdrawn it, and the model picks whichever verb it read last.
+        if (result.AcceptancePassed == false && IsInfraRejection(result)
+            && SupervisorReplanStanding.ExitFor(priors, subtaskId) == SupervisorReplanExit.ToAmendment)
+            return $"done but its check COULD NOT RUN ({Truncate(result.AcceptanceDetail)}) — a re-plan already left this verdict unchanged; propose 'amend_acceptance' or ask a human, do not re-plan and do not retry";
+
         return Describe(result);
     }
 

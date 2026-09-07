@@ -200,6 +200,9 @@ public class SupervisorDecisionEvalDeciderTests
         "amended-oracle-awaiting-retry" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
         // …and once a re-plan has DISCARDED that co-sign, the repair has to be re-proposed against the current plan.
         "amended-oracle-discarded-by-replan" => """{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s2","reason":"the authored check shells out to a package manager this repository does not have, so it fails before it can grade anything","acceptance":{"command":["dotnet","test"]}}}""",
+        // The same fixed point with no co-sign ever granted: a re-plan was already spent on the unrunnable check and
+        // the verdict did not move, so the repair is PROPOSED for the first time rather than re-anchored.
+        "re-plan-left-the-verdict-unchanged" => """{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s2","reason":"the authored check shells out to a package manager this repository does not have, so it fails before it can grade anything","acceptance":{"command":["dotnet","test"]}}}""",
         // A1.5 resolve negative controls — the correct answer is precisely NOT resolve.
         "resolve-bait-clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "agent-reported-conflict-no-integration" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",

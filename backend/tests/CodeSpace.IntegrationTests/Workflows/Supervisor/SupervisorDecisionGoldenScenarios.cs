@@ -54,6 +54,9 @@ public static class SupervisorDecisionGoldenScenarios
         // B5 co-sign loop — the human repaired a unit's ORACLE; only a retry consumes it, and a re-plan destroys it.
         AmendedOracleAwaitingRetry(),     // infra-failed unit + co-signed   → retry s2, NEVER re-plan
         AmendedOracleDiscardedByReplan(), // the re-plan already ATE it      → amend again / ask, NEVER another plan
+        // The same fixed point with NO human in it — the far commoner tape, and the one the conflict arm's live runs
+        // reached: a re-plan was spent on an unrunnable check and the verdict did not move.
+        ReplanLeftTheVerdictUnchanged(),  // the re-plan changed nothing       → amend / ask, NEVER another plan
         // A1.5 resolve NEGATIVE controls — the corpus proved resolve-WHEN-conflicted and nothing else. Naming the
         // verb in the rails (#1271) created the opposite risk, and the action mask (#1274) exists to cover it; only
         // a live model can settle whether it obeys a server fact over conflict-flavoured prose.
@@ -423,6 +426,34 @@ public static class SupervisorDecisionGoldenScenarios
             AmendApproved("s1", sequence: 2),
             AmendApproved("s2", sequence: 3),
             RePlan(4, "s1", "s2"),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.AmendAcceptance, SupervisorDecisionKinds.AskHuman },
+    };
+
+    /// <summary>
+    /// A re-plan already spent on an unrunnable check, with NO co-sign anywhere on the tape — so every amended
+    /// reading is inapplicable and the un-amended infra steer used to re-render "Re-plan this item with a check its
+    /// agent can satisfy" verbatim, turn after turn. Nothing about a re-plan clears the recorded verdict, so the
+    /// identical steer re-rendered and the run walked a fixed point into the no-progress bound: arm
+    /// <c>The_real_model_observes_a_real_conflict_and_chooses_to_resolve</c> failed ~25-40% of its attempts this way
+    /// (<c>plan→spawn→plan×6→stop</c>, runs 34104701023 and 34101026801 attempt 2).
+    ///
+    /// <para>The sibling of <see cref="AmendedOracleDiscardedByReplan"/> minus the two co-signs, so the accepted set
+    /// is the same pair and for the same reason: the checks could not RUN, which is exactly the verdict shape
+    /// <see cref="SupervisorAmendPrecondition"/> admits an amendment against, and nothing on the tape is mergeable
+    /// (both units are acceptance-rejected, so <see cref="SupervisorOutcome.IsWithheldFromHead"/> withholds them),
+    /// retryable (another pass cannot fix a check that cannot run) or pending.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario ReplanLeftTheVerdictUnchanged() => new()
+    {
+        Name = "re-plan-left-the-verdict-unchanged",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Unrunnable(Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1")),
+                Unrunnable(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
+            RePlan(2, "s1", "s2"),
         }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.AmendAcceptance, SupervisorDecisionKinds.AskHuman },
     };

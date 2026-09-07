@@ -26,11 +26,14 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorAmendPrecondition
 {
     /// <summary>Why this proposal must not reach a human, or null when it may — the target's latest verdict is a genuinely infra-classed failure.</summary>
-    public static string? Reject(SupervisorTurnContext context, SupervisorAmendAcceptancePayload amend) => Reject(context, amend.SubtaskId);
+    public static string? Reject(SupervisorTurnContext context, SupervisorAmendAcceptancePayload amend) => Reject(context.PriorDecisions, amend.SubtaskId);
 
     /// <summary>Whether ANY unit on this tape would clear <see cref="Reject"/> — the turn roster's availability reader for <c>amend_acceptance</c>. Derived from the precondition itself, never a second reading of it: a menu that offers the verb where the server refuses it synchronously costs the turn for nothing, and one that withholds it where a broken oracle really is amendable strands the run on a check that cannot pass.</summary>
     public static bool AnyAmendableUnit(SupervisorTurnContext context) =>
-        GradedAttempts(context).Keys.Any(subtaskId => Reject(context, subtaskId) is null);
+        GradedAttempts(context.PriorDecisions).Keys.Any(subtaskId => Reject(context.PriorDecisions, subtaskId) is null);
+
+    /// <summary>Whether an amend proposal for THIS unit would clear <see cref="Reject"/> — the PER-UNIT reading <see cref="SupervisorReplanStanding.ExitFor"/> needs, so a steer that sends a stranded unit at <c>amend_acceptance</c> names the verb only where the server admits it (and therefore only where <see cref="AnyAmendableUnit"/> puts it on the turn's menu — the same gate, so the two cannot offer and forbid it in one prompt). Priors-only for the same reason the obligation walk has such an overload: the prompt renderers resolve it without a turn context.</summary>
+    public static bool IsAmendable(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string subtaskId) => Reject(priorDecisions, subtaskId) is null;
 
     /// <summary>
     /// The graded evidence this gate rules on: every subtask's LATEST folded attempt across the WHOLE tape, NOT the
@@ -47,21 +50,21 @@ public static class SupervisorAmendPrecondition
     /// on its superseded attempt's evidence, and a co-sign for it can never be consumed by a retry. A plan-membership
     /// arm would be its own admission rule (and would have to exempt plan-less tapes), and it would re-open exactly
     /// the split above one case narrower — the decider already renders that unit's verdict line and steer off the
-    /// same whole-tape join (<c>AmendStandingsFor</c>). It belongs in a change that can be graded on that.</para>
+    /// same whole-tape join (<c>UnitSteerStandings</c>). It belongs in a change that can be graded on that.</para>
     /// </summary>
-    private static IReadOnlyDictionary<string, SupervisorAgentResult> GradedAttempts(SupervisorTurnContext context) =>
-        SupervisorDependencyGate.LatestResultsBySubtask(context.PriorDecisions);
+    private static IReadOnlyDictionary<string, SupervisorAgentResult> GradedAttempts(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        SupervisorDependencyGate.LatestResultsBySubtask(priorDecisions);
 
-    /// <summary>The subtask-id overload every arm below actually reads — <see cref="Reject(SupervisorTurnContext, SupervisorAmendAcceptancePayload)"/>'s only inputs are the context and the target, so the roster can ask the same question without inventing a proposal to ask it with.</summary>
-    private static string? Reject(SupervisorTurnContext context, string subtaskId)
+    /// <summary>The subtask-id overload every arm below actually reads — <see cref="Reject(SupervisorTurnContext, SupervisorAmendAcceptancePayload)"/>'s only inputs are the tape and the target, so the roster and the re-plan steers can ask the same question without inventing a proposal to ask it with.</summary>
+    private static string? Reject(IReadOnlyList<SupervisorPriorDecision> priorDecisions, string subtaskId)
     {
         // B6 (the re-enactment arm's live finding): after an approved amendment, the target's LATEST verdict is
         // still the dead oracle's failure — which passes the infra check below and let a live brain re-amend the
         // same subtask five times without ever retrying. One signed repair at a time: consume it first.
-        if (SupervisorAmendObligation.IsOutstanding(context, subtaskId))
+        if (SupervisorAmendObligation.IsOutstanding(priorDecisions, subtaskId))
             return $"subtask '{subtaskId}' already carries an approved amendment awaiting its retry — RETRY the subtask to re-grade under the co-signed check; do not amend it again";
 
-        var latest = GradedAttempts(context).GetValueOrDefault(subtaskId);
+        var latest = GradedAttempts(priorDecisions).GetValueOrDefault(subtaskId);
 
         if (latest is null)
             return $"subtask '{subtaskId}' has never been attempted — an oracle is only amendable against the evidence of a graded failure; spawn it first";
@@ -87,7 +90,7 @@ public static class SupervisorAmendPrecondition
     /// <summary>The raw server verdict appended to the POSTED card body (MAJOR-3's third leg: the co-signer rules on the server's own evidence, never only the model's framing) — display-only; the tape payload and the parked question stay canonical.</summary>
     public static string? RawVerdictSuffix(SupervisorTurnContext context, string subtaskId)
     {
-        var latest = GradedAttempts(context).GetValueOrDefault(subtaskId);
+        var latest = GradedAttempts(context.PriorDecisions).GetValueOrDefault(subtaskId);
 
         if (latest?.AcceptanceDetail is null) return null;
 
