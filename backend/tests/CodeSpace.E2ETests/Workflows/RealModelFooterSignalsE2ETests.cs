@@ -211,7 +211,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         if (ReadLiveSecretsOrSkip() is not { } live) return;   // skip ≠ pass (surfaced loudly)
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
 
         // GATING best-of-N on the blessed wire: a file-create-then-ls goal is near-deterministic, so a persistent
         // absence of the agent feed REDs; a gateway/exec fault is a non-gating LOUD skip.
@@ -232,7 +232,7 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
             };
 
             Guid runId;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(userId, teamId))
                 runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
             using (var scope = _fixture.BeginScope())

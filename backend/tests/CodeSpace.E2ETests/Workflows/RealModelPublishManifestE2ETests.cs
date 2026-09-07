@@ -83,7 +83,7 @@ public sealed class RealModelPublishManifestE2ETests
             };
 
             Guid runId;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
                 runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
             using (var scope = _fixture.BeginScope())
@@ -161,7 +161,7 @@ public sealed class RealModelPublishManifestE2ETests
             };
 
             Guid runId;
-            using (var scope = _fixture.BeginScope())
+            using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
                 runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
             using (var scope = _fixture.BeginScope())
@@ -212,7 +212,7 @@ public sealed class RealModelPublishManifestE2ETests
 
     // ─── gate + seeding ────────────────────────────────────────────────────────
 
-    private readonly record struct LiveContext(Guid TeamId, string BaseUrl, string ApiKey, string Model);
+    private readonly record struct LiveContext(Guid TeamId, Guid UserId, string BaseUrl, string ApiKey, string Model);
 
     /// <summary>Resolve the live-model + git preconditions or self-skip LOUDLY (skip ≠ pass). Returns null when the run cannot go live.</summary>
     private async Task<LiveContext?> EnsureLiveOrSkipAsync()
@@ -229,8 +229,8 @@ public sealed class RealModelPublishManifestE2ETests
         if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed (skip ≠ pass)");
         if (!await GitAvailableAsync()) throw RealModelGate.ReportSkipped(Provider, "git is not installed (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
-        return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        return new LiveContext(teamId, userId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 
     /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the executor resolves via <c>ModelCredentialId</c>.</summary>
@@ -304,18 +304,21 @@ public sealed class RealModelPublishManifestE2ETests
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-publish-manifest-e2e-" + Guid.NewGuid().ToString("N"));
         private readonly string _bare;
+        private readonly CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer _server;
 
         public BareRemote()
         {
             Directory.CreateDirectory(_root);
             _bare = Path.Combine(_root, "remote.git");
+            _server = new CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer(_root);
         }
 
-        public string Url => new Uri(_bare).AbsoluteUri;
+        public string Url => _server.Url;
 
         public async Task SeedWithOneCommitAsync()
         {
             await RunGitAsync(_root, "init", "--bare", "-b", "main", _bare);
+            await RunGitAsync(_root, "--git-dir", _bare, "config", "http.receivepack", "true");
 
             var seed = Path.Combine(_root, "seed");
             Directory.CreateDirectory(seed);
@@ -335,19 +338,12 @@ public sealed class RealModelPublishManifestE2ETests
         public async Task<bool> BranchContainsFileAsync(string branch, string file) =>
             (await RunGitAsync(_root, "--git-dir", _bare, "ls-tree", "-r", "--name-only", branch)).Split('\n').Any(l => l.Trim() == file);
 
-        private static async Task<string> RunGitAsync(string workdir, params string[] args)
-        {
-            var result = await new LocalProcessRunner().RunAsync(
-                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
-
-            if (result.Status != SandboxStatus.Success)
-                throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
-
-            return result.Stdout;
-        }
+        private static Task<string> RunGitAsync(string workdir, params string[] args) =>
+            CodeSpace.E2ETests.Infrastructure.GitTestRemoteServer.RunFixtureGitAsync(workdir, args);
 
         public void Dispose()
         {
+            _server.Dispose();
             try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
         }
     }

@@ -136,7 +136,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         var task = taskFactory(credId);
 
         Guid runId;
-        using (var scope = _fixture.BeginScope())
+        using (var scope = _fixture.BeginScopeAs(live.UserId, live.TeamId))
             runId = (await scope.Resolve<IAgentRunService>().CreateAsync(task, live.TeamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
@@ -176,7 +176,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
 
     // ─── gate + seeding ────────────────────────────────────────────────────────
 
-    private readonly record struct LiveContext(Guid TeamId, string BaseUrl, string ApiKey, string Model);
+    private readonly record struct LiveContext(Guid TeamId, Guid UserId, string BaseUrl, string ApiKey, string Model);
 
     /// <summary>Resolve the live-model preconditions (creds + a real codex CLI + a seeded team) or self-skip LOUDLY (skip ≠ pass). Returns null when the run cannot go live.</summary>
     private async Task<LiveContext?> EnsureLiveOrSkipAsync()
@@ -193,8 +193,8 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         if (OperatingSystem.IsWindows()) return null;                       // the harness + sandbox are /bin/sh based
         if (!await CodexReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `codex` coding-agent CLI is not installed — the injection gate needs the harness binary (skip ≠ pass)");
 
-        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
-        return new LiveContext(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        return new LiveContext(teamId, userId, baseUrl!.TrimEnd('/'), apiKey!, model!);
     }
 
     /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the executor resolves via <c>ModelCredentialId</c> and the CodexHarness projects onto its env (OPENAI_API_KEY + the OPENAI_BASE_URL carrier it re-injects as a <c>-c</c> model-provider override). The live key is read from the DB, never in-process.</summary>

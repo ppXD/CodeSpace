@@ -12,12 +12,104 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using System.Diagnostics;
 
 namespace CodeSpace.SandboxTests;
 
 [Trait("Category", "Sandbox")]
 public sealed class GitWorkspaceIsolationE2ETests
 {
+    [KernelFact]
+    public async Task Killing_the_worker_process_still_terminates_its_confined_command()
+    {
+        var directory = Directory.CreateTempSubdirectory("cs-worker-death-").FullName;
+        var info = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var arg in new[] { typeof(SandboxTestHost).Assembly.Location, "--lifetime-host", directory }) info.ArgumentList.Add(arg);
+        using var worker = Process.Start(info).ShouldNotBeNull();
+        var stdout = worker.StandardOutput.ReadToEndAsync();
+        var stderr = worker.StandardError.ReadToEndAsync();
+        Process? sandbox = null;
+        try
+        {
+            var ready = Path.Combine(directory, "ready");
+            for (var attempt = 0; attempt < 200 && !File.Exists(ready) && !worker.HasExited; attempt++) await Task.Delay(25);
+            File.Exists(ready).ShouldBeTrue("the worker must have started the real sandbox before the crash");
+            var children = Directory.EnumerateDirectories($"/proc/{worker.Id}/task").SelectMany(task =>
+            {
+                try { return File.ReadAllText(Path.Combine(task, "children")).Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray(); }
+                catch (IOException) { return []; }
+            }).Distinct().ToArray();
+            children.Length.ShouldBe(1, "the dedicated launcher owns exactly this worker's one sandbox process");
+            sandbox = Process.GetProcessById(children[0]);
+            sandbox.HasExited.ShouldBeFalse();
+            worker.Kill(entireProcessTree: false);
+            await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            for (var attempt = 0; attempt < 200 && !HasTerminated(sandbox); attempt++) await Task.Delay(25);
+            HasTerminated(sandbox).ShouldBeTrue("keeping the native launch thread alive must preserve bwrap's worker-death kill guarantee; an unreaped zombie is terminated but a live process is not");
+            var pulse = Path.Combine(directory, "pulse");
+            var stoppedLength = new FileInfo(pulse).Length;
+            await Task.Delay(300);
+            new FileInfo(pulse).Length.ShouldBe(stoppedLength, "the confined writer must stop after its worker is killed");
+        }
+        finally
+        {
+            if (!worker.HasExited) worker.Kill(entireProcessTree: true);
+            if (sandbox is not null && !HasTerminated(sandbox)) sandbox.Kill(entireProcessTree: true);
+            sandbox?.Dispose();
+            await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(5));
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static bool HasTerminated(Process process)
+    {
+        if (process.HasExited) return true;
+        try
+        {
+            // After its parent is killed this is not our child to reap. Container PID 1 can retain a zombie;
+            // kill(pid, 0), used by non-child Process observation, does not distinguish that from a live task.
+            var stat = File.ReadAllText($"/proc/{process.Id}/stat");
+            return stat[stat.LastIndexOf(')') + 2] is 'Z' or 'X';
+        }
+        catch (DirectoryNotFoundException) { return true; }
+        catch (FileNotFoundException) { return true; }
+    }
+
+    [KernelTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_command_survives_its_managed_launch_thread_while_the_worker_process_is_alive(bool stream)
+    {
+        var directory = Directory.CreateTempSubdirectory("cs-command-thread-").FullName;
+        Task<SandboxResult>? operation = null;
+        var lines = new List<string>();
+        Exception? startFailure = null;
+        var ready = Path.Combine(directory, "ready");
+        var starter = new Thread(() =>
+        {
+            try
+            {
+                var runner = new LocalProcessRunner();
+                var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "touch ready; sleep 2; printf 'finished\\n'" }, WorkingDirectory = directory, TimeoutSeconds = 10 };
+                operation = stream ? runner.RunStreamingAsync(spec, (line, _) => { lines.Add(line); return Task.CompletedTask; }, CancellationToken.None) : runner.RunAsync(spec, CancellationToken.None);
+                SpinWait.SpinUntil(() => File.Exists(ready) || operation.IsCompleted, TimeSpan.FromSeconds(5));
+            }
+            catch (Exception error) { startFailure = error; }
+        });
+        try
+        {
+            starter.Start();
+            starter.Join(TimeSpan.FromSeconds(10)).ShouldBeTrue();
+            startFailure.ShouldBeNull();
+            File.Exists(ready).ShouldBeTrue("the sandbox must be alive before its managed launch thread exits");
+            var result = await operation.ShouldNotBeNull();
+            result.Status.ShouldBe(SandboxStatus.Success, $"the worker process is still alive; retiring a managed thread must not kill its command (exit={result.ExitCode}, stderr={result.Stderr})");
+            if (stream) lines.ShouldBe(new[] { "finished" });
+            else result.Stdout.ShouldBe("finished\n");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public async Task Pack_clone_uses_only_its_destination_and_reclaims_it()
     {
@@ -169,12 +261,18 @@ public sealed class GitWorkspaceIsolationE2ETests
         private readonly LocalProcessRunner _inner = new();
         public string Kind => "local";
         public List<SandboxSpec> Specs { get; } = new();
-        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
         {
             Specs.Add(spec);
             spec.WorkingDirectory.ShouldNotBeNull("a filesystem command must explicitly bind its destination");
             Directory.Exists(spec.WorkingDirectory).ShouldBeTrue("the writable destination must exist before bubblewrap binds it");
-            return _inner.RunAsync(spec, cancellationToken);
+            var result = await _inner.RunAsync(spec, cancellationToken);
+            if (spec.Args.FirstOrDefault() == "ls-remote" && spec.Args.LastOrDefault() == "session-gone")
+            {
+                result.Status.ShouldBe(SandboxStatus.Success, $"the missing-ref probe must complete: exit={result.ExitCode}, stderr={result.Stderr.Replace("fixture-only-token", "[redacted]")}");
+                result.Stdout.ShouldBeEmpty("the fixture never created session-gone; a successful probe must establish its absence");
+            }
+            return result;
         }
     }
 
@@ -210,6 +308,15 @@ public sealed class GitWorkspaceIsolationE2ETests
         }
         public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class KernelTheoryAttribute : TheoryAttribute
+    {
+        public KernelTheoryAttribute()
+        {
+            if (BubblewrapSandbox.Available is null && !BubblewrapSandbox.IsRequired)
+                Skip = "Requires real Linux bubblewrap; the privileged GitHub Actions lane is authoritative.";
+        }
     }
 
     private sealed class KernelFactAttribute : FactAttribute
