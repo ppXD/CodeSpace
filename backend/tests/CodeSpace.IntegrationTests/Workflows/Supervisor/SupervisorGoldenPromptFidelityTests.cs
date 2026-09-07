@@ -356,7 +356,7 @@ public class SupervisorGoldenPromptFidelityTests
         var profile = new ModeProfileRegistry().Resolve(RunModeKeys.Supervisor)!;
         var moved = new List<string>();
 
-        Digest(RenderedCorpus(DimensionsOnlyPrompt, PredatesTheSupersededPins)).ShouldBe(DimensionsOnlyCorpusDigest,
+        Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(DimensionsOnlyPrompt(s), s.Context), PredatesTheSupersededPins)).ShouldBe(DimensionsOnlyCorpusDigest,
             "the 'before' half of this receipt must be the corpus that was really pinned before the mirror carried the trace — if it is not, the per-scenario deltas below are a re-derivation comparing today's code with itself, and they would look clean across a drift that has nothing to do with the stage line");
 
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
@@ -400,7 +400,28 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The superseded pin stays beside it as HISTORY, and is still asserted (over the rendering that produced
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
-    private const string GoldenPromptDigest = "d4c31246c3aefb766e4e913dc8fbbf9dc25f428fc5a2b0805e9087a6963ee42c";
+    private const string GoldenPromptDigest = "157c10446744d26e41c45112e46a3c7635106176d9cb366745737d5c7ea85b33";
+
+    /// <summary>
+    /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
+    /// seven verbs and their meanings, listed identically on every turn, while the action mask in the user prompt
+    /// named the one the server would refuse. Superseded because that is one prompt with two rosters: golden
+    /// <c>resolve-cap-spent</c> passed four main runs in a row on the gating Anthropic wire and then failed 2 of 4
+    /// branch lanes, once answering <c>resolve</c> — the verb the mask three lines below withheld — and once
+    /// <c>merge</c>, the merge already recorded as conflicted. The roster is now rendered per turn FROM the mask
+    /// (<see cref="SupervisorActionRoster"/>), so a withheld verb is never on the menu it is withheld from.
+    ///
+    /// <para>The corpus's numbers stay comparable across the re-pin, and that is DERIVED rather than claimed: every
+    /// scenario's prompt is wound back through <see cref="AsRenderedBeforeTheTurnRoster"/> — the roster replaced by
+    /// the mask block it grew out of, and the conflicted-integration block's cap-aware closing line replaced by the
+    /// invitation it retired — and both superseded anchors then reproduce their own digests over the whole pre-pin
+    /// corpus. So the moved bytes are exactly those two blocks and nothing else: the roster on every scenario, and
+    /// the closing line on the two that record a conflict with the resolve cap spent (<c>resolve-cap-spent</c>,
+    /// <c>verified-resolution</c>). No scenario's <c>AcceptedKinds</c> changed, and none acquired a menu entry for a
+    /// verb its own tape cannot reach — which <see cref="No_scenario_steers_toward_a_verb_its_tape_cannot_reach"/>
+    /// and <see cref="Every_scenario_renders_the_action_mask_arm_its_tape_implies"/> re-derive off the mask itself.</para>
+    /// </summary>
+    private const string StaticVerbRosterCorpusDigest = "d4c31246c3aefb766e4e913dc8fbbf9dc25f428fc5a2b0805e9087a6963ee42c";
 
     /// <summary>
     /// The pin this corpus carried while it held 23 scenarios — before the two co-sign scenarios joined it. They
@@ -450,7 +471,7 @@ public class SupervisorGoldenPromptFidelityTests
         // This re-pin's receipt: over the scenarios that predate it, today's rendering still digests to the
         // superseded pin — so the move is corpus GROWTH and nothing else, and every score taken under the old pin
         // remains comparable with one taken under the new one.
-        Digest(RenderedCorpus(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context), PredatesTheSupersededPins)).ShouldBe(PreCosignScenarioCorpusDigest,
+        Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context), PredatesTheSupersededPins)).ShouldBe(PreCosignScenarioCorpusDigest,
             "a pre-existing scenario's prompt moved in the same commit that grew the corpus — the growth is then not the whole story, and the digest below cannot be attributed to it");
 
         var digest = Digest(RenderedCorpus());
@@ -592,6 +613,41 @@ public class SupervisorGoldenPromptFidelityTests
     };
 
     private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);
+
+    /// <summary>
+    /// The conflicted-integration block's closing line as it read BEFORE it became cap-aware — the copy that
+    /// offered <c>resolve</c> and a re-<c>merge</c> on a tape where the mask had withdrawn the first and the
+    /// stopped-now steer the second. Frozen history, not live copy: it is deleted from the renderer, so it can
+    /// never be reworded again and restating it here cannot become a two-file chore. Only the merge arm is needed —
+    /// every cap-spent conflict in this corpus is a conflicted MERGE, and a tape that ever reached the blocked-spawn
+    /// arm with a spent cap would fail the anchors below loudly rather than silently.
+    /// </summary>
+    private const string ResolveInvitedOnAConflictedIntegration =
+        "    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, then you merge again. Or stop to leave the conflict for a human.";
+
+    /// <summary>
+    /// One scenario's prompt wound back to the rendering that produced the superseded pins below: the turn's VERB
+    /// ROSTER replaced by the action mask it grew out of, and the conflicted-integration block's cap-aware closing
+    /// line replaced by the invitation it retired. It exists because the roster renders on EVERY turn where the mask
+    /// rendered on most, so a superseded digest recomputed over today's raw rendering can no longer reproduce
+    /// itself, and both receipts below would have to be deleted or re-pinned into tautologies.
+    ///
+    /// <para>Winding them back keeps the receipts, and makes them stronger than a re-pin would: the roster is a pure
+    /// INSERTION over the mask and the closing line is a pure SUBSTITUTION, so undoing exactly those two must return
+    /// the pre-commit bytes — which is what the anchors assert by still reproducing their old digests over the whole
+    /// pre-pin corpus. Anything else that drifted into this commit shows up as a failure here rather than as a
+    /// digest nobody can attribute. Every part except the deleted line is taken FROM the renderers rather than
+    /// retyped, in the same spirit as the stage line below.</para>
+    /// </summary>
+    private static string AsRenderedBeforeTheTurnRoster(string prompt, SupervisorTurnContext context)
+    {
+        var roster = $"{Environment.NewLine}{SupervisorActionRoster.Render(context)}{Environment.NewLine}";
+        var mask = SupervisorActionMask.Render(context) is { } withheld ? $"{Environment.NewLine}{withheld}{Environment.NewLine}" : string.Empty;
+
+        return prompt
+            .Replace(roster, mask, StringComparison.Ordinal)
+            .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal);
+    }
 
     /// <summary>One scenario's prompt as this corpus rendered it BEFORE the mirror carried the trace: the stopped-now block from the assessment ALONE — no stage trace, no profile, no enforcement mode.</summary>
     private static string DimensionsOnlyPrompt(SupervisorGoldenScenario scenario) =>

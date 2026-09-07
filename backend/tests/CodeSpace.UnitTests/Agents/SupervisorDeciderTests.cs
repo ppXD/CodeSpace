@@ -1328,15 +1328,18 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
-    public void The_system_prompt_vocabulary_names_every_verb_the_schema_accepts()
+    public void The_turn_roster_names_every_verb_the_schema_accepts_when_nothing_is_masked()
     {
-        // The sentence self-describes as "a fixed vocabulary" — a verb missing from it reads to the model as a verb
-        // that does not exist. 'resolve' was omitted while the schema accepted it, so the only guidance pointing at
-        // a conflicted integration named a DIFFERENT verb (the M0 verb-off-the-copy failure class).
-        var system = LlmSupervisorDecider.SystemPromptForTest;
+        // The vocabulary a verb is missing from reads to the model as a verb that does not exist — 'resolve' was
+        // once omitted while the schema accepted it, so the only guidance pointing at a conflicted integration named
+        // a DIFFERENT verb (the M0 verb-off-the-copy failure class). The obligation moved with the roster: it is now
+        // the per-TURN block that must name every verb, on a turn where the mask withholds none of them. Asserted on
+        // a tape with a live conflict and resolve budget left, which is the only shape that masks nothing.
+        var unmasked = Context(turnNumber: 2, MergeDecision(ConflictedMergeOutcome)) with { MaxResolveAttempts = 2 };
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(unmasked);
 
-        foreach (var verb in new[] { "'plan'", "'spawn'", "'retry'", "'merge'", "'resolve'", "'ask_human'", "'stop'" })
-            system.ShouldContain(verb, Case.Sensitive, $"the fixed-vocabulary sentence must name {verb} — the schema accepts it");
+        foreach (var verb in new[] { "plan", "spawn", "retry", "merge", "resolve", "ask_human", "stop" })
+            prompt.ShouldContain($"- {verb} — ", Case.Sensitive, $"the turn's roster must name {verb} — the schema accepts it and nothing on this tape withholds it");
     }
 
     [Fact]
