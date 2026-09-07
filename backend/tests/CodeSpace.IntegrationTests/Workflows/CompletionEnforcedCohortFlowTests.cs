@@ -1,6 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Reconciliation;
@@ -181,7 +182,10 @@ public class CompletionEnforcedCohortFlowTests
         run.Status.ShouldBe(WorkflowRunStatus.Failure,
             customMessage: $"a give-up over a failed unit is a DECIDED outcome — the authority must stamp Failure, not park. It said: {run.Error}");
         run.Error.ShouldNotBeNull();
-        run.Error!.ShouldContain("honest failure", customMessage: "the terminal must name the arbitration that produced it");
+        // ANCHORED, not merely worded (Rule 8): the real-model gates classify this terminal by the prefix at the
+        // START of the error. A future renderer that prepends anything in front of the arbiter's own slot would keep
+        // a ShouldContain green while silently reverting every honest failure to a gating CodeFault.
+        run.Error!.ShouldStartWith(CompletionTerminalAuthority.HonestFailureReasonPrefix, customMessage: "the terminal must LEAD with the arbitration that produced it, not merely mention it");
         run.CompletionParkedAt.ShouldBeNull("nothing is unadjudicated — a decided failure is not a park");
     }
 
