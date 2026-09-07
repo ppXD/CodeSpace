@@ -4,22 +4,27 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
 /// <summary>
-/// A1.5 action mask, v1: name the actions that are STRUCTURALLY unavailable this turn, so a futile verb is refused
+/// A1.5 action mask: name the actions that are STRUCTURALLY unavailable this turn, so a futile verb is refused
 /// before the model spends a turn on it rather than after. The schema's verb enum is deliberately NOT narrowed —
-/// its seven-verb shape and order are a pinned commit contract, and a per-turn enum would make the wire contract
-/// state-dependent; the mask is prompt-level guidance beside the run-bounds and budget recitations.
+/// its eight-verb shape and order are a pinned commit contract, and a per-turn enum would make the wire contract
+/// state-dependent; the mask is prompt-level guidance beside the run-bounds and budget recitations, and the turn's
+/// roster (<see cref="SupervisorActionRoster"/>) renders it as its withheld half.
 ///
-/// <para><b>v1 covers exactly the <c>resolve</c> verb</b>, because it is the only verb whose availability is a
-/// server-decided FACT rather than a judgement call, and because it is the verb most newly at risk: the rails now
-/// name it (a model that never knew resolve existed could not misfire it). Its two unavailable states are
-/// materially different — one wastes a turn, the other ENDS THE RUN:
+/// <para><b>It covers exactly the two verbs whose availability is a server-decided FACT</b> rather than a
+/// judgement call — the two the server refuses (or kills the run over) no matter how well the model argued for
+/// them. <c>resolve</c>'s two unavailable states are materially different — one wastes a turn, the other ENDS THE
+/// RUN:
 /// <list type="bullet">
 ///   <item>No conflicted integration recorded ⇒ the executor no-ops the resolve with a skip reason
 ///         (<c>ResolveSkipReason</c>'s first arm) and the turn is spent for nothing.</item>
 ///   <item>A conflict exists but the resolve cap is spent ⇒ <c>SupervisorBounds.PostDecision</c> FORCE-STOPS the
 ///         whole run (<c>ResolveAttemptsExceeded</c>). Unlike an over-cap spawn wave, which is merely refused,
 ///         this one is the run's death — the strongest reason to state it before the choice, not after.</item>
-/// </list></para>
+/// </list>
+/// <c>amend_acceptance</c> joined it once <see cref="SupervisorAmendPrecondition"/> (B4) made eligibility a
+/// server verdict: with no unit whose latest check is an INFRA-classed failure, the proposal is rejected
+/// synchronously — no card posted, no human spent, the turn gone — so it belongs beside <c>resolve</c> rather
+/// than in the model's judgement.</para>
 ///
 /// <para>Deliberately masks NOTHING else. <c>plan</c>, <c>ask_human</c> and <c>stop</c> are the escape hatches out
 /// of every dead end and must always be offerable. <c>merge</c> is never masked on "nothing folded": the merge set
@@ -32,13 +37,36 @@ public static class SupervisorActionMask
     /// <summary>The block's pinned header — a stable prompt landmark, mirroring the bounds and budget recitations.</summary>
     public const string Header = "UNAVAILABLE THIS TURN (choosing one of these cannot advance the run):";
 
-    /// <summary>Render the mask, or null when every action is available — a healthy run's prompt stays byte-identical, which the auto-compaction and token-budget characteristics depend on.</summary>
+    /// <summary>The verbs this mask can withhold, in render order — the ONE table <see cref="Render"/> and <see cref="SupervisorActionRoster"/> both partition the vocabulary by, so a verb cannot be offered on the menu and forbidden underneath it.</summary>
+    private static readonly string[] Maskable = [SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.AmendAcceptance];
+
+    /// <summary>Render the mask, or null when every action is available — the turn's roster carries this as its withheld half, so a verb named here is never on the menu above it.</summary>
     public static string? Render(SupervisorTurnContext context)
     {
-        if (ResolveUnavailableReason(context) is not { } reason) return null;
+        var withheld = Maskable.Select(verb => (Verb: verb, Reason: UnavailableReasonFor(verb, context))).Where(v => v.Reason is not null).ToList();
 
-        return $"{Header}\n- resolve — {reason}";
+        if (withheld.Count == 0) return null;
+
+        var builder = new StringBuilder(Header);
+
+        foreach (var (verb, reason) in withheld) builder.Append('\n').Append("- ").Append(verb).Append(" — ").Append(reason);
+
+        return builder.ToString();
     }
+
+    /// <summary>Why <paramref name="verb"/> cannot advance the run this turn, else null (it is genuinely available). The SINGLE per-verb availability authority — the roster's menu and this block's withheld half both read it, so the two partition the vocabulary by construction instead of by agreement.</summary>
+    internal static string? UnavailableReasonFor(string verb, SupervisorTurnContext context) => verb switch
+    {
+        SupervisorDecisionKinds.Resolve => ResolveUnavailableReason(context),
+        SupervisorDecisionKinds.AmendAcceptance => AmendUnavailableReason(context),
+        _ => null,
+    };
+
+    /// <summary>The non-null reason an amend proposal cannot advance the run this turn, else null. Reads <see cref="SupervisorAmendPrecondition"/> — the SAME gate the executor applies before any card is posted — so the mask and the refusal can never disagree about which units are amendable. What to do instead is NOT steered here: an outstanding co-sign already has its own banner, and a work-classed failure already has its own verdict line; a third steer authored here could only disagree with one of them.</summary>
+    internal static string? AmendUnavailableReason(SupervisorTurnContext context) =>
+        SupervisorAmendPrecondition.AnyAmendableUnit(context)
+            ? null
+            : "no unit has an infra-failed check to amend — the server rules on the RECORDED verdict, so a proposal here is refused before any human sees it and costs this turn";
 
     /// <summary>The non-null reason resolve cannot advance the run this turn, else null (it is genuinely available). Reads the SAME conflict-presence authority the resolve executor acts on, so the mask and the executor can never disagree about whether a conflict exists.</summary>
     internal static string? ResolveUnavailableReason(SupervisorTurnContext context) => ResolveUnavailableReason(context.PriorDecisions, context.MaxResolveAttempts);

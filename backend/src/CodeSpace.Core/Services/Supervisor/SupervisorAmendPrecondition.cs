@@ -24,30 +24,37 @@ namespace CodeSpace.Core.Services.Supervisor;
 public static class SupervisorAmendPrecondition
 {
     /// <summary>Why this proposal must not reach a human, or null when it may — the target's latest verdict is a genuinely infra-classed failure.</summary>
-    public static string? Reject(SupervisorTurnContext context, SupervisorAmendAcceptancePayload amend)
+    public static string? Reject(SupervisorTurnContext context, SupervisorAmendAcceptancePayload amend) => Reject(context, amend.SubtaskId);
+
+    /// <summary>Whether ANY unit on this tape would clear <see cref="Reject"/> — the turn roster's availability reader for <c>amend_acceptance</c>. Derived from the precondition itself, never a second reading of it: a menu that offers the verb where the server refuses it synchronously costs the turn for nothing, and one that withholds it where a broken oracle really is amendable strands the run on a check that cannot pass.</summary>
+    public static bool AnyAmendableUnit(SupervisorTurnContext context) =>
+        SupervisorDependencyGate.LatestResultsBySubtask(context).Keys.Any(subtaskId => Reject(context, subtaskId) is null);
+
+    /// <summary>The subtask-id overload every arm below actually reads — <see cref="Reject(SupervisorTurnContext, SupervisorAmendAcceptancePayload)"/>'s only inputs are the context and the target, so the roster can ask the same question without inventing a proposal to ask it with.</summary>
+    private static string? Reject(SupervisorTurnContext context, string subtaskId)
     {
         // B6 (the re-enactment arm's live finding): after an approved amendment, the target's LATEST verdict is
         // still the dead oracle's failure — which passes the infra check below and let a live brain re-amend the
         // same subtask five times without ever retrying. One signed repair at a time: consume it first.
-        if (SupervisorAmendObligation.IsOutstanding(context, amend.SubtaskId))
-            return $"subtask '{amend.SubtaskId}' already carries an approved amendment awaiting its retry — RETRY the subtask to re-grade under the co-signed check; do not amend it again";
+        if (SupervisorAmendObligation.IsOutstanding(context, subtaskId))
+            return $"subtask '{subtaskId}' already carries an approved amendment awaiting its retry — RETRY the subtask to re-grade under the co-signed check; do not amend it again";
 
-        var latest = SupervisorDependencyGate.LatestResultsBySubtask(context).GetValueOrDefault(amend.SubtaskId);
+        var latest = SupervisorDependencyGate.LatestResultsBySubtask(context).GetValueOrDefault(subtaskId);
 
         if (latest is null)
-            return $"subtask '{amend.SubtaskId}' has never been attempted — an oracle is only amendable against the evidence of a graded failure; spawn it first";
+            return $"subtask '{subtaskId}' has never been attempted — an oracle is only amendable against the evidence of a graded failure; spawn it first";
 
         if (SupervisorOutcome.IsWaived(latest))
-            return $"subtask '{amend.SubtaskId}' is already WAIVED — there is no oracle left to amend";
+            return $"subtask '{subtaskId}' is already WAIVED — there is no oracle left to amend";
 
         if (latest.AcceptancePassed == true)
-            return $"subtask '{amend.SubtaskId}'s check PASSED on its latest attempt — there is nothing wrong with the oracle to amend";
+            return $"subtask '{subtaskId}'s check PASSED on its latest attempt — there is nothing wrong with the oracle to amend";
 
         if (latest.AcceptancePassed is null)
-            return $"subtask '{amend.SubtaskId}'s latest attempt was never graded — an oracle is only amendable against the evidence of a graded failure";
+            return $"subtask '{subtaskId}'s latest attempt was never graded — an oracle is only amendable against the evidence of a graded failure";
 
         if (!Agents.AgentAcceptanceContract.IsInfraFailure(latest.AcceptanceDetail, SupervisorOutcome.ResultShowsWork(latest)))
-            return $"subtask '{amend.SubtaskId}'s check RAN and rejected the work ({latest.AcceptanceDetail}) — that is evidence against the WORK, not the check; fix the work or retry it. An oracle is only amendable when its failure is infra-classed (the check itself could not run)";
+            return $"subtask '{subtaskId}'s check RAN and rejected the work ({latest.AcceptanceDetail}) — that is evidence against the WORK, not the check; fix the work or retry it. An oracle is only amendable when its failure is infra-classed (the check itself could not run)";
 
         return null;
     }

@@ -21,10 +21,13 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// <see cref="SupervisorActionMask.Render"/>'s own output, byte for byte, rather than a second rendering of the
 /// same facts: the reasons a verb is unavailable stay authored in exactly one place.</para>
 ///
-/// <para>The vocabulary is deliberately the SAME seven verbs the rails named before this block existed — this
-/// change moves the roster, it does not widen it. <c>amend_acceptance</c> is in the decision schema and stays out
-/// of the roster exactly as it stayed out of the rails: it is introduced by the per-unit amendment steers, where
-/// the evidence that a check itself is broken actually lives.</para>
+/// <para>The vocabulary is the decision schema's <c>kind</c> enum — all EIGHT verbs, not the seven the rails used
+/// to name. A block whose header says "the decision 'kind' values this turn accepts" and then omits a verb the
+/// server binds is the same defect from the other side: golden <c>amended-oracle-discarded-by-replan</c> is graded
+/// on <c>amend_acceptance</c>, and the nearest, loudest claim of exhaustiveness told the model it did not exist.
+/// Its availability is a server verdict like <c>resolve</c>'s — <see cref="SupervisorAmendPrecondition"/> refuses a
+/// proposal against a unit whose check RAN — so it is offered where some unit is genuinely amendable and named as
+/// withheld, with the reason, everywhere else.</para>
 /// </summary>
 public static class SupervisorActionRoster
 {
@@ -42,6 +45,7 @@ public static class SupervisorActionRoster
         (SupervisorDecisionKinds.Retry, "re-run one subtask"),
         (SupervisorDecisionKinds.Merge, "synthesize the agents' results"),
         (SupervisorDecisionKinds.Resolve, "reconcile a CONFLICTED integration — the server spawns ONE reconciling agent from the recorded conflict; you name no subtask and author no branches"),
+        (SupervisorDecisionKinds.AmendAcceptance, "propose to rewrite or waive ONE subtask's acceptance check when the CHECK ITSELF could not run — it parks for a human co-sign; never retry into a check that cannot pass"),
         (SupervisorDecisionKinds.AskHuman, "ask a question"),
         (SupervisorDecisionKinds.Stop, "finish"),
     ];
@@ -64,9 +68,8 @@ public static class SupervisorActionRoster
     internal static IReadOnlyList<string> Withheld(SupervisorTurnContext context) =>
         Vocabulary.Where(v => UnavailableReasonFor(v.Verb, context) is not null).Select(v => v.Verb).ToList();
 
-    /// <summary>Why this verb cannot advance the run this turn, else null. The ONLY availability authority the roster consults — <see cref="SupervisorActionMask"/>'s own reader — so the block and the mask beneath it answer from one source. Every other verb is unmasked BY DESIGN, and the mask's own summary documents why: the escape hatches must always be reachable, and a futile <c>merge</c>/<c>spawn</c>/<c>retry</c> is a judgement call rather than a server-decided fact.</summary>
-    private static string? UnavailableReasonFor(string verb, SupervisorTurnContext context) =>
-        verb == SupervisorDecisionKinds.Resolve ? SupervisorActionMask.ResolveUnavailableReason(context) : null;
+    /// <summary>Why this verb cannot advance the run this turn, else null. The ONLY availability authority the roster consults — <see cref="SupervisorActionMask"/>'s own per-verb reader — so the menu and the withheld half beneath it answer from one source. Every other verb is unmasked BY DESIGN, and the mask's own summary documents why: the escape hatches must always be reachable, and a futile <c>merge</c>/<c>spawn</c>/<c>retry</c> is a judgement call rather than a server-decided fact.</summary>
+    private static string? UnavailableReasonFor(string verb, SupervisorTurnContext context) => SupervisorActionMask.UnavailableReasonFor(verb, context);
 
     private static string MeaningFor(string verb) => Vocabulary.Single(v => v.Verb == verb).Meaning;
 }
