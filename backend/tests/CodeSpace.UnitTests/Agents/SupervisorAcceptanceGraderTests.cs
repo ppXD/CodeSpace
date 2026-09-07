@@ -813,7 +813,7 @@ public class SupervisorAcceptanceGraderTests
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
         // v4: an argv oracle's own program file is protected from candidate tampering even when no ProtectedPaths were authored.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v5");
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v6");
     }
 
     [Fact]

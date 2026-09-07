@@ -1117,16 +1117,21 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>The unit's manifest row for THIS repository (I2 — the single source of truth; never re-derived from the decision's own outcome snapshot), or null when none exists (the unit made no changes here, or hasn't been recorded yet). Mirrors <c>RealSupervisorActionExecutor.DependencyStaging.cs</c>'s per-repo manifest lookup.</summary>
     /// <summary>
-    /// P3a-3 (B+V0+): the base sha the grader restores the spec's ProtectedPaths from — the unit's recorded
-    /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec actually
-    /// protects paths (no extra read on the common unprotected path); null = grader grades exactly as before.
-    /// A protected spec whose unit has no manifest grades with NO restore, and the grade says so out loud
+    /// P3a-3 (B+V0+): the base sha the grader restores the spec's protected paths from — the unit's recorded
+    /// manifest BaseSha (the S1 immutable base its work was cut from). Resolved ONLY when the spec can be
+    /// PROTECTED AT ALL (<see cref="AcceptanceOracleProtection.MayProtect"/> — authored, or derivable from the
+    /// command, the SAME test the grader itself uses to decide whether to widen its clone) — no extra read on a
+    /// genuinely unprotectable spec; null = grader grades exactly as before. Before this shared the grader's own
+    /// derivation, an authored-only guard here meant a per-unit oracle whose only protection was DERIVED (nothing
+    /// in Core or the UI ever authors <c>ProtectedPaths</c>, so this is the shape every real operator floor has)
+    /// never got a base sha at all — the grader could detect that it went unprotected but never had the bytes to
+    /// restore. A protected spec whose unit has no manifest grades with NO restore, and the grade says so out loud
     /// (<c>BenchmarkGrade.OracleNote</c> — "graded UNPROTECTED"): before C3 that case was silent, and silence
     /// from an unanchored oracle is indistinguishable from a protected one that was left alone.
     /// </summary>
     private async Task<string?> OracleBaseShaAsync(Guid agentRunId, Guid repositoryId, SupervisorAcceptanceSpec spec, Guid teamId, CancellationToken cancellationToken)
     {
-        if (spec.ProtectedPaths is not { Count: > 0 }) return null;
+        if (!AcceptanceOracleProtection.MayProtect(spec)) return null;
 
         var manifest = await ResolveUnitManifestAsync(agentRunId, repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 

@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -88,4 +89,21 @@ public class AcceptanceOracleProtectionTests
     private static string[] Argv(string spec) => spec.Split('|', StringSplitOptions.RemoveEmptyEntries);
 
     private static string[] Expected(string spec) => spec.Length == 0 ? Array.Empty<string>() : spec.Split(',');
+
+    // ── MayProtect: the RESTORE-BASE decision — the one guard shared by the grader (widen the clone before the
+    // restore) and SupervisorTurnService.Rehydrate.cs's per-unit OracleBaseShaAsync (resolve a base sha worth
+    // restoring from at all). An authored-only guard there meant a per-unit oracle whose only protection was
+    // DERIVED — the shape every real operator floor has, since nothing in Core or the UI ever authors
+    // ProtectedPaths — never got a base sha to restore from in the first place. ──
+
+    [Theory]
+    [InlineData(true, "dotnet|test", true)]     // authored ProtectedPaths outrank the command outright — protectable even though `dotnet test` alone derives nothing
+    [InlineData(false, "sh|check.sh", true)]    // no authored set, but the command's own program is derivable — the realistic operator-floor shape this fix restores
+    [InlineData(false, "dotnet|test", false)]   // no authored set and nothing derivable — genuinely unprotectable, no base sha is worth resolving
+    public void A_restore_base_is_worth_resolving_when_protection_is_authored_or_derivable(bool authored, string argv, bool expected)
+    {
+        var spec = new SupervisorAcceptanceSpec { Command = Argv(argv), ProtectedPaths = authored ? new[] { "tests/" } : null };
+
+        AcceptanceOracleProtection.MayProtect(spec).ShouldBe(expected);
+    }
 }

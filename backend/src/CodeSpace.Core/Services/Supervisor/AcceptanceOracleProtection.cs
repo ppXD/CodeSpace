@@ -1,3 +1,6 @@
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
+
 namespace CodeSpace.Core.Services.Supervisor;
 
 /// <summary>
@@ -36,6 +39,27 @@ public static class AcceptanceOracleProtection
     /// <summary>The repo-relative paths <paramref name="argv"/> makes oracle bytes: its program file(s), kept only when <paramref name="repoFileExists"/> says the repository actually holds that file at the graded base. A program the candidate CREATED is not the operator's judge and is deliberately not protected.</summary>
     public static IReadOnlyList<string> DeriveProtectedPaths(IReadOnlyList<string>? argv, Func<string, bool> repoFileExists) =>
         ProgramCandidates(argv).Where(repoFileExists).ToList();
+
+    /// <summary>
+    /// Whether <paramref name="spec"/> can be protected at all — AUTHORED <c>ProtectedPaths</c>, or a derivable
+    /// program candidate from its command — decided from the contract alone, before any clone or base-sha lookup.
+    /// The ONE derivation both the grader (to widen its clone before the restore) and the per-unit base-sha
+    /// resolver (<c>SupervisorTurnService.Rehydrate.cs</c>'s <c>OracleBaseShaAsync</c>) must share: before that
+    /// resolver consulted this same function it anchored a restore ONLY on an authored spec, so a per-unit oracle
+    /// whose only protection was DERIVABLE (the shape every real operator floor actually has — nothing in Core or
+    /// the UI ever authors <c>ProtectedPaths</c>) never got a base sha to restore from at all. The grader could then
+    /// only say the judge went unprotected; it could never put the pristine script back.
+    /// </summary>
+    public static bool MayProtect(SupervisorAcceptanceSpec spec) => spec.ProtectedPaths is { Count: > 0 } || CommandOracleCandidates(spec).Count > 0;
+
+    /// <summary>
+    /// The argv's program candidates for a TestsPass-shaped acceptance — empty for any oracle whose <c>Command</c>
+    /// is NOT an argv. An <c>ArtifactPresent</c> contract's command is the list of deliverables the candidate must
+    /// PRODUCE; restoring one of those from base would void the very work being verified, which is the opposite of
+    /// protecting a judge.
+    /// </summary>
+    public static IReadOnlyList<string> CommandOracleCandidates(SupervisorAcceptanceSpec spec) =>
+        spec.Kind is null or BenchmarkGradingKind.TestsPass ? ProgramCandidates(spec.Command) : Array.Empty<string>();
 
     /// <summary>
     /// The program-position tokens of <paramref name="argv"/>, normalized to repo-relative pathspecs and deduped —
