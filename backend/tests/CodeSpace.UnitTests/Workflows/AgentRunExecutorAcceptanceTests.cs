@@ -120,7 +120,7 @@ public class AgentRunExecutorAcceptanceTests
     public async Task A_self_reported_failure_whose_check_also_fails_stays_failed_with_no_contradiction()
     {
         var evidenceId = Guid.NewGuid();
-        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", EvidenceArtifactId = evidenceId });
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", EvidenceArtifactId = evidenceId, EvidenceTail = "the current oracle diagnosis", Class = GradeFailureClass.Genuine });
 
         var claimed = FailedWithWork();
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), claimed, workspace: null, CancellationToken.None);
@@ -129,6 +129,8 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptancePassed.ShouldBe(false, "the check ran and rejected the work — that verdict is recorded, not left null");
         result.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
         result.AcceptanceEvidenceId.ShouldBe(evidenceId);
+        result.AcceptanceEvidenceTail.ShouldBe("the current oracle diagnosis");
+        result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.Genuine);
         result.Contradiction.ShouldBeNull("the claim and the verdict AGREE — an over-claim stamp here would be a lie");
         result.Error.ShouldBe(claimed.Error, "the agent's own failure text is not overwritten by the fail-closed sentence");
         result.ExitReason.ShouldBe(claimed.ExitReason, "the run failed on its own report, not on a fail-closed re-grade");
@@ -267,7 +269,7 @@ public class AgentRunExecutorAcceptanceTests
     {
         var evidenceId = Guid.NewGuid();
         var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
-        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = false, Detail = "exit 1", EvidenceArtifactId = evidenceId };
+        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = false, Detail = "exit 1", EvidenceArtifactId = evidenceId, EvidenceTail = "secondary repository assertion failed", Class = GradeFailureClass.GraderFault };
 
         var multi = Succeeded() with
         {
@@ -285,6 +287,25 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptancePassed.ShouldBe(false);
         result.AcceptanceDetail.ShouldBe("repo 'api': exit 1", "the failing repo's alias is named so the failure is diagnosable");
         result.AcceptanceEvidenceId.ShouldBe(evidenceId, "P5-2: the failing repo's evidence binding survives the aggregate (mirroring the single-repo fail path and the supervisor twin)");
+        result.AcceptanceEvidenceTail.ShouldBe("secondary repository assertion failed");
+        result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.GraderFault, "typed classification must survive even when the diagnostic text looks like a generic failed check");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_fresh_pass_clears_the_prior_failed_oracle_diagnosis(bool multiRepo)
+    {
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "accepted" });
+        var prior = Succeeded() with { AcceptanceEvidenceTail = "obsolete failure", AcceptanceEvidenceId = Guid.NewGuid(), AcceptanceFailureClass = GradeFailureClass.Genuine };
+        if (multiRepo) prior = prior with { RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" } } };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), prior, workspace: null, CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceEvidenceTail.ShouldBeNull();
+        result.AcceptanceEvidenceId.ShouldBeNull();
+        result.AcceptanceFailureClass.ShouldBeNull();
     }
 
     [Fact]

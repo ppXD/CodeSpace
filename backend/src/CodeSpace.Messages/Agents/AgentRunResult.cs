@@ -146,6 +146,10 @@ public sealed record AgentRunResult
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Guid? AcceptanceEvidenceId { get; init; }
 
+    /// <summary>The bounded output tail of this failed oracle, retained for worker repair across result folds. Null on successful, uncaptured or older grades; the captured evidence stays behind AcceptanceEvidenceId. Diagnostic text is not a verification verdict.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? AcceptanceEvidenceTail { get; init; }
+
     /// <summary>P0-B2: what the run's MCP fabric ACTUALLY did — bound/declared/proxied/handshook/served, observed off the live endpoint at result time. Null on pre-slice results; null-omitted so old rows stay byte-identical.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public McpFabricEvidence? McpEvidence { get; init; }
