@@ -30,7 +30,7 @@ public sealed class FailoverStructuredClient : IStructuredLLMClient
     private readonly IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> _candidates;
     private readonly ILogger? _logger;
 
-    /// <summary>The logger is optional because one construction site has none to give: <see cref="InProcessStructuredModel"/> is a static resolver shared by the planner / classifier lanes. Without it a hop is still recorded on the completion's trail — it just isn't announced live.</summary>
+    /// <summary>The logger is optional for isolated library callers and tests. Production automatic-selection callers pass their category through <see cref="InProcessStructuredModelOptions"/>, so their hops are announced live; the completion trail remains the portable provenance contract.</summary>
     public FailoverStructuredClient(IReadOnlyList<(IStructuredLLMClient Client, ModelPoolPick Pick)> candidates, ILogger? logger = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("A failover client needs at least one candidate.", nameof(candidates));

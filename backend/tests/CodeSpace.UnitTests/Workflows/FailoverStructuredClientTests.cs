@@ -25,7 +25,7 @@ public class FailoverStructuredClientTests
         var anthropic = new ScriptedStructured("Anthropic", Answer);
         var openai = new ScriptedStructured("OpenAI", Answer);
 
-        var resolved = await InProcessStructuredModel.ResolveAsync(new FakeRegistry(anthropic, openai), new MultiProviderSelector("Anthropic", "OpenAI"), Guid.NewGuid(), CancellationToken.None);
+        var resolved = await InProcessStructuredModel.ResolveAsync(new FakeRegistry(anthropic, openai), new MultiProviderSelector("Anthropic", "OpenAI"), new InProcessStructuredModelOptions(Guid.NewGuid()), CancellationToken.None);
 
         var failover = resolved!.Value.Client.ShouldBeOfType<FailoverStructuredClient>();
         failover.Candidates.Count.ShouldBe(2);
@@ -34,11 +34,28 @@ public class FailoverStructuredClientTests
     }
 
     [Fact]
+    public async Task The_shared_resolver_threads_the_callers_logger_into_the_failover_chain()
+    {
+        var anthropic = new ScriptedStructured("Anthropic", _ => throw new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "slow down"));
+        var openai = new ScriptedStructured("OpenAI", Answer);
+        var logger = new CapturingLogger();
+        var options = new InProcessStructuredModelOptions(Guid.NewGuid()) { Logger = logger };
+
+        var resolved = await InProcessStructuredModel.ResolveAsync(new FakeRegistry(anthropic, openai), new MultiProviderSelector("Anthropic", "OpenAI"), options, CancellationToken.None);
+        await resolved!.Value.Client.CompleteStructuredAsync(Request("Anthropic-model"), CancellationToken.None);
+
+        var warning = logger.Entries.ShouldHaveSingleItem("a shared in-process caller must not construct a silent failover client");
+        warning.Level.ShouldBe(LogLevel.Warning);
+        warning.Message.ShouldContain("Anthropic:Anthropic-model");
+        warning.Message.ShouldContain("RateLimited 429");
+    }
+
+    [Fact]
     public async Task A_single_provider_resolves_the_raw_client_byte_identically()
     {
         var only = new ScriptedStructured("Anthropic", Answer);
 
-        var resolved = await InProcessStructuredModel.ResolveAsync(new FakeRegistry(only, new ScriptedStructured("OpenAI", Answer)), new MultiProviderSelector("Anthropic"), Guid.NewGuid(), CancellationToken.None);
+        var resolved = await InProcessStructuredModel.ResolveAsync(new FakeRegistry(only, new ScriptedStructured("OpenAI", Answer)), new MultiProviderSelector("Anthropic"), new InProcessStructuredModelOptions(Guid.NewGuid()), CancellationToken.None);
 
         resolved!.Value.Client.ShouldBeSameAs(only, "no alternate exists — no wrapper, no behavior change");
     }

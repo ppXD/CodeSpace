@@ -1,5 +1,7 @@
 using CodeSpace.Core.Services.Agents.Eval;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Learning;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using Shouldly;
@@ -266,4 +268,23 @@ public class RunScorecardTrendTests
         // shared enum to protect the agreement — this pin is it. Drift silently blanks brain_model on every row.
         RunScorecardWriter.SupervisorDecisionCallKind.ShouldBe("supervisor.decision");
     }
+
+    [Fact]
+    public void The_scorecard_selects_the_first_brain_model_by_durable_sequence()
+    {
+        var runId = Guid.NewGuid();
+        var later = DecisionRecord(runId, sequence: 20, model: "fallback-model");
+        var first = DecisionRecord(runId, sequence: 10, model: "requested-model");
+
+        RunScorecardWriter.FirstDecisionModel([later, first]).ShouldBe("requested-model", "materialization order is unspecified; model attribution follows the append-only run cursor");
+    }
+
+    private static WorkflowRunRecord DecisionRecord(Guid runId, long sequence, string model) => new()
+    {
+        Id = Guid.NewGuid(),
+        RunId = runId,
+        Sequence = sequence,
+        RecordType = WorkflowRunRecordTypes.InteractionCompleted,
+        PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { kind = RunScorecardWriter.SupervisorDecisionCallKind, model, usage = new { inputTokens = 1, outputTokens = 1 } }),
+    };
 }
