@@ -32,7 +32,7 @@ public sealed class RoutedReadSurvivesMetadataChurnTests : IDisposable
         _roots.Add(destination.Root);
 
         var artifactId = await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, "work worth keeping", "text/plain");
-        var path = Directory.GetFiles(destination.Root, "*", SearchOption.AllDirectories).Single();
+        var path = destination.ObjectPaths.Single();
         var bytes = await File.ReadAllBytesAsync(path);
 
         await RestoreFromBackupAsync(path, bytes);

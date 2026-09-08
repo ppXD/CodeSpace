@@ -32,7 +32,7 @@ public sealed class RoutedPurgeSurvivesMetadataChurnTests : IDisposable
         _roots.Add(destination.Root);
 
         await RoutedArtifactSeed.WriteRoutedAsync(_fixture, teamId, "work that must be deletable", "text/plain");
-        var path = Directory.GetFiles(destination.Root, "*", SearchOption.AllDirectories).Single();
+        var path = destination.ObjectPaths.Single();
         var bytes = await File.ReadAllBytesAsync(path);
 
         File.Delete(path);
