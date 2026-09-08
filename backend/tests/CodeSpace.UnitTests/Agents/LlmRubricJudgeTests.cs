@@ -56,6 +56,20 @@ public sealed class LlmRubricJudgeTests
     }
 
     [Fact]
+    public async Task A_malformed_echo_keeps_the_wire_identity_in_that_models_health_stratum()
+    {
+        var producer = new ReviewModelIdentity { ObservedModel = "producer-wire" };
+        var response = Json("""{ "criteria": [ { "id": "invented", "met": true, "evidence": "irrelevant" } ] }""");
+        var judge = new LlmRubricJudge(new LLMClientRegistry([new JudgeClient("judge-wire", response)]), new JudgeSelector());
+
+        var verdict = await judge.JudgeAsync(new RubricJudgeRequest { Rubric = Rubric("required"), Artifact = "artifact", TeamId = Guid.NewGuid(), ProducerModel = producer }, CancellationToken.None);
+
+        verdict.Failed.ShouldBeTrue();
+        verdict.JudgeModel.ShouldBe("judge-wire", "an invalid answer still came from an observed model and must reduce that model's evaluator health");
+        verdict.Independence.ShouldBe(ReviewModelIndependence.DistinctBackingModel);
+    }
+
+    [Fact]
     public void Invented_ids_are_dropped_and_duplicates_keep_the_first()
     {
         var verdict = LlmRubricJudge.Project(Rubric("a"), Json("""{ "criteria": [ { "id": "a", "met": true, "evidence": "first" }, { "id": "a", "met": false, "evidence": "second" }, { "id": "ghost", "met": true, "evidence": "?" } ] }"""));
@@ -159,14 +173,14 @@ public sealed class LlmRubricJudgeTests
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
-    private sealed class JudgeClient(string? observedModel) : ILLMClient, IStructuredLLMClient
+    private sealed class JudgeClient(string? observedModel, JsonElement? response = null) : ILLMClient, IStructuredLLMClient
     {
         public string Provider => "test";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) => Task.FromResult(new StructuredLLMCompletion
         {
             Model = observedModel ?? request.Model, ObservedModel = observedModel,
-            Json = JsonSerializer.SerializeToElement(new { criteria = new[] { new { id = "a", met = true, evidence = "complete" } } }),
+            Json = response ?? JsonSerializer.SerializeToElement(new { criteria = new[] { new { id = "a", met = true, evidence = "complete" } } }),
         });
     }
 
