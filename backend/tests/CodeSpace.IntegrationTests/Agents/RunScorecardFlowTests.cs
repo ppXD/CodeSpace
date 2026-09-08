@@ -398,9 +398,8 @@ public class RunScorecardFlowTests
     [Fact]
     public async Task A_graded_benchmark_cell_lands_a_durable_row_with_its_grade_and_intervention_flags()
     {
-        // The persistence seam itself against real Postgres. The runner → store WIRING (one call per graded cell,
-        // never for an infra-errored one, and swallowed on failure) is pinned by CorpusBenchmarkRunnerTests with a
-        // recording double, so this tier proves the columns rather than re-proving the loop.
+        // The persistence seam itself against real Postgres. CorpusBenchmarkRunnerTests pin the legacy
+        // best-effort path and the paired fail-closed path; this tier proves the durable columns and constraints.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var agentRunId = Guid.NewGuid();
 
@@ -416,29 +415,113 @@ public class RunScorecardFlowTests
             ReviseRounds = 2,
             McpFullCatalog = true,
             ExitReason = "output-flagged",
+            ObservedModel = "provider-observed-sonnet",
+            CostUsd = 0.125m,
         };
 
-        var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "claude-sonnet-4-6" };
+        var groupId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "claude-sonnet-4-6", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m };
 
         using (var scope = _fixture.BeginScope())
-            await scope.Resolve<IBenchmarkResultStore>().RecordAsync(teamId, "sha256/corpus-v2:abc123", result, selection, CancellationToken.None);
+            await scope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = "sha256/corpus-v3:abc123", Result = result, Selection = selection,
+                ObservationGroupId = groupId, ObservationArm = "candidate", ObservationSession = 2,
+                CodeRevision = new string('a', 40),
+            }, CancellationToken.None);
 
         using var read = _fixture.BeginScope();
         var row = await read.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking()
             .SingleAsync(r => r.TeamId == teamId && r.AgentRunId == agentRunId);
 
-        row.SuiteVersion.ShouldBe("sha256/corpus-v2:abc123", "the suite's content-derived identity is what a cross-run comparison joins on");
+        row.SuiteVersion.ShouldBe("sha256/corpus-v3:abc123", "the suite's content-derived identity is what a cross-run comparison joins on");
         row.TaskId.ShouldBe("fix-the-failing-check");
         row.Mode.ShouldBe(nameof(BenchmarkMode.HarnessCliWithMcp));
         row.Harness.ShouldBe("claude-code");
         row.Model.ShouldBe("claude-sonnet-4-6");
+        row.ObservedModel.ShouldBe("provider-observed-sonnet");
+        row.ObservationGroupId.ShouldBe(groupId);
+        row.ObservationArm.ShouldBe("candidate");
+        row.ObservationSession.ShouldBe(2);
+        row.OutcomeState.ShouldBe(nameof(CorpusCellState.Solved));
         row.Solved.ShouldBeTrue("the persisted verdict is the OBJECTIVE grade, not run completion");
         row.RunStatus.ShouldBe(nameof(AgentRunStatus.Succeeded));
         row.ReviseRounds.ShouldBe(2, "a solve rate that rode on extra attempts must be visible, not hidden in the headline");
         row.McpFullCatalog.ShouldBeTrue();
         row.ExitReason.ShouldBe("output-flagged");
         row.DurationSeconds.ShouldBe(42.5);
-        row.CostUsd.ShouldNotBeNull();
+        row.CostUsd.ShouldBe(0.125m);
+        row.CostIndeterminate.ShouldBeFalse();
+        row.MaxCostUsd.ShouldBe(5m);
+        row.GitSha.ShouldBe(new string('a', 40));
+
+        using (var duplicate = _fixture.BeginScope())
+        {
+            var duplicateRejected = await Should.ThrowAsync<DbUpdateException>(() => duplicate.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = "sha256/corpus-v3:abc123", Result = result, Selection = selection,
+                ObservationGroupId = groupId, ObservationArm = "candidate", ObservationSession = 2,
+                CodeRevision = new string('a', 40),
+            }, CancellationToken.None));
+            duplicateRejected.InnerException?.Message.ShouldContain("ix_benchmark_result_observation_group", customMessage: "one physical cell cannot be counted twice inside a qualification campaign");
+        }
+
+        using var mutation = _fixture.BeginScope();
+        var mutable = await mutation.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.SingleAsync(value => value.Id == row.Id);
+        mutable.OutcomeDetail = "rewritten-verdict";
+        var rejected = await mutation.Resolve<CodeSpaceDbContext>().SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+        rejected.InnerException?.Message.ShouldContain("append-only");
+    }
+
+    [Fact]
+    public async Task An_infra_cell_is_durable_in_the_same_observation_group_without_a_false_capability_grade()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var groupId = Guid.NewGuid();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IBenchmarkResultStore>().RecordInfraAsync(new BenchmarkInfraObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = "sha256/corpus-v3:infra", ObservationGroupId = groupId,
+                ObservationArm = "control", ObservationSession = 1,
+                Selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "control", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+                CodeRevision = new string('b', 40),
+                Error = new CorpusBenchmarkError { TaskId = "required-witness", Mode = BenchmarkMode.TaskLaunchDeep, Error = "gateway 429" },
+            }, CancellationToken.None);
+
+        using var read = _fixture.BeginScope();
+        var row = await read.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().SingleAsync(value => value.ObservationGroupId == groupId);
+        row.OutcomeState.ShouldBe(nameof(CorpusCellState.InfraUnknown));
+        row.OutcomeDetail.ShouldBe("gateway 429");
+        row.Solved.ShouldBeFalse();
+        row.CostUsd.ShouldBeNull();
+        row.CostIndeterminate.ShouldBeTrue();
+        row.AgentRunId.ShouldBeNull();
+        row.GitSha.ShouldBe(new string('b', 40));
+    }
+
+    [Fact]
+    public async Task Paired_evidence_never_reprices_missing_settled_cost_from_tokens()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var groupId = Guid.NewGuid();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = "sha256/corpus-v3:unknown-cost", ObservationGroupId = groupId,
+                ObservationArm = "candidate", ObservationSession = 0, CodeRevision = new string('c', 40),
+                Selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "claude-sonnet-4-6", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+                Result = new BenchmarkResult
+                {
+                    TaskId = "unknown-cost", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+                    Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false,
+                    ObservedModel = "provider-observed-sonnet", TokenUsage = new AgentTokenUsage { InputTokens = 2000, OutputTokens = 800 },
+                },
+            }, CancellationToken.None);
+
+        using var read = _fixture.BeginScope();
+        var row = await read.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().SingleAsync(value => value.ObservationGroupId == groupId);
+        row.CostUsd.ShouldBeNull("paired qualification must use settled physical spend rather than an after-the-fact estimate");
+        row.CostIndeterminate.ShouldBeTrue();
     }
 
     [Fact]

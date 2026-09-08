@@ -49,4 +49,13 @@ public sealed record BenchmarkTask
 
     /// <summary>Wall-clock cap for the agent run on this task (seconds). Short by default — fixtures are tiny.</summary>
     public int TimeoutSeconds { get; init; } = 120;
+
+    /// <summary>Operator-authored, open stratum label used for sliced qualification reports. The runner never interprets the value or maps it to a model.</summary>
+    public string Stratum { get; init; } = "general";
+
+    /// <summary>Independent sampling unit for clustered statistics. Null/blank means this task's own <see cref="Id"/>; related tasks can name one shared source without hard-coded task families.</summary>
+    public string? IndependenceCluster { get; init; }
+
+    /// <summary>Whether every session and arm for this task must obtain a capability verdict. An infrastructure-unknown cell then blocks qualification instead of being hidden by aggregate health.</summary>
+    public bool RequiresCompleteExecution { get; init; }
 }

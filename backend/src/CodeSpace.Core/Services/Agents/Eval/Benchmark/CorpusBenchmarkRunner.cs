@@ -1,6 +1,9 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Messages.Agents.Benchmark;
 using Microsoft.Extensions.Logging;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
@@ -11,13 +14,13 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// into a per-mode solve-rate via <see cref="BenchmarkScorecard.Compute"/>. Composes the proven instrument — it does
 /// NOT re-implement the run/grade/score; it only owns the cross-corpus loop + the isolated staging lifecycle.
 ///
-/// <para><b>Resilient + honest:</b> each pair runs in its own try/finally so one pair's infra failure (a staging
-/// error, a runner throw) is recorded in <see cref="CorpusBenchmarkRun.Errored"/> and the corpus CONTINUES — a
-/// single flake never aborts the whole benchmark — and the errored pair is EXCLUDED from the scorecard rather than
-/// silently scored as an unsolved task (the same infra-vs-capability honesty the real-model gates enforce). A caller
-/// cancellation propagates (it is not a per-pair infra fault).</para>
+/// <para><b>Resilient + honest:</b> each cell runs in its own try/finally so one execution fault is recorded in
+/// <see cref="CorpusBenchmarkRun.Errored"/> and the corpus CONTINUES. The legacy scorecard reports capability over
+/// completed cells while <see cref="CorpusBenchmarkRun.Cells"/> preserves the fixed manifest denominator; paired
+/// qualification evaluates that fixed denominator and also requires every observation append to succeed. A caller
+/// cancellation and a paired durable-write fault propagate.</para>
 /// </summary>
-public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDependency
+public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpusBenchmarkRunner, IScopedDependency
 {
     private readonly IBenchmarkRunner _runner;
     private readonly IBenchmarkFixtureStager _stager;
@@ -51,17 +54,65 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
             foreach (var mode in task.Modes)
                 await RunPairAsync(task, mode, execution, cancellationToken).ConfigureAwait(false);
 
-        return new CorpusBenchmarkRun
+        return Complete(manifest, results, errored);
+    }
+
+    public async Task<PairedCorpusBenchmarkRun> RunPairedAsync(PairedCorpusBenchmarkRequest request, CancellationToken cancellationToken)
+    {
+        ValidatePairedRequest(request);
+        if (request.FixtureStager is not null && string.IsNullOrWhiteSpace(request.SuiteContentHash))
+            throw new ArgumentException("A corpus fixture override requires its frozen content hash.", nameof(request));
+
+        var manifest = EvalSuite.ManifestFor(request.Tasks, request.SuiteContentHash);
+        var control = Execution(request, manifest.Version, request.Control, "control");
+        var candidate = Execution(request, manifest.Version, request.Candidate, "candidate");
+        var tasks = request.Tasks.ToDictionary(task => task.Id, StringComparer.Ordinal);
+        var cells = manifest.Cells.OrderBy(cell => CellOrder(request.OrderingSeed, cell.TaskId, cell.Mode, request.ObservationSession), StringComparer.Ordinal).ToList();
+
+        for (var index = 0; index < cells.Count; index++)
         {
-            ExecutionPath = ExecutionPathFor(manifest),
-            Results = results,
-            Errored = errored,
-            Scorecard = BenchmarkScorecard.Compute(results),
-            SuiteVersion = manifest.Version,
-            Cells = EvalSuite.Classify(manifest, results, errored),
-            FormatFaults = BenchmarkScorecard.TallyFormatFaults(results),
+            var cell = cells[index];
+            var candidateFirst = (index + request.ObservationSession) % 2 == 0;
+            await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? candidate : control, cancellationToken).ConfigureAwait(false);
+            await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? control : candidate, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new PairedCorpusBenchmarkRun
+        {
+            Control = Complete(manifest, control.Results, control.Errored),
+            Candidate = Complete(manifest, candidate.Results, candidate.Errored),
         };
     }
+
+    private static CorpusExecution Execution(PairedCorpusBenchmarkRequest request, string suiteVersion, BenchmarkAgentSelection selection, string arm) =>
+        new(new CorpusBenchmarkRequest
+        {
+            Tasks = request.Tasks, TeamId = request.TeamId, Selection = selection, FixtureStager = request.FixtureStager,
+            SuiteContentHash = request.SuiteContentHash, ObservationGroupId = request.ObservationGroupId,
+            ObservationArm = arm, ObservationSession = request.ObservationSession, RequireDurableObservation = true, CodeRevision = request.CodeRevision,
+        }, suiteVersion, new List<BenchmarkResult>(), new List<CorpusBenchmarkError>());
+
+    private static string CellOrder(string seed, string taskId, BenchmarkMode mode, int session) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{seed}\u001f{session}\u001f{taskId}\u001f{mode}")));
+
+    private static void ValidatePairedRequest(PairedCorpusBenchmarkRequest request)
+    {
+        if (request.TeamId == Guid.Empty) throw new ArgumentException("A paired benchmark team is required.", nameof(request));
+        if (request.ObservationGroupId == Guid.Empty) throw new ArgumentException("A non-empty observation group is required.", nameof(request));
+        if (request.ObservationSession < 0) throw new ArgumentOutOfRangeException(nameof(request), "ObservationSession cannot be negative.");
+        if (string.IsNullOrWhiteSpace(request.OrderingSeed)) throw new ArgumentException("A pre-registered ordering seed is required.", nameof(request));
+        if (!BenchmarkEvidenceRevision.IsGitObjectId(request.CodeRevision)) throw new ArgumentException("A full Git object id is required for paired evidence.", nameof(request));
+        if (request.Control.ModelCredentialModelId is null || request.Candidate.ModelCredentialModelId is null) throw new ArgumentException("Both paired arms require an exact credential-model row.", nameof(request));
+        if (request.Control.ModelCredentialModelId == request.Candidate.ModelCredentialModelId) throw new ArgumentException("Paired arms require distinct credential-model rows.", nameof(request));
+        if (request.Control.MaxCostUsd is null || request.Control.MaxCostUsd <= 0 || request.Control.MaxCostUsd != request.Candidate.MaxCostUsd) throw new ArgumentException("Both paired arms require the same positive cost ceiling.", nameof(request));
+    }
+
+    private static CorpusBenchmarkRun Complete(EvalSuiteManifest manifest, List<BenchmarkResult> results, List<CorpusBenchmarkError> errored) => new()
+    {
+        ExecutionPath = ExecutionPathFor(manifest), Results = results, Errored = errored,
+        Scorecard = BenchmarkScorecard.Compute(results), SuiteVersion = manifest.Version,
+        Cells = EvalSuite.Classify(manifest, results, errored), FormatFaults = BenchmarkScorecard.TallyFormatFaults(results),
+    };
 
     /// <summary>P19: TaskLaunch evidence only when EVERY cell in the manifest actually enters through the real Launch entry — a suite that mixes a direct-harness mode into even one cell cannot substantiate a product Launch-mode seal, so it stays DirectAgentHarness (the conservative default <see cref="QualificationRunner.Grant"/> already gates Sealed on). Internal so the boundary is unit-pinned directly (InternalsVisibleTo), not only through a full corpus run.</summary>
     internal static BenchmarkExecutionPath ExecutionPathFor(EvalSuiteManifest manifest) =>
@@ -71,7 +122,6 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
 
     /// <summary>Stage → run → grade → PERSIST ONE (task,mode) pair in an isolated workspace; a non-cancellation throw is recorded as an infra error (the pair is excluded from the score), never aborting the corpus. The workspace is always reclaimed.</summary>
     private sealed record CorpusExecution(CorpusBenchmarkRequest Request, string SuiteVersion, List<BenchmarkResult> Results, List<CorpusBenchmarkError> Errored);
-
     private async Task RunPairAsync(BenchmarkTask task, BenchmarkMode mode, CorpusExecution execution, CancellationToken cancellationToken)
     {
         var workspace = Path.Combine(Path.GetTempPath(), "cs-corpus-bench-" + Guid.NewGuid().ToString("N"));
@@ -88,16 +138,22 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
 
             execution.Results.Add(result);
 
-            await PersistAsync(request.TeamId, execution.SuiteVersion, result, request.Selection, cancellationToken).ConfigureAwait(false);
+            await PersistAsync(request, execution.SuiteVersion, result, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (DurableBenchmarkObservationException)
         {
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Benchmark pair {TaskId}/{Mode} could not run (infra fault); recorded as errored + excluded from the score, continuing the corpus", task.Id, mode);
-            execution.Errored.Add(new CorpusBenchmarkError { TaskId = task.Id, Mode = mode, Error = ex.Message });
+            var error = new CorpusBenchmarkError { TaskId = task.Id, Mode = mode, Error = ex.Message };
+            execution.Errored.Add(error);
+            await PersistInfraAsync(execution.Request, execution.SuiteVersion, error, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -111,15 +167,39 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
     /// result joins the in-memory results: the gate's verdict is computed from that list, so a
     /// persistence fault can neither red a passing corpus nor turn a failing cell into an infra error.
     /// </summary>
-    private async Task PersistAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
+    private async Task PersistAsync(CorpusBenchmarkRequest request, string suiteVersion, BenchmarkResult result, CancellationToken cancellationToken)
     {
         try
         {
-            await _results.RecordAsync(teamId, suiteVersion, result, selection, cancellationToken).ConfigureAwait(false);
+            await _results.RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = request.TeamId, SuiteVersion = suiteVersion, Result = result, Selection = request.Selection,
+                ObservationGroupId = request.ObservationGroupId, ObservationArm = request.ObservationArm,
+                ObservationSession = request.ObservationSession, CodeRevision = request.CodeRevision,
+            }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (request.RequireDurableObservation) throw new DurableBenchmarkObservationException($"Durable paired benchmark observation {result.TaskId}/{result.Mode} could not be appended.", ex);
             _logger.LogWarning(ex, "Benchmark cell {TaskId}/{Mode} could not be persisted; the corpus verdict is unaffected (it reads the in-memory results)", result.TaskId, result.Mode);
+        }
+    }
+
+    private async Task PersistInfraAsync(CorpusBenchmarkRequest request, string suiteVersion, CorpusBenchmarkError error, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _results.RecordInfraAsync(new BenchmarkInfraObservationWrite
+            {
+                TeamId = request.TeamId, SuiteVersion = suiteVersion, Error = error, Selection = request.Selection,
+                ObservationGroupId = request.ObservationGroupId, ObservationArm = request.ObservationArm,
+                ObservationSession = request.ObservationSession, CodeRevision = request.CodeRevision,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (request.RequireDurableObservation) throw new DurableBenchmarkObservationException($"Durable paired benchmark infra observation {error.TaskId}/{error.Mode} could not be appended.", ex);
+            _logger.LogWarning(ex, "Benchmark infra cell {TaskId}/{Mode} could not be persisted; the corpus verdict is unaffected", error.TaskId, error.Mode);
         }
     }
 }

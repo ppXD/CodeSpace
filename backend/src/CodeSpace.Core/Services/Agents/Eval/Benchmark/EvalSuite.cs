@@ -21,7 +21,7 @@ public static class EvalSuite
     private const char Rec = (char)0x1E;   // record separator — closes each task record
 
     /// <summary>The version prefix naming the canonicalization algorithm — bumped on ANY canonical-form change (v2: length-prefixed fields kill the field-migration collision the v1 flat join allowed; TimeoutSeconds joined the fields — a timeout change flips TimedOut↔Solved, i.e. it changes the measurement protocol, so it IS suite identity).</summary>
-    public const string VersionAlgorithm = "sha256/corpus-v2";
+    public const string VersionAlgorithm = "sha256/corpus-v3";
 
     /// <summary>The immutable manifest for a corpus: content-derived version + the canonical cell universe (sorted by task id then mode, so authoring order never changes identity). FAIL-LOUD on a duplicate (task, mode) cell — two cells under one identity would alias every id-keyed read (the same strict-identity bar H2 set for plan subtask ids), and <see cref="Classify"/> keys on exactly that identity.</summary>
     public static EvalSuiteManifest ManifestFor(IReadOnlyList<BenchmarkTask> corpus, string? suiteContentHash = null)
@@ -47,6 +47,9 @@ public static class EvalSuite
             AppendList(canonical, task.TestCommand);
             AppendField(canonical, task.Goal);
             AppendField(canonical, task.Description);
+            AppendField(canonical, task.Stratum);
+            AppendField(canonical, task.IndependenceCluster ?? string.Empty);
+            AppendField(canonical, task.RequiresCompleteExecution.ToString());
             AppendList(canonical, task.Modes.OrderBy(m => m).Select(m => m.ToString()));
             canonical.Append(Rec);
         }
@@ -97,10 +100,7 @@ public static class EvalSuite
                     // P0-B2: a REACHED cell whose grade is infra-classed (grader fault, environment — incl. the
                     // mcp-required-no-handshake rule) is a truth hole, not a candidate failure: it leaves the
                     // solve denominator instead of counting Unsolved against the model.
-                    State = result.Grade.EvaluatorIndependence is { } independence && independence != global::CodeSpace.Messages.Review.ReviewModelIndependence.DistinctBackingModel ? CorpusCellState.InfraUnknown
-                        : result.Grade.Passed ? CorpusCellState.Solved
-                        : Agents.AgentAcceptanceContract.IsInfraFailure(result.Grade, workPresent: true) ? CorpusCellState.InfraUnknown
-                        : CorpusCellState.Unsolved,
+                    State = ClassifyResult(result),
                     Detail = result.Grade.Detail,
                 };
 
@@ -112,6 +112,13 @@ public static class EvalSuite
             };
         }).ToList();
     }
+
+    /// <summary>The single-cell truth fold shared by in-memory scoring and durable observations.</summary>
+    public static CorpusCellState ClassifyResult(BenchmarkResult result) =>
+        result.Grade.EvaluatorIndependence is { } independence && independence != global::CodeSpace.Messages.Review.ReviewModelIndependence.DistinctBackingModel ? CorpusCellState.InfraUnknown
+            : result.Grade.Passed ? CorpusCellState.Solved
+            : Agents.AgentAcceptanceContract.IsInfraFailure(result.Grade, workPresent: true) ? CorpusCellState.InfraUnknown
+            : CorpusCellState.Unsolved;
 
     private static void AppendField(StringBuilder builder, string value) =>
         builder.Append(value.Length).Append(':').Append(value).Append(Sep);

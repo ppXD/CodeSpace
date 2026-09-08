@@ -281,6 +281,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     {
         var graded = attempts[^1];
         var result = graded.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
+        var cost = BenchmarkResultCost.Sum(attempts.Select(ParseResult));
 
         return new BenchmarkResult
         {
@@ -293,6 +294,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             McpFullCatalog = mcpFullCatalog,
             FormatFaultRespawns = attempts.Count - 1,
             TokenUsage = SumTokenUsage(attempts),
+            CostUsd = cost.CostUsd,
+            CostIndeterminate = cost.Indeterminate,
             ReviseRounds = result?.ReviseRounds ?? 0,
             ExitReason = result?.ExitReason,
             ObservedModel = ObservedModelOf(attempts, result?.Model),
@@ -313,6 +316,9 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         attempts
             .Select(a => a.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.TokenUsage : null)
             .Aggregate((AgentTokenUsage?)null, AgentRunExecutor.SumTokenUsage);
+
+    private static AgentRunResult? ParseResult(AgentRun attempt) =>
+        attempt.ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options) : null;
 
     /// <summary>The census's harness-reported observed model: <paramref name="gradedModel"/> (the GRADED attempt's own model, already parsed by the caller) when it reported one — that's the tree <see cref="BuildResult"/> judges — else the first EARLIER attempt (a format-fault respawn's first try) that did (mirrors <c>TaskLaunchBenchmarkCellRunner.ObservedModelOf</c>). Null (unknown) when NONE reported one — never backfilled from what was requested.</summary>
     private static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts, string? gradedModel) =>

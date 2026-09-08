@@ -29,25 +29,41 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
     }
 
     public async Task RecordAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
+        => await RecordAsync(new BenchmarkObservationWrite { TeamId = teamId, SuiteVersion = suiteVersion, Result = result, Selection = selection }, cancellationToken).ConfigureAwait(false);
+
+    public async Task RecordAsync(BenchmarkObservationWrite request, CancellationToken cancellationToken)
     {
+        var result = request.Result;
+        var selection = request.Selection;
+        var paired = request.ObservationGroupId is not null;
+        var costIndeterminate = result.CostIndeterminate || paired && result.CostUsd is null;
         var row = new BenchmarkResultRecord
         {
             Id = Guid.NewGuid(),
-            TeamId = teamId,
-            SuiteVersion = suiteVersion,
+            TeamId = request.TeamId,
+            SuiteVersion = request.SuiteVersion,
             TaskId = result.TaskId,
             Mode = result.Mode.ToString(),
             Harness = selection?.Harness,
             Model = selection?.Model,
+            ModelCredentialModelId = selection?.ModelCredentialModelId,
+            ObservedModel = result.ObservedModel,
+            ObservationGroupId = request.ObservationGroupId,
+            ObservationArm = request.ObservationArm,
+            ObservationSession = request.ObservationSession,
+            OutcomeState = EvalSuite.ClassifyResult(result).ToString(),
+            OutcomeDetail = result.Grade.Detail,
             AgentRunId = result.AgentRunId,
             Solved = result.Grade.Passed,
             RunStatus = result.RunStatus.ToString(),
             ReviseRounds = result.ReviseRounds,
             McpFullCatalog = result.McpFullCatalog,
             ExitReason = result.ExitReason,
-            CostUsd = PriceOf(result, selection),
+            CostUsd = costIndeterminate ? null : paired ? result.CostUsd : result.CostUsd ?? PriceOf(result, selection),
+            CostIndeterminate = costIndeterminate,
+            MaxCostUsd = selection?.MaxCostUsd,
             DurationSeconds = result.DurationSeconds,
-            GitSha = Env(GitShaEnvVar),
+            GitSha = request.CodeRevision ?? Env(GitShaEnvVar),
             CiRunId = Env(CiRunIdEnvVar),
         };
 
@@ -59,13 +75,32 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
         }
         catch
         {
-            // The caller (CorpusBenchmarkRunner) SWALLOWS this so a write fault cannot move the corpus verdict —
-            // which means a failed row left Added in this SCOPED context would be re-attempted on the next cell's
-            // SaveChanges and fail it too, turning one lost cell into every later cell in the run. Detach so the
-            // failure stays contained to the cell that caused it.
+            // The legacy corpus path swallows this so a write fault cannot move its in-memory verdict; paired
+            // qualification deliberately propagates it because unauditable evidence cannot qualify. In either
+            // path, a failed row left Added in this SCOPED context would be re-attempted on the next cell's
+            // SaveChanges and fail it too, turning one lost cell into every later cell. Detach so the fault stays
+            // contained to the cell that caused it.
             _db.Entry(row).State = EntityState.Detached;
             throw;
         }
+    }
+
+    public async Task RecordInfraAsync(BenchmarkInfraObservationWrite request, CancellationToken cancellationToken)
+    {
+        var row = new BenchmarkResultRecord
+        {
+            Id = Guid.NewGuid(), TeamId = request.TeamId, SuiteVersion = request.SuiteVersion, TaskId = request.Error.TaskId,
+            Mode = request.Error.Mode.ToString(), Harness = request.Selection?.Harness, Model = request.Selection?.Model,
+            ModelCredentialModelId = request.Selection?.ModelCredentialModelId, ObservationGroupId = request.ObservationGroupId,
+            ObservationArm = request.ObservationArm, ObservationSession = request.ObservationSession,
+            OutcomeState = CorpusCellState.InfraUnknown.ToString(), OutcomeDetail = request.Error.Error,
+            RunStatus = CorpusCellState.InfraUnknown.ToString(), Solved = false, CostIndeterminate = true, MaxCostUsd = request.Selection?.MaxCostUsd,
+            GitSha = request.CodeRevision ?? Env(GitShaEnvVar), CiRunId = Env(CiRunIdEnvVar),
+        };
+
+        _db.BenchmarkResultRecord.Add(row);
+        try { await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false); }
+        catch { _db.Entry(row).State = EntityState.Detached; throw; }
     }
 
     /// <summary>The cell's priced spend — null when the run reported no usage (the deterministic fake CLI emits none) or the model is unknown to the pricer. Fail-open, never a silent $0.</summary>

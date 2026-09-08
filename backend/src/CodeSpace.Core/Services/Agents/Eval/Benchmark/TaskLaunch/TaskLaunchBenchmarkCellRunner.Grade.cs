@@ -92,6 +92,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     {
         var graded = attempts[^1];
         var gradedResult = ParseResult(graded);
+        var cost = BenchmarkResultCost.Sum(attempts.Select(ParseResult), launched.Route.Caps.MaxCostUsd is not null);
 
         return new BenchmarkResult
         {
@@ -104,6 +105,8 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             McpFullCatalog = false,
             FormatFaultRespawns = 0,
             TokenUsage = SumTokenUsage(attempts),
+            CostUsd = cost.CostUsd,
+            CostIndeterminate = cost.Indeterminate,
             ReviseRounds = attempts.Sum(a => ParseResult(a)?.ReviseRounds ?? 0),
             ExitReason = gradedResult?.ExitReason,
             ObservedModel = observedModel,
