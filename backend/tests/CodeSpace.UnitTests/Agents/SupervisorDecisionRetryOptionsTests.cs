@@ -16,6 +16,7 @@ public class SupervisorDecisionRetryOptionsTests
     {
         SupervisorDecisionRetryOptions.MaxAttemptsEnvVar.ShouldBe("CODESPACE_SUPERVISOR_DECISION_MAX_ATTEMPTS");
         SupervisorDecisionRetryOptions.TimeoutSecondsEnvVar.ShouldBe("CODESPACE_SUPERVISOR_DECISION_TIMEOUT_SECONDS");
+        SupervisorDecisionRetryOptions.RateLimitFallbackSecondsEnvVar.ShouldBe("CODESPACE_SUPERVISOR_DECISION_RATE_LIMIT_FALLBACK_SECONDS");
     }
 
     [Fact]
@@ -23,11 +24,13 @@ public class SupervisorDecisionRetryOptionsTests
     {
         using var _ = new EnvScope(SupervisorDecisionRetryOptions.MaxAttemptsEnvVar, null);
         using var __ = new EnvScope(SupervisorDecisionRetryOptions.TimeoutSecondsEnvVar, null);
+        using var ___ = new EnvScope(SupervisorDecisionRetryOptions.RateLimitFallbackSecondsEnvVar, null);
 
         var options = SupervisorDecisionRetryOptions.FromEnvironment();
 
         options.MaxAttempts.ShouldBe(5);
         options.PerCallTimeout.ShouldBe(TimeSpan.FromSeconds(600));
+        options.RateLimitFallbackBackoff.ShouldBe(TimeSpan.FromSeconds(60));
     }
 
     [Fact]
@@ -61,6 +64,18 @@ public class SupervisorDecisionRetryOptionsTests
         using var _ = new EnvScope(SupervisorDecisionRetryOptions.TimeoutSecondsEnvVar, raw);
 
         SupervisorDecisionRetryOptions.FromEnvironment().PerCallTimeout.ShouldBe(TimeSpan.FromSeconds(expectedSeconds));
+    }
+
+    [Theory]
+    [InlineData("90", 90)]
+    [InlineData("0", 1)]
+    [InlineData("9999", 900)]
+    [InlineData("not-a-number", 60)]
+    public void Rate_limit_fallback_seconds_is_read_and_clamped(string raw, int expectedSeconds)
+    {
+        using var _ = new EnvScope(SupervisorDecisionRetryOptions.RateLimitFallbackSecondsEnvVar, raw);
+
+        SupervisorDecisionRetryOptions.FromEnvironment().RateLimitFallbackBackoff.ShouldBe(TimeSpan.FromSeconds(expectedSeconds));
     }
 
     /// <summary>Sets an env var for the scope of one test and restores the prior value on dispose (tests in one class run serially, so no cross-test race).</summary>
