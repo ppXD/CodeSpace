@@ -73,10 +73,12 @@ internal static class SupervisorPlanObservationTestData
         TitleTotalBytes = titleBytes ?? System.Text.Encoding.UTF8.GetByteCount(title),
     };
 
-    internal static SupervisorPlanModelUsageObservationLeaf Usage(string model = "metis-coder-plus", int? modelBytes = null) => new()
+    internal static SupervisorPlanModelUsageObservationLeaf Usage(string model = "metis-coder-plus", int? modelBytes = null, string? requestedModel = null, int? requestedModelBytes = null) => new()
     {
         ModelPrefix = model,
         ModelTotalBytes = modelBytes ?? System.Text.Encoding.UTF8.GetByteCount(model),
+        RequestedModelPrefix = requestedModel,
+        RequestedModelTotalBytes = requestedModel is null ? null : requestedModelBytes ?? System.Text.Encoding.UTF8.GetByteCount(requestedModel),
         InputTokens = 1_000,
         OutputTokens = 200,
     };

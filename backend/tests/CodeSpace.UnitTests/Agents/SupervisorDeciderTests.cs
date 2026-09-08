@@ -1899,6 +1899,10 @@ public class SupervisorDeciderTests
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
         decision.IsTerminal.ShouldBeFalse();
+        decision.Usage.ShouldNotBeNull();
+        decision.Usage!.RequestedModel.ShouldBe(ThrottledBrainWithSubstitute.BrainModel);
+        decision.Usage.Model.ShouldBe(ThrottledBrainWithSubstitute.SubstituteModel);
+        decision.Usage.FailedOver.ShouldHaveSingleItem().ShouldContain(ThrottledBrainWithSubstitute.BrainModel);
     }
 
     [Fact]

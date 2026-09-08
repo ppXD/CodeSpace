@@ -576,6 +576,7 @@ export interface JournalObservationCoverage {
 export interface JournalModelCall {
   purpose: string;
   model?: string | null;
+  requestedModel?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
   tokens?: number | null;

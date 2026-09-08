@@ -16,6 +16,9 @@ public sealed record JournalModelCall
     /// <summary>The model the call ran on (e.g. <c>claude-opus-4-8</c>). Null when the record didn't name one.</summary>
     public string? Model { get; init; }
 
+    /// <summary>The model selected before failover. Null on legacy rows and calls whose selection identity was not captured.</summary>
+    public string? RequestedModel { get; init; }
+
     /// <summary>Prompt (input) tokens the call consumed. Null when the call reported no usage.</summary>
     public int? InputTokens { get; init; }
 

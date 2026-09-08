@@ -301,7 +301,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // what authored the decision (e.g. the "via <model> · N tokens" line on a plan beat).
         var decision = SupervisorDecisionProjector.Project(model) with
         {
-            Usage = new SupervisorModelUsage { Model = completion.Model, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+            Usage = UsageOf(pick, completion),
         };
 
         // A STRUCTURALLY invalid plan (SupervisorPlanValidator: a dangling DependsOn reference or a cycle) would
@@ -355,11 +355,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         var retried = SupervisorDecisionProjector.Project(model) with
         {
-            Usage = new SupervisorModelUsage { Model = completion.Model, InputTokens = completion.Usage.InputTokens, OutputTokens = completion.Usage.OutputTokens },
+            Usage = UsageOf(pick, completion),
         };
 
         return SupervisorPlanValidator.Validate(retried) is null ? retried : null;
     }
+
+    /// <summary>The selected and observed model identities for one decision call. The trail is kept as ordered evidence; requested→observed remains available even when a provider returned an alias with no hop.</summary>
+    private static SupervisorModelUsage UsageOf(ModelPoolPick pick, StructuredLLMCompletion completion) => new()
+    {
+        RequestedModel = pick.ModelId,
+        Model = completion.Model,
+        FailedOver = completion.FailedOver,
+        InputTokens = completion.Usage.InputTokens,
+        OutputTokens = completion.Usage.OutputTokens,
+    };
 
     /// <summary>
     /// One bounded REPAIR round-trip after a bind failure: the model receives its OWN schema-valid-but-unbindable

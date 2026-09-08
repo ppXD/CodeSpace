@@ -45,6 +45,8 @@ public sealed record SupervisorPlanModelUsageObservationLeaf
 {
     public required string ModelPrefix { get; init; }
     public required int ModelTotalBytes { get; init; }
+    public string? RequestedModelPrefix { get; init; }
+    public int? RequestedModelTotalBytes { get; init; }
     public int? InputTokens { get; init; }
     public int? OutputTokens { get; init; }
 }

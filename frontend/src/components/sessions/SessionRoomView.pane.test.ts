@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { JournalObservationCoverage, JournalStep, RoomBlock } from "@/api/sessions";
 import type { WorkflowRunStatus } from "@/api/workflows";
-import { journalObservationCoverageText, journalStepNodeId, type PaneBinding, resolveBinding, resolvePaneFromTurn, shouldShowJumpToLatest } from "./SessionRoomView";
+import { journalModelRoute, journalObservationCoverageText, journalStepNodeId, type PaneBinding, resolveBinding, resolvePaneFromTurn, shouldShowJumpToLatest } from "./SessionRoomView";
 
 /**
  * The companion pane's split-state decision, extracted as a pure helper so it's testable without rendering the
@@ -20,6 +20,18 @@ const blocks: RoomBlock[] = [
   { type: "user_message", id: "u5", seq: 2, text: "another thing" },
   turn("a5", 3, 5, "run-5"),
 ];
+
+describe("journalModelRoute", () => {
+  it("shows the requested and observed model when a failover answered", () => {
+    expect(journalModelRoute({ requestedModel: "claude-opus-4-6", model: "gpt-6" })).toBe("claude-opus-4-6 → gpt-6");
+  });
+
+  it("does not invent a hop for a first-choice answer or legacy row", () => {
+    expect(journalModelRoute({ requestedModel: "gpt-6", model: "gpt-6" })).toBe("gpt-6");
+    expect(journalModelRoute({ model: "gpt-6" })).toBe("gpt-6");
+    expect(journalModelRoute({})).toBe("model");
+  });
+});
 
 describe("resolvePaneFromTurn", () => {
   it("binds a present turn to its run (summon / URL-restore)", () => {

@@ -79,6 +79,7 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
             .ShouldBe(new[] { ("s1", "Research"), ("s2", "Write") }, "AgentJson case-insensitive payload names stay readable");
         item.ModelUsageState.ShouldBe(SupervisorPlanObservationLeafState.Exact);
         item.ModelUsage.ShouldNotBeNull();
+        item.ModelUsage!.RequestedModelPrefix.ShouldBe("claude-opus-4-6");
         item.ModelUsage!.ModelPrefix.ShouldBe("metis-coder-plus");
         item.ModelUsage.InputTokens.ShouldBe(1_000);
         item.ModelUsage.OutputTokens.ShouldBe(200);
@@ -136,6 +137,8 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
         capped.ModelUsageState.ShouldBe(SupervisorPlanObservationLeafState.Truncated);
         capped.ModelUsage!.ModelPrefix.Length.ShouldBe(SupervisorPlanObservationLeafLimits.MaximumModelChars);
         capped.ModelUsage.ModelTotalBytes.ShouldBeGreaterThan(capped.ModelUsage.ModelPrefix.Length);
+        capped.ModelUsage.RequestedModelPrefix!.Length.ShouldBe(SupervisorPlanObservationLeafLimits.MaximumModelChars);
+        capped.ModelUsage.RequestedModelTotalBytes!.Value.ShouldBeGreaterThan(capped.ModelUsage.RequestedModelPrefix.Length);
 
         var invalid = page.Items.Single(item => item.Metadata.DecisionId == invalidId);
         invalid.SubtasksState.ShouldBe(SupervisorPlanObservationLeafState.Invalid);
@@ -229,7 +232,7 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
                     jsonb_build_object('id', 's2', 'title', 'Write', 'instruction', 'Write report')),
                 'baggage', repeat('PAYLOAD-SENTINEL', 140000)),
             jsonb_build_object(
-                'modelUsage', jsonb_build_object('model', 'metis-coder-plus', 'inputTokens', 1000, 'outputTokens', 200),
+                'modelUsage', jsonb_build_object('requestedModel', 'claude-opus-4-6', 'model', 'metis-coder-plus', 'inputTokens', 1000, 'outputTokens', 200),
                 'baggage', repeat('OUTCOME-SENTINEL', 130000)),
             0, @actor, @actor, -1, -1)
             """;
@@ -251,7 +254,7 @@ public sealed class SupervisorPlanObservationLeafReaderFlowTests
                     'title', CASE WHEN value = 1 THEN repeat('界', 500) ELSE 'Task ' || value::text END,
                     'instruction', 'Do it') ORDER BY value)
                 FROM generate_series(1, 25) AS value)),
-            jsonb_build_object('modelUsage', jsonb_build_object('model', repeat('m', 300), 'inputTokens', 10, 'outputTokens', 5)),
+            jsonb_build_object('modelUsage', jsonb_build_object('requestedModel', repeat('r', 300), 'model', repeat('m', 300), 'inputTokens', 10, 'outputTokens', 5)),
             0, @actor, @actor, -1, -1)
             """;
         await command.ExecuteNonQueryAsync();

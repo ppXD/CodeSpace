@@ -24,11 +24,20 @@ public class SupervisorPlanModelCallFactsSourceTests
 
         SupervisorOutcome.WriteModelUsage(outcome, null).ShouldBe(outcome, "no usage → byte-identical (never adjacent to the hashed payload, but keep the outcome clean)");
 
-        var written = SupervisorOutcome.WriteModelUsage(outcome, new SupervisorModelUsage { Model = "metis-coder-plus", InputTokens = 16902, OutputTokens = 1062 });
+        var written = SupervisorOutcome.WriteModelUsage(outcome, new SupervisorModelUsage
+        {
+            RequestedModel = "claude-opus-4-6",
+            Model = "metis-coder-plus",
+            FailedOver = ["Anthropic:claude-opus-4-6 — RateLimited 429"],
+            InputTokens = 16902,
+            OutputTokens = 1062,
+        });
         var read = SupervisorOutcome.ReadModelUsage(written);
 
         read.ShouldNotBeNull();
+        read!.RequestedModel.ShouldBe("claude-opus-4-6");
         read!.Model.ShouldBe("metis-coder-plus");
+        read.FailedOver.ShouldBe(["Anthropic:claude-opus-4-6 — RateLimited 429"]);
         read.InputTokens.ShouldBe(16902);
         read.OutputTokens.ShouldBe(1062);
         written.ShouldContain("\"count\"", customMessage: "the original outcome fields survive alongside modelUsage");
@@ -49,7 +58,7 @@ public class SupervisorPlanModelCallFactsSourceTests
         var teamId = Guid.NewGuid();
         var log = new FakeSupervisorDecisionLog();
 
-        var outcome = SupervisorOutcome.WriteModelUsage("{\"count\":4}", new SupervisorModelUsage { Model = "metis-coder-plus", InputTokens = 1000, OutputTokens = 200 });
+        var outcome = SupervisorOutcome.WriteModelUsage("{\"count\":4}", new SupervisorModelUsage { RequestedModel = "claude-opus-4-6", Model = "metis-coder-plus", FailedOver = ["Anthropic:claude-opus-4-6 — RateLimited 429"], InputTokens = 1000, OutputTokens = 200 });
         log.SeedTerminal(runId, teamId, SupervisorDecisionKinds.Plan, "{}", outcome);
 
         var facts = await new SupervisorPlanModelCallFactsSource(log).GatherAsync(runId, teamId, CancellationToken.None);
@@ -58,6 +67,7 @@ public class SupervisorPlanModelCallFactsSourceTests
         var call = facts[SupervisorDecisionTimelineMap.EventId(decision)].ModelCall;
 
         call.ShouldNotBeNull();
+        call!.RequestedModel.ShouldBe("claude-opus-4-6");
         call!.Model.ShouldBe("metis-coder-plus");
         call.Tokens.ShouldBe(1200, "input + output");
     }

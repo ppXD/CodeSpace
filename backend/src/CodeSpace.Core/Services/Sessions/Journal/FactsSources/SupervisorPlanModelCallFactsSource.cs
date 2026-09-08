@@ -70,6 +70,7 @@ public sealed class SupervisorPlanModelCallFactsSource : IJournalFactsSource
         {
             Purpose = "supervisor.plan",
             Model = usage.ModelPrefix,
+            RequestedModel = usage.RequestedModelPrefix,
             InputTokens = usage.InputTokens,
             OutputTokens = usage.OutputTokens,
             Tokens = tokens,
@@ -81,7 +82,8 @@ public sealed class SupervisorPlanModelCallFactsSource : IJournalFactsSource
 
     private static bool IsExact(SupervisorPlanModelUsageObservationLeaf? usage) => usage is not null
         && !string.IsNullOrWhiteSpace(usage.ModelPrefix)
-        && usage.ModelTotalBytes == Encoding.UTF8.GetByteCount(usage.ModelPrefix);
+        && usage.ModelTotalBytes == Encoding.UTF8.GetByteCount(usage.ModelPrefix)
+        && (usage.RequestedModelPrefix is null || usage.RequestedModelTotalBytes == Encoding.UTF8.GetByteCount(usage.RequestedModelPrefix));
 
     private static bool IsTruncated(SupervisorPlanModelUsageObservationLeaf? usage) => usage is not null
         && !string.IsNullOrWhiteSpace(usage.ModelPrefix)
