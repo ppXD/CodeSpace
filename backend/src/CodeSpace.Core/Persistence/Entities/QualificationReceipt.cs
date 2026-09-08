@@ -35,6 +35,21 @@ public class QualificationReceipt : IEntity<Guid>, IAuditable
     /// <summary>The measured numbers backing the grant (jsonb) — solve rate with bounds, cost/solve, latency, human-intervention rate. Null when the mint recorded none.</summary>
     public string? MetricsJson { get; set; }
 
+    /// <summary>The model-evidence contract that interpreted this immutable round. Null on legacy receipts.</summary>
+    public string? ModelEvidenceVersion { get; set; }
+
+    /// <summary>The selected credentialed-model row. A soft historical reference: deleting or changing the current pool must not erase old evidence.</summary>
+    public Guid? CandidateModelRowId { get; set; }
+
+    /// <summary>The single provider-reported identity observed across all capability-verdict cells. Null unless attribution is <see cref="ModelQualificationAttribution.Bound"/>.</summary>
+    public string? ObservedModel { get; set; }
+
+    public ModelQualificationAttribution ModelAttribution { get; set; } = ModelQualificationAttribution.LegacyUnknown;
+    public int? ModelSampleSize { get; set; }
+    public int? ModelObservedCellCount { get; set; }
+    public double? ModelSolveRateLowerBound { get; set; }
+    public double? ModelEvaluatorHealth { get; set; }
+
     public DateTimeOffset EffectiveFrom { get; set; }
 
     /// <summary>Hard validity horizon — a claim does not outlive its window; re-qualification mints a NEW receipt.</summary>

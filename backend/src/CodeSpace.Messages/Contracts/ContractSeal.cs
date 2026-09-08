@@ -16,6 +16,18 @@ public sealed record VerifierBundle
 
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>The selected credentialed-model row whose requested alias and credential were validated before the qualification round.</summary>
+    public Guid? ModelCredentialModelId { get; init; }
+
+    /// <summary>The single provider-reported backing identity observed across all capability-verdict cells. Null when attribution was not safe.</summary>
+    public string? ObservedModel { get; init; }
+
+    /// <summary>Why this round is or is not safely attributable to <see cref="ModelCredentialModelId"/>.</summary>
+    public ModelQualificationAttribution? ModelAttribution { get; init; }
+
+    /// <summary>The versioned attribution/statistics contract. Null on receipts minted before model evidence existed.</summary>
+    public string? ModelEvidenceVersion { get; init; }
+
     /// <summary>The production boundary actually exercised. Null means a legacy receipt whose path was not recorded and therefore must not be newly treated as Launch evidence.</summary>
     public BenchmarkExecutionPath? ExecutionPath { get; init; }
 }

@@ -22,13 +22,14 @@ public class RunQualificationRoundHandlerTests
         var runner = new CapturingRunner();
         var teamId = Guid.NewGuid();
         var credentialId = Guid.NewGuid();
+        var modelRowId = Guid.NewGuid();
         var handler = new RunQualificationRoundCommandHandler(runner, new FixedTeam(teamId));
 
         var response = await handler.Handle(new RunQualificationRoundCommand
         {
             Mode = "supervisor", CapabilityKey = "git-branch",
             MinSolveRateLowerBound = 0.83, MinEvaluatorHealth = 0.95, ValidityDays = 14,
-            Harness = "claude-code", Model = "m-1", ModelCredentialId = credentialId,
+            Harness = "claude-code", Model = "m-1", ModelCredentialId = credentialId, ModelCredentialModelId = modelRowId,
         }, CancellationToken.None);
 
         runner.Spec!.MinSolveRateLowerBound.ShouldBe(0.83, "the claim bar is the OPERATOR'S, threaded verbatim — softening it here would launder the seal");
@@ -37,9 +38,11 @@ public class RunQualificationRoundHandlerTests
         runner.TeamId.ShouldBe(teamId, "the paying team comes from ICurrentTeam, never the wire");
         runner.Selection!.Harness.ShouldBe("claude-code");
         runner.Selection.ModelCredentialId.ShouldBe(credentialId);
+        runner.Selection.ModelCredentialModelId.ShouldBe(modelRowId);
         response.Granted.ShouldBe(PerformanceQualification.Sealed);
         response.ExecutionPath.ShouldBe(BenchmarkExecutionPath.TaskLaunch);
         response.ReceiptId.ShouldBe(runner.ReceiptId);
+        response.ModelEvidence!.ModelCredentialModelId.ShouldBe(modelRowId);
     }
 
     private sealed class CapturingRunner : IQualificationRunner
@@ -49,7 +52,10 @@ public class RunQualificationRoundHandlerTests
         public Task<QualificationOutcome> QualifyAsync(string mode, string capabilityKey, QualificationSpec spec, Guid teamId, BenchmarkAgentSelection selection, CancellationToken cancellationToken)
         {
             Spec = spec; Selection = selection; TeamId = teamId;
-            return Task.FromResult(new QualificationOutcome(new CorpusCellScore { Solved = 19, Unsolved = 1, Abstained = 0, InfraUnknown = 0 }, 0.75, PerformanceQualification.Sealed, ReceiptId, "sha256:x", new FormatFaultTally(), BenchmarkExecutionPath.TaskLaunch));
+            return Task.FromResult(new QualificationOutcome(new CorpusCellScore { Solved = 19, Unsolved = 1, Abstained = 0, InfraUnknown = 0 }, 0.75, PerformanceQualification.Sealed, ReceiptId, "sha256:x", new FormatFaultTally(), BenchmarkExecutionPath.TaskLaunch)
+            {
+                ModelEvidence = new ModelQualificationEvidence { ModelCredentialModelId = selection.ModelCredentialModelId, Attribution = ModelQualificationAttribution.Bound },
+            });
         }
     }
 
