@@ -6,11 +6,12 @@ import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ModelCredentialModelsModal } from "./ModelCredentialModelsModal";
 
 const mocks = vi.hoisted(() => ({
-  models: [] as { id: string; modelId: string; displayName?: string | null; enabled: boolean; isDefault?: boolean; inputUsdPerMillion?: number | null; outputUsdPerMillion?: number | null }[],
+  models: [] as { id: string; modelId: string; displayName?: string | null; enabled: boolean; isDefault?: boolean; inputUsdPerMillion?: number | null; outputUsdPerMillion?: number | null; contextWindowTokens?: number | null }[],
   saveMutate: vi.fn(),
   refreshMutate: vi.fn(),
   setDefaultMutate: vi.fn(),
   setPriceMutate: vi.fn(),
+  setContextWindowMutate: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-model-credentials", async () => {
@@ -22,11 +23,14 @@ vi.mock("@/hooks/use-model-credentials", async () => {
     parsePrice: actual.parsePrice,
     priceFieldIssue: actual.priceFieldIssue,
     completePrice: actual.completePrice,
+    parseContextWindow: actual.parseContextWindow,
+    contextWindowFieldIssue: actual.contextWindowFieldIssue,
     useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
     useRefreshCredentialedModels: () => ({ mutate: mocks.refreshMutate, isPending: false }),
     useSaveCredentialedModels: () => ({ mutate: mocks.saveMutate, isPending: false }),
     useSetDefaultCredentialedModel: () => ({ mutate: mocks.setDefaultMutate, isPending: false }),
     useSetCredentialedModelPrice: () => ({ mutate: mocks.setPriceMutate, isPending: false }),
+    useSetCredentialedModelContextWindow: () => ({ mutate: mocks.setContextWindowMutate, isPending: false }),
   };
 });
 
@@ -48,6 +52,7 @@ describe("ModelCredentialModelsModal", () => {
     mocks.refreshMutate.mockReset();
     mocks.setDefaultMutate.mockReset();
     mocks.setPriceMutate.mockReset();
+    mocks.setContextWindowMutate.mockReset();
   });
 
   it("marks a model as the default when its star is clicked", () => {
@@ -88,7 +93,7 @@ describe("ModelCredentialModelsModal", () => {
     const [arg] = mocks.saveMutate.mock.calls[0];
     expect(arg.original).toEqual(mocks.models);
     expect(arg.rows).toEqual([
-      { id: "m1", modelId: "claude-sonnet-4-5", displayName: "", isDefault: undefined, inputUsdPerMillion: "", outputUsdPerMillion: "" },
+      { id: "m1", modelId: "claude-sonnet-4-5", displayName: "", isDefault: undefined, inputUsdPerMillion: "", outputUsdPerMillion: "", contextWindowTokens: "" },
       { modelId: "claude-opus-4-8", displayName: "" },
     ]);
   });
@@ -110,6 +115,18 @@ describe("ModelCredentialModelsModal", () => {
 
     expect(screen.getByPlaceholderText("$/M in")).toHaveValue("2");
     expect(screen.getByPlaceholderText("$/M out")).toHaveValue("10");
+  });
+
+  it("loads and commits the exact model rows context capacity on blur", () => {
+    mocks.models = [{ id: "m1", modelId: "opaque-house-model", enabled: true, contextWindowTokens: 131072 }];
+    renderModal();
+
+    const field = screen.getByPlaceholderText("Context tokens");
+    expect(field).toHaveValue("131072");
+    fireEvent.change(field, { target: { value: "262144" } });
+    fireEvent.blur(field);
+
+    expect(mocks.setContextWindowMutate).toHaveBeenCalledWith({ modelRowId: "m1", contextWindowTokens: 262144 }, expect.anything());
   });
 
   it("hints that a model with neither price set is unpriced", () => {

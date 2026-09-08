@@ -38,4 +38,7 @@ public sealed record CredentialedModelSummary
 
     /// <summary>D1 — USD per 1,000,000 OUTPUT tokens. Null = unpriced (see <see cref="InputUsdPerMillion"/>). BOTH must be set for the row to price a call.</summary>
     public decimal? OutputUsdPerMillion { get; init; }
+
+    /// <summary>The operator-declared total context capacity for this exact endpoint. Null = unknown.</summary>
+    public int? ContextWindowTokens { get; init; }
 }

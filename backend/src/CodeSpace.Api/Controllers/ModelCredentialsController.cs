@@ -83,6 +83,13 @@ public class ModelCredentialsController : ControllerBase
         return Ok(new { id });
     }
 
+    [HttpPut("{credentialId:guid}/models/{modelRowId:guid}/context-window")]
+    public async Task<IActionResult> SetModelContextWindow([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, [FromBody] SetCredentialedModelContextWindowCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command with { ModelCredentialId = credentialId, ModelRowId = modelRowId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
+
     [HttpPost("{credentialId:guid}/models/{modelRowId:guid}/default")]
     public async Task<IActionResult> SetDefaultModel([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, CancellationToken cancellationToken)
     {

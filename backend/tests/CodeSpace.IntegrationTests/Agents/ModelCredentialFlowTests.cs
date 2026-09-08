@@ -149,6 +149,38 @@ public class ModelCredentialFlowTests
     }
 
     [Fact]
+    public async Task A_manual_models_context_capacity_round_trips_without_model_name_inference()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var credId = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Custom", DisplayName = "Opaque gateway", ApiKey = "sk" });
+
+        var rowId = await SendAsync(userId, teamId, new AddCredentialedModelCommand
+        {
+            ModelCredentialId = credId,
+            ModelId = "house-alias-with-no-family-prefix",
+            ContextWindowTokens = 131_072,
+        });
+
+        var model = (await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId })).ShouldHaveSingleItem();
+        model.ContextWindowTokens.ShouldBe(131_072);
+
+        await SendAsync(userId, teamId, new SetCredentialedModelContextWindowCommand { ModelCredentialId = credId, ModelRowId = rowId, ContextWindowTokens = 262_144 });
+        (await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId })).ShouldHaveSingleItem().ContextWindowTokens.ShouldBe(262_144);
+
+        await SendAsync(userId, teamId, new SetCredentialedModelContextWindowCommand { ModelCredentialId = credId, ModelRowId = rowId, ContextWindowTokens = null });
+        (await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId })).ShouldHaveSingleItem().ContextWindowTokens.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_non_positive_context_capacity_is_rejected_before_persistence()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var credId = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Custom", DisplayName = "Gateway", ApiKey = "sk" });
+
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "m", ContextWindowTokens = 0 }));
+    }
+
+    [Fact]
     public async Task Setting_a_disabled_model_as_default_is_rejected()
     {
         var (userId, teamId) = await SeedTeamAsync();

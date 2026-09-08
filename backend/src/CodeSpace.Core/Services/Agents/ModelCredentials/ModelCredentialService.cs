@@ -113,11 +113,12 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         return rows.Select(ToModelSummary).ToList();
     }
 
-    public async Task<Guid> AddModelAsync(Guid credentialId, string modelId, string? displayName, ModelPrice? price, CancellationToken cancellationToken)
+    public async Task<Guid> AddModelAsync(Guid credentialId, CredentialedModelConfiguration model, CancellationToken cancellationToken)
     {
-        var normalized = (modelId ?? "").Trim();
+        var normalized = (model.ModelId ?? "").Trim();
 
-        if (normalized.Length == 0) throw new ArgumentException("A model id is required.", nameof(modelId));
+        if (normalized.Length == 0) throw new ArgumentException("A model id is required.", nameof(model));
+        if (model.ContextWindowTokens is <= 0) throw new ArgumentOutOfRangeException(nameof(model), "Context window tokens must be positive when specified.");
 
         await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
 
@@ -129,10 +130,11 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
             Id = Guid.NewGuid(),
             ModelCredentialId = credentialId,
             ModelId = normalized,
-            DisplayName = NullIfBlank(displayName),
+            DisplayName = NullIfBlank(model.DisplayName),
             Source = ModelSource.Manual,
-            InputUsdPerMillion = price?.InputPerMillionUsd,
-            OutputUsdPerMillion = price?.OutputPerMillionUsd,
+            InputUsdPerMillion = model.Price?.InputPerMillionUsd,
+            OutputUsdPerMillion = model.Price?.OutputPerMillionUsd,
+            ContextWindowTokens = model.ContextWindowTokens,
         };
 
         await _db.ModelCredentialModel.AddAsync(row, cancellationToken).ConfigureAwait(false);
@@ -203,6 +205,20 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
+        return row.Id;
+    }
+
+    public async Task<Guid> SetModelContextWindowAsync(Guid credentialId, Guid modelRowId, int? contextWindowTokens, CancellationToken cancellationToken)
+    {
+        if (contextWindowTokens is <= 0) throw new ArgumentOutOfRangeException(nameof(contextWindowTokens), "Context window tokens must be positive when specified.");
+
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);
+
+        var row = await _db.ModelCredentialModel.FirstOrDefaultAsync(m => m.Id == modelRowId && m.ModelCredentialId == credentialId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Model {modelRowId} not found on credential {credentialId}.");
+
+        row.ContextWindowTokens = contextWindowTokens;
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return row.Id;
     }
 
@@ -290,6 +306,7 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         Available = m.Available,
         InputUsdPerMillion = m.InputUsdPerMillion,
         OutputUsdPerMillion = m.OutputUsdPerMillion,
+        ContextWindowTokens = m.ContextWindowTokens,
     };
 
     private ModelCredentialSummary ToSummary(ModelCredential c)

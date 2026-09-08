@@ -576,18 +576,36 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         """).RootElement;
 
     /// <summary>
-    /// The primary brain call with the P1.2 AUTO-COMPACT safety net: on the FIRST ContextLengthExceeded the decider
-    /// folds the tape's oldest decisions into a persisted rolling digest (one bounded summarizer call on the same
-    /// pinned brain row), rebuilds the prompt as [digest + recent tail] and retries the SAME decision ONCE — a long
-    /// run's growing tape compacts instead of dying. A second overflow (or a tape too small to fold) propagates to
-    /// the existing clean-stop path; an infra fault during the summarizer propagates too (the node's infra park owns
-    /// it). Later turns load the digest at rehydrate, so the prompt STAYS compacted without re-hitting the window.
+    /// The primary brain call with the P1.2 AUTO-COMPACT safety net. When the selected credentialed-model row declares
+    /// a context capacity, a provider-neutral preflight folds the tape before the request approaches that capacity.
+    /// Unknown capacity preserves the provider-authoritative path: on the FIRST ContextLengthExceeded the decider folds
+    /// the tape's oldest decisions into a persisted rolling digest (one bounded summarizer call on the same pinned brain
+    /// row), rebuilds the prompt as [digest + recent tail] and retries the SAME decision ONCE. A second overflow (or a
+    /// tape too small to fold) propagates to the existing clean-stop path; an infra fault during the summarizer propagates
+    /// too (the node's infra park owns it). Later turns load the digest at rehydrate, so the prompt STAYS compacted.
     /// </summary>
     private async Task<StructuredLLMCompletion> CompleteWithCompactionAsync(IStructuredLLMClient structured, ModelPoolPick pick, SupervisorTurnContext context, string catalog, CancellationToken cancellationToken)
     {
+        var request = BuildRequest(context, pick, catalog);
+
+        if (LlmContextWindowBudget.RequiresCompaction(request, pick.ContextWindowTokens))
+        {
+            _logger.LogInformation("Supervisor context is nearing the selected model row's declared window; compacting before the provider call (model={Model}, contextWindowTokens={ContextWindowTokens}, estimatedInputTokens={EstimatedInputTokens}, maxOutputTokens={MaxOutputTokens})", pick.ModelId, pick.ContextWindowTokens, LlmContextWindowBudget.EstimateInputTokens(request), request.MaxOutputTokens);
+
+            if (await TryCompactTapeAsync(structured, pick, context, cancellationToken).ConfigureAwait(false) is { } proactive)
+            {
+                context = proactive;
+                request = BuildRequest(context, pick, catalog);
+            }
+            else
+            {
+                _logger.LogWarning("Supervisor context preflight found a tight declared model window but the decision tape had no useful fold available; preserving the provider-authoritative fallback (model={Model}, contextWindowTokens={ContextWindowTokens})", pick.ModelId, pick.ContextWindowTokens);
+            }
+        }
+
         try
         {
-            return await structured.CompleteStructuredAsync(BuildRequest(context, pick, catalog), cancellationToken).ConfigureAwait(false);
+            return await structured.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
         }
         catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.ContextLengthExceeded)
         {

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { MAX_PRICE_PER_MILLION_USD, modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type ModelPriceInput, type UpdateModelCredentialInput } from "@/api/modelCredentials";
+import { MAX_CONTEXT_WINDOW_TOKENS, MAX_PRICE_PER_MILLION_USD, modelCredentialsApi, type AddCredentialedModelInput, type AddModelCredentialInput, type CredentialedModelSummary, type ModelPriceInput, type UpdateModelCredentialInput } from "@/api/modelCredentials";
 
 const MODEL_CREDENTIALS_KEY = ["model-credentials"] as const;
 
@@ -116,8 +116,17 @@ export function useSetCredentialedModelPrice(credentialId: string) {
   });
 }
 
+export function useSetCredentialedModelContextWindow(credentialId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ modelRowId, contextWindowTokens }: { modelRowId: string; contextWindowTokens: number | null }) =>
+      modelCredentialsApi.setModelContextWindow(credentialId, modelRowId, contextWindowTokens),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["credentialed-models"] }),
+  });
+}
+
 /** A row in the model editor — `id` present means it already exists on the credential. */
-export interface EditableModelRow { id?: string; modelId: string; displayName: string; inputUsdPerMillion?: string; outputUsdPerMillion?: string; }
+export interface EditableModelRow { id?: string; modelId: string; displayName: string; inputUsdPerMillion?: string; outputUsdPerMillion?: string; contextWindowTokens?: string; }
 
 /**
  * Reconcile an edited set of model rows against the credential's current models. There is no update
@@ -145,10 +154,11 @@ export function useSaveCredentialedModels(credentialId: string) {
         const price = completePrice(r);
 
         const orig = r.id ? original.find(o => o.id === r.id) : undefined;
-        if (!orig) { toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price }); continue; }
+        const contextWindowTokens = parseContextWindow(r.contextWindowTokens);
+        if (!orig) { toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price, contextWindowTokens }); continue; }
         if (orig.modelId !== modelId || (orig.displayName ?? "") !== r.displayName.trim()) {
           toRemove.push(orig);
-          toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price });
+          toAdd.push({ modelId, displayName: r.displayName.trim() || null, ...price, contextWindowTokens });
         }
       }
 
@@ -203,6 +213,21 @@ export function parsePrice(raw: string | undefined): number | null {
 
   const value = Number(trimmed);
   return Number.isFinite(value) && value >= 0 && value <= MAX_PRICE_PER_MILLION_USD ? value : null;
+}
+
+export function contextWindowFieldIssue(raw: string | undefined): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+
+  const value = Number(trimmed);
+  if (!Number.isInteger(value)) return "Context window must be a whole number of tokens.";
+  if (value <= 0) return "Context window must be positive.";
+  if (value > MAX_CONTEXT_WINDOW_TOKENS) return "Context window is too large.";
+  return null;
+}
+
+export function parseContextWindow(raw: string | undefined): number | null {
+  return contextWindowFieldIssue(raw) === null && (raw ?? "").trim() !== "" ? Number(raw) : null;
 }
 
 /** Add input plus an optional set of models to seed onto the new credential in one user action. */
