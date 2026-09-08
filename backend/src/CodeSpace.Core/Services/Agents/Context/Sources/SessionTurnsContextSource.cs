@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace CodeSpace.Core.Services.Agents.Context.Sources;
 
@@ -36,7 +37,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     private readonly CodeSpaceDbContext _db;
     private readonly IPublishManifestStore _manifests;
 
-    /// <summary>Cap the rows the DB query returns — a thread longer than this carries its older turns in the rolling summary, or is reached by an exact <see cref="AgentContextQuery.Query"/> match, not by unbounded scanning here (pinned by a test).</summary>
+    /// <summary>Cap each DB page. Older rows remain reachable through the source-owned keyset cursor; an exact <see cref="AgentContextQuery.Query"/> is applied before this bound (pinned by tests).</summary>
     internal const int MaxTurnsScanned = 50;
 
     /// <summary>Total-character budget for the rendered output, AND the per-leaf DISPLAY clip applied inside the SQL query's SELECT list — newest turns are kept first; older ones beyond it are noted, not silently dropped (pinned by a test). The query MATCH (the WHERE clause) runs against each leaf's full, unclipped value, so a match past this display clip is still found.</summary>
@@ -62,6 +63,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         if (query.SessionId is not { } sessionId) return AgentContextResult.Empty;
 
         var hasQuery = !string.IsNullOrWhiteSpace(query.Query);
+        var cursor = SessionTurnsContextCursor.Decode(query.Cursor, query.TeamId, sessionId, query.Query);
 
         var rows = await _db.Database.SqlQueryRaw<DbRow>(ListSql,
         [
@@ -70,12 +72,15 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
             new NpgsqlParameter<bool>("query_provided", hasQuery),
             new NpgsqlParameter<string>("pattern", hasQuery ? $"%{EscapeLikePattern(query.Query!.Trim())}%" : ""),
             new NpgsqlParameter<int>("leaf_take", MaxOutputChars),
-            new NpgsqlParameter<int>("row_limit", MaxTurnsScanned),
+            NullableParameter("before_turn", NpgsqlDbType.Integer, cursor?.Turn),
+            NullableParameter("before_group_id", NpgsqlDbType.Uuid, cursor?.GroupId),
+            new NpgsqlParameter<int>("row_limit", MaxTurnsScanned + 1),
         ]).ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (rows.Count == 0) return AgentContextResult.Empty;
 
-        var turns = rows.Select(r => new TurnRow(r.Id, r.SessionTurnIndex, r.Status, r.Goal, r.Result, r.LegacyBranch, r.MatchedWithoutBranch)).ToList();
+        var hasMoreRows = rows.Count > MaxTurnsScanned;
+        var turns = rows.Take(MaxTurnsScanned).Select(r => new TurnRow(r.Id, r.GroupId, r.SessionTurnIndex, r.Status, r.Goal, r.Result, r.LegacyBranch, r.MatchedWithoutBranch)).ToList();
 
         var manifestsByRunId = await _manifests.ListForWorkflowRunsAsync(turns.Select(t => t.Id).ToList(), query.TeamId, cancellationToken).ConfigureAwait(false);
 
@@ -86,11 +91,17 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
             ? turns.Where(t => t.MatchedWithoutBranch || BranchMatches(t, manifestsByRunId.GetValueOrDefault(t.Id), query.Query!)).ToList()
             : turns;
 
-        if (matchedTurns.Count == 0) return AgentContextResult.Empty;
+        if (matchedTurns.Count == 0)
+            return hasMoreRows ? AgentContextResult.Partial("", CursorFor(turns[^1], query, sessionId)) : AgentContextResult.Empty;
 
         var rendered = matchedTurns.Select(t => Render(t, manifestsByRunId.GetValueOrDefault(t.Id))).ToList();
+        var page = Compose(rendered);
+        var bodyCut = page.KeptCount < matchedTurns.Count;
+        var continuationRow = bodyCut ? matchedTurns[page.KeptCount - 1] : hasMoreRows ? turns[^1] : (TurnRow?)null;
 
-        return AgentContextResult.From(Compose(rendered));
+        return continuationRow is { } last
+            ? AgentContextResult.Partial(WithPartialCoverage(page.Text), CursorFor(last, query, sessionId))
+            : AgentContextResult.From(page.Text);
     }
 
     /// <summary>
@@ -124,6 +135,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         resolved AS (
             SELECT
                 e.effective_id AS id,
+                e.group_id AS group_id,
                 e.turn AS session_turn_index,
                 r.status AS status,
                 CASE WHEN jsonb_typeof(q.normalized_payload_json -> 'goal') = 'string' AND btrim(q.normalized_payload_json ->> 'goal') <> '' THEN q.normalized_payload_json ->> 'goal' END AS goal_full,
@@ -139,6 +151,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         )
         SELECT
             id,
+            group_id,
             session_turn_index,
             status,
             left(goal_full, @leaf_take) AS goal,
@@ -156,9 +169,15 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
             OR status ILIKE @pattern ESCAPE '\'
             OR COALESCE(legacy_branch, '') ILIKE @pattern ESCAPE '\'
         )
-        ORDER BY session_turn_index DESC
+          AND (@before_turn IS NULL OR (session_turn_index, group_id) < (@before_turn, @before_group_id))
+        ORDER BY session_turn_index DESC, group_id DESC
         LIMIT @row_limit
         """;
+
+    private static NpgsqlParameter NullableParameter(string name, NpgsqlDbType type, object? value) => new(name, type) { Value = value ?? DBNull.Value };
+
+    private static string CursorFor(TurnRow row, AgentContextQuery query, Guid sessionId) =>
+        new SessionTurnsContextCursor(row.Turn, row.GroupId).Encode(query.TeamId, sessionId, query.Query);
 
     /// <summary>Escape LIKE/ILIKE wildcards (<c>%</c>, <c>_</c>) and the escape character itself, so a query containing them is matched LITERALLY, not as a pattern.</summary>
     private static string EscapeLikePattern(string text) => text.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
@@ -196,7 +215,7 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
     /// if it ALONE exceeds the budget (a single huge un-clipped result), it is clipped to fit with a marker, so one
     /// pull can never blow up the model's context (the <see cref="IContextSource"/> bound).
     /// </summary>
-    private static string Compose(List<RenderedTurn> matchedNewestFirst)
+    private static ComposedPage Compose(List<RenderedTurn> matchedNewestFirst)
     {
         var kept = new List<RenderedTurn>();
         var used = 0;
@@ -216,13 +235,8 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
         if (kept.Count == 1 && kept[0].Text.Length > MaxOutputChars)
             kept[0] = kept[0] with { Text = ClipToBudget(kept[0].Text) };
 
-        var omitted = matchedNewestFirst.Count - kept.Count;
-
         var sb = new StringBuilder();
         sb.AppendLine("# Full prior turns in this work thread");
-
-        if (omitted > 0)
-            sb.AppendLine($"({omitted} older matching turn(s) omitted to fit the size budget — refine with a query, or read session.summary for the distilled older work.)");
 
         foreach (var turn in Enumerable.Reverse(kept))
         {
@@ -230,20 +244,25 @@ public sealed class SessionTurnsContextSource : IContextSource, IScopedDependenc
             sb.AppendLine(turn.Text);
         }
 
-        return sb.ToString().TrimEnd();
+        return new ComposedPage(sb.ToString().TrimEnd(), kept.Count);
     }
+
+    private static string WithPartialCoverage(string text) => text.Replace("# Full prior turns in this work thread", "# Full prior turns in this work thread\n(Older matching turns may be omitted from this partial page. Continue with the returned source cursor; do not infer that older evidence is absent.)", StringComparison.Ordinal);
 
     /// <summary>Clip one over-budget turn's text to the budget, leaving room for the truncation marker.</summary>
     private static string ClipToBudget(string text) => text[..(MaxOutputChars - TurnTruncationMarker.Length)] + TurnTruncationMarker;
 
-    private readonly record struct TurnRow(Guid Id, int? Turn, string Status, string? Goal, string? Result, string? LegacyBranch, bool MatchedWithoutBranch);
+    private readonly record struct TurnRow(Guid Id, Guid GroupId, int Turn, string Status, string? Goal, string? Result, string? LegacyBranch, bool MatchedWithoutBranch);
 
-    private readonly record struct RenderedTurn(int? Turn, string Text);
+    private readonly record struct RenderedTurn(int Turn, string Text);
+
+    private readonly record struct ComposedPage(string Text, int KeptCount);
 
     private sealed class DbRow
     {
         public Guid Id { get; set; }
-        public int? SessionTurnIndex { get; set; }
+        public Guid GroupId { get; set; }
+        public int SessionTurnIndex { get; set; }
         public string Status { get; set; } = "";
         public string? Goal { get; set; }
         public string? Result { get; set; }
