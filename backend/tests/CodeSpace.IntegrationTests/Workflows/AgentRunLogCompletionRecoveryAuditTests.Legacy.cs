@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -57,10 +58,28 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests
 
         public ILifetimeScope BeginScope() => fixture.BeginScope(builder => builder.RegisterInstance(new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(connectionString).UseSnakeCaseNamingConvention().Options).As<DbContextOptions<CodeSpaceDbContext>>());
 
-        public async Task InsertStreamAndUpgradeAsync(AgentRunLogOpenRequest request)
+        public async Task InsertRunAndStreamThenUpgradeAsync(AgentRun run, AgentRunLogOpenRequest request)
         {
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync();
+            await using (var runCommand = new NpgsqlCommand("""
+                INSERT INTO agent_run
+                    (id, team_id, harness, status, task_jsonb, fence_epoch, created_date, created_by, last_modified_date, last_modified_by)
+                VALUES (@id, @team, @harness, @status, CAST(@task AS jsonb), @fence, @created, @createdBy, @modified, @modifiedBy)
+                """, connection))
+            {
+                runCommand.Parameters.AddWithValue("id", run.Id);
+                runCommand.Parameters.AddWithValue("team", run.TeamId);
+                runCommand.Parameters.AddWithValue("harness", run.Harness);
+                runCommand.Parameters.AddWithValue("status", run.Status.ToString());
+                runCommand.Parameters.AddWithValue("task", run.TaskJson);
+                runCommand.Parameters.AddWithValue("fence", run.FenceEpoch);
+                runCommand.Parameters.AddWithValue("created", run.CreatedDate);
+                runCommand.Parameters.AddWithValue("createdBy", run.CreatedBy);
+                runCommand.Parameters.AddWithValue("modified", run.LastModifiedDate);
+                runCommand.Parameters.AddWithValue("modifiedBy", run.LastModifiedBy);
+                (await runCommand.ExecuteNonQueryAsync()).ShouldBe(1);
+            }
             await using var command = new NpgsqlCommand("""
                 INSERT INTO agent_run_log_stream
                     (id, team_id, agent_run_id, worker_fence_epoch, capture_session_id, stream_kind, content_type, content_encoding,
