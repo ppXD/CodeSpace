@@ -106,6 +106,32 @@ public class SupervisorBoundsTests
     }
 
     [Fact]
+    public void First_reauthorable_rejection_at_the_no_progress_cap_gets_exactly_one_correction_turn()
+    {
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxNoProgressDecisions = 3 });
+        var firstRejection = RejectedSpawnPrior(3, "the authored persona is unavailable");
+        var firstRejectionAtCap = Context(turn: 3, noProgress: 3) with
+        {
+            MaxNoProgressDecisions = 3,
+            PriorDecisions = new[] { PlanPrior(1), PlanPrior(2), firstRejection },
+        };
+        var repeatedRejectionAtCap = firstRejectionAtCap with
+        {
+            PriorDecisions = new[] { PlanPrior(1), RejectedSpawnPrior(2, "the authored persona is unavailable"), RejectedSpawnPrior(3, "the replacement model is unavailable") },
+        };
+        var unusedCorrectionAtCap = firstRejectionAtCap with
+        {
+            TurnNumber = 4,
+            NoProgressDecisions = 4,
+            PriorDecisions = new[] { PlanPrior(1), PlanPrior(2), firstRejection, PlanPrior(4) },
+        };
+
+        SupervisorBounds.PreDecision(firstRejectionAtCap, plan, supervisorDepth: 0).ShouldBeNull("the rejection feedback is actionable only if the model receives one fresh decision");
+        SupervisorBounds.PreDecision(repeatedRejectionAtCap, plan, supervisorDepth: 0).ShouldBe(SupervisorStopReasons.NoProgress, "a second rejected action must not buy an unbounded loop");
+        SupervisorBounds.PreDecision(unusedCorrectionAtCap, plan, supervisorDepth: 0).ShouldBe(SupervisorStopReasons.NoProgress, "an evidence-free correction consumes the one-turn runway");
+    }
+
+    [Fact]
     public void Pre_decision_precedence_is_depth_then_no_progress()
     {
         // Both trip at once → depth wins (the deterministic precedence a re-entry re-derives). There is no round budget.
@@ -252,6 +278,12 @@ public class SupervisorBoundsTests
 
     private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0, decimal runSpend = 0m) =>
         new() { Goal = "g", TurnNumber = turn, TotalSpawnedAgents = totalSpawned, NoProgressDecisions = noProgress, RunSpendUsd = runSpend };
+
+    private static SupervisorPriorDecision PlanPrior(long sequence) =>
+        new() { Id = Guid.NewGuid(), Sequence = sequence, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan, PayloadJson = "{}", OutcomeJson = "{}" };
+
+    private static SupervisorPriorDecision RejectedSpawnPrior(long sequence, string reason) =>
+        new() { Id = Guid.NewGuid(), Sequence = sequence, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Spawn, PayloadJson = "{}", OutcomeJson = JsonSerializer.Serialize(new { spawn = "rejected", reason }, AgentJson.Options) };
 
     private static SupervisorDecision Spawn(params string[] ids) => new()
     {

@@ -1,4 +1,5 @@
 using System.Text;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
@@ -18,26 +19,41 @@ public static class SupervisorBoundsRecitation
 
     /// <summary>Render the bounds block for the decider's prompt, or null when every counter is zero (nothing is at risk yet).</summary>
     public static string? Render(int noProgressDecisions, int maxNoProgressDecisions, int totalSpawnedAgents, int? maxTotalSpawns, int resolveAttempts = 0, int? maxResolveAttempts = null)
+        => Render(new SupervisorTurnContext
+        {
+            NoProgressDecisions = noProgressDecisions,
+            MaxNoProgressDecisions = maxNoProgressDecisions,
+            TotalSpawnedAgents = totalSpawnedAgents,
+            MaxTotalSpawns = maxTotalSpawns,
+            MaxResolveAttempts = maxResolveAttempts,
+        }, resolveAttempts, hasCorrectionTurn: false);
+
+    /// <summary>Render from the real durable turn context, including the single correction runway when the runtime admits it.</summary>
+    public static string? Render(SupervisorTurnContext context) => Render(context, context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve), SupervisorBounds.HasReauthorableCorrectionTurn(context));
+
+    private static string? Render(SupervisorTurnContext context, int resolveAttempts, bool hasCorrectionTurn)
     {
-        if (noProgressDecisions <= 0 && totalSpawnedAgents <= 0 && resolveAttempts <= 0) return null;
+        if (context.NoProgressDecisions <= 0 && context.TotalSpawnedAgents <= 0 && resolveAttempts <= 0) return null;
 
         var builder = new StringBuilder(Header);
 
-        if (noProgressDecisions > 0)
+        if (context.NoProgressDecisions > 0)
         {
-            var left = Math.Max(0, maxNoProgressDecisions - noProgressDecisions);
-            var runway = left == 1 ? "ONE more evidence-less decision force-stops this run" : $"{left} more evidence-less decisions force-stop this run";
+            var left = Math.Max(0, context.MaxNoProgressDecisions - context.NoProgressDecisions);
+            var runway = hasCorrectionTurn
+                ? "ONE correction turn is available because the server rejected the last action; fix the rejected action now, because a repeated rejection or any other evidence-less decision force-stops this run"
+                : left == 1 ? "ONE more evidence-less decision force-stops this run" : $"{left} more evidence-less decisions force-stop this run";
 
-            builder.AppendLine().Append($"- no-progress decisions: {noProgressDecisions} of {maxNoProgressDecisions} — {runway}. A decision counts as progress only when it lands SETTLED EVIDENCE: an objectively accepted unit, a merge that integrates new work, or an answered human ask. Prefer the action most likely to produce verifiable evidence; if none can, stop honestly or ask a human now instead of burning the remaining decisions.");
+            builder.AppendLine().Append($"- no-progress decisions: {context.NoProgressDecisions} of {context.MaxNoProgressDecisions} — {runway}. A decision counts as progress only when it lands SETTLED EVIDENCE: an objectively accepted unit, a merge that integrates new work, or an answered human ask. Prefer the action most likely to produce verifiable evidence; if none can, stop honestly or ask a human now instead of burning the remaining decisions.");
         }
 
-        if (totalSpawnedAgents > 0)
-            builder.AppendLine().Append($"- agents spawned: {totalSpawnedAgents} of {maxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns} total-spawn cap (every spawn fan-out member and every retry counts one; a wave that would exceed the cap is refused).");
+        if (context.TotalSpawnedAgents > 0)
+            builder.AppendLine().Append($"- agents spawned: {context.TotalSpawnedAgents} of {context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns} total-spawn cap (every spawn fan-out member and every retry counts one; a wave that would exceed the cap is refused).");
 
         // P5-5: the resolver runway — a resolve PAST the cap doesn't get refused, it force-stops the whole run
         // (ResolveAttemptsExceeded), so the model must know the count before spending the run's life on one more.
         if (resolveAttempts > 0)
-            builder.AppendLine().Append($"- resolve attempts: {resolveAttempts} of {maxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts} resolve cap — a resolve past the cap force-stops this run. If the reconciliation still is not VERIFIED within the cap, stop and leave the conflict to a human.");
+            builder.AppendLine().Append($"- resolve attempts: {resolveAttempts} of {context.MaxResolveAttempts ?? SupervisorLane.DefaultMaxResolveAttempts} resolve cap — a resolve past the cap force-stops this run. If the reconciliation still is not VERIFIED within the cap, stop and leave the conflict to a human.");
 
         return builder.ToString();
     }

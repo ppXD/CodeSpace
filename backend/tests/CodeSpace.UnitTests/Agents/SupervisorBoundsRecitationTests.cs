@@ -46,6 +46,32 @@ public class SupervisorBoundsRecitationTests
     }
 
     [Fact]
+    public void A_first_rejection_at_the_cap_names_the_single_correction_turn_in_the_real_prompt()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(new SupervisorTurnContext
+        {
+            Goal = "ship it",
+            TurnNumber = 3,
+            NoProgressDecisions = 3,
+            MaxNoProgressDecisions = 3,
+            PriorDecisions = new[]
+            {
+                PlanPrior(1),
+                PlanPrior(2),
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 3, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Spawn,
+                    PayloadJson = "{}", OutcomeJson = """{"spawn":"rejected","reason":"the authored persona is unavailable"}""",
+                },
+            },
+        });
+
+        prompt.ShouldContain("ONE correction turn", Case.Sensitive);
+        prompt.ShouldContain("fix the rejected action", Case.Sensitive);
+        prompt.ShouldNotContain("0 more evidence-less decisions", Case.Sensitive, "the ordinary countdown is false while the runtime has admitted its one correction turn");
+    }
+
+    [Fact]
     public void The_spawn_line_renders_the_count_against_the_cap()
     {
         var block = SupervisorBoundsRecitation.Render(0, 8, 5, 40);
@@ -120,6 +146,9 @@ public class SupervisorBoundsRecitationTests
         LlmSupervisorDecider.BuildUserPromptForTest(new SupervisorTurnContext { Goal = "ship it", TurnNumber = 0, PriorDecisions = Array.Empty<SupervisorPriorDecision>() })
             .ShouldNotContain("RUN BOUNDS", Case.Sensitive, "byte-identical prompt while nothing is at risk");
     }
+
+    private static SupervisorPriorDecision PlanPrior(long sequence) =>
+        new() { Id = Guid.NewGuid(), Sequence = sequence, Status = SupervisorDecisionStatus.Succeeded, DecisionKind = SupervisorDecisionKinds.Plan, PayloadJson = "{}", OutcomeJson = "{}" };
 
     [Fact]
     public void The_user_prompt_counts_resolves_off_the_tape_exactly_like_the_bound_does()

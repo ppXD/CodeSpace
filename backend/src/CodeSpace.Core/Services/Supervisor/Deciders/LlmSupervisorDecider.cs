@@ -971,8 +971,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // the kill blind. The resolve count mirrors PostDecision's own tape count exactly (the CURRENT resolve
         // isn't on the tape yet, so cap=1 shows 1-of-1 AFTER the first attempt — the moment the next one dies).
         // Null while every counter is zero ⇒ byte-identical prompt for a fresh run.
-        if (SupervisorBoundsRecitation.Render(context.NoProgressDecisions, context.MaxNoProgressDecisions, context.TotalSpawnedAgents, context.MaxTotalSpawns,
-                context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve), context.MaxResolveAttempts) is { } bounds)
+        if (SupervisorBoundsRecitation.Render(context) is { } bounds)
         {
             builder.AppendLine();
             builder.AppendLine(bounds);

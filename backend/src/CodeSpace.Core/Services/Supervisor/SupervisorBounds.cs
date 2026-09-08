@@ -27,10 +27,32 @@ public static class SupervisorBounds
     {
         if (supervisorDepth >= SupervisorLane.MaxSupervisorDepth) return SupervisorStopReasons.DepthCapExceeded;
 
-        if (context.NoProgressDecisions >= plan.MaxNoProgressDecisions) return SupervisorStopReasons.NoProgress;
+        if (context.NoProgressDecisions >= plan.MaxNoProgressDecisions && !HasReauthorableCorrectionTurn(context, plan.MaxNoProgressDecisions)) return SupervisorStopReasons.NoProgress;
 
         return null;
     }
+
+    /// <summary>
+    /// A server rejection is actionable feedback, but a rejection that lands exactly on the last no-progress slot
+    /// used to be followed immediately by the pre-decision stop. The model therefore never saw the reason the
+    /// executor deliberately made re-authorable. Admit one correction turn only when this is the FIRST rejected
+    /// action in the current evidence-free streak and it is the decision that reached the cap. A repeated rejection,
+    /// or any evidence-free decision after the correction turn, exceeds the cap and stops normally. Pure over the
+    /// durable tape, so crash replay derives the same answer without task-, persona-, model-, or harness-specific rules.
+    /// </summary>
+    internal static bool HasReauthorableCorrectionTurn(SupervisorTurnContext context) => HasReauthorableCorrectionTurn(context, context.MaxNoProgressDecisions);
+
+    private static bool HasReauthorableCorrectionTurn(SupervisorTurnContext context, int maxNoProgressDecisions)
+    {
+        if (context.NoProgressDecisions != maxNoProgressDecisions || context.PriorDecisions.Count == 0) return false;
+
+        var streak = context.PriorDecisions.TakeLast(context.NoProgressDecisions).ToList();
+        return IsReauthorableRejection(streak[^1]) && streak.Count(IsReauthorableRejection) == 1;
+    }
+
+    private static bool IsReauthorableRejection(SupervisorPriorDecision decision) =>
+        SupervisorOutcome.ReadRejectionReason(decision.OutcomeJson) is not null
+        || SupervisorOutcome.ReadAskHumanRejectionReason(decision.OutcomeJson) is not null;
 
     /// <summary>
     /// The bounds that refuse the DECIDER'S CHOSEN decision: a spawn decision whose fan-out K exceeds the
