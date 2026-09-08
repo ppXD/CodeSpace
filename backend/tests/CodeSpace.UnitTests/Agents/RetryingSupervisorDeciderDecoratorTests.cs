@@ -24,7 +24,7 @@ public class RetryingSupervisorDeciderDecoratorTests
     private static readonly SupervisorDecision Stop = new() { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" };
 
     private static SupervisorDecisionRetryOptions Options(int maxAttempts = 3, int timeoutMs = 5000, int baseBackoffMs = 0) =>
-        new() { MaxAttempts = maxAttempts, PerCallTimeout = TimeSpan.FromMilliseconds(timeoutMs), BaseBackoff = TimeSpan.FromMilliseconds(baseBackoffMs) };
+        new() { MaxAttempts = maxAttempts, PerCallTimeout = TimeSpan.FromMilliseconds(timeoutMs), BaseBackoff = TimeSpan.FromMilliseconds(baseBackoffMs), RateLimitFallbackBackoff = TimeSpan.Zero };
 
     private static RetryingSupervisorDeciderDecorator Decorator(ScriptedInner inner, SupervisorDecisionRetryOptions? options = null) =>
         new(inner, options ?? Options(), NullLogger<RetryingSupervisorDeciderDecorator>.Instance);
@@ -195,6 +195,18 @@ public class RetryingSupervisorDeciderDecoratorTests
         stopwatch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5), "the backoff was interrupted by the cancellation, not waited out");
     }
 
+    [Fact]
+    public async Task An_outer_cancellation_interrupts_the_missing_header_rate_limit_cooldown()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var inner = new ScriptedInner(_ => throw Fault(LlmErrorCategory.RateLimited), _ => Task.FromResult(Stop));
+        var options = new SupervisorDecisionRetryOptions { MaxAttempts = 2, PerCallTimeout = TimeSpan.FromSeconds(5), BaseBackoff = TimeSpan.Zero, RateLimitFallbackBackoff = TimeSpan.FromSeconds(30) };
+
+        await Should.ThrowAsync<OperationCanceledException>(() => Decorator(inner, options).DecideAsync(Ctx, cts.Token));
+
+        inner.Calls.ShouldBe(1, "cancelling the run interrupts the conservative cooldown instead of starting another physical request");
+    }
+
     // ── ComputeDelay: exponential growth, caps, jitter band — pure, no sleeps ─────────
 
     [Theory]
@@ -233,6 +245,33 @@ public class RetryingSupervisorDeciderDecoratorTests
         var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(new SupervisorDecisionRetryOptions(), attempt: 1, retryAfter: TimeSpan.FromHours(2));
 
         delay.ShouldBe(SupervisorDecisionRetryOptions.RetryAfterCeiling, "a misconfigured gateway header must not pin a worker for hours");
+    }
+
+    [Fact]
+    public void A_rate_limit_without_Retry_After_uses_the_bounded_operator_fallback_and_never_retries_early()
+    {
+        var options = new SupervisorDecisionRetryOptions { BaseBackoff = TimeSpan.FromSeconds(2), RateLimitFallbackBackoff = TimeSpan.FromSeconds(60) };
+
+        var delay = RetryingSupervisorDeciderDecorator.ComputeDelay(options, attempt: 1, category: LlmErrorCategory.RateLimited, retryAfter: null);
+
+        delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(60), "a gateway that omitted the standard header still gets a conservative cooldown");
+        delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(72), "positive jitter spreads retries without making the bounded fallback unreasonably long");
+    }
+
+    [Fact]
+    public void An_explicit_Retry_After_wins_over_the_rate_limit_fallback()
+    {
+        var options = new SupervisorDecisionRetryOptions { RateLimitFallbackBackoff = TimeSpan.FromSeconds(60) };
+
+        RetryingSupervisorDeciderDecorator.ComputeDelay(options, attempt: 1, category: LlmErrorCategory.RateLimited, retryAfter: TimeSpan.FromSeconds(7)).ShouldBe(TimeSpan.FromSeconds(7));
+    }
+
+    [Fact]
+    public void A_misconfigured_rate_limit_fallback_is_clamped_after_jitter()
+    {
+        var options = new SupervisorDecisionRetryOptions { RateLimitFallbackBackoff = TimeSpan.FromHours(2) };
+
+        RetryingSupervisorDeciderDecorator.ComputeDelay(options, attempt: 1, category: LlmErrorCategory.RateLimited, retryAfter: null).ShouldBe(SupervisorDecisionRetryOptions.RetryAfterCeiling);
     }
 
     [Fact]

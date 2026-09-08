@@ -6,7 +6,7 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// big plan is a LEGITIMATE multi-minute call (and one decision attempt can span several HTTP round-trips under the
 /// progressive structured-output degrade), so a tight budget guillotines exactly the calls the deep lane exists for.
 /// A bounded attempt count lets a TRANSIENT blip self-heal in place instead of terminalizing the durable run on the
-/// supervisor node's default single attempt. Both are env-overridable (air-gapped / slow-gateway operators) with the
+/// supervisor node's default single attempt. Attempt, timeout and missing-header cooldown bounds are env-overridable with
 /// var names pinned by a test; values are clamped so a fat-fingered override can never disable the bound or pin a
 /// worker indefinitely (worst case ≈ MaxAttempts × PerCallTimeout for a gateway that hangs every attempt).
 /// </summary>
@@ -14,6 +14,7 @@ public sealed class SupervisorDecisionRetryOptions
 {
     public const string MaxAttemptsEnvVar = "CODESPACE_SUPERVISOR_DECISION_MAX_ATTEMPTS";
     public const string TimeoutSecondsEnvVar = "CODESPACE_SUPERVISOR_DECISION_TIMEOUT_SECONDS";
+    public const string RateLimitFallbackSecondsEnvVar = "CODESPACE_SUPERVISOR_DECISION_RATE_LIMIT_FALLBACK_SECONDS";
 
     /// <summary>Hard cap on a provider-supplied Retry-After the backoff will honor — a hostile / misconfigured gateway header can suggest hours and would otherwise pin a worker for its full length. Pinned by a unit test (Rule 8).</summary>
     public static readonly TimeSpan RetryAfterCeiling = TimeSpan.FromMinutes(15);
@@ -27,14 +28,18 @@ public sealed class SupervisorDecisionRetryOptions
     /// <summary>The per-attempt budget; a call that does not return within it is treated as a transient timeout and retried. Clamped to [10s, 900s]. Default 600s — a slow reasoning model on a big plan is a legitimate multi-minute decision, and one attempt can span several HTTP round-trips.</summary>
     public TimeSpan PerCallTimeout { get; init; } = TimeSpan.FromSeconds(600);
 
-    /// <summary>The exponential backoff unit between attempts: attempt N waits BaseBackoff × 2^(N−1) (capped at <see cref="BackoffCeiling"/>, ±20% jitter so retries never re-storm a recovering gateway in lockstep) unless the provider supplied a Retry-After (honored verbatim up to <see cref="RetryAfterCeiling"/>). Default 2s; tests set zero so they never actually sleep.</summary>
+    /// <summary>The exponential backoff unit between attempts: attempt N waits BaseBackoff × 2^(N−1) (capped at <see cref="BackoffCeiling"/>, ±20% jitter so retries never re-storm a recovering gateway in lockstep) unless the provider supplied a Retry-After or the fault is rate-limited. Default 2s; tests set zero so they never actually sleep.</summary>
     public TimeSpan BaseBackoff { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Conservative cooldown for a rate-limit response that omitted the standard Retry-After header. The operator can tune it for a known gateway; positive jitter prevents simultaneous runs from re-entering together. Default 60s, clamped to [1s, 900s] when read from the environment.</summary>
+    public TimeSpan RateLimitFallbackBackoff { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>Read the operator overrides from the environment, clamped to safe bounds (a missing / non-numeric / out-of-range value falls back to the default — never disables the bound).</summary>
     public static SupervisorDecisionRetryOptions FromEnvironment() => new()
     {
         MaxAttempts = ReadClampedInt(MaxAttemptsEnvVar, defaultValue: 5, min: 1, max: 10),
         PerCallTimeout = TimeSpan.FromSeconds(ReadClampedInt(TimeoutSecondsEnvVar, defaultValue: 600, min: 10, max: 900)),
+        RateLimitFallbackBackoff = TimeSpan.FromSeconds(ReadClampedInt(RateLimitFallbackSecondsEnvVar, defaultValue: 60, min: 1, max: 900)),
     };
 
     private static int ReadClampedInt(string envVar, int defaultValue, int min, int max)
