@@ -60,13 +60,111 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
         await ContinueAsync(child);
         (await ReadLineAsync(child)).ShouldBe("staged");
         File.Exists(ObjectPath(key)).ShouldBeFalse();
-        Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-*").Length.ShouldBe(1);
+        Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-v2-*").Length.ShouldBe(1);
+        LeaseFiles().Length.ShouldBe(1, "the recoverer needs a durable owner record before staging becomes visible");
         await KillAsync(child);
 
         var retry = await PutAsync(key, 4);
 
         retry.IsSuccess.ShouldBeTrue(retry.Error?.Message);
         (await File.ReadAllBytesAsync(ObjectPath(key))).ShouldBe(Payload(4));
+        Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-v2-*").ShouldBeEmpty("a dead writer's alias must be reclaimed without an age guess");
+        LeaseFiles().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_live_writer_lease_prevents_a_concurrent_probe_from_reclaiming_its_staging_bytes()
+    {
+        const string key = "recovery/live";
+        var child = StartWorker(key, "staged", 13);
+        (await ReadLineAsync(child)).ShouldBe("ready");
+        await ContinueAsync(child);
+        (await ReadLineAsync(child)).ShouldBe("staged");
+        var staging = Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-v2-*").Single();
+        LeaseFiles().Length.ShouldBe(1);
+
+        await using (var driver = new LocalRwxArtifactStorageDriver(_root))
+            (await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None)).Status.ShouldBe(ArtifactStorageProbeStatus.Available);
+
+        File.Exists(staging).ShouldBeTrue("a held cross-process lease is authoritative evidence that the writer is alive");
+        LeaseFiles().Length.ShouldBe(1);
+        await ContinueAsync(child);
+        (await ReadLineAsync(child)).ShouldBe("stored");
+        await AssertExitedAsync(child);
+        (await File.ReadAllBytesAsync(ObjectPath(key))).ShouldBe(Payload(13));
+        File.Exists(staging).ShouldBeFalse();
+        LeaseFiles().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Legacy_unleased_aliases_are_never_age_guessed_by_the_v2_recoverer()
+    {
+        var directory = Path.GetDirectoryName(ObjectPath("legacy/target"))!;
+        Directory.CreateDirectory(directory);
+        var legacy = Path.Combine(directory, "target.upload-" + Guid.NewGuid().ToString("N"));
+        await File.WriteAllBytesAsync(legacy, Payload(14));
+
+        var result = await PutAsync("another/object", 15);
+
+        result.IsSuccess.ShouldBeTrue(result.Error?.Message);
+        File.Exists(legacy).ShouldBeTrue("an old writer can be paused in the unlocked pre-publication gap, so mtime is not ownership evidence");
+    }
+
+    [Fact]
+    public async Task A_malformed_escape_lease_is_quarantined_without_touching_bytes_outside_the_object_root()
+    {
+        var outside = Path.Combine(_root, "outside.bin");
+        await File.WriteAllBytesAsync(outside, Payload(16));
+        var leaseDirectory = LeaseDirectory();
+        Directory.CreateDirectory(leaseDirectory);
+        var lease = Path.Combine(leaseDirectory, Guid.NewGuid().ToString("N") + ".json");
+        await File.WriteAllTextAsync(lease, "{\"schemaVersion\":1,\"stagingPath\":\"../outside.bin\"}");
+
+        await using (var driver = new LocalRwxArtifactStorageDriver(_root))
+            (await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None)).Status.ShouldBe(ArtifactStorageProbeStatus.Available);
+
+        (await File.ReadAllBytesAsync(outside)).ShouldBe(Payload(16));
+        File.Exists(lease).ShouldBeFalse("an unlocked malformed record must not permanently block the bounded recovery queue");
+        Directory.GetFiles(Path.Combine(_root, ".codespace", "staging-lease-quarantine", "v1"), "*.json").Length.ShouldBe(1);
+    }
+
+    [UnixFact]
+    public async Task Recovery_after_publication_removes_only_the_alias_and_preserves_the_committed_inode()
+    {
+        const string key = "recovery/committed";
+        var destination = ObjectPath(key);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var id = Guid.NewGuid();
+        var staging = destination + ".upload-v2-" + id.ToString("N");
+        await File.WriteAllBytesAsync(staging, Payload(17));
+        LocalRwxAtomicFilePublication.CreateOnly(staging, destination).ShouldBeNull();
+        var leaseDirectory = LeaseDirectory();
+        Directory.CreateDirectory(leaseDirectory);
+        var lease = Path.Combine(leaseDirectory, id.ToString("N") + ".json");
+        await File.WriteAllTextAsync(lease, $"{{\"schemaVersion\":1,\"stagingPath\":\"objects/{key}.upload-v2-{id:N}\"}}");
+
+        await using (var driver = new LocalRwxArtifactStorageDriver(_root))
+            (await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None)).Status.ShouldBe(ArtifactStorageProbeStatus.Available);
+
+        (await File.ReadAllBytesAsync(destination)).ShouldBe(Payload(17));
+        File.Exists(staging).ShouldBeFalse();
+        File.Exists(lease).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Each_recovery_sweep_is_bounded_and_repeated_sweeps_make_forward_progress()
+    {
+        for (var index = 0; index < 129; index++) await CreateUnlockedOrphanAsync($"bounded/{index}", (byte)index);
+
+        await ProbeAsync();
+
+        LeaseFiles().Length.ShouldBe(1, "one probe must cap filesystem mutation even after an orphan storm");
+        Directory.GetFiles(Path.Combine(_root, "objects", "bounded"), "*.upload-v2-*").Length.ShouldBe(1);
+
+        await ProbeAsync();
+
+        LeaseFiles().ShouldBeEmpty();
+        Directory.GetFiles(Path.Combine(_root, "objects", "bounded"), "*.upload-v2-*").ShouldBeEmpty();
     }
 
     [Fact]
@@ -94,7 +192,8 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
         (await ReadLineAsync(child)).ShouldBe("ready");
         await ContinueAsync(child);
         (await ReadLineAsync(child)).ShouldBe("staged");
-        var staging = Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-*").Single();
+        var staging = Directory.GetFiles(Path.GetDirectoryName(ObjectPath(key))!, "*.upload-v2-*").Single();
+        LeaseFiles().Length.ShouldBe(1);
         await SetDeleteAclAsync(staging, deny: true);
 
         try
@@ -103,11 +202,17 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
             (await ReadLineAsync(child)).ShouldBe("stored", "cleanup failure must not turn committed bytes into a failed publication");
             await AssertExitedAsync(child);
             File.Exists(staging).ShouldBeTrue("the OS, not a fake, refused staging cleanup");
+            LeaseFiles().Length.ShouldBe(1, "failed alias cleanup must retain a retryable recovery record");
             (await File.ReadAllBytesAsync(ObjectPath(key))).ShouldBe(Payload(7));
             (await PutAsync(key, 8)).Error!.Code.ShouldBe(ArtifactStorageErrorCode.AlreadyExists);
             (await File.ReadAllBytesAsync(ObjectPath(key))).ShouldBe(Payload(7));
         }
         finally { await SetDeleteAclAsync(staging, deny: false); }
+
+        await using (var driver = new LocalRwxArtifactStorageDriver(_root))
+            (await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None)).Status.ShouldBe(ArtifactStorageProbeStatus.Available);
+        File.Exists(staging).ShouldBeFalse();
+        LeaseFiles().ShouldBeEmpty();
     }
 
     [LinuxFact]
@@ -202,7 +307,25 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
         return await driver.PutAsync(new ArtifactStoragePutRequest(key, source) { Condition = ArtifactStorageWriteCondition.CreateOnly }, CancellationToken.None);
     }
 
+    private async Task ProbeAsync()
+    {
+        await using var driver = new LocalRwxArtifactStorageDriver(_root);
+        (await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None)).Status.ShouldBe(ArtifactStorageProbeStatus.Available);
+    }
+
+    private async Task CreateUnlockedOrphanAsync(string key, byte value)
+    {
+        var id = Guid.NewGuid();
+        var staging = ObjectPath(key) + ".upload-v2-" + id.ToString("N");
+        Directory.CreateDirectory(Path.GetDirectoryName(staging)!);
+        await File.WriteAllBytesAsync(staging, [value]);
+        Directory.CreateDirectory(LeaseDirectory());
+        await File.WriteAllTextAsync(Path.Combine(LeaseDirectory(), id.ToString("N") + ".json"), $"{{\"schemaVersion\":1,\"stagingPath\":\"objects/{key}.upload-v2-{id:N}\"}}");
+    }
+
     private string ObjectPath(string key) => Path.Combine(_root, "objects", key);
+    private string LeaseDirectory() => Path.Combine(_root, ".codespace", "staging-leases", "v1");
+    private string[] LeaseFiles() => Directory.Exists(LeaseDirectory()) ? Directory.GetFiles(LeaseDirectory(), "*.json") : [];
 
     private static byte[] Payload(byte value) => Enumerable.Repeat(value, 1024 * 1024).ToArray();
 
@@ -235,6 +358,14 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
         public LinuxFactAttribute()
         {
             if (!OperatingSystem.IsLinux()) Skip = "The real cross-device link injection requires Linux procfs.";
+        }
+    }
+
+    private sealed class UnixFactAttribute : FactAttribute
+    {
+        public UnixFactAttribute()
+        {
+            if (OperatingSystem.IsWindows()) Skip = "The committed alias is a hard link on Unix; Windows create-only moves the staging file.";
         }
     }
 }

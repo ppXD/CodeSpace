@@ -70,41 +70,36 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
         if (request.Condition == ArtifactStorageWriteCondition.CreateOnly && File.Exists(path))
             return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.AlreadyExists, $"Object '{request.ObjectKey}' already exists."));
 
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporaryPath = path + ".upload-" + Guid.NewGuid().ToString("N");
-
+        LocalRwxStagingLease? staging = null;
         try
         {
-            var copied = await CopyAndHashAsync(request.Content, temporaryPath, cancellationToken).ConfigureAwait(false);
+            LocalRwxStagingLeaseRecovery.Sweep(_root);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            staging = LocalRwxStagingLease.Create(_root, path);
+            var copied = await CopyAndHashAsync(request.Content, staging.StagingPath, cancellationToken).ConfigureAwait(false);
             if (request.ContentLength is { } expectedLength && copied.Length != expectedLength)
-                return FailAndDelete(temporaryPath, ArtifactStorageErrorCode.IntegrityMismatch, $"Content length mismatch for object '{request.ObjectKey}'.");
+                return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.IntegrityMismatch, $"Content length mismatch for object '{request.ObjectKey}'."));
             if (request.ExpectedSha256 != null && !string.Equals(request.ExpectedSha256, copied.Sha256, StringComparison.OrdinalIgnoreCase))
-                return FailAndDelete(temporaryPath, ArtifactStorageErrorCode.IntegrityMismatch, $"SHA-256 mismatch for object '{request.ObjectKey}'.");
+                return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.IntegrityMismatch, $"SHA-256 mismatch for object '{request.ObjectKey}'."));
 
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (request.Condition == ArtifactStorageWriteCondition.CreateOnly)
                 {
-                    var placementError = _createOnly(temporaryPath, path);
-                    if (placementError != null)
-                    {
-                        TryDelete(temporaryPath);
-                        return ArtifactStoragePutResult.Failed(placementError);
-                    }
+                    var placementError = _createOnly(staging.StagingPath, path);
+                    if (placementError != null) return ArtifactStoragePutResult.Failed(placementError);
 
                     // Publication has committed. A crash or failed cleanup may leave an upload alias, but cannot
                     // undo the complete object or turn a committed write into a reported failure and blind retry.
-                    TryDelete(temporaryPath);
                 }
                 else
                 {
-                    File.Move(temporaryPath, path, overwrite: true);
+                    File.Move(staging.StagingPath, path, overwrite: true);
                 }
             }
             catch (IOException) when (request.Condition == ArtifactStorageWriteCondition.CreateOnly && File.Exists(path))
             {
-                TryDelete(temporaryPath);
                 return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.AlreadyExists, $"Object '{request.ObjectKey}' already exists."));
             }
 
@@ -112,23 +107,27 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
         }
         catch (OperationCanceledException)
         {
-            TryDelete(temporaryPath);
             throw;
         }
         catch (UnauthorizedAccessException ex)
         {
-            TryDelete(temporaryPath);
             return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.Forbidden, ex.Message));
         }
         catch (IOException ex)
         {
-            TryDelete(temporaryPath);
             return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.ProviderFailure, ex.Message, isRetryable: true));
         }
-        catch
+        catch (PlatformNotSupportedException ex)
         {
-            TryDelete(temporaryPath);
-            throw;
+            return ArtifactStoragePutResult.Failed(Error(ArtifactStorageErrorCode.Unsupported, ex.Message));
+        }
+        finally
+        {
+            if (staging != null)
+            {
+                staging.TryCleanup();
+                staging.Dispose();
+            }
         }
     }
 
@@ -250,6 +249,8 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
                     Status = ArtifactStorageProbeStatus.Unavailable, Latency = stopwatch.Elapsed,
                     Error = Error(ArtifactStorageErrorCode.Unavailable, $"Local storage root '{_root}' does not exist.", isRetryable: true),
                 };
+
+            LocalRwxStagingLeaseRecovery.Sweep(_root);
 
             if (request.VerifyWriteAccess)
             {
@@ -389,12 +390,6 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
     };
 
     private static string ETag(FileInfo info) => $"W/\"local-{info.Length:x}-{info.LastWriteTimeUtc.Ticks:x}\"";
-
-    private static ArtifactStoragePutResult FailAndDelete(string path, ArtifactStorageErrorCode code, string message)
-    {
-        TryDelete(path);
-        return ArtifactStoragePutResult.Failed(Error(code, message));
-    }
 
     private static ArtifactStorageError Missing(string objectKey) => Error(ArtifactStorageErrorCode.Missing, $"Object '{objectKey}' does not exist.");
     private static ArtifactStorageError Error(ArtifactStorageErrorCode code, string message, bool isRetryable = false) => new(code, message, isRetryable);
