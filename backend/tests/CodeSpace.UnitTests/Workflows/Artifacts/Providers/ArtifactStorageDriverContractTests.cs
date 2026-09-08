@@ -99,6 +99,74 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
         (await window.ReadAsync(new byte[1], CancellationToken.None)).ShouldBe(0, "the window ends where it was asked to end");
     }
 
+    [Fact]
+    public async Task Write_probe_exercises_the_production_object_publication_path_and_cleans_its_object()
+    {
+        await using var driver = await CreateDriverAsync();
+
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, CancellationToken.None);
+
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Available, probe.Error?.Message);
+        Directory.Exists(Path.Combine(_root, "objects")).ShouldBeTrue("a root-level CreateNew probe does not qualify the driver's advertised conditional-create path");
+        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("a successful probe must remove its published object and staging alias");
+    }
+
+    [Fact]
+    public async Task Write_probe_fails_closed_when_atomic_create_only_publication_is_unsupported()
+    {
+        Directory.CreateDirectory(_root);
+        var publications = 0;
+        await using var driver = new LocalRwxArtifactStorageDriver(_root, (_, _) =>
+        {
+            publications++;
+            return new ArtifactStorageError(ArtifactStorageErrorCode.Unsupported, "hard links unavailable", ProviderCode: "errno:95");
+        });
+
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, CancellationToken.None);
+
+        publications.ShouldBe(1);
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Unavailable);
+        probe.Error.ShouldNotBeNull().Code.ShouldBe(ArtifactStorageErrorCode.Unsupported);
+        probe.Error.ProviderCode.ShouldBe("errno:95");
+        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("a refused publication must clean its staging file and expose no final object");
+    }
+
+    [Fact]
+    public async Task Failed_probe_publication_never_deletes_a_destination_it_did_not_create()
+    {
+        Directory.CreateDirectory(_root);
+        string? competingPath = null;
+        await using var driver = new LocalRwxArtifactStorageDriver(_root, (_, destination) =>
+        {
+            competingPath = destination;
+            File.WriteAllText(destination, "competing object");
+            return new ArtifactStorageError(ArtifactStorageErrorCode.AlreadyExists, "another writer won");
+        });
+
+        var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, CancellationToken.None);
+
+        probe.Status.ShouldBe(ArtifactStorageProbeStatus.Unavailable);
+        probe.Error.ShouldNotBeNull().Code.ShouldBe(ArtifactStorageErrorCode.AlreadyExists);
+        File.ReadAllText(competingPath.ShouldNotBeNull()).ShouldBe("competing object", "failed create-only publication confers no authority to delete the destination");
+    }
+
+    [Fact]
+    public async Task Cancellation_after_probe_publication_removes_the_private_object_before_propagating()
+    {
+        Directory.CreateDirectory(_root);
+        using var cancellation = new CancellationTokenSource();
+        await using var driver = new LocalRwxArtifactStorageDriver(_root, (staging, destination) =>
+        {
+            var failure = LocalRwxAtomicFilePublication.CreateOnly(staging, destination);
+            cancellation.Cancel();
+            return failure;
+        });
+
+        await Should.ThrowAsync<OperationCanceledException>(() => driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, cancellation.Token).AsTask());
+
+        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("cancellation after commit must not strand the probe's private object");
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); } catch { }
