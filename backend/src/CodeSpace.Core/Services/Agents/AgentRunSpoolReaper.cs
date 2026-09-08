@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -20,6 +21,8 @@ namespace CodeSpace.Core.Services.Agents;
 /// per-terminal teardown (most notably a re-attach that could only complete from the exit marker) still carries its
 /// netns key on the handle, so the reaper requests best-effort teardown before clearing it. The teardown API does
 /// not return a durable cleanup receipt; successful spool cleanup does not prove namespace cleanup succeeded.
+/// A nonterminal durable log-capture intent holds the spool beyond the ordinary age window: the raw files may be the
+/// only source from which recovery can finish an Expected, Opened, or SourceFinalized capture after storage returns.
 ///
 /// <para><b>Terminal-gated, not age-gated:</b> a live run has no <c>CompletedAt</c>, so the reaper can NEVER
 /// touch a running run's spool however long it runs — which matters precisely because durable runs are meant
@@ -37,14 +40,17 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     /// <summary>
     /// Operator override (a TimeSpan, e.g. <c>"1.00:00:00"</c>) for how long a TERMINAL run's spool is kept
     /// before reaping; default 24h. Pinned by a test (Rule 8). The spool holds RAW (un-redacted) output, so a
-    /// shorter window reduces raw-output-at-rest. This retention policy is independent of whether late log
-    /// capture has completed; a future durable source-replay obligation must coordinate its own retention hold.
+    /// shorter window reduces raw-output-at-rest. An unsettled durable capture intent extends this window until
+    /// its monotonic health state reaches a terminal outcome, because the spool may be its only replay source.
     /// </summary>
     public const string RetentionEnvVar = "CODESPACE_AGENT_RUN_SPOOL_RETENTION";
 
     private static readonly TimeSpan DefaultRetention = TimeSpan.FromHours(24);
     private static readonly TimeSpan BaseRetryDelay = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromHours(6);
+
+    /// <summary>Capture states that still own the raw spool as a recovery source. Terminal health states have already settled what survived and release this hold.</summary>
+    internal static readonly AgentRunLogCaptureIntentState[] CaptureSourceHoldingStates = [AgentRunLogCaptureIntentState.Expected, AgentRunLogCaptureIntentState.Opened, AgentRunLogCaptureIntentState.SourceFinalized];
 
     /// <summary>Per-sweep cap so a large backlog can't run one tick forever; the next tick continues.</summary>
     public const int BatchSize = 200;
@@ -75,7 +81,8 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
             WHERE lower(runner_handle ->> 'launchHost') = lower({host})
             """).AsNoTracking()
             .Where(r => r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running && r.CompletedAt != null && r.CompletedAt < cutoff && r.RunnerHandleJson != null
-                && (r.SpoolCleanupNextAttemptAt == null || r.SpoolCleanupNextAttemptAt <= now))
+                && (r.SpoolCleanupNextAttemptAt == null || r.SpoolCleanupNextAttemptAt <= now)
+                && !_db.AgentRunLogCaptureIntent.Any(intent => intent.TeamId == r.TeamId && intent.AgentRunId == r.Id && CaptureSourceHoldingStates.Contains(intent.State)))
             // Least-attempted eligible work first: a permanently bad oldest batch cannot regain the front of the
             // hourly queue as soon as its backoff expires. Completion time and id keep each attempt tier stable.
             .OrderBy(r => r.SpoolCleanupAttempts).ThenBy(r => r.SpoolCleanupNextAttemptAt).ThenBy(r => r.CompletedAt).ThenBy(r => r.Id)
@@ -108,6 +115,13 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (current == null) return false;
+
+        // Candidate discovery is only an optimization. Recheck under the run's row lock before touching the
+        // filesystem: the capture-admission trigger takes FOR SHARE before it verifies Running + fence, so this
+        // FOR UPDATE orders against a racing admission and the following read sees its durable obligation.
+        var captureHoldsSource = await _db.AgentRunLogCaptureIntent.AsNoTracking()
+            .AnyAsync(intent => intent.TeamId == current.TeamId && intent.AgentRunId == current.Id && CaptureSourceHoldingStates.Contains(intent.State), cancellationToken).ConfigureAwait(false);
+        if (captureHoldsSource) return false;
 
         var handle = TryDeserialize(candidate.HandleJson);
         if (string.IsNullOrWhiteSpace(handle?.LaunchHost) || !string.Equals(handle.LaunchHost, LocalProcessRunner.CurrentHost, StringComparison.OrdinalIgnoreCase))

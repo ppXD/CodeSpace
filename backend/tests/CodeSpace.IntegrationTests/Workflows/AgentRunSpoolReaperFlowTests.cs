@@ -5,6 +5,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -97,6 +98,26 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Never_reaps_the_only_raw_source_while_durable_log_capture_is_unsettled()
+    {
+        var teamId = await SeedTeamAsync();
+        var dir = MakeSpoolDir(Path.Combine(_spoolRoot, Guid.NewGuid().ToString("N")));
+        var runId = await SeedTerminalRunWithHandleAsync(teamId, dir, completedAt: DateTimeOffset.UtcNow.AddDays(-2), pendingLogCapture: true);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
+
+        Directory.Exists(dir).ShouldBeTrue("the pending capture still needs this spool as its only raw source, even after the ordinary age window");
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.RunnerHandleJson.ShouldNotBeNull("the handle is the durable locator recovery needs; cleanup cannot clear it before capture settles");
+            var intent = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent.AsNoTracking().SingleAsync(value => value.AgentRunId == runId);
+            intent.State.ShouldBe(AgentRunLogCaptureIntentState.Expected);
+        }
+    }
+
+    [Fact]
     public async Task An_out_of_root_handle_is_preserved_without_deleting_the_directory()
     {
         var teamId = await SeedTeamAsync();
@@ -137,7 +158,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
                 .ShouldBeNull("the handle is still cleared — the best-effort netns teardown never blocks the reap");
     }
 
-    private async Task<Guid> SeedTerminalRunWithHandleAsync(Guid teamId, string spoolDir, DateTimeOffset completedAt, string? egressNetnsKey = null)
+    private async Task<Guid> SeedTerminalRunWithHandleAsync(Guid teamId, string spoolDir, DateTimeOffset completedAt, string? egressNetnsKey = null, bool pendingLogCapture = false)
     {
         Guid runId;
         using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
@@ -146,6 +167,15 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             var epoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.SetRunnerHandleAsync(runId, HandleJson(spoolDir, egressNetnsKey), CancellationToken.None);
+            if (pendingLogCapture)
+            {
+                var declaration = await scope.Resolve<IAgentRunLogCaptureRecoveryService>().DeclareAsync(new AgentRunLogCaptureDeclarationRequest
+                {
+                    TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = epoch, CaptureSessionId = Guid.NewGuid(),
+                    Streams = [new AgentRunLogExpectedStream(AgentRunLogKinds.StandardOutput, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "durable-spool/v1")],
+                }, CancellationToken.None);
+                declaration.ShouldBeOfType<AgentRunLogCaptureDeclarationResult.Declared>();
+            }
             await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "done" }, epoch, CancellationToken.None);
         }
 
