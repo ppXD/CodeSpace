@@ -9,8 +9,8 @@ namespace CodeSpace.Core.Services.Sessions;
 public interface ISessionContextBuilder
 {
     /// <summary>
-    /// Render the session's prior top-level turns (goal + status + result summary + produced branch) as a single
-    /// grounding block, newest-window-first-then-chronological and bounded for size. Returns <c>null</c> when the
+    /// Render the session's prior top-level turns (goal + status + result summary + produced branch) and its newest
+    /// governed side-effect receipts as a single grounding block, bounded for size. Returns <c>null</c> when the
     /// session has no prior turn yet (nothing to carry forward). Team-scoped (defence in depth).
     /// </summary>
     Task<string?> BuildAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken);
