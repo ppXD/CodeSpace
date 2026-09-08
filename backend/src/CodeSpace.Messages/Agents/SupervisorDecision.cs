@@ -110,7 +110,13 @@ public sealed record SupervisorDecisionReview
 /// <summary>The model call that authored a supervisor decision — the model id + its token usage, captured off the decider's LLM response. A data noun (Rule 18.1) folded into the decision's outcome so a read can attribute the decision.</summary>
 public sealed record SupervisorModelUsage
 {
+    /// <summary>The pool model selected for the call before any provider failover. Null on legacy decisions and callers that did not retain selection provenance.</summary>
+    public string? RequestedModel { get; init; }
+
     public required string Model { get; init; }
+
+    /// <summary>Ordered candidates skipped before <see cref="Model"/> answered. Empty means the requested model answered or the legacy caller did not record a trail.</summary>
+    public IReadOnlyList<string> FailedOver { get; init; } = Array.Empty<string>();
 
     public int? InputTokens { get; init; }
 

@@ -150,6 +150,8 @@ public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervi
             {
                 ModelPrefix = usage.Model,
                 ModelTotalBytes = System.Text.Encoding.UTF8.GetByteCount(usage.Model),
+                RequestedModelPrefix = usage.RequestedModel,
+                RequestedModelTotalBytes = usage.RequestedModel is null ? null : System.Text.Encoding.UTF8.GetByteCount(usage.RequestedModel),
                 InputTokens = usage.InputTokens,
                 OutputTokens = usage.OutputTokens,
             },

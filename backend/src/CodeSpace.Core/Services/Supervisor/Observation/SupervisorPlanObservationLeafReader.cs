@@ -205,6 +205,10 @@ public sealed class SupervisorPlanObservationLeafReader : ISupervisorPlanObserva
                 CASE WHEN jsonb_typeof(usage_model.value) = 'string' THEN LEFT(usage_model.value #>> '{}', @model_chars) END AS model_prefix,
                 CASE WHEN jsonb_typeof(usage_model.value) = 'string' THEN OCTET_LENGTH(usage_model.value #>> '{}') END AS model_total_bytes,
                 CASE WHEN jsonb_typeof(usage_model.value) = 'string' THEN CHAR_LENGTH(usage_model.value #>> '{}') END AS model_total_chars,
+                jsonb_typeof(usage_requested_model.value) AS requested_model_kind,
+                CASE WHEN jsonb_typeof(usage_requested_model.value) = 'string' THEN LEFT(usage_requested_model.value #>> '{}', @model_chars) END AS requested_model_prefix,
+                CASE WHEN jsonb_typeof(usage_requested_model.value) = 'string' THEN OCTET_LENGTH(usage_requested_model.value #>> '{}') END AS requested_model_total_bytes,
+                CASE WHEN jsonb_typeof(usage_requested_model.value) = 'string' THEN CHAR_LENGTH(usage_requested_model.value #>> '{}') END AS requested_model_total_chars,
                 jsonb_typeof(usage_input.value) AS input_kind,
                 CASE WHEN usage_input.value IS NOT NULL THEN LEFT(usage_input.value::text, @token_chars) END AS input_text,
                 CASE WHEN usage_input.value IS NOT NULL THEN CHAR_LENGTH(usage_input.value::text) END AS input_total_chars,
@@ -291,6 +295,7 @@ public sealed class SupervisorPlanObservationLeafReader : ISupervisorPlanObserva
                   AND decision.outcome_jsonb ? 'modelUsage'
             ) AS plan_usage ON TRUE
             LEFT JOIN LATERAL (SELECT plan_usage.value -> 'model' AS value) AS usage_model ON TRUE
+            LEFT JOIN LATERAL (SELECT plan_usage.value -> 'requestedModel' AS value) AS usage_requested_model ON TRUE
             LEFT JOIN LATERAL (SELECT plan_usage.value -> 'inputTokens' AS value) AS usage_input ON TRUE
             LEFT JOIN LATERAL (SELECT plan_usage.value -> 'outputTokens' AS value) AS usage_output ON TRUE
               WHERE decision.team_id = @team_id
@@ -326,8 +331,12 @@ internal static class SupervisorPlanObservationLeafWire
         var modelPrefix = NullableString(reader, 21);
         var modelTotalBytes = NullableInt(reader, 22);
         var modelTotalChars = NullableInt(reader, 23);
-        var inputTokens = ReadToken(NullableString(reader, 24), NullableString(reader, 25), NullableInt(reader, 26));
-        var outputTokens = ReadToken(NullableString(reader, 27), NullableString(reader, 28), NullableInt(reader, 29));
+        var requestedModelKind = NullableString(reader, 24);
+        var requestedModelPrefix = NullableString(reader, 25);
+        var requestedModelTotalBytes = NullableInt(reader, 26);
+        var requestedModelTotalChars = NullableInt(reader, 27);
+        var inputTokens = ReadToken(NullableString(reader, 28), NullableString(reader, 29), NullableInt(reader, 30));
+        var outputTokens = ReadToken(NullableString(reader, 31), NullableString(reader, 32), NullableInt(reader, 33));
 
         List<LeafWire>? wireLeaves;
         try { wireLeaves = JsonSerializer.Deserialize<List<LeafWire>>(leafJson, AgentJson.Options); }
@@ -335,12 +344,14 @@ internal static class SupervisorPlanObservationLeafWire
 
         var subtaskState = DecodeSubtasks(new SubtaskStateInput(payloadRootKind, subtasksPresent, subtasksKind, totalCount, invalidCount, truncatedCount), wireLeaves);
         var subtasks = TrustedSubtasks(subtaskState, wireLeaves);
-        var modelState = DecodeModelUsage(new ModelUsageStateInput(outcomeRootKind, usagePresent, usageKind, modelKind, modelPrefix, modelTotalBytes, modelTotalChars));
+        var modelState = DecodeModelUsage(new ModelUsageStateInput(outcomeRootKind, usagePresent, usageKind, modelKind, modelPrefix, modelTotalBytes, modelTotalChars, requestedModelKind, requestedModelPrefix, requestedModelTotalBytes, requestedModelTotalChars));
         var modelUsage = modelState is SupervisorPlanObservationLeafState.Exact or SupervisorPlanObservationLeafState.Truncated
             ? new SupervisorPlanModelUsageObservationLeaf
             {
                 ModelPrefix = modelPrefix!,
                 ModelTotalBytes = modelTotalBytes!.Value,
+                RequestedModelPrefix = requestedModelPrefix,
+                RequestedModelTotalBytes = requestedModelTotalBytes,
                 InputTokens = inputTokens,
                 OutputTokens = outputTokens,
             }
@@ -396,7 +407,10 @@ internal static class SupervisorPlanObservationLeafWire
         if (input.UsageKind != "object" || input.ModelKind != "string" || string.IsNullOrWhiteSpace(input.ModelPrefix)) return SupervisorPlanObservationLeafState.Invalid;
         if (input.ModelTotalBytes is null or < 0 || input.ModelTotalChars is null or < 0) return SupervisorPlanObservationLeafState.Corrupt;
         if (Encoding.UTF8.GetByteCount(input.ModelPrefix) > input.ModelTotalBytes) return SupervisorPlanObservationLeafState.Corrupt;
-        return input.ModelTotalChars > SupervisorPlanObservationLeafLimits.MaximumModelChars
+        if (input.RequestedModelKind is not null && input.RequestedModelKind != "string") return SupervisorPlanObservationLeafState.Invalid;
+        if (input.RequestedModelKind == "string" && (string.IsNullOrWhiteSpace(input.RequestedModelPrefix) || input.RequestedModelTotalBytes is null or < 0 || input.RequestedModelTotalChars is null or < 0)) return SupervisorPlanObservationLeafState.Invalid;
+        if (input.RequestedModelPrefix is not null && Encoding.UTF8.GetByteCount(input.RequestedModelPrefix) > input.RequestedModelTotalBytes!.Value) return SupervisorPlanObservationLeafState.Corrupt;
+        return input.ModelTotalChars > SupervisorPlanObservationLeafLimits.MaximumModelChars || input.RequestedModelTotalChars > SupervisorPlanObservationLeafLimits.MaximumModelChars
             ? SupervisorPlanObservationLeafState.Truncated
             : SupervisorPlanObservationLeafState.Exact;
     }
@@ -421,7 +435,7 @@ internal static class SupervisorPlanObservationLeafWire
 
     private sealed record SubtaskStateInput(string PayloadRootKind, bool Present, string? Kind, int Total, long Invalid, long Truncated);
 
-    private sealed record ModelUsageStateInput(string OutcomeRootKind, bool Present, string? UsageKind, string? ModelKind, string? ModelPrefix, int? ModelTotalBytes, int? ModelTotalChars);
+    private sealed record ModelUsageStateInput(string OutcomeRootKind, bool Present, string? UsageKind, string? ModelKind, string? ModelPrefix, int? ModelTotalBytes, int? ModelTotalChars, string? RequestedModelKind, string? RequestedModelPrefix, int? RequestedModelTotalBytes, int? RequestedModelTotalChars);
 
     private sealed record LeafWire
     {

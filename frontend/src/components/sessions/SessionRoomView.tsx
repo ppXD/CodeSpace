@@ -1,4 +1,4 @@
-/* eslint-disable react-refresh/only-export-components -- the room view co-locates its pure pane-binding helpers (resolveBinding, resolvePaneFromTurn, journalStepNodeId, shouldShowJumpToLatest) with the component; fast-refresh granularity is moot for these. */
+/* eslint-disable react-refresh/only-export-components -- the room view co-locates its pure pane-binding and model-route helpers with the component; fast-refresh granularity is moot for these. */
 import { createContext, Fragment, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -1047,6 +1047,12 @@ function JournalFold({ steps, category }: { steps: JournalStep[]; category: stri
  *  step's structured facts. A model call is the cost + intelligence source of an AI workflow, so once the fold is opened
  *  the reader sees WHAT decided WHAT, at what token cost + latency + spend — not a bare "Model call" line. Falls back to
  *  the muted step row if the facts didn't attach (a pre-enrichment step). */
+export function journalModelRoute(call: Pick<JournalModelCall, "requestedModel" | "model">): string {
+  const requested = call.requestedModel?.trim();
+  const observed = call.model?.trim();
+  return requested && observed && requested.toLowerCase() !== observed.toLowerCase() ? `${requested} → ${observed}` : observed || requested || "model";
+}
+
 function ModelCallRow({ step }: { step: JournalStep }) {
   const mc = step.modelCall;
   const openDrawer = useRoomDrawer();
@@ -1063,7 +1069,7 @@ function ModelCallRow({ step }: { step: JournalStep }) {
       <span className="room-mctime">{jTime(step.at)}</span>
       <span className="room-mcpurpose">{jPurpose(mc.purpose)}</span>
       <span className="room-mcmeta">
-        {mc.model && <span className="room-mcitem room-mcmodel" title={`Model · ${mc.model}`}><Sym n="sparkle" s={10} cls="room-mcic" /> {mc.model}</span>}
+        {(mc.model || mc.requestedModel) && <span className="room-mcitem room-mcmodel" title={`Model · ${journalModelRoute(mc)}`}><Sym n="sparkle" s={10} cls="room-mcic" /> {journalModelRoute(mc)}</span>}
         {mc.tokens != null && mc.tokens > 0 && <span className="room-mcitem" title={`${mc.tokens.toLocaleString()} tokens`}><Sym n="cpu" s={10} cls="room-mcic" /> {formatTokens(mc.tokens)} tokens</span>}
         {mc.latencyMs != null && <span className="room-mcitem" title="Latency"><Sym n="clock" s={10} cls="room-mcic" /> {formatLatencyMs(mc.latencyMs)}</span>}
         {mc.costUsd != null && <span className="room-mcitem room-mccost" title="Estimated cost">{formatCostUsd(mc.costUsd)}</span>}
@@ -1222,7 +1228,7 @@ function JournalStepRow({ step, muted, planCard, planVersion, planSuperseded, as
       {step.modelCall && (
         <div className="room-jmodel">
           <span className="room-jmodel-l">└ via · </span>
-          <span className="room-jmodel-model">{step.modelCall.model ?? "model"}</span>
+          <span className="room-jmodel-model">{journalModelRoute(step.modelCall)}</span>
           {step.modelCall.tokens != null && step.modelCall.tokens > 0 && <span className="room-jmodel-x"> · {formatTokens(step.modelCall.tokens)} tokens</span>}
           {step.modelCall.costUsd != null && <span className="room-jmodel-x"> · {formatCostUsd(step.modelCall.costUsd)}</span>}
         </div>

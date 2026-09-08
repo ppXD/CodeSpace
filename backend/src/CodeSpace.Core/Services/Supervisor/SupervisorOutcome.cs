@@ -416,12 +416,22 @@ public static class SupervisorOutcome
 
         if (root is not System.Text.Json.Nodes.JsonObject obj) return outcomeJson ?? "{}";
 
-        obj["modelUsage"] = new System.Text.Json.Nodes.JsonObject
+        var modelUsage = new System.Text.Json.Nodes.JsonObject
         {
             ["model"] = usage.Model,
             ["inputTokens"] = usage.InputTokens,
             ["outputTokens"] = usage.OutputTokens,
         };
+
+        if (!string.IsNullOrWhiteSpace(usage.RequestedModel)) modelUsage["requestedModel"] = usage.RequestedModel;
+        if (usage.FailedOver.Count > 0)
+        {
+            var trail = new System.Text.Json.Nodes.JsonArray();
+            foreach (var hop in usage.FailedOver.Where(hop => !string.IsNullOrWhiteSpace(hop))) trail.Add(hop);
+            if (trail.Count > 0) modelUsage["failedOver"] = trail;
+        }
+
+        obj["modelUsage"] = modelUsage;
 
         return obj.ToJsonString();
     }
@@ -614,7 +624,12 @@ public static class SupervisorOutcome
 
             if (string.IsNullOrWhiteSpace(model)) return null;
 
-            return new SupervisorModelUsage { Model = model!, InputTokens = ReadIntField(u, "inputTokens"), OutputTokens = ReadIntField(u, "outputTokens") };
+            var requestedModel = u.TryGetProperty("requestedModel", out var requested) && requested.ValueKind == JsonValueKind.String ? requested.GetString() : null;
+            var failedOver = u.TryGetProperty("failedOver", out var trail) && trail.ValueKind == JsonValueKind.Array
+                ? trail.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString())).Select(item => item.GetString()!).ToList()
+                : [];
+
+            return new SupervisorModelUsage { RequestedModel = requestedModel, Model = model!, FailedOver = failedOver, InputTokens = ReadIntField(u, "inputTokens"), OutputTokens = ReadIntField(u, "outputTokens") };
         }
         catch (JsonException)
         {
