@@ -9,10 +9,12 @@ using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Tasks.Contracts;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.Core.Services.Tasks.RoutePreview.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -105,11 +107,10 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // self-resolved so the decider has one instead of stopping turn-1. Inert (null) for every non-supervisor
         // projection — single-agent / map launches are byte-identical. PinIneligible flags the ONE case worth
         // recording: a pin was authored but didn't resolve, so the run silently ran on a DIFFERENT brain than requested.
-        var (brainModelId, brainPinIneligible, brainPinned) = await ResolveSupervisorBrainModelAsync(request, route, cancellationToken).ConfigureAwait(false);
+        var supervisorSelection = await ResolveSupervisorBrainModelAsync(request, seed, route, cancellationToken).ConfigureAwait(false);
+        var plannerSelection = await ResolvePlannerModelAsync(request, seed, route, cancellationToken).ConfigureAwait(false);
 
-        var plannerModelRowId = await ResolvePlannerModelAsync(request, route, cancellationToken).ConfigureAwait(false);
-
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, CompletionMode = request.CompletionMode, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = brainModelId, SupervisorBrainModelPinIneligible = brainPinIneligible, SupervisorBrainModelPinned = brainPinned, PlannerModelRowId = plannerModelRowId, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId, Purpose = request.Purpose };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, CompletionMode = request.CompletionMode, BaseRefs = baseRefs, PinnedShas = pinnedShas, SupervisorBrainModelId = supervisorSelection?.RowId, SupervisorModelSelection = supervisorSelection?.Receipt, SupervisorBrainModelPinIneligible = supervisorSelection?.PinIneligible == true, SupervisorBrainModelPinned = supervisorSelection?.Pinned == true, PlannerModelRowId = plannerSelection?.RowId, PlannerModelSelection = plannerSelection?.Receipt, PlannerReviewMode = request.PlannerReviewMode, AllowedModelIds = request.AllowedModelIds, AllowedAgentDefinitionIds = request.AllowedAgentDefinitionIds, AcceptanceCriteria = request.AcceptanceCriteria, AcceptanceChecks = request.AcceptanceChecks, DeliverySpec = request.DeliverySpec, RequirePlanConfirmation = request.RequirePlanConfirmation == true, DecisionReviewMode = request.DecisionReviewMode, ReviewerModelId = request.ReviewerModelId, Purpose = request.Purpose };
 
         // Potential model/Git preparation above runs without holding the snapshot row lock. The callback below
         // performs only transactional session/run staging and is entered once across competing workers.
@@ -186,11 +187,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// <c>PinIneligible</c> is true only when a pin was authored and did NOT resolve — the fallback still happened,
     /// but it's now discoverable instead of a silently swapped id with no trace.
     /// </summary>
-    private async Task<(Guid? RowId, bool PinIneligible, bool Pinned)> ResolveSupervisorBrainModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
+    private async Task<StructuredBrainSelection?> ResolveSupervisorBrainModelAsync(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route, CancellationToken cancellationToken)
     {
-        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return (null, false, false);
+        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return null;
 
-        return await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false);
+        return await ResolveStructuredBrainRowAsync(request, seed, route, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -199,11 +200,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// Null for every other projection (single-agent / supervisor use their own seams — byte-identical) and for
     /// a structured-incapable pool (the node then auto-picks / fails legibly at execution).
     /// </summary>
-    private async Task<Guid?> ResolvePlannerModelAsync(TaskLaunchRequest request, RoutePlan route, CancellationToken cancellationToken)
+    private async Task<StructuredBrainSelection?> ResolvePlannerModelAsync(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route, CancellationToken cancellationToken)
     {
         if (route.ProjectionKind is not (TaskProjectionKinds.PlanMapSynth or TaskProjectionKinds.PlanMapDynamic)) return null;
 
-        return (await ResolveStructuredBrainRowAsync(request, cancellationToken).ConfigureAwait(false)).RowId;
+        return await ResolveStructuredBrainRowAsync(request, seed, route, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -214,23 +215,35 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     /// case worth surfacing: an authored pin that didn't resolve, so the run is quietly steered onto a different brain
     /// than the operator asked for — a routine credential-rotation/revocation event, not a rare authoring mistake.
     /// </summary>
-    private async Task<(Guid? RowId, bool PinIneligible, bool Pinned)> ResolveStructuredBrainRowAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    private async Task<StructuredBrainSelection?> ResolveStructuredBrainRowAsync(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route, CancellationToken cancellationToken)
     {
         var structuredProviders = _llm.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
-        if (structuredProviders.Count == 0) return (null, false, false);
+        if (structuredProviders.Count == 0) return null;
+
+        var mode = RunModeClassifier.DeriveProjection(route.ProjectionKind);
+        var capabilityKey = SelectionCapability(request, seed);
 
         if (request.Overrides.ModelCredentialModelId is not { } pin)
-            return (await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false), false, false);
+            return FromDecision(await _modelSelector.SelectBrainForCapabilityAsync(new CapabilityModelSelectionRequest { TeamId = request.TeamId, Mode = mode, CapabilityKey = capabilityKey, EligibleProviders = structuredProviders }, cancellationToken).ConfigureAwait(false), pinIneligible: false);
 
         // Pinned = the operator's own row, honored — the decider resolves it verbatim and never fails over.
         if (await _modelSelector.ResolvePinnedBrainRowIdAsync(request.TeamId, pin, structuredProviders, cancellationToken).ConfigureAwait(false) is { } pinnedBrain)
-            return (pinnedBrain, false, true);
+            return new StructuredBrainSelection(pinnedBrain, false, true, new ModelSelectionReceipt { Source = ModelSelectionSource.OperatorPin, ModelCredentialModelId = pinnedBrain, Mode = mode, CapabilityKey = capabilityKey });
 
         _logger.LogWarning("TaskLaunchService: the operator's pinned brain model {PinnedModelCredentialModelId} for team {TeamId} was ineligible (missing/disabled/cross-team/non-structured) — auto-selecting an eligible model instead", pin, request.TeamId);
 
-        return (await _modelSelector.SelectBrainRowIdAsync(request.TeamId, structuredProviders, cancellationToken).ConfigureAwait(false), true, false);
+        return FromDecision(await _modelSelector.SelectBrainForCapabilityAsync(new CapabilityModelSelectionRequest { TeamId = request.TeamId, Mode = mode, CapabilityKey = capabilityKey, EligibleProviders = structuredProviders }, cancellationToken).ConfigureAwait(false), pinIneligible: true);
     }
+
+    /// <summary>The expected completion surface known before projection: repository-scoped work produces a reviewable branch; repository-free work produces an inline answer.</summary>
+    private static string SelectionCapability(TaskLaunchRequest request, TaskLaunchSeed seed) =>
+        seed.RepositoryId is not null || request.RepositoryId is not null || request.RelatedRepositories is { Count: > 0 } ? CapabilityKeys.GitBranch : CapabilityKeys.InlineAnswer;
+
+    private static StructuredBrainSelection? FromDecision(CapabilityModelSelectionDecision? decision, bool pinIneligible) =>
+        decision is null ? null : new StructuredBrainSelection(decision.RowId, pinIneligible, false, decision.Receipt);
+
+    private sealed record StructuredBrainSelection(Guid RowId, bool PinIneligible, bool Pinned, ModelSelectionReceipt Receipt);
 
     /// <summary>The grounding the run is primed with: on a CONTINUE, the session's prior-turn digest composed over any seed grounding; on a fresh launch, only the seed's own grounding (null for chat). The projection folds this into the agent prompt.</summary>
     private async Task<string?> ResolveGroundingAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)

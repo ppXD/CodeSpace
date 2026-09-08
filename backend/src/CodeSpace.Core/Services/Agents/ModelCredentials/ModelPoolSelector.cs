@@ -1,9 +1,12 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 
@@ -189,6 +192,49 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     public async Task<IReadOnlyList<Guid>> ListBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
         await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeModelId: null, cancellationToken).ConfigureAwait(false);
 
+    public async Task<CapabilityModelSelectionDecision?> SelectBrainForCapabilityAsync(CapabilityModelSelectionRequest request, CancellationToken cancellationToken)
+    {
+        if (request.EligibleProviders.Count == 0) return null;
+
+        var eligible = request.EligibleProviders.Select(provider => provider.ToLower()).ToHashSet();
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(model => model.Enabled && model.Credential.TeamId == request.TeamId && model.Credential.DeletedDate == null && model.Credential.Status == CredentialStatus.Active)
+            .Select(model => new { model.Id, model.ModelId, model.IsDefault, model.CapabilityTier, model.ProbedCapabilityTier, model.Available, Provider = model.Credential.Provider })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var candidates = rows.Where(row => eligible.Contains(row.Provider.ToLower())).ToList();
+        var reachable = candidates.Where(row => row.Available != false).ToList();
+        if (reachable.Count > 0) candidates = reachable;
+        if (candidates.Count == 0) return null;
+
+        var now = DateTimeOffset.UtcNow;
+        var rowIds = candidates.Select(row => row.Id).ToList();
+        var receiptRows = await _db.QualificationReceipt.AsNoTracking()
+            .Where(receipt => receipt.CandidateModelRowId != null && rowIds.Contains(receipt.CandidateModelRowId.Value)
+                && receipt.Mode == request.Mode && receipt.CapabilityKey == request.CapabilityKey
+                && receipt.ModelAttribution == ModelQualificationAttribution.Bound && receipt.ModelEvidenceVersion == ModelQualificationEvidence.CurrentVersion
+                && receipt.ModelSampleSize != null && receipt.ModelObservedCellCount > 0 && receipt.ModelSolveRateLowerBound != null && receipt.ModelEvaluatorHealth != null
+                && receipt.RevokedAt == null && receipt.EffectiveFrom <= now && receipt.ExpiresAt > now)
+            .Select(receipt => new { receipt.Id, receipt.CandidateModelRowId, receipt.SuiteDigest, receipt.ModelEvidenceVersion, receipt.ModelSampleSize, receipt.ModelSolveRateLowerBound, receipt.ModelEvaluatorHealth, receipt.EffectiveFrom, receipt.ExpiresAt, receipt.CohortJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var observations = receiptRows.Where(receipt => CohortMatches(receipt.CohortJson, request.TeamId, request.Mode))
+            .GroupBy(receipt => receipt.CandidateModelRowId!.Value)
+            .ToDictionary(group => group.Key, group => (IReadOnlyList<EmpiricalModelObservation>)group.Select(receipt => new EmpiricalModelObservation
+            {
+                ReceiptId = receipt.Id, SuiteDigest = receipt.SuiteDigest, EvidenceVersion = receipt.ModelEvidenceVersion!,
+                SampleSize = receipt.ModelSampleSize!.Value, SolveRateLowerBound = receipt.ModelSolveRateLowerBound!.Value,
+                EvaluatorHealth = receipt.ModelEvaluatorHealth!.Value, EffectiveFrom = receipt.EffectiveFrom, ExpiresAt = receipt.ExpiresAt,
+            }).ToList());
+
+        var ranked = EmpiricalModelSelectionPolicy.Select(candidates.Select(row => new EmpiricalModelCandidate
+        {
+            RowId = row.Id, ModelId = row.ModelId, IsDefault = row.IsDefault, DeclaredTier = row.CapabilityTier, ProbedTier = row.ProbedCapabilityTier,
+            Observations = observations.GetValueOrDefault(row.Id) ?? [],
+        }).ToList(), now, request.Mode, request.CapabilityKey);
+
+        return ranked is null ? null : new CapabilityModelSelectionDecision(ranked.RowId, ranked.Receipt);
+    }
+
     private async Task<Guid?> SelectBrainRowIdCoreAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, string? excludeModelId, CancellationToken cancellationToken)
     {
         var ordered = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeModelId, cancellationToken).ConfigureAwait(false);
@@ -317,6 +363,19 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
     };
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static bool CohortMatches(string cohortJson, Guid teamId, string mode)
+    {
+        try
+        {
+            var cohort = JsonSerializer.Deserialize<LaunchCohortDescriptor>(cohortJson, AgentJson.Options);
+            return cohort?.TeamId == teamId && cohort.Mode == mode && cohort.CompletionPolicyVersion == CompletionPolicy.CurrentVersion;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>The EFFECTIVE capability tier used for ordering: the objectively-PROBED tier (the opaque-id probe) wins, else the brain-inferred tier, else Unknown (un-probed / un-tiered). So a probed Strong outranks a brain Unknown without erasing the brain verdict, and an un-probed pool orders identically to before this column.</summary>
     private static ModelCapabilityTier EffectiveTier(ModelCapabilityTier? probed, ModelCapabilityTier? brain) => AgentPlaneModelRanking.Effective(probed, brain);
