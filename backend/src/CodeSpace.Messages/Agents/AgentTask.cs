@@ -195,6 +195,23 @@ public sealed record AgentTask
     /// <summary>Wall-clock cap for the whole agent run, in seconds. Default 3600 (1h). <c>null</c> ⇒ NO wall-clock (unbounded) — the run is then bounded only by the stall watchdog (no-progress) + the cost cap; use for a genuinely long task. Never defaulted to null: an absent value falls back to the bounded default, so only an EXPLICIT null (the operator's "no timeout" choice) is unbounded.</summary>
     public int? TimeoutSeconds { get; init; } = 3600;
 
+    /// <summary>
+    /// The operator's monitored USD ceiling for this agent-run chain. The coding CLI is an opaque external process,
+    /// so one in-flight invocation may cross the ceiling before CodeSpace observes its final token usage; once observed,
+    /// an over-cap result cannot qualify and no retry is admitted. Null means no cost ceiling and is omitted so legacy
+    /// task envelopes stay byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? MaxCostUsd { get; init; }
+
+    /// <summary>
+    /// Realized, priceable spend from earlier attempts in this node's retry chain. The retiring attempt's durable result
+    /// supplies it to the next envelope, so every retry prices against the same cumulative ceiling. Null means no prior
+    /// priced attempt and is omitted from first-attempt and uncapped envelopes.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? BudgetSpentUsd { get; init; }
+
     /// <summary>The conversation a run posts its tool-approval cards into — null = no approval surface (which fails closed in a later slice). Stored only; nothing reads it yet.</summary>
     public Guid? ApprovalConversationId { get; init; }
 

@@ -136,6 +136,14 @@ public class TaskLaunchFlowTests
 
         result.Route.Caps.MaxCostUsd.ShouldBe(3.25m, "the operator cost cap reached the route through the handler (was dropped — CapsOverride=null — before F1)");
         result.Route.Caps.MaxParallelism.ShouldBe(2, "the operator parallelism cap reached the route too");
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull("the launched single-agent definition is frozen inline on the run");
+        var agentConfig = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement
+            .GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent")
+            .GetProperty("config");
+        agentConfig.GetProperty("maxCostUsd").GetDecimal().ShouldBe(3.25m,
+            "Quick must carry the operator's cap past routing into the executable agent.run snapshot, not merely echo it in the route receipt");
     }
 
     [Fact]

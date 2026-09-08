@@ -113,6 +113,18 @@ public sealed record AgentRunResult
 
     public AgentTokenUsage? TokenUsage { get; init; }
 
+    /// <summary>The priceable USD spend of this physical CLI attempt, derived from its observed model and complete reported token usage. Null means unknown or uncapped.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? CostUsd { get; init; }
+
+    /// <summary>This attempt's <see cref="CostUsd"/> plus the retry chain's previously realized spend. Null when the capped result could not be priced or when no cap applies.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public decimal? CumulativeCostUsd { get; init; }
+
+    /// <summary>True when a capped run emitted no complete usage, no usable model price, or an unrepresentable total. Fail-closed at the workflow node because the monitored ceiling cannot be evaluated honestly.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool CostIndeterminate { get; init; }
+
     /// <summary>
     /// P3.1a: the harness-native session/thread id of the agent's CLI conversation (Claude's <c>session_id</c>,
     /// Codex's <c>thread_id</c>), captured off the run's event stream. The handle a later rerun threads back as

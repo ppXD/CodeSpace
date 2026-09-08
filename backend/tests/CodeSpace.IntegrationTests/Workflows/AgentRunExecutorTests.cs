@@ -1177,6 +1177,47 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_capped_real_process_persists_observed_attempt_and_retry_chain_cost()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 0.5m, budgetSpentUsd: 0.1m, model: "claude-opus-4-8");
+
+        const string script = """printf 'working on it\n{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"output_tokens":0}}}\n'""";
+        await ExecuteAsync(runId, new UsageReportingHarness(script));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.TokenUsage!.InputTokens.ShouldBe(100_000, "the real shell process's CLI-shaped usage reached the executor fold");
+        result.CostUsd.ShouldBe(0.5m, "the observed invocation is priced with the model that actually ran");
+        result.CumulativeCostUsd.ShouldBe(0.6m, "prior retry spend and this invocation are one durable cumulative fact");
+        result.CostIndeterminate.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_capped_real_process_with_an_unpriced_model_persists_indeterminate_instead_of_zero()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 1m, model: "unpriced-cli-model");
+
+        const string script = """printf 'working on it\n{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":5}}}\n'""";
+        await ExecuteAsync(runId, new UsageReportingHarness(script));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.CostUsd.ShouldBeNull();
+        result.CumulativeCostUsd.ShouldBeNull();
+        result.CostIndeterminate.ShouldBeTrue("unknown price under a cap is terminal accounting evidence, never a free run");
+    }
+
+    [Fact]
     public async Task Projects_the_captured_token_usage_onto_the_agent_metric_end_to_end()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1768,11 +1809,11 @@ public partial class AgentRunExecutorTests
         return instrumented;
     }
 
-    private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800)
+    private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800, decimal? maxCostUsd = null, decimal? budgetSpentUsd = null, string model = "test-model")
     {
         using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = timeoutSeconds },
+            new AgentTask { Goal = "scripted", Harness = "scripted", Model = model, TimeoutSeconds = timeoutSeconds, MaxCostUsd = maxCostUsd, BudgetSpentUsd = budgetSpentUsd },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

@@ -17,7 +17,7 @@ public sealed record RouteCaps
     /// <summary>Max agents the run may spawn in total. Null = the projection default.</summary>
     public int? MaxTotalSpawns { get; init; }
 
-    /// <summary>Max spend the run is allowed. Null = no cost cap at this layer.</summary>
+    /// <summary>Max spend the run is allowed. Quick observes external-CLI spend after each invocation; map/deep enforce through their ledgers. Null = no cost cap at this layer.</summary>
     public decimal? MaxCostUsd { get; init; }
 
     /// <summary>The highest autonomy tier the run may use, as an open tier-name string (e.g. <c>"Standard"</c>) — the projection clamps to it.</summary>

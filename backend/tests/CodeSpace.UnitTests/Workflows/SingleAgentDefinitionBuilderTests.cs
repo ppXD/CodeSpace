@@ -34,10 +34,10 @@ public class SingleAgentDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(TaskLaunchSeed seed, ResolvedAgentProfile? profile) => new()
+    private static TaskBuildContext Context(TaskLaunchSeed seed, ResolvedAgentProfile? profile, decimal? maxCostUsd = null) => new()
     {
         Seed = seed,
-        Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent },
+        Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent, Caps = new RouteCaps { MaxCostUsd = maxCostUsd } },
         AgentProfile = profile,
     };
 
@@ -85,6 +85,13 @@ public class SingleAgentDefinitionBuilderTests
         config.TryGetProperty("autonomyLevel", out _).ShouldBeFalse();
         config.TryGetProperty("agentDefinitionId", out _).ShouldBeFalse();
         AgentInputsOf(Builder.Build(Context(Seed(), profile: null))).TryGetProperty("repositoryId", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Quick_cost_override_reaches_the_agent_node_without_inventing_a_default()
+    {
+        AgentConfigOf(Builder.Build(Context(Seed(), profile: null, maxCostUsd: 1.25m))).GetProperty("maxCostUsd").GetDecimal().ShouldBe(1.25m);
+        AgentConfigOf(Builder.Build(Context(Seed(), profile: null))).TryGetProperty("maxCostUsd", out _).ShouldBeFalse();
     }
 
     [Fact]

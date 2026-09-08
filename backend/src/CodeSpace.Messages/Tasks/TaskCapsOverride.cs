@@ -6,12 +6,11 @@ namespace CodeSpace.Messages.Tasks;
 /// OPTIONAL: a set value replaces the preset's; an unset (null) field keeps the preset default, so an absent
 /// override is byte-identical to today's preset-only behaviour.
 ///
-/// <para><b>Where each cap BINDS</b> — these are multi-agent / loop bounds, so they take effect on the projections
-/// that actually loop or fan out: <see cref="MaxCostUsd"/> is enforced by the SUPERVISOR lane (the deep tier) — a
-/// run whose realized spend exceeds it is force-stopped by <c>SupervisorBounds</c> (the named "cost cap before
-/// public Deep" gate); <see cref="MaxParallelism"/> binds a fan-out (map / supervisor) projection. A single-agent
-/// (quick) run has no spend-loop or fan-out to bound, so a cap set on it is inert by design — the caps reach
-/// <c>RoutePlan.Caps</c> on every tier, but only a looping/fan-out projection consumes them.</para>
+/// <para><b>Where each cap BINDS</b>: <see cref="MaxCostUsd"/> reaches every agent-bearing projection. Supervisor and
+/// map enforce it at their orchestration ledgers; quick carries it into the coding CLI result and blocks qualification
+/// or another retry after observed spend reaches it. Quick is explicitly monitored because an opaque external CLI
+/// reports usage only after an invocation exits, so that invocation may cross the ceiling. <see cref="MaxParallelism"/>
+/// binds fan-out (map / supervisor) projections and is inert on quick.</para>
 ///
 /// <para>Kept SEPARATE from <c>TaskExecutionOverrides</c> (the agent-profile harness/model/persona overrides) by
 /// design: caps are a supervisor/cost concern that flows through the router's caps merge, not the agent envelope.
@@ -20,7 +19,7 @@ namespace CodeSpace.Messages.Tasks;
 /// </summary>
 public sealed record TaskCapsOverride
 {
-    /// <summary>Max spend (USD) the run is allowed before the SUPERVISOR (deep tier) force-stops it; inert on a single-agent run (no spend-loop). Null = the preset's cap (or none). Must be POSITIVE when set.</summary>
+    /// <summary>Max spend (USD) before the active lane stops further work; monitored post-invocation on quick and ledger-enforced on map/deep. Null = the preset's cap (or none). Must be POSITIVE when set.</summary>
     public decimal? MaxCostUsd { get; init; }
 
     /// <summary>Max branches a fan-out (map / supervisor) projection may run at once; inert on a single-agent run. Null = the preset default. Must be >= 1 when set.</summary>
