@@ -5,6 +5,9 @@ name: Backend · Real model
 # so it runs on main + on demand (NOT on every PR push) to control token cost. The Category=RealModel tests
 # self-skip when the secrets are absent, so a fork without them stays green at zero API cost.
 # CLI jobs use the worker image's Node major; strict npm engine checks reject incompatible pinned packages before live tests.
+# The repository secrets route every lane through one shared gateway. The short independent probes run together first;
+# expensive decision, auxiliary, and supervisor arcs then enter in bounded waves. `always()` preserves every downstream
+# measurement after a red verdict while `needs` prevents a concurrent cooldown storm from corrupting that measurement.
 
 on:
   push:
@@ -37,6 +40,8 @@ env:
 jobs:
   real-model:
     name: real model (supervisor decision eval)
+    needs: [real-model-benchmark, real-model-injection, real-model-publish-manifest, real-model-footer-signals, real-model-stop-hook]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     # Headroom for the SEQUENTIAL worst case (xUnit runs a class's [Theory] cases serially): the trajectory class is
     # 10 cases (5 scenarios — happy/conflict/failure/persistent-conflict/multi-failure × 2 wires) each bounded by its
@@ -159,6 +164,8 @@ jobs:
 
   real-model-wholeloop:
     name: real model (live-brain whole-loop — supervisor arcs)
+    needs: real-model-wholeloop-aux
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     # The live brain authors up to maxRounds (12 — a FAIR budget for a real, less-efficient model to reach the accept
     # head) decisions, each a live API call (~15-60s), plus real git clone/capture/integrate per spawned agent + the
@@ -344,6 +351,8 @@ jobs:
 
   real-model-wholeloop-aux:
     name: real model (live-brain whole-loop — session · planner · delivery arcs)
+    needs: [real-model, real-model-benchmark-extended, real-model-qualification-rehearsal]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     # The live brain authors up to maxRounds (12 — a FAIR budget for a real, less-efficient model to reach the accept
     # head) decisions, each a live API call (~15-60s), plus real git clone/capture/integrate per spawned agent + the
@@ -762,6 +771,7 @@ jobs:
 
   real-model-qualification-rehearsal:
     name: real model (hidden-suite qualification rehearsal — report only)
+    needs: real-model-benchmark-extended
     runs-on: ubuntu-latest
     # Q-ops — the qualification REHEARSAL, dispatch-only like the extended corpus: stages the operator-held hidden
     # suite from a secret URL (absent ⇒ the test self-skips loudly), runs the EXACT IQualificationRunner chain the
@@ -769,7 +779,7 @@ jobs:
     # round before minting the durable receipt on the deployment. The receipt appended here lands in the job-local
     # throwaway db — a rehearsal never mints the deployment's claim. Dispatch via
     # `gh workflow run real-model.yml --ref <branch>`.
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 60
 
     services:
@@ -887,6 +897,7 @@ jobs:
 
   real-model-benchmark-extended:
     name: real model (extended benchmark corpus — report only)
+    needs: real-model
     runs-on: ubuntu-latest
     # P4.2 — the EXTENDED-tier solve-rate REPORT, kept in its OWN opt-in lane (workflow_dispatch ONLY — see the `on:`
     # block at the top of this file, which the default push trigger does NOT reach): the extended corpus is 2 harder,
@@ -894,7 +905,7 @@ jobs:
     # generous 20-min per-task timeout, so it must never share a budget with (or risk flaking) the blessed 9-task
     # `real-model-benchmark` job above. Dispatch on demand via `gh workflow run real-model.yml --ref <branch>` to get a
     # fresh extended-corpus read; it never runs on an automatic push to main.
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 60
 
     # Same UNCONFINED rationale as the blessed benchmark lane: this gate's signal is the live solve-rate REPORT, not
