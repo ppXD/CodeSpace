@@ -15,9 +15,9 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// 🟢 Integration (real Postgres + the REAL <see cref="ModelCapabilityProbeService"/>, a SCRIPTED <see cref="ILLMClient"/>
 /// at the battery seam): the opaque-id capability PROBE runs the battery on ONLY opaque (capability_tier='Unknown') rows,
-/// maps the score to a coarse {Basic, Strong} tier (never Frontier), writes it as a MONOTONIC upgrade, leaves a garbage /
-/// unreachable model un-verdicted (re-probing on staleness), and backs off via last_probed_capability_at. The brain
-/// verdict (capability_tier) is never touched.
+/// maps a complete score to a coarse {Unknown, Basic, Strong} tier (never Frontier), permits complete newer evidence to
+/// replace stale evidence, preserves the prior on incomplete infrastructure-faulted batteries, and backs off via
+/// last_probed_capability_at. The brain verdict (capability_tier) is never touched.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -56,7 +56,7 @@ public sealed class ModelCapabilityProbeFlowTests
     }
 
     [Fact]
-    public async Task A_garbage_model_gets_no_verdict_but_stamps_the_attempt()
+    public async Task A_complete_garbage_response_records_an_Unknown_verdict_and_stamps_the_attempt()
     {
         var teamId = await SeedTeamAsync();
         var cred = await SeedCredentialAsync(teamId);
@@ -64,7 +64,7 @@ public sealed class ModelCapabilityProbeFlowTests
 
         await ProbeAsync(teamId, Responder(easyCorrect: false, hardCorrect: false));
 
-        (await ProbedTierOf(teamId, "garbage-alias")).ShouldBeNull("a model that fails the battery is never promoted — it stays Unknown");
+        (await ProbedTierOf(teamId, "garbage-alias")).ShouldBe(ModelCapabilityTier.Unknown, "a complete objectively graded miss is evidence, not an infrastructure absence");
         (await LastProbedAtOf(teamId, "garbage-alias")).ShouldNotBeNull("but the attempt is stamped for back-off");
     }
 
@@ -87,7 +87,7 @@ public sealed class ModelCapabilityProbeFlowTests
     }
 
     [Fact]
-    public async Task A_re_probe_never_downgrades_a_higher_verdict()
+    public async Task A_complete_re_probe_can_downgrade_a_higher_verdict()
     {
         var teamId = await SeedTeamAsync();
         var cred = await SeedCredentialAsync(teamId);
@@ -99,7 +99,23 @@ public sealed class ModelCapabilityProbeFlowTests
         await MakeStaleAsync(teamId, "metis-coder-max");
         await ProbeAsync(teamId, Responder(true, false));   // a later, weaker (Basic-scoring) run
 
-        (await ProbedTierOf(teamId, "metis-coder-max")).ShouldBe(ModelCapabilityTier.Strong, "monotonic — a later Basic-scoring run never downgrades a Strong verdict");
+        (await ProbedTierOf(teamId, "metis-coder-max")).ShouldBe(ModelCapabilityTier.Basic, "a complete newer measurement replaces stale optimistic evidence");
+    }
+
+    [Fact]
+    public async Task A_partial_probe_with_infrastructure_faults_never_downgrades_a_prior_verdict()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId);
+        await AddModelAsync(cred, "metis-coder-max", capabilityTier: ModelCapabilityTier.Unknown);
+
+        await ProbeAsync(teamId, Responder(true, true));
+        (await ProbedTierOf(teamId, "metis-coder-max")).ShouldBe(ModelCapabilityTier.Strong);
+
+        await MakeStaleAsync(teamId, "metis-coder-max");
+        await ProbeAsync(teamId, new PartialInfrastructureClient(Provider));
+
+        (await ProbedTierOf(teamId, "metis-coder-max")).ShouldBe(ModelCapabilityTier.Strong, "a partial battery is inconclusive even when its usable easy answers would otherwise map to Basic");
     }
 
     [Fact]
@@ -252,5 +268,20 @@ public sealed class ModelCapabilityProbeFlowTests
         public string Provider { get; }
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) =>
             throw new LlmApiException(Provider, null, LlmErrorCategory.Transient, "connection refused");
+    }
+
+    private sealed class PartialInfrastructureClient : ILLMClient
+    {
+        public PartialInfrastructureClient(string provider) => Provider = provider;
+        public string Provider { get; }
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct)
+        {
+            var task = ModelCapabilityProbeBattery.Tasks.First(t => t.Prompt == request.UserPrompt);
+            if (task.Band == ProbeBand.Hard) throw new LlmApiException(Provider, 429, LlmErrorCategory.Transient, "rate limited");
+
+            var answer = CorrectAnswers[request.UserPrompt];
+            return Task.FromResult(new LLMCompletion { Text = answer, Model = request.Model });
+        }
     }
 }

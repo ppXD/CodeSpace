@@ -36,16 +36,16 @@ public static class ModelCapabilityProbeBattery
     /// <summary>
     /// Map a battery score to a probed tier. A MAJORITY (&gt;50%, N-of-M) of the EASY tasks ⇒ at least
     /// <see cref="ModelCapabilityTier.Basic"/>; ALSO a majority of the HARD tasks ⇒ <see cref="ModelCapabilityTier.Strong"/>
-    /// (the cap — never Frontier). Below the Easy majority ⇒ <c>null</c> (no verdict; the row stays Unknown and re-probes
-    /// later). The majority threshold tolerates a single flaky miss; combined with the caller's monotonic-upgrade write it
-    /// makes one bad day non-destructive.
+    /// (the cap — never Frontier). Below the Easy majority ⇒ <see cref="ModelCapabilityTier.Unknown"/>. Completeness is
+    /// enforced by the caller, so this method maps a complete measured miss rather than conflating it with missing evidence.
+    /// The majority threshold tolerates a single wrong answer in either band.
     /// </summary>
-    public static ModelCapabilityTier? MapToTier(int easyPasses, int hardPasses)
+    public static ModelCapabilityTier MapToTier(int easyPasses, int hardPasses)
     {
         var easyMajority = easyPasses >= Majority(CountBand(ProbeBand.Easy));
         var hardMajority = hardPasses >= Majority(CountBand(ProbeBand.Hard));
 
-        if (!easyMajority) return null;
+        if (!easyMajority) return ModelCapabilityTier.Unknown;
 
         return hardMajority ? ModelCapabilityTier.Strong : ModelCapabilityTier.Basic;
     }

@@ -557,6 +557,18 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task An_observed_Unknown_falls_back_to_the_declared_prior_in_every_picker()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        var declaredStrong = await AddModelReturningIdAsync(cred, "zzz-declared-strong", tier: ModelCapabilityTier.Strong, probedTier: ModelCapabilityTier.Unknown);
+        await AddModelReturningIdAsync(cred, "aaa-declared-basic", tier: ModelCapabilityTier.Basic);
+
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("zzz-declared-strong", "Unknown evidence cannot erase a known prior in the general model picker");
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(declaredStrong, "the brain picker uses the same evidence fold");
+    }
+
+    [Fact]
     public async Task Never_probed_rows_are_preferred_so_an_unprobed_pool_is_byte_identical()
     {
         var teamId = await SeedTeamAsync();

@@ -41,6 +41,7 @@ public static class AgentPlaneModelRanking
             .ThenByDescending(m => (int)Effective(probedTier(m), declaredTier(m)));
     }
 
-    /// <summary>The EFFECTIVE capability tier: the objectively-PROBED tier wins, else the declared/brain-inferred tier, else Unknown — mirrors <see cref="ModelPoolSelector"/>'s own identical formula.</summary>
-    public static ModelCapabilityTier Effective(ModelCapabilityTier? probed, ModelCapabilityTier? declared) => probed ?? declared ?? ModelCapabilityTier.Unknown;
+    /// <summary>The EFFECTIVE capability tier: a concrete objectively-probed tier wins; an absent or Unknown observation falls back to the declared/brain-inferred prior; otherwise Unknown.</summary>
+    public static ModelCapabilityTier Effective(ModelCapabilityTier? probed, ModelCapabilityTier? declared) =>
+        probed is { } observed && observed != ModelCapabilityTier.Unknown ? observed : declared ?? ModelCapabilityTier.Unknown;
 }
