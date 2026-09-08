@@ -15,7 +15,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// and stub the model-pool selector to the configured live credential. ONE source of truth so the gates can never
 /// drift on the wire setup (a fix here reaches every lane).
 /// </summary>
-internal static class RealModelLiveWire
+public static class RealModelLiveWire
 {
     private static readonly IHttpClientFactory SharedHttp = new SimpleHttpClientFactory();
 

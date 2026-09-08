@@ -18,6 +18,8 @@ namespace CodeSpace.Core.Services.Review;
 /// </summary>
 public sealed class LlmRubricJudge : IRubricJudge, IScopedDependency
 {
+    public const string EvaluatorGeneration = "llm-rubric-judge/v2-observed-identity";
+
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
 
@@ -48,11 +50,9 @@ public sealed class LlmRubricJudge : IRubricJudge, IScopedDependency
             if (structured == null) return RubricJudgeVerdict.JudgeFailed("no-judge-model: no structured-output provider for the judge model");
 
             var completion = await structured.CompleteStructuredAsync(BuildRequest(request.Rubric, request.Artifact, request.Goal, pick), cancellationToken).ConfigureAwait(false);
-
-            var verdict = Project(request.Rubric, completion.Json);
-            if (verdict.Failed) return verdict;
             var judgeModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential);
-            return verdict with { JudgeModel = judgeModel, Independence = LlmStructuredCritic.IndependenceOf(producerModel.ObservedModel, judgeModel) };
+            var independence = LlmStructuredCritic.IndependenceOf(producerModel.ObservedModel, judgeModel);
+            return Project(request.Rubric, completion.Json) with { JudgeModel = judgeModel, Independence = independence };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
