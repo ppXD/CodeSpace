@@ -28,15 +28,19 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
     private readonly CodeSpaceDbContext _db;
     private readonly IPublishManifestStore _manifests;
     private readonly ISessionIntelligenceTurnReader _turns;
+    private readonly ISessionEffectReceiptReader _effects;
 
     /// <summary>Cap the VERBATIM window to the most recent N top-level turns — recent work is rendered in full; older turns roll into the distilled <see cref="WorkSession.Summary"/>. The summarizer's watermark uses this same window size, so summary + window are contiguous.</summary>
     internal const int MaxTurns = 8;
 
-    public SessionContextBuilder(CodeSpaceDbContext db, IPublishManifestStore manifests)
+    public SessionContextBuilder(CodeSpaceDbContext db, IPublishManifestStore manifests) : this(db, manifests, new SessionEffectReceiptReader(db)) { }
+
+    public SessionContextBuilder(CodeSpaceDbContext db, IPublishManifestStore manifests, ISessionEffectReceiptReader effects)
     {
         _db = db;
         _manifests = manifests;
         _turns = new SessionIntelligenceTurnReader(db);
+        _effects = effects;
     }
 
     public async Task<string?> BuildAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
@@ -83,6 +87,7 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
         // window above — read from the durable source binding (never re-derived from the summary's own prose), so a
         // persisted failed verification or unknown delivery is never silently lost to compaction.
         var carriedForward = await BuildCarriedForwardContractsAsync(session?.SummarySourceBindingJson, teamId, cancellationToken).ConfigureAwait(false);
+        var effects = await _effects.ReadAsync(new SessionEffectReceiptRequest { TeamId = teamId, SessionId = sessionId, Limit = 12 }, cancellationToken).ConfigureAwait(false);
 
         var sb = new StringBuilder();
         sb.AppendLine("# Earlier turns in this work thread");
@@ -127,6 +132,12 @@ public sealed class SessionContextBuilder : ISessionContextBuilder, IScopedDepen
 
             if (assessmentsByRunId.TryGetValue(row.Id, out var recorded) && RenderCompletion(recorded.AssessmentJson, recorded.WouldBeTerminalDecision) is { } completion)
                 sb.AppendLine(completion);
+        }
+
+        if (effects.Items.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine(SessionEffectReceiptText.Render(effects, launchDigest: true));
         }
 
         return sb.ToString().TrimEnd();
