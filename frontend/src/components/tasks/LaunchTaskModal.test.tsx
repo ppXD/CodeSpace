@@ -60,7 +60,13 @@ const defaultPosture = (input: import("@/api/tasks").RoutePreviewInput): TaskRou
     : NETWORK_ON_TIERS.has(ceiling)
       ? `Network: off (${autonomy}) — severed only where the sandbox confines`
       : `Network: clamped off by policy (ceiling ${ceiling}) — severed only where the sandbox confines`;
-  return { autonomy, networkOn, network, completionMode: "Shadow" };
+  const write = autonomy === "Confined" ? "Write scope: read-only requested (Confined) — OS-enforced only where the sandbox confines" : `Write scope: workspace (${autonomy})`;
+  const approval = autonomy === "Confined"
+    ? "Risky tools: refused (Confined); tools marked irreversible cannot auto-run"
+    : autonomy === "Unleashed"
+      ? "Risky tools: may run unattended (Unleashed); tools marked irreversible still require human approval"
+      : `Risky tools: require human approval (${autonomy}); tools marked irreversible cannot auto-run`;
+  return { autonomy, networkOn, network, write, approval, completionMode: "Shadow", completion: "Completion: Shadow — evidence is assessed without overriding the legacy terminal result" };
 };
 
 vi.mock("@/hooks/use-route-preview", () => ({
@@ -167,7 +173,7 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(lastInput).toMatchObject({ autonomy: "Confined" });
   });
 
-  it("Permissions tab drops the unwired decision-surface/notify/timeout controls and states the network posture", () => {
+  it("Permissions tab removes fake always-on toggles and states server-owned safety postures", () => {
     renderBox();
     fireEvent.click(screen.getByText("Advanced"));
     fireEvent.click(screen.getByText("Permissions"));
@@ -179,6 +185,12 @@ describe("LaunchTaskModal (minimal box)", () => {
     expect(screen.queryByText("Unleashed")).toBeNull();
     // Untouched Auto + Standard permission: the route preview's OWN posture, sourced from the server, not a guess.
     expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by policy (ceiling Standard)");
+    expect(screen.getByTestId("write-posture")).toHaveTextContent("Write scope: workspace (Standard)");
+    expect(screen.getByTestId("approval-posture")).toHaveTextContent("Risky tools: require human approval (Standard)");
+    expect(screen.getByTestId("completion-posture")).toHaveTextContent("Completion: Shadow");
+    expect(screen.queryByText("Always on")).toBeNull();
+    expect(screen.queryByText("Ask when uncertain")).toBeNull();
+    expect(screen.queryByText("Stop before merge / push")).toBeNull();
     // Time limit survives — it is the one control this tab's dead trio pointed back to.
     expect(screen.getByText("Time limit")).toBeInTheDocument();
   });
@@ -321,7 +333,7 @@ describe("LaunchTaskModal (minimal box)", () => {
     // The deployment ceiling (Sandbox:MaxAutonomy) is a bound the FE never sees a value for on its own — only the
     // route preview reports it. A component that still computed its own sentence could not produce this wording at
     // all; showing it verbatim is the proof the row is a genuine pass-through of the server's posture.
-    routeState = { ...ROUTE_ANSWERED, posture: { autonomy: "Standard", networkOn: false, network: "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines", completionMode: "Enforced" } };
+    routeState = { ...ROUTE_ANSWERED, posture: { autonomy: "Standard", networkOn: false, network: "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines", write: "Write scope: workspace (Standard)", approval: "Risky tools: require human approval (Standard); tools marked irreversible cannot auto-run", completionMode: "Enforced", completion: "Completion: Enforced — terminal success requires durable evidence" } };
     openPermissions("Deep");
 
     expect(screen.getByTestId("network-posture")).toHaveTextContent("Network: clamped off by deployment ceiling (Standard)");

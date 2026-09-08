@@ -62,7 +62,16 @@ public sealed class TaskRoutePreviewService : ITaskRoutePreviewService, IScopedD
         var mode = RunModeClassifier.DeriveFromJson(route.ProjectionKind, definitionJson: null);
         var completionMode = CompletionPolicy.StampModeFor(request.CompletionMode, mode, _modeProfiles.Resolve(mode));
 
-        return new TaskRoutePosture { Autonomy = autonomy, NetworkOn = AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On, Network = network, CompletionMode = completionMode };
+        return new TaskRoutePosture
+        {
+            Autonomy = autonomy,
+            NetworkOn = AgentAutonomyPolicy.Derive(effective).Network == AgentNetworkAccess.On,
+            Network = network,
+            Write = AgentAutonomyPolicy.DescribeWrite(effective),
+            Approval = AgentAutonomyPolicy.DescribeApproval(effective),
+            CompletionMode = completionMode,
+            Completion = CompletionPolicy.Describe(completionMode),
+        };
     }
 
     private TaskAcceptanceCompatibility DescribeAcceptance(RoutePlan route, Guid? repositoryId)

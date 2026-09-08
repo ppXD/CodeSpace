@@ -244,8 +244,14 @@ export interface TaskRoutePosture {
   networkOn: boolean;
   /** The one-line network posture, e.g. "Network: off (Standard) — severed only where the sandbox confines". */
   network: string;
+  /** The effective write boundary, including the pre-launch confinement caveat when read-only was requested. */
+  write: string;
+  /** Whether risky and irreversible tool calls are refused, human-gated, or may run unattended. */
+  approval: string;
   /** The completion-enforcement mode a run of this exact input would be stamped with. */
   completionMode: "Legacy" | "Shadow" | "Enforced";
+  /** The operator-facing meaning of `completionMode`, authored by the server completion policy. */
+  completion: string;
 }
 
 export interface TaskRoutePreviewResult {

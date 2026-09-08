@@ -27,6 +27,14 @@ public static class CompletionPolicy
     public static CompletionEnforcementMode ModeFor(string? storedMode) =>
         Enum.TryParse<CompletionEnforcementMode>(storedMode, ignoreCase: false, out var mode) ? mode : CompletionEnforcementMode.Legacy;
 
+    /// <summary>Operator-facing meaning of an enforcement stamp, kept beside the policy that assigns and interprets it.</summary>
+    public static string Describe(CompletionEnforcementMode mode) => mode switch
+    {
+        CompletionEnforcementMode.Enforced => "Completion: Enforced — terminal success requires durable evidence",
+        CompletionEnforcementMode.Shadow => "Completion: Shadow — evidence is assessed without overriding the legacy terminal result",
+        _ => "Completion: Legacy — the legacy terminal result is authoritative",
+    };
+
     /// <summary>
     /// THE readiness predicate the Enforced cohort is drawn by — a mode qualifies exactly when its profile holds
     /// <see cref="ProtocolReadiness.Enforceable"/> standing. Read by BOTH the launch-time default stamp
