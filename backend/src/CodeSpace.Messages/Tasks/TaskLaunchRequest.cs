@@ -94,4 +94,7 @@ public sealed record TaskLaunchRequest
 
     /// <summary>The opaque per-surface payload (the folded <c>LaunchContext.Raw</c>) — ONLY the resolved seed provider reads it; the core never does. Defaults empty.</summary>
     public IReadOnlyDictionary<string, JsonElement> SurfacePayload { get; init; } = new Dictionary<string, JsonElement>();
+
+    /// <summary>An open marker (<c>WorkflowRunPurposes</c>) for a launch that is NOT genuine operator work — e.g. a TaskLaunch qualification/benchmark cell. Null (every real launch surface) stamps <c>WorkflowRun.Purpose</c> null — byte-identical. Never set by any <c>ITaskLaunchSeedProvider</c>; only an internal caller supplies it.</summary>
+    public string? Purpose { get; init; }
 }

@@ -103,6 +103,10 @@ public class BenchmarkCorpusTests
     [InlineData(BenchmarkMode.HarnessCli, "bench:cli")]
     [InlineData(BenchmarkMode.HarnessCliWithMcp, "bench:cli-mcp")]
     [InlineData(BenchmarkMode.WorkflowMap, "bench:workflow-map")]
+    [InlineData(BenchmarkMode.TaskLaunchQuick, "bench:launch-quick")]
+    [InlineData(BenchmarkMode.TaskLaunchStandard, "bench:launch-standard")]
+    [InlineData(BenchmarkMode.TaskLaunchDeep, "bench:launch-deep")]
+    [InlineData(BenchmarkMode.TaskLaunchAuto, "bench:launch-auto")]
     public void Mode_label_is_the_pinned_bench_prefixed_row_key(BenchmarkMode mode, string expected)
     {
         // Renaming a label silently changes the operator-visible scorecard row + breaks a UI that filters on it.

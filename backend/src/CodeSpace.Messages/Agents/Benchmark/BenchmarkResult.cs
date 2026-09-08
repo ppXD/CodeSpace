@@ -77,4 +77,30 @@ public sealed record BenchmarkResult
     /// <c>false</c> = the plan needed an edit / didn't compose; <c>null</c> = not applicable / not yet measured.
     /// </summary>
     public bool? PlanRanCleanWithNoHumanEdits { get; init; }
+
+    /// <summary>
+    /// P19: the model the harness ACTUALLY ran, read off the run's own event stream (<c>AgentRunResult.Model</c> —
+    /// HARNESS-reported, not the requested/pinned model, and not the LLM-provider-wire string
+    /// <c>ObservedLlmModel.FromWire</c> captures at the client layer — this is what the harness CLI process itself
+    /// self-reported). Null when the run reported none: an unknown observed model stays unknown here, it is never
+    /// backfilled from what was requested. Populated for every mode that has an underlying <c>AgentRun</c> to read;
+    /// a cell whose run never reached a result stays null.
+    /// </summary>
+    public string? ObservedModel { get; init; }
+
+    /// <summary>P19, <see cref="BenchmarkModeEffort.IsTaskLaunch"/> modes only: the RESOLVED <c>RoutePlan.EffortMode</c> the real Launch entry routed this cell to — for <see cref="BenchmarkMode.TaskLaunchAuto"/> this is the classifier's actual pick, distinct from the requested arm. Null for every direct-harness mode (no route exists).</summary>
+    public string? RouteEffortMode { get; init; }
+
+    /// <summary>P19, <see cref="BenchmarkModeEffort.IsTaskLaunch"/> modes only: the RESOLVED <c>RoutePlan.ProjectionKind</c> the real Launch entry projected this cell onto (single-agent / plan-map-synth / plan-map-dynamic / supervisor). Null for every direct-harness mode.</summary>
+    public string? RouteProjectionKind { get; init; }
+
+    /// <summary>
+    /// P19, <see cref="BenchmarkModeEffort.IsTaskLaunch"/> modes only: the ACTUAL <c>WorkflowRun.CompletionEnforcementMode</c>
+    /// this cell's run was stamped with — read off the persisted run, never assumed from what the cell requested, so a
+    /// census reader never has to trust that the Shadow override actually took (an unbackable claim under Enforced
+    /// would otherwise PARK a Deep/Auto cell instead of terminaling it, since <see cref="BenchmarkTask"/> authors no
+    /// <c>AcceptanceChecks</c> — see <c>TaskLaunchBenchmarkCellRunner.LaunchAsync</c>). Null for every direct-harness
+    /// mode (no <c>WorkflowRun</c> — and so no completion-contract concept — exists for a bare <c>AgentRun</c>).
+    /// </summary>
+    public string? CompletionMode { get; init; }
 }

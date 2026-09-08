@@ -47,6 +47,8 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
 
         await StampRouteProvenanceAsync(runId, TaskLaunchContractSnapshot.ResolvedRoute(context), cancellationToken).ConfigureAwait(false);
 
+        if (context.Purpose is { } purpose) await StampPurposeAsync(runId, purpose, cancellationToken).ConfigureAwait(false);
+
         return new TaskRunHandle { RunId = runId, ProjectionKind = context.Route.ProjectionKind };
     }
 
@@ -69,6 +71,20 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
 
         await _db.WorkflowRun.Where(r => r.Id == runId)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.RoutePlanJson, json), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stamp <see cref="Persistence.Entities.WorkflowRun.Purpose"/> for a launch that is NOT genuine operator work
+    /// (e.g. a TaskLaunch qualification/benchmark cell) — the team Runs index excludes any non-null value by
+    /// default. Same targeted single-column <c>ExecuteUpdateAsync</c> shape as <see cref="StampRouteProvenanceAsync"/>
+    /// and for the same reason (a tracked save here could lose the optimistic-concurrency race against the
+    /// post-commit dispatcher). Only called when <paramref name="purpose"/> is non-null — zero extra cost for
+    /// every real launch.
+    /// </summary>
+    private async Task StampPurposeAsync(Guid runId, string purpose, CancellationToken cancellationToken)
+    {
+        await _db.WorkflowRun.Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Purpose, purpose), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

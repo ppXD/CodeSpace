@@ -1,6 +1,10 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -59,6 +63,73 @@ public class QualificationRunnerTests
 
         QualificationRunner.Grant(spec, Score(solved: 20, unsolved: 0, infra: 0), lowerBound: 0.9, BenchmarkExecutionPath.DirectAgentHarness)
             .ShouldBe(PerformanceQualification.Shadow, "a direct agent harness did not exercise TaskLaunch routing, projection, workflow execution, or completion authority");
+    }
+
+    [Fact]
+    public void BuildCensus_covers_every_manifest_cell_including_a_specified_arm_that_never_ran()
+    {
+        // P19: "指定 arm 未跑不可被平均遮蔽" — a SPECIFIED arm the corpus loop never reached must still land as its
+        // own census row, sourced from the FIXED-denominator Cells, never merely the Results that happened to run.
+        var ranResult = new BenchmarkResult
+        {
+            TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false,
+            RouteEffortMode = "quick", RouteProjectionKind = "single-agent", ObservedModel = "claude-example",
+            CompletionMode = WorkflowDefinition.CompletionModeShadow,
+        };
+
+        var run = new CorpusBenchmarkRun
+        {
+            ExecutionPath = BenchmarkExecutionPath.TaskLaunch,
+            Results = new[] { ranResult },
+            Errored = Array.Empty<CorpusBenchmarkError>(),
+            Scorecard = new AgentRunScorecard { Harnesses = Array.Empty<HarnessScore>(), Overall = new HarnessScore { Harness = "overall", Total = 0, Succeeded = 0, SuccessRate = 0 } },
+            Cells = new[]
+            {
+                new CorpusCellOutcome { TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchQuick, State = CorpusCellState.Solved },
+                new CorpusCellOutcome { TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchDeep, State = CorpusCellState.InfraUnknown, Detail = "the corpus loop never reached this cell" },
+            },
+        };
+
+        var rows = JsonDocument.Parse(JsonSerializer.Serialize(QualificationRunner.BuildCensus(run))).RootElement.EnumerateArray().ToList();
+
+        rows.Count.ShouldBe(2, "the Deep arm never ran but still gets its own row — never silently absent");
+
+        var ranRow = rows.Single(r => r.GetProperty("arm").GetString() == "TaskLaunchQuick");
+        ranRow.GetProperty("state").GetString().ShouldBe("Solved");
+        ranRow.GetProperty("routeEffortMode").GetString().ShouldBe("quick");
+        ranRow.GetProperty("routeProjectionKind").GetString().ShouldBe("single-agent");
+        ranRow.GetProperty("observedModel").GetString().ShouldBe("claude-example");
+        ranRow.GetProperty("completionMode").GetString().ShouldBe("shadow", "a TaskLaunch cell always forces Shadow — the census must show it, never omit it");
+
+        var missingRow = rows.Single(r => r.GetProperty("arm").GetString() == "TaskLaunchDeep");
+        missingRow.GetProperty("state").GetString().ShouldBe("InfraUnknown", "a specified-but-unrun arm reads as InfraUnknown, the suite's own never-dropped-from-the-divisor cell state");
+        missingRow.GetProperty("observedModel").ValueKind.ShouldBe(JsonValueKind.Null, "an arm that never ran has no observed model to report — unknown stays unknown, never backfilled");
+        missingRow.GetProperty("completionMode").ValueKind.ShouldBe(JsonValueKind.Null, "an arm that never ran has no run to read a completion mode off");
+    }
+
+    [Fact]
+    public void BuildCensus_reports_an_unknown_observed_model_as_null_never_backfilled()
+    {
+        var result = new BenchmarkResult
+        {
+            TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false,
+            RouteEffortMode = "quick", RouteProjectionKind = "single-agent", ObservedModel = null,
+        };
+
+        var run = new CorpusBenchmarkRun
+        {
+            ExecutionPath = BenchmarkExecutionPath.TaskLaunch,
+            Results = new[] { result },
+            Errored = Array.Empty<CorpusBenchmarkError>(),
+            Scorecard = new AgentRunScorecard { Harnesses = Array.Empty<HarnessScore>(), Overall = new HarnessScore { Harness = "overall", Total = 0, Succeeded = 0, SuccessRate = 0 } },
+            Cells = new[] { new CorpusCellOutcome { TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchQuick, State = CorpusCellState.Solved } },
+        };
+
+        var row = JsonDocument.Parse(JsonSerializer.Serialize(QualificationRunner.BuildCensus(run))).RootElement.EnumerateArray().Single();
+
+        row.GetProperty("observedModel").ValueKind.ShouldBe(JsonValueKind.Null);
     }
 
     private static CorpusCellScore Score(int solved, int unsolved, int infra) =>

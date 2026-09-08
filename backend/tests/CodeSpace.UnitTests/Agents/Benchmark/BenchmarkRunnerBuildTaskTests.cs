@@ -232,7 +232,7 @@ public class BenchmarkRunnerBuildTaskTests
 
     // ── The respawned cell's row: the GRADED attempt's verdict, but BOTH attempts' cost ──
 
-    private static Core.Persistence.Entities.AgentRun Attempt(int inputTokens, int outputTokens, double seconds, AgentRunStatus status = AgentRunStatus.Succeeded, string exitReason = "completed")
+    private static Core.Persistence.Entities.AgentRun Attempt(int inputTokens, int outputTokens, double seconds, AgentRunStatus status = AgentRunStatus.Succeeded, string exitReason = "completed", string? model = null)
     {
         var startedAt = DateTimeOffset.UnixEpoch;
 
@@ -244,7 +244,7 @@ public class BenchmarkRunnerBuildTaskTests
             CompletedAt = startedAt.AddSeconds(seconds),
             ResultJson = System.Text.Json.JsonSerializer.Serialize(new AgentRunResult
             {
-                Status = status, ExitReason = exitReason, ReviseRounds = 2,
+                Status = status, ExitReason = exitReason, ReviseRounds = 2, Model = model,
                 TokenUsage = new AgentTokenUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
             }, Core.Services.Agents.AgentJson.Options),
         };
@@ -306,5 +306,31 @@ public class BenchmarkRunnerBuildTaskTests
 
         BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { untimed, untimed }, PassingGrade, mcpFullCatalog: false)
             .DurationSeconds.ShouldBeNull("null, never 0 — 0 would enter the latency percentiles as a real measurement");
+    }
+
+    // ── P19: the direct-harness arm's observed-model census field, harness-agnostic like the TaskLaunch arm's ──
+
+    [Theory]
+    [InlineData("claude-first-wire", null, "claude-first-wire")]              // the graded (last) attempt reported none ⇒ falls back to the earlier attempt that did
+    [InlineData("claude-first-wire", "claude-graded-wire", "claude-graded-wire")]   // the graded attempt reported its OWN model ⇒ that wins — it is the tree the grade actually judged
+    public void The_observed_model_prefers_the_graded_attempts_own_report_falling_back_to_an_earlier_attempt(string? firstModel, string? gradedModel, string expected)
+    {
+        // Mirrors TaskLaunchBenchmarkCellRunner.ObservedModelOf: the census must be as harness-agnostic as the
+        // TaskLaunch arm's, and consistent with the SAME graded attempt BuildResult reads status/exit-reason off —
+        // never a DIFFERENT attempt's model than the one whose tree the grade actually judged.
+        var died = Attempt(inputTokens: 100, outputTokens: 40, seconds: 3, status: AgentRunStatus.Failed, exitReason: "error", model: firstModel);
+        var graded = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12, model: gradedModel);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { died, graded }, PassingGrade, mcpFullCatalog: false)
+            .ObservedModel.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void An_attempt_that_reported_no_model_leaves_the_cells_observed_model_null_never_backfilled()
+    {
+        var only = Attempt(inputTokens: 700, outputTokens: 260, seconds: 12);
+
+        BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { only }, PassingGrade, mcpFullCatalog: false)
+            .ObservedModel.ShouldBeNull("the deterministic fake CLI reports no model — unknown stays unknown, never fabricated from what was requested");
     }
 }

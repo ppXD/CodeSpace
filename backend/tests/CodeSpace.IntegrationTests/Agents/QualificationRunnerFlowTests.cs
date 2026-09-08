@@ -95,6 +95,74 @@ public class QualificationRunnerFlowTests
     }
 
     [Fact]
+    public async Task A_specified_arm_that_never_ran_lands_in_the_census_as_unmeasured_and_the_rate_still_counts_it()
+    {
+        // P19: "指定 arm 未跑不可被平均遮蔽" — an arm the corpus never reached must still be a CENSUS ROW (state
+        // InfraUnknown), and the minted solve rate must still be computed over the FULL denominator (including it),
+        // never silently over just the arms that happened to run.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var mode = "supervisor-" + Guid.NewGuid().ToString("N")[..6];
+
+        var ranResult = new BenchmarkResult
+        {
+            TaskId = "t1", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = CodeSpace.Messages.Enums.AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false,
+            RouteEffortMode = "quick", RouteProjectionKind = "single-agent", ObservedModel = "claude-example",
+        };
+        var cells = new[]
+        {
+            new CorpusCellOutcome { TaskId = "t1", Mode = BenchmarkMode.TaskLaunchQuick, State = CorpusCellState.Solved },
+            new CorpusCellOutcome { TaskId = "t1", Mode = BenchmarkMode.TaskLaunchDeep, State = CorpusCellState.InfraUnknown, Detail = "the corpus loop never reached this cell" },
+        };
+
+        using var scope = _fixture.BeginScope();
+        var runner = Runner(scope, cells, BenchmarkExecutionPath.TaskLaunch, results: new[] { ranResult });
+
+        // The Deep arm never ran, so a 0.9 bar over just the ONE ran cell would seal; the specified-but-missing
+        // arm must instead pull the round back to Shadow by widening the denominator to 2.
+        var outcome = await runner.QualifyAsync(mode, "git-branch", Spec(minLowerBound: 0.9), teamId, Selection(), CancellationToken.None);
+
+        outcome.Score.Solved.ShouldBe(1);
+        outcome.Score.InfraUnknown.ShouldBe(1, "the missing Deep arm still occupies its cell — never dropped from the divisor");
+        outcome.Score.Total.ShouldBe(2, "the denominator is BOTH arms, not just the one that ran");
+        outcome.Granted.ShouldBe(PerformanceQualification.Shadow, "a specified arm that never ran must be able to pull a round back from Sealed — never averaged away");
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().QualificationReceipt.AsNoTracking().SingleAsync(r => r.Id == outcome.ReceiptId);
+        var census = JsonDocument.Parse(row.MetricsJson!).RootElement.GetProperty("census").EnumerateArray().ToList();
+
+        census.Count.ShouldBe(2, "both the ran arm and the never-run arm get their own census row");
+
+        var ranRow = census.Single(r => r.GetProperty("arm").GetString() == "TaskLaunchQuick");
+        ranRow.GetProperty("state").GetString().ShouldBe("Solved");
+        ranRow.GetProperty("routeEffortMode").GetString().ShouldBe("quick");
+        ranRow.GetProperty("routeProjectionKind").GetString().ShouldBe("single-agent");
+        ranRow.GetProperty("observedModel").GetString().ShouldBe("claude-example");
+
+        var missingRow = census.Single(r => r.GetProperty("arm").GetString() == "TaskLaunchDeep");
+        missingRow.GetProperty("state").GetString().ShouldBe("InfraUnknown", "a specified-but-unrun arm is UNMEASURED — it must never vanish from the census");
+        missingRow.GetProperty("observedModel").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task An_unknown_fixture_is_an_explicit_infra_fault_for_a_TaskLaunch_arm_never_a_silent_skip()
+    {
+        // P19: the real fixture stager throws for an unknown FixtureRef — the SAME production stager the direct
+        // instrument uses. A Launch-mode task must get exactly the same explicit-infra-fault treatment.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var mode = "supervisor-" + Guid.NewGuid().ToString("N")[..6];
+        var unknownTask = Task_() with { FixtureRef = "does-not-exist-" + Guid.NewGuid().ToString("N"), Modes = new[] { BenchmarkMode.TaskLaunchQuick } };
+
+        using var scope = _fixture.BeginScope();
+        var corpus = scope.Resolve<ICorpusBenchmarkRunner>();   // the REAL corpus loop + REAL production SeedFixtureStager
+
+        var run = await corpus.RunAsync(new[] { unknownTask }, teamId, selection: null, CancellationToken.None);
+
+        run.Errored.ShouldHaveSingleItem().TaskId.ShouldBe(unknownTask.Id);
+        run.Cells!.ShouldHaveSingleItem().State.ShouldBe(CorpusCellState.InfraUnknown, "an unknown fixture is an explicit infra fault, occupying its cell — never a silent skip");
+        run.Results.ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task An_absent_suite_throws_never_a_silent_pass()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -127,8 +195,8 @@ public class QualificationRunnerFlowTests
 
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
-    private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness) =>
-        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells, executionPath),
+    private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness, IReadOnlyList<BenchmarkResult>? results = null) =>
+        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells, executionPath, results),
             scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
 
     private static QualificationSpec Spec(double minLowerBound) => new() { MinSolveRateLowerBound = minLowerBound, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
@@ -157,12 +225,16 @@ public class QualificationRunnerFlowTests
     {
         private readonly IReadOnlyList<CorpusCellOutcome> _cells;
         private readonly BenchmarkExecutionPath _executionPath;
-        public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness) { _cells = cells; _executionPath = executionPath; }
+        private readonly IReadOnlyList<BenchmarkResult> _results;
+        public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness, IReadOnlyList<BenchmarkResult>? results = null)
+        {
+            _cells = cells; _executionPath = executionPath; _results = results ?? Array.Empty<BenchmarkResult>();
+        }
 
         public Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new CorpusBenchmarkRun
             {
-                Results = Array.Empty<BenchmarkResult>(),
+                Results = _results,
                 Errored = Array.Empty<CorpusBenchmarkError>(),
                 Scorecard = new CodeSpace.Messages.Agents.AgentRunScorecard { Harnesses = Array.Empty<CodeSpace.Messages.Agents.HarnessScore>(), Overall = new CodeSpace.Messages.Agents.HarnessScore { Harness = "overall", Total = 0, Succeeded = 0, SuccessRate = 0 } },
                 Cells = _cells,

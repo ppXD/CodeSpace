@@ -47,6 +47,7 @@ public sealed class TaskRouteSnapshotContractTests
         preview.Overrides.PushBranch.ShouldBe(false);
         preview.Overrides.AllowedTools.ShouldBe(["Read"]);
         preview.RequestedRecipe.ShouldBe("single-agent");
+        launch.Purpose.ShouldBeNull("Purpose is an internal-only qualification marker (WorkflowRunPurposes) — no real wire field may ever set it, even from this maximally-complete input");
         typeof(PreviewTaskRouteCommand).BaseType.ShouldBe(typeof(LaunchTaskCommand).BaseType, "future wire controls must be shared, not copied selectively");
     }
 
