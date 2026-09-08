@@ -1,4 +1,5 @@
 using System.Text;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
@@ -21,6 +22,53 @@ public static class SupervisorBudgetRecitation
 
     /// <summary>The CAP-LESS sibling header (D6) — an uncapped run has no ceiling to recite, so the block states spend and claims nothing about a limit the operator never set.</summary>
     public const string UncappedHeader = "SPEND SO FAR (this run has no cost ceiling — no spend figure will force-stop it):";
+
+    public const string UnitHeader = "UNIT COSTS (durable agent attempts, aggregated by planned unit):";
+
+    public const int MaxRenderedUnits = 32;
+
+    /// <summary>
+    /// Render model, token and priced-USD evidence per planned unit. Retries aggregate into the same unit and retain
+    /// their model transition, so the brain can decide where another attempt is worth its cost. The positional
+    /// subtask/result join is the same contract the dependency gate uses; legacy rows without that join receive a
+    /// bounded agent-id label instead of being dropped. Output is capped for long-run prompt stability and names the
+    /// omitted count explicitly.
+    /// </summary>
+    public static string? RenderUnits(IReadOnlyList<SupervisorPriorDecision> decisions, IReadOnlyDictionary<string, ModelPrice> modelPrices)
+    {
+        var units = new Dictionary<string, UnitSpend>(StringComparer.Ordinal);
+
+        foreach (var decision in decisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)))
+        {
+            var subtaskIds = SupervisorDependencyGate.SubtaskIdsOf(decision);
+            var results = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson);
+
+            for (var i = 0; i < results.Count; i++)
+            {
+                var result = results[i];
+                var unitId = i < subtaskIds.Count && !string.IsNullOrWhiteSpace(subtaskIds[i]) ? subtaskIds[i] : $"agent:{result.AgentRunId:N}"[..14];
+
+                if (!units.TryGetValue(unitId, out var unit))
+                {
+                    unit = new UnitSpend(unitId);
+                    units.Add(unitId, unit);
+                }
+
+                unit.Add(result, modelPrices);
+            }
+        }
+
+        if (units.Count == 0) return null;
+
+        var builder = new StringBuilder(UnitHeader);
+
+        foreach (var unit in units.Values.Take(MaxRenderedUnits)) builder.AppendLine().Append("- ").Append(unit.Render());
+
+        if (units.Count > MaxRenderedUnits)
+            builder.AppendLine().Append($"- ... {units.Count - MaxRenderedUnits} additional unit(s) omitted from this bounded prompt view; their spend remains in the aggregate lane total.");
+
+        return builder.ToString();
+    }
 
     /// <summary>
     /// Render the budget block for the decider's prompt: the cap block when a cost cap is set, else — D6 — the
@@ -80,5 +128,42 @@ public static class SupervisorBudgetRecitation
             if (usd > 0) lanes.Add($"{kind} ${usd:0.00}");
 
         return lanes.Count == 0 ? headline : $"{headline} — {string.Join(", ", lanes)}";
+    }
+
+    private sealed class UnitSpend
+    {
+        private readonly List<string> _models = new();
+        private decimal _spendUsd;
+        private bool _hasUnpricedUsage;
+        private long _inputTokens;
+        private long _outputTokens;
+        private int _attempts;
+
+        public UnitSpend(string unitId) => UnitId = unitId;
+
+        public string UnitId { get; }
+
+        public void Add(SupervisorAgentResult result, IReadOnlyDictionary<string, ModelPrice> modelPrices)
+        {
+            _attempts++;
+            _inputTokens += result.InputTokens;
+            _outputTokens += result.OutputTokens;
+
+            var model = string.IsNullOrWhiteSpace(result.Model) ? "(unknown)" : result.Model.Trim();
+            if (_models.Count == 0 || !string.Equals(_models[^1], model, StringComparison.Ordinal)) _models.Add(model);
+
+            _spendUsd += SupervisorOutcome.SpendUsd(new[] { result }, modelPrices);
+            _hasUnpricedUsage |= (result.InputTokens > 0 || result.OutputTokens > 0) && SupervisorOutcome.FirstUnpricedModel(new[] { result }, modelPrices) is not null;
+        }
+
+        public string Render()
+        {
+            var attempt = _attempts == 1 ? "1 attempt" : $"{_attempts} attempts";
+            var model = _models.Count == 1 ? $"model {_models[0]}" : $"models {string.Join(" → ", _models)}";
+            var price = _hasUnpricedUsage ? _spendUsd > 0 ? $"${_spendUsd:0.00##} + unpriced usage" : "USD unpriced" : $"${_spendUsd:0.00##}";
+            var unavailable = _inputTokens == 0 && _outputTokens == 0 ? "; usage not reported" : string.Empty;
+
+            return $"{UnitId}: {attempt}; {model}; tokens {_inputTokens} in / {_outputTokens} out; {price}{unavailable}";
+        }
     }
 }

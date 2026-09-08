@@ -1,5 +1,8 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Messages.Agents;
 using Shouldly;
+using System.Text.Json;
 
 namespace CodeSpace.UnitTests.Agents;
 
@@ -7,6 +10,56 @@ namespace CodeSpace.UnitTests.Agents;
 public sealed class SupervisorBudgetRecitationTests
 {
     private static readonly IReadOnlyDictionary<string, decimal> NoBrainSpend = new Dictionary<string, decimal>();
+    private static readonly IReadOnlyDictionary<string, ModelPrice> NoModelPrices = new Dictionary<string, ModelPrice>();
+
+    [Fact]
+    public void Per_unit_recitation_aggregates_retries_with_models_tokens_and_realized_usd()
+    {
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var retry = Guid.NewGuid();
+        var decisions = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, """{"subtaskIds":["api","docs"]}""", Results(
+                Result(first, "cheap", input: 100, output: 20),
+                Result(second, "cheap", input: 10, output: 5))),
+            Decision(SupervisorDecisionKinds.Retry, """{"subtaskId":"api"}""", Results(Result(retry, "strong", input: 50, output: 10))),
+        };
+        var prices = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["cheap"] = new() { InputPerMillionUsd = 1_000m, OutputPerMillionUsd = 2_000m },
+            ["strong"] = new() { InputPerMillionUsd = 2_000m, OutputPerMillionUsd = 4_000m },
+        };
+
+        SupervisorBudgetRecitation.RenderUnits(decisions, prices).ShouldBe("""
+            UNIT COSTS (durable agent attempts, aggregated by planned unit):
+            - api: 2 attempts; models cheap → strong; tokens 150 in / 30 out; $0.28
+            - docs: 1 attempt; model cheap; tokens 10 in / 5 out; $0.02
+            """.ReplaceLineEndings());
+    }
+
+    [Fact]
+    public void Per_unit_recitation_names_unpriced_usage_instead_of_rendering_a_false_zero()
+    {
+        var result = Result(Guid.NewGuid(), "private-model", input: 12, output: 3);
+        var decision = Decision(SupervisorDecisionKinds.Spawn, """{"subtaskIds":["research"]}""", Results(result));
+
+        SupervisorBudgetRecitation.RenderUnits(new[] { decision }, NoModelPrices)!
+            .ShouldContain("- research: 1 attempt; model private-model; tokens 12 in / 3 out; USD unpriced", Case.Sensitive);
+    }
+
+    [Fact]
+    public void Per_unit_recitation_is_bounded_and_names_every_omitted_unit()
+    {
+        var count = SupervisorBudgetRecitation.MaxRenderedUnits + 3;
+        var ids = Enumerable.Range(0, count).Select(i => $"u{i}").ToArray();
+        var results = ids.Select(_ => Result(Guid.NewGuid(), "private-model", input: 1, output: 0)).ToArray();
+        var payload = JsonSerializer.Serialize(new { subtaskIds = ids }, AgentJson.Options);
+        var text = SupervisorBudgetRecitation.RenderUnits(new[] { Decision(SupervisorDecisionKinds.Spawn, payload, Results(results)) }, NoModelPrices)!;
+
+        text.Split('\n').Count(line => line.StartsWith("- u", StringComparison.Ordinal)).ShouldBe(SupervisorBudgetRecitation.MaxRenderedUnits);
+        text.ShouldContain("3 additional unit(s) omitted", Case.Sensitive, "a long task's prompt stays bounded without silently hiding the extent of the omitted ledger");
+    }
 
     [Fact]
     public void Render_is_null_when_no_cap_and_nothing_has_been_spent()
@@ -103,4 +156,16 @@ public sealed class SupervisorBudgetRecitationTests
         SupervisorBudgetRecitation.Summary(10m, agentExecutionSpendUsd: 0m, brainPlaneSpendUsd: 2m, byKind)
             .ShouldBe("$2.00 spent of $10.00 cap ($8.00 remaining) — critic.review $1.00, grader.acceptance $1.00");
     }
+
+    private static SupervisorPriorDecision Decision(string kind, string payloadJson, string outcomeJson) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 1, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson,
+    };
+
+    private static SupervisorAgentResult Result(Guid agentRunId, string model, int input, int output) => new()
+    {
+        AgentRunId = agentRunId, Status = "Succeeded", Model = model, InputTokens = input, OutputTokens = output,
+    };
+
+    private static string Results(params SupervisorAgentResult[] results) => JsonSerializer.Serialize(new { agentResults = results }, AgentJson.Options);
 }

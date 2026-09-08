@@ -383,6 +383,23 @@ public class ModelPricingUnderCapFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_runs_own_prompt_recites_each_units_model_tokens_and_priced_spend_from_the_tape()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var credentialId = await SeedCredentialAsync(teamId, "OpenAI");
+        await SeedModelRowAsync(credentialId, UnpricedPoolModel, input: 2m, output: 10m);
+        await SeedSettledSpawnAsync(runId, teamId, UnpricedPoolModel, inputTokens: 1_000_000, outputTokens: 100_000);
+
+        var context = await RehydrateAsync(runId, teamId, new SupervisorGoalConfig { Goal = Goal });
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldContain(SupervisorBudgetRecitation.UnitHeader, Case.Sensitive);
+        prompt.ShouldContain($"- s1: 1 attempt; model {UnpricedPoolModel}; tokens 1000000 in / 100000 out; $3.00", Case.Sensitive,
+            "the prompt must expose the same durable per-unit usage and operator price that produced the aggregate bill");
+    }
+
+    [Fact]
     public async Task An_uncapped_run_that_has_spent_NOTHING_still_carries_no_budget_block_at_all()
     {
         // The other half of the pin, and the one a widened block would silently break: a fresh uncapped turn's
@@ -398,6 +415,7 @@ public class ModelPricingUnderCapFlowTests : IDisposable
 
         prompt.ShouldNotContain(SupervisorBudgetRecitation.UncappedHeader, Case.Sensitive);
         prompt.ShouldNotContain(SupervisorBudgetRecitation.Header, Case.Sensitive);
+        prompt.ShouldNotContain(SupervisorBudgetRecitation.UnitHeader, Case.Sensitive);
     }
 
     // ── The team bill covers both lanes ─────────────────────────────────────────────

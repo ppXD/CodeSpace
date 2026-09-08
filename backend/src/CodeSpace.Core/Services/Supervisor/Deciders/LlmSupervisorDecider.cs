@@ -942,6 +942,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(budget);
         }
 
+        if (SupervisorBudgetRecitation.RenderUnits(context.PriorDecisions, context.ModelPrices) is { } units)
+        {
+            builder.AppendLine();
+            builder.AppendLine(units);
+        }
+
         // P5-3/P5-5 — the RUN BOUNDS recitation: the no-progress streak + total-spawn count + resolve attempts that
         // silently force-stop the run (SupervisorBounds). The model previously saw none of them and marched into
         // the kill blind. The resolve count mirrors PostDecision's own tape count exactly (the CURRENT resolve
