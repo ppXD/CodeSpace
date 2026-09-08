@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Context;
+using CodeSpace.Core.Services.Agents.Context.Exceptions;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -38,7 +39,8 @@ public sealed class GetContextTool : IAgentTool
     public string Description =>
         "Retrieve prior context for THIS work thread on demand — the full version of what was summarized into your " +
         "launch briefing. Call with no arguments to pull every available source; or name one 'source'. Optional 'query' " +
-        "refines a source (e.g. filters prior turns to those mentioning it).";
+        "refines a source (e.g. filters prior turns to those mentioning it). When coverage is partial, call the named " +
+        "source again with its opaque continuation cursor until coverage is complete.";
 
     public JsonElement InputSchema { get; } = BuildInputSchema();
 
@@ -60,6 +62,16 @@ public sealed class GetContextTool : IAgentTool
         if (input.TryGetProperty("query", out var q) && q.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
             return AgentToolValidation.Invalid("'query' must be a string when provided.");
 
+        if (input.TryGetProperty("cursor", out var c))
+        {
+            if (c.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                return AgentToolValidation.Invalid("'cursor' must be a non-empty string when provided.");
+            if (c.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(c.GetString()))
+                return AgentToolValidation.Invalid("'cursor' must be a non-empty string when provided.");
+            if (c.ValueKind == JsonValueKind.String && ReadString(input, "source") == null)
+                return AgentToolValidation.Invalid("'source' is required when continuing with a source-owned cursor.");
+        }
+
         return AgentToolValidation.Valid;
     }
 
@@ -67,7 +79,7 @@ public sealed class GetContextTool : IAgentTool
     {
         // No trusted run/team identity → nothing to scope a retrieval to. A clean miss (found:false), not an error.
         if (call.RunId is not { } runId || runId == Guid.Empty || call.TeamId is not { } teamId)
-            return Ok(found: false, source: "none", text: "No run context is available, so there is nothing to retrieve.");
+            return Ok(found: false, source: "none", text: "No run context is available, so there is nothing to retrieve.", []);
 
         // Fresh per-call scope: the sources read per-request DB state, and the tool instance is shared across the run's
         // concurrent MCP connections — a captured DbContext would race. Resolve the registry + the run→session lookup
@@ -78,7 +90,7 @@ public sealed class GetContextTool : IAgentTool
 
         var sessionId = await ResolveSessionIdAsync(db, runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var query = new AgentContextQuery { TeamId = teamId, RunId = runId, SessionId = sessionId, Query = ReadString(call.Input, "query") };
+        var query = new AgentContextQuery { TeamId = teamId, RunId = runId, SessionId = sessionId, Query = ReadString(call.Input, "query"), Cursor = ReadString(call.Input, "cursor") };
 
         var requested = ReadString(call.Input, "source");
 
@@ -102,11 +114,22 @@ public sealed class GetContextTool : IAgentTool
         if (!registry.TryResolve(requested, out var source))
             return AgentToolResult.Fail($"Unknown context source '{requested}'. Available: {AvailableKinds(registry)}.");
 
-        var result = await source.RetrieveAsync(query, cancellationToken).ConfigureAwait(false);
+        AgentContextResult result;
+
+        try
+        {
+            result = await source.RetrieveAsync(query, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentContextCursorException ex)
+        {
+            return AgentToolResult.Fail(ex.Message);
+        }
+
+        var continuations = Continuations(source.Kind, result);
 
         return result.Found
-            ? Ok(found: true, source.Kind, result.Text)
-            : Ok(found: false, source.Kind, $"No '{source.Kind}' context is available for this run yet.");
+            ? Ok(found: true, source.Kind, result.Text, continuations)
+            : Ok(found: false, source.Kind, result.NextCursor == null ? $"No '{source.Kind}' context is available for this run yet." : $"No matching '{source.Kind}' context was found in this bounded page; continue with the returned cursor.", continuations);
     }
 
     /// <summary>Pull EVERY source, concatenate the ones that returned content (each carries its own heading). A first call with no arguments is also how the model discovers which sources exist.</summary>
@@ -114,10 +137,13 @@ public sealed class GetContextTool : IAgentTool
     {
         var sb = new StringBuilder();
         var found = false;
+        var continuations = new List<ContextContinuation>();
 
         foreach (var source in registry.All)
         {
             var result = await source.RetrieveAsync(query, cancellationToken).ConfigureAwait(false);
+
+            continuations.AddRange(Continuations(source.Kind, result));
 
             if (!result.Found) continue;
 
@@ -128,15 +154,18 @@ public sealed class GetContextTool : IAgentTool
         }
 
         return found
-            ? Ok(found: true, source: "all", sb.ToString())
-            : Ok(found: false, source: "all", $"No prior context is available for this run yet. Sources checked: {AvailableKinds(registry)}.");
+            ? Ok(found: true, source: "all", sb.ToString(), continuations)
+            : Ok(found: false, source: "all", $"No prior context is available for this run yet. Sources checked: {AvailableKinds(registry)}.", continuations);
     }
 
     private static string AvailableKinds(IContextSourceRegistry registry) => string.Join(", ", registry.All.Select(s => s.Kind));
 
-    private static AgentToolResult Ok(bool found, string source, string text)
+    private static IReadOnlyList<ContextContinuation> Continuations(string source, AgentContextResult result) =>
+        result.NextCursor == null ? [] : [new ContextContinuation(source, result.NextCursor)];
+
+    private static AgentToolResult Ok(bool found, string source, string text, IReadOnlyList<ContextContinuation> continuations)
     {
-        var json = JsonSerializer.SerializeToElement(new { found, source, text }, AgentJson.Options);
+        var json = JsonSerializer.SerializeToElement(new { found, source, text, coverage = continuations.Count == 0 ? "complete" : "partial", continuations }, AgentJson.Options);
 
         return AgentToolResult.Ok(json, json.GetRawText().Length);
     }
@@ -153,18 +182,23 @@ public sealed class GetContextTool : IAgentTool
         {
             source = new { type = "string", description = "Which context source to read (e.g. 'session.turns', 'session.summary'). Omit to pull every available source — also how to discover what exists." },
             query = new { type = "string", description = "Optional refinement the source interprets (session.turns filters to prior turns mentioning it)." },
+            cursor = new { type = "string", description = "Opaque continuation returned by a prior partial page. Repeat the same source and query; omit to start from the newest page." },
         },
     }, AgentJson.Options);
 
     private static JsonElement BuildOutputSchema() => JsonSerializer.SerializeToElement(new
     {
         type = "object",
-        required = new[] { "found", "source", "text" },
+        required = new[] { "found", "source", "text", "coverage", "continuations" },
         properties = new
         {
             found = new { type = "boolean", description = "True when context was returned; false is a clean 'nothing here', not an error." },
             source = new { type = "string", description = "Which source produced this ('all' when every source was pulled, 'none' when the run had no context to scope to)." },
             text = new { type = "string", description = "The retrieved context." },
+            coverage = new { type = "string", @enum = new[] { "complete", "partial" }, description = "Whether this response exhausted every requested source." },
+            continuations = new { type = "array", description = "Source-owned cursors for any source whose coverage is partial.", items = new { type = "object", required = new[] { "source", "cursor" }, properties = new { source = new { type = "string" }, cursor = new { type = "string" } } } },
         },
     }, AgentJson.Options);
+
+    private sealed record ContextContinuation(string Source, string Cursor);
 }
