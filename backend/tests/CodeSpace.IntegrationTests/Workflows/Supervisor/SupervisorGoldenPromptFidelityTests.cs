@@ -112,6 +112,30 @@ public class SupervisorGoldenPromptFidelityTests
         }
     }
 
+    [Fact]
+    public void A_non_conflict_integration_failure_prompt_exposes_a_reachable_repair_instead_of_a_dead_end()
+    {
+        var merge = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(),
+            Sequence = 2,
+            DecisionKind = SupervisorDecisionKinds.Merge,
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = "{}",
+            OutcomeJson = """{"merged":[],"count":0,"integration":{"status":"Failed","reason":"repository hook rejected the integrated tree","outcomes":[]}}""",
+        };
+        var context = new SupervisorTurnContext { Goal = "ship the coordinated change", TurnNumber = 3, PriorDecisions = [merge] };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldContain("retry the affected planned unit", Case.Insensitive);
+        prompt.ShouldContain("spawn a focused fix-up unit", Case.Insensitive);
+        prompt.ShouldContain("ask_human", Case.Sensitive);
+        prompt.ShouldNotContain("choose 'resolve'", Case.Insensitive, "the action mask correctly withholds resolve when no conflict was recorded");
+        WithheldInPrompt(prompt).ShouldContain(SupervisorDecisionKinds.Resolve);
+        OfferedInPrompt(prompt).ShouldNotContain(SupervisorDecisionKinds.Resolve);
+    }
+
     /// <summary>
     /// Arc-3 item 4.3's residual, one screen before the co-sign loop it feeds: <c>first-infra-failure</c> is graded
     /// on <c>plan</c> or <c>ask_human</c> — never <c>amend_acceptance</c>, even though the menu genuinely offers it.
