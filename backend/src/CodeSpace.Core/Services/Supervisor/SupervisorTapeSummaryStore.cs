@@ -22,31 +22,22 @@ public sealed class SupervisorTapeSummaryStore : ISupervisorTapeSummaryStore, IS
 
     public async Task UpsertAsync(Guid supervisorRunId, Guid teamId, long upToSequence, string summary, CancellationToken cancellationToken)
     {
-        var row = await _db.SupervisorTapeSummaryRecord
-            .SingleOrDefaultAsync(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+        var id = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
 
-        if (row == null)
-        {
-            _db.SupervisorTapeSummaryRecord.Add(new SupervisorTapeSummaryRecord
-            {
-                Id = Guid.NewGuid(),
-                TeamId = teamId,
-                SupervisorRunId = supervisorRunId,
-                UpToSequence = upToSequence,
-                Summary = summary,
-                CreatedDate = DateTimeOffset.UtcNow,
-            });
-        }
-        else
-        {
-            // Forward-only: a stale writer's lower (or equal) sequence is ignored — the newer digest already covers it.
-            if (upToSequence <= row.UpToSequence) return;
-
-            row.UpToSequence = upToSequence;
-            row.Summary = summary;
-            row.UpdatedDate = DateTimeOffset.UtcNow;
-        }
-
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        // The sequence comparison belongs inside the same database statement as the write. An application-side read
+        // lets two workers both observe N, then a slow N+2 writer overwrite a committed N+5 digest. The conflict row
+        // lock serializes them and the WHERE re-evaluates against the committed winner. Team equality prevents a
+        // forged cross-team call from mutating the globally unique run row.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO supervisor_tape_summary (id, team_id, supervisor_run_id, up_to_sequence, summary, created_date)
+            VALUES ({id}, {teamId}, {supervisorRunId}, {upToSequence}, {summary}, {now})
+            ON CONFLICT (supervisor_run_id) DO UPDATE SET
+                up_to_sequence = EXCLUDED.up_to_sequence,
+                summary = EXCLUDED.summary,
+                updated_date = {now}
+            WHERE supervisor_tape_summary.team_id = EXCLUDED.team_id
+              AND supervisor_tape_summary.up_to_sequence < EXCLUDED.up_to_sequence
+            """, cancellationToken).ConfigureAwait(false);
     }
 }
