@@ -166,14 +166,17 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
 
         // A 1 MiB single-file cap: writing 5 MiB is truncated by RLIMIT_FSIZE (SIGXFSZ) well under 5 MiB, so a
         // runaway file (or stdout spool) can't fill the disk.
-        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "head -c 5242880 /dev/zero > big.dat 2>/dev/null; wc -c < big.dat" }, MaxFileSizeMb = 1, WorkingDirectory = TempDir(), TimeoutSeconds = 30 };
+        var workspace = TempDir();
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "head -c 5242880 /dev/zero > big.dat 2>/dev/null" }, MaxFileSizeMb = 1, WorkingDirectory = workspace, TimeoutSeconds = 30 };
 
         var handle = await LaunchAsync(spec);
-        var (_, lines) = await AttachCollectAsync(handle);
+        await AttachCollectAsync(handle);
 
-        var written = long.Parse(string.Join("", lines).Trim());
+        var output = Path.Combine(workspace, "big.dat");
+        File.Exists(output).ShouldBeTrue("the confined process entered the real write before RLIMIT_FSIZE stopped it");
+        var written = new FileInfo(output).Length;
         written.ShouldBeGreaterThan(0);
-        written.ShouldBeLessThan(5L * 1024 * 1024, "the 1 MiB RLIMIT_FSIZE cap truncates the 5 MiB write");
+        written.ShouldBeLessThanOrEqualTo(1L * 1024 * 1024, "the observed file itself cannot exceed the inherited 1 MiB RLIMIT_FSIZE cap");
     }
 
     // ─── Shared real-process harness (GUID-keyed spool dirs, cleaned up — Rule 12.2/12.3) ─────────
