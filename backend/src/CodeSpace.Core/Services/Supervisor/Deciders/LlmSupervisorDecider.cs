@@ -1420,6 +1420,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         {
             builder.AppendLine($"- merge: INTEGRATION FAILED — {contributorText}.");
             if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {BoundOneLine(integration.Reason, maxReasonChars)}");
+            builder.AppendLine("    next move: retry the affected planned unit with this integration failure as evidence, spawn a focused fix-up unit when the fault crosses units, or ask_human. Do not merge the unchanged contributor set again.");
             return;
         }
 

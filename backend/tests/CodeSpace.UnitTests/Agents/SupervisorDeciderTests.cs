@@ -1506,6 +1506,23 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void A_non_conflict_integration_failure_names_only_reachable_repair_moves()
+    {
+        var outcome = """{"merged":[{"agentRunId":"11111111-1111-1111-1111-111111111111","status":"Succeeded","patch":"UNTRUSTED_PATCH"}],"count":1,"integration":{"status":"Failed","reason":"repository hook rejected the integrated tree","outcomes":[]}}""";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision(outcome)));
+
+        prompt.ShouldContain("INTEGRATION FAILED", Case.Sensitive);
+        prompt.ShouldContain("repository hook rejected the integrated tree", Case.Sensitive);
+        prompt.ShouldContain("retry the affected planned unit", Case.Insensitive);
+        prompt.ShouldContain("spawn a focused fix-up unit", Case.Insensitive);
+        prompt.ShouldContain("ask_human", Case.Sensitive);
+        prompt.ShouldContain("do not merge the unchanged contributor set again", Case.Insensitive);
+        prompt.ShouldNotContain("choose 'resolve'", Case.Insensitive, "resolve is structurally unavailable without a recorded conflict");
+        prompt.ShouldNotContain("UNTRUSTED_PATCH", customMessage: "repair evidence stays bounded to the recorded integration reason");
+    }
+
+    [Fact]
     public void A_clean_merge_renders_bounded_operational_facts_without_reinjecting_its_patch()
     {
         var agentRunId = Guid.NewGuid();
