@@ -31,6 +31,14 @@ public static class StorageTestWorker
             Configuration = JsonSerializer.SerializeToElement(new { rootPath = root }),
         };
         await using var driver = await new LocalRwxArtifactStorageDriverFactory().CreateAsync(new ArtifactStorageDriverCreateRequest(profile), CancellationToken.None).ConfigureAwait(false);
+        if (mode == "probe")
+        {
+            Console.WriteLine("probing");
+            var probe = await driver.ProbeAsync(new ArtifactStorageProbeRequest(), CancellationToken.None).ConfigureAwait(false);
+            Console.WriteLine(probe.Status);
+            return probe.Status == ArtifactStorageProbeStatus.Available ? 0 : 1;
+        }
+
         var bytes = Enumerable.Repeat(payloadByte, 1024 * 1024).ToArray();
         await using var source = new CoordinatedStream(bytes, mode == "staged");
         var result = await driver.PutAsync(new ArtifactStoragePutRequest(key, source)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -25,8 +26,9 @@ internal sealed class LocalRwxStagingLease : IDisposable
     public string StagingPath { get; }
     public string LeasePath { get; }
 
-    public static LocalRwxStagingLease Create(string root, string destinationPath)
+    internal static LocalRwxStagingLease Create(string root, string destinationPath, Action? leaseCreated = null)
     {
+        using var registration = LocalRwxLeaseRegistryLock.Acquire(root);
         var id = Guid.NewGuid();
         var stagingPath = destinationPath + ".upload-v2-" + id.ToString("N");
         var leaseDirectory = LocalRwxStagingLeaseRecovery.LeaseDirectory(root);
@@ -35,6 +37,7 @@ internal sealed class LocalRwxStagingLease : IDisposable
         var ownership = new FileStream(leasePath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Delete);
         try
         {
+            leaseCreated?.Invoke();
             if (!LocalRwxLeaseLock.TryAcquire(ownership)) throw new IOException("A newly-created staging lease was unexpectedly held by another process.");
             if (!File.Exists(leasePath)) throw new IOException("The staging lease lost its active directory entry before ownership was established.");
             var record = new LeaseRecord(SchemaVersion, Path.GetRelativePath(root, stagingPath).Replace('\\', '/'));
@@ -87,6 +90,7 @@ internal static class LocalRwxStagingLeaseRecovery
 
         try
         {
+            using var registration = LocalRwxLeaseRegistryLock.Acquire(root);
             foreach (var leasePath in Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly).Take(MaximumRecordsPerSweep)) RecoverOne(root, leasePath);
         }
         catch
@@ -155,6 +159,47 @@ internal static class LocalRwxStagingLeaseRecovery
     }
 }
 
+/// <summary>Serializes only lease registration and recovery discovery for one shared root. The per-lease lock remains the writer-liveness authority after registration.</summary>
+internal sealed class LocalRwxLeaseRegistryLock : IDisposable
+{
+    private static readonly TimeSpan AcquisitionTimeout = TimeSpan.FromSeconds(30);
+    private readonly FileStream _ownership;
+
+    private LocalRwxLeaseRegistryLock(FileStream ownership) => _ownership = ownership;
+
+    public static LocalRwxLeaseRegistryLock Acquire(string root)
+    {
+        var directory = Path.Combine(root, ".codespace", "staging-leases");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "registry.lock");
+
+        var stopwatch = Stopwatch.StartNew();
+        while (true)
+        {
+            FileStream? ownership = null;
+            try
+            {
+                var share = OperatingSystem.IsWindows() ? FileShare.None : FileShare.ReadWrite | FileShare.Delete;
+                ownership = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, share);
+                LocalRwxLeaseLock.Acquire(ownership);
+                return new LocalRwxLeaseRegistryLock(ownership);
+            }
+            catch (IOException) when (stopwatch.Elapsed < AcquisitionTimeout)
+            {
+                ownership?.Dispose();
+                Thread.Sleep(5);
+            }
+            catch
+            {
+                ownership?.Dispose();
+                throw;
+            }
+        }
+    }
+
+    public void Dispose() => _ownership.Dispose();
+}
+
 internal static class LocalRwxLeaseLock
 {
     private const int Exclusive = 2;
@@ -170,6 +215,14 @@ internal static class LocalRwxLeaseLock
         var error = Marshal.GetLastPInvokeError();
         if (error is LinuxWouldBlock or MacOsWouldBlock) return false;
         throw new IOException($"Could not acquire the local RWX staging lease (errno {error}).");
+    }
+
+    public static void Acquire(FileStream stream)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) throw new PlatformNotSupportedException("Local RWX staging leases require Linux, macOS or Windows.");
+        if (Flock(stream.SafeFileHandle.DangerousGetHandle().ToInt32(), Exclusive) == 0) return;
+        throw new IOException($"Could not acquire the local RWX lease registry lock (errno {Marshal.GetLastPInvokeError()}).");
     }
 
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]

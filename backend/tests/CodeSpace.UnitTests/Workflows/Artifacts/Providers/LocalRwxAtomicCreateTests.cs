@@ -52,6 +52,40 @@ public sealed class LocalRwxAtomicCreateTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_recovery_sweep_cannot_inspect_a_new_lease_before_its_writer_acquires_ownership()
+    {
+        var destination = ObjectPath("race/lease-registration");
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var created = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(() => LocalRwxStagingLease.Create(_root, destination, () =>
+        {
+            created.SetResult();
+            release.Task.GetAwaiter().GetResult();
+        }));
+        await created.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var recoverer = StartWorker("__probe__", "probe", 0);
+        (await ReadLineAsync(recoverer)).ShouldBe("probing");
+        var recoveryResult = ReadLineAsync(recoverer);
+        var sweptBeforeRegistrationCompleted = await Task.WhenAny(recoveryResult, Task.Delay(TimeSpan.FromMilliseconds(250))) == recoveryResult;
+
+        release.SetResult();
+        try
+        {
+            sweptBeforeRegistrationCompleted.ShouldBeFalse("recovery must serialize with the create-to-ownership gap or it can steal and quarantine a live writer's new lease");
+            (await recoveryResult).ShouldBe(nameof(ArtifactStorageProbeStatus.Available));
+            await AssertExitedAsync(recoverer);
+            using var lease = await writer.WaitAsync(TimeSpan.FromSeconds(30));
+            File.Exists(lease.LeasePath).ShouldBeTrue();
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { (await writer.WaitAsync(TimeSpan.FromSeconds(30))).Dispose(); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task Killing_a_writer_after_staging_does_not_publish_partial_bytes_or_block_the_retry()
     {
         const string key = "crash/staged";
