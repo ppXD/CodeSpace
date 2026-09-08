@@ -58,20 +58,20 @@ public sealed class RetryingSupervisorDeciderDecorator : ISupervisorDecider
 
                 _logger.LogWarning("Supervisor brain call timed out after {TimeoutSeconds}s on turn {Turn}; retrying ({Attempt}/{Max})", _options.PerCallTimeout.TotalSeconds, context.TurnNumber, attempt, _options.MaxAttempts);
 
-                await BackoffAsync(attempt, retryAfter: null, cancellationToken).ConfigureAwait(false);
+                await BackoffAsync(attempt, LlmErrorCategory.Transient, retryAfter: null, cancellationToken).ConfigureAwait(false);
             }
             catch (LlmApiException ex) when (ex.IsRetryable && attempt < _options.MaxAttempts)
             {
                 _logger.LogWarning("Supervisor brain call hit a transient {Category} fault on turn {Turn}; retrying ({Attempt}/{Max})", ex.Category, context.TurnNumber, attempt, _options.MaxAttempts);
 
-                await BackoffAsync(attempt, ex.RetryAfter, cancellationToken).ConfigureAwait(false);
+                await BackoffAsync(attempt, ex.Category, ex.RetryAfter, cancellationToken).ConfigureAwait(false);
             }
         }
     }
 
-    private async Task BackoffAsync(int attempt, TimeSpan? retryAfter, CancellationToken cancellationToken)
+    private async Task BackoffAsync(int attempt, LlmErrorCategory category, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
-        var delay = ComputeDelay(_options, attempt, retryAfter);
+        var delay = ComputeDelay(_options, attempt, category, retryAfter);
 
         if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
     }
@@ -79,11 +79,14 @@ public sealed class RetryingSupervisorDeciderDecorator : ISupervisorDecider
     /// <summary>
     /// The wait before the next attempt. A provider Retry-After wins verbatim — the provider KNOWS when it recovers —
     /// but is clamped to <see cref="SupervisorDecisionRetryOptions.RetryAfterCeiling"/> so a hostile / misconfigured
-    /// header can't pin a worker for hours. Otherwise exponential: BaseBackoff × 2^(attempt−1), capped at
-    /// <see cref="SupervisorDecisionRetryOptions.BackoffCeiling"/>, with ±20% jitter so many concurrent runs retrying
-    /// a recovering gateway never re-storm it in lockstep. Internal + pure for direct unit pinning (no sleeps).
+    /// header can't pin a worker for hours. A rate limit without that standard header uses the operator's bounded
+    /// fallback with positive jitter, so it never retries before the configured cooldown. Other faults use exponential
+    /// BaseBackoff × 2^(attempt−1), capped at <see cref="SupervisorDecisionRetryOptions.BackoffCeiling"/>, with ±20%
+    /// jitter. Internal + pure for direct unit pinning (no sleeps).
     /// </summary>
-    internal static TimeSpan ComputeDelay(SupervisorDecisionRetryOptions options, int attempt, TimeSpan? retryAfter)
+    internal static TimeSpan ComputeDelay(SupervisorDecisionRetryOptions options, int attempt, TimeSpan? retryAfter) => ComputeDelay(options, attempt, LlmErrorCategory.Transient, retryAfter);
+
+    internal static TimeSpan ComputeDelay(SupervisorDecisionRetryOptions options, int attempt, LlmErrorCategory category, TimeSpan? retryAfter)
     {
         if (retryAfter is { } hinted)
             return hinted <= SupervisorDecisionRetryOptions.RetryAfterCeiling ? hinted : SupervisorDecisionRetryOptions.RetryAfterCeiling;
@@ -91,6 +94,12 @@ public sealed class RetryingSupervisorDeciderDecorator : ISupervisorDecider
         var exponential = TimeSpan.FromTicks(options.BaseBackoff.Ticks * (1L << Math.Min(attempt - 1, 10)));
         var capped = exponential <= SupervisorDecisionRetryOptions.BackoffCeiling ? exponential : SupervisorDecisionRetryOptions.BackoffCeiling;
 
-        return capped * (0.8 + Random.Shared.NextDouble() * 0.4);
+        if (category != LlmErrorCategory.RateLimited) return capped * (0.8 + Random.Shared.NextDouble() * 0.4);
+
+        var configuredFallback = options.RateLimitFallbackBackoff > TimeSpan.Zero ? options.RateLimitFallbackBackoff : TimeSpan.Zero;
+        var boundedFallback = configuredFallback <= SupervisorDecisionRetryOptions.RetryAfterCeiling ? configuredFallback : SupervisorDecisionRetryOptions.RetryAfterCeiling;
+        var rateLimitDelay = capped >= boundedFallback ? capped : boundedFallback;
+
+        return TimeSpan.FromTicks(Math.Min(SupervisorDecisionRetryOptions.RetryAfterCeiling.Ticks, (long)(rateLimitDelay.Ticks * (1 + Random.Shared.NextDouble() * 0.2))));
     }
 }
