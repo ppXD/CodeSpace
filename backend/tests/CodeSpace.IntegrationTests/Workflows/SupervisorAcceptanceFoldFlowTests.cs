@@ -242,7 +242,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             ProducedBranch = "codespace/resolve/claimed",
         };
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
-        var compact = SupervisorOutcome.ProjectCompact(resolverId, AgentRunStatus.Succeeded.ToString(), rowError: null, resultJson, model: null);
+        var compact = SupervisorOutcome.ProjectCompact(resolverId, AgentRunStatus.Succeeded.ToString(), rowError: null, resultJson, producerModel: null);
         var malformedCarrier = JsonSerializer.Serialize(new { agentRunIds = new object[] { resolverId, "not-a-guid" }, agentCount = 1, agentResults = new[] { compact } }, AgentJson.Options);
 
         await SeedPlanDecisionAsync(runId, teamId);

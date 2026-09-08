@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -737,7 +738,7 @@ public static class SupervisorOutcome
     /// Reads only bounded fields off the result — never the patch/transcript — so it needs no artifact-store fetch
     /// and stays a pure function of immutable post-terminal state (replay-deterministic).
     /// </summary>
-    public static SupervisorAgentResult ProjectCompact(Guid agentRunId, string statusName, string? rowError, string? resultJson, string? model = null)
+    public static SupervisorAgentResult ProjectCompact(Guid agentRunId, string statusName, string? rowError, string? resultJson, ReviewModelIdentity? producerModel = null)
     {
         var result = string.IsNullOrWhiteSpace(resultJson) ? null : TryDeserializeResult(resultJson);
 
@@ -790,7 +791,10 @@ public static class SupervisorOutcome
             // in — so an UNPINNED run (common for Codex) still prices + labels with what it used — null when neither has one.
             InputTokens = result?.TokenUsage?.InputTokens ?? 0,
             OutputTokens = result?.TokenUsage?.OutputTokens ?? 0,
-            Model = !string.IsNullOrWhiteSpace(result?.Model) ? result!.Model : model,
+            Model = !string.IsNullOrWhiteSpace(result?.Model) ? result!.Model : producerModel?.ConfiguredModel,
+            ModelCredentialModelId = producerModel?.ModelCredentialModelId,
+            ConfiguredModel = producerModel?.ConfiguredModel,
+            ObservedModel = string.IsNullOrWhiteSpace(result?.Model) ? null : result!.Model,
         };
     }
 

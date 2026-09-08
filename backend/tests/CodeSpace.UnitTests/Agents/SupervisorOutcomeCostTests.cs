@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -25,7 +26,7 @@ public class SupervisorOutcomeCostTests
         var id = Guid.NewGuid();
         var resultJson = ResultJson(input: 200_000, output: 40_000, summary: "did the thing");
 
-        var compact = SupervisorOutcome.ProjectCompact(id, "Succeeded", rowError: null, resultJson, model: "claude-opus-4-8");
+        var compact = SupervisorOutcome.ProjectCompact(id, "Succeeded", rowError: null, resultJson, producerModel: new ReviewModelIdentity { ConfiguredModel = "claude-opus-4-8" });
 
         compact.InputTokens.ShouldBe(200_000);
         compact.OutputTokens.ShouldBe(40_000);
@@ -37,7 +38,7 @@ public class SupervisorOutcomeCostTests
     {
         // A cancelled/abandoned agent (null ResultJson) or a usage-silent harness contributes nothing — never a throw,
         // never a phantom cost. Model null when the caller has no TaskJson.
-        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Cancelled", rowError: "operator cancelled", resultJson: null, model: null);
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Cancelled", rowError: "operator cancelled", resultJson: null, producerModel: null);
 
         compact.InputTokens.ShouldBe(0);
         compact.OutputTokens.ShouldBe(0);

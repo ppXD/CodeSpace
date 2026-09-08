@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using System.Text;
@@ -47,6 +48,20 @@ public class CapturedDeliverableGradeTests
         oracle.SeenFiles["data/rows.csv"].ShouldBe("a,b\n1,2\n", "a nested logical path is rebuilt as a nested path");
         oracle.LastSpec!.Command.ShouldBe(new[] { "report.md" });
         oracle.LastTimeoutSeconds.ShouldBe(60);
+    }
+
+    [Fact]
+    public async Task The_delayed_captured_grade_preserves_the_producers_trusted_model_identity()
+    {
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var modelRowId = Guid.NewGuid();
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = modelRowId, ConfiguredModel = "configured", ObservedModel = "observed" };
+        var (grader, oracle, _) = New(new BenchmarkGrade { Passed = true, Detail = "artifact-present" }, Row(runId, teamId, "report.md", "# findings\n"));
+
+        await grader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = runId, TeamId = teamId, Spec = Spec("report.md"), TimeoutSeconds = 60, ProducerModel = producer }, CancellationToken.None);
+
+        oracle.LastProducerModel.ShouldBe(producer, "the evaluator must see the producer identity even when grading happens after the worker and workspace are gone");
     }
 
     [Fact]
@@ -220,6 +235,7 @@ public class CapturedDeliverableGradeTests
         public string? LastDirectory { get; private set; }
         public SupervisorAcceptanceSpec? LastSpec { get; private set; }
         public int LastTimeoutSeconds { get; private set; }
+        public ReviewModelIdentity? LastProducerModel { get; private set; }
         public Dictionary<string, string> SeenFiles { get; } = new(StringComparer.Ordinal);
 
         public Task<BenchmarkGrade> GradeAsync(BenchmarkGradingContext context, CancellationToken cancellationToken)
@@ -228,6 +244,7 @@ public class CapturedDeliverableGradeTests
             LastDirectory = context.WorkspaceDirectory;
             LastSpec = context.Acceptance;
             LastTimeoutSeconds = context.Task.TimeoutSeconds;
+            LastProducerModel = context.ProducerModel;
 
             foreach (var file in Directory.EnumerateFiles(context.WorkspaceDirectory!, "*", SearchOption.AllDirectories))
                 SeenFiles[Path.GetRelativePath(context.WorkspaceDirectory!, file).Replace(Path.DirectorySeparatorChar, '/')] = File.ReadAllText(file);
