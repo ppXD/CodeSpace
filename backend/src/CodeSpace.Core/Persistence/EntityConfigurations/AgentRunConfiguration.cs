@@ -26,6 +26,10 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
         builder.Property(r => r.SessionId).HasColumnName("session_id");
 
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");
+        builder.Property(r => r.SpoolCleanupAttempts).HasColumnName("spool_cleanup_attempts");
+        builder.Property(r => r.SpoolCleanupLastAttemptAt).HasColumnName("spool_cleanup_last_attempt_at");
+        builder.Property(r => r.SpoolCleanupNextAttemptAt).HasColumnName("spool_cleanup_next_attempt_at");
+        builder.Property(r => r.SpoolCleanupLastErrorCode).HasColumnName("spool_cleanup_last_error_code").HasMaxLength(64);
 
         // The launch-stamped confinement posture (migration 0194). Nullable: a run from before the stamp, or a
         // runner that records none.

@@ -68,7 +68,7 @@ public sealed partial class AgentRunService
 
     public async Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken)
     {
-        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET runner_handle = CAST({handleJson} AS jsonb) FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET runner_handle = CAST({handleJson} AS jsonb), spool_cleanup_attempts = 0, spool_cleanup_last_attempt_at = NULL, spool_cleanup_next_attempt_at = NULL, spool_cleanup_last_error_code = NULL FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
         if (changed != 1) throw new AgentRunOwnershipLostException(owner.RunId);
     }
 

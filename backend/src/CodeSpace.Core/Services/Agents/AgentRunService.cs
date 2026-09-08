@@ -323,7 +323,11 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // heartbeat's pings can block completion. A missing row is a harmless no-op.
         await _db.AgentRun
             .Where(r => r.Id == runId && r.OwnerId == null && r.ReattachReservationId == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, handleJson), cancellationToken)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, handleJson)
+                .SetProperty(r => r.SpoolCleanupAttempts, 0)
+                .SetProperty(r => r.SpoolCleanupLastAttemptAt, (DateTimeOffset?)null)
+                .SetProperty(r => r.SpoolCleanupNextAttemptAt, (DateTimeOffset?)null)
+                .SetProperty(r => r.SpoolCleanupLastErrorCode, (string?)null), cancellationToken)
             .ConfigureAwait(false);
         await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
     }

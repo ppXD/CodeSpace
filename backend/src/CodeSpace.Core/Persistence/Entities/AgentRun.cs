@@ -91,6 +91,18 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// </summary>
     public string? RunnerHandleJson { get; set; }
 
+    /// <summary>Durable count of failed terminal-spool cleanup attempts for the current runner handle.</summary>
+    public int SpoolCleanupAttempts { get; set; }
+
+    /// <summary>Database time at which the reaper last failed to clean the current runner handle.</summary>
+    public DateTimeOffset? SpoolCleanupLastAttemptAt { get; set; }
+
+    /// <summary>Database-owned eligibility boundary for retrying a failed terminal-spool cleanup.</summary>
+    public DateTimeOffset? SpoolCleanupNextAttemptAt { get; set; }
+
+    /// <summary>Bounded machine-readable reason for the most recent failed cleanup attempt.</summary>
+    public string? SpoolCleanupLastErrorCode { get; set; }
+
     /// <summary>
     /// What confinement the launch ACTUALLY applied (a <c>SandboxConfinement</c> as JSON: outcome, the reason the
     /// host could not confine, and whether egress was severed), stamped once at launch. Its own column rather than a

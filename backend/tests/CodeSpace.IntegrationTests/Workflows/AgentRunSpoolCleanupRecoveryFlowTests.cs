@@ -61,14 +61,17 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
             using var scope = Scope();
             await scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
             await AssertHandleAsync(run, present: true);
+            await AssertRetryScheduledAsync(run, "filesystem-access");
             File.ReadAllText(output).ShouldBe("retained output");
         }
         finally { File.SetUnixFileMode(run.Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
 
+        await MakeRetryDueAsync(run);
         using var retry = Scope();
         (await retry.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
         Directory.Exists(run.Directory).ShouldBeFalse();
         await AssertHandleAsync(run, present: false);
+        await AssertRetryClearedAsync(run);
     }
 
     [UnixPermissionsFact]
@@ -86,9 +89,11 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
             using var scope = Scope();
             await scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
             await AssertHandleAsync(run, present: true);
+            await AssertRetryScheduledAsync(run, "filesystem-access");
         }
         finally { File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
 
+        await MakeRetryDueAsync(run);
         using var retry = Scope();
         await retry.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
         Directory.Exists(run.Directory).ShouldBeFalse();
@@ -118,6 +123,74 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
         var foreign = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(row => row.TeamId == local.TeamId && row.Id != local.Id).ToListAsync();
         foreign.Count.ShouldBe(AgentRunSpoolReaper.BatchSize + 1);
         foreign.ShouldAllBe(row => row.RunnerHandleJson != null);
+    }
+
+    [Fact]
+    public async Task A_full_batch_of_failed_local_candidates_does_not_starve_a_later_cleanable_run()
+    {
+        var cleanable = await SeedAsync();
+        using (var seed = Scope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            for (var index = 0; index < AgentRunSpoolReaper.BatchSize; index++)
+            {
+                var id = Guid.NewGuid();
+                var invalid = new SandboxHandle
+                {
+                    Kind = "local",
+                    ProcessId = 1,
+                    SpoolDirectory = Path.Combine(Path.GetTempPath(), $"outside-spool-{id:N}"),
+                    Deadline = DateTimeOffset.UtcNow,
+                    LaunchHost = LocalProcessRunner.CurrentHost,
+                };
+                db.AgentRun.Add(Row(cleanable.TeamId, id, JsonSerializer.Serialize(invalid, AgentJson.Options), DateTimeOffset.UtcNow.AddDays(-3)));
+            }
+            await db.SaveChangesAsync();
+        }
+
+        using (var first = Scope())
+            (await first.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None)).ShouldBe(0, "the oldest batch is deliberately uncleanable");
+
+        using (var evidence = Scope())
+        {
+            var db = evidence.Resolve<CodeSpaceDbContext>();
+            var failed = await db.AgentRun.AsNoTracking().Where(row => row.TeamId == cleanable.TeamId && row.Id != cleanable.Id).ToListAsync();
+            failed.ShouldAllBe(row => row.RunnerHandleJson != null && row.SpoolCleanupAttempts == 1 && row.SpoolCleanupLastAttemptAt != null
+                && row.SpoolCleanupNextAttemptAt > row.SpoolCleanupLastAttemptAt && row.SpoolCleanupLastErrorCode == "invalid-spool-path");
+            await db.AgentRun.Where(row => row.TeamId == cleanable.TeamId && row.Id != cleanable.Id)
+                .ExecuteUpdateAsync(set => set.SetProperty(row => row.SpoolCleanupNextAttemptAt, DateTimeOffset.UtcNow.AddMinutes(-1)));
+        }
+
+        using (var second = Scope())
+            (await second.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1, "even due failed candidates must yield to less-attempted eligible work");
+
+        Directory.Exists(cleanable.Directory).ShouldBeFalse();
+        await AssertHandleAsync(cleanable, present: false);
+    }
+
+    [Fact]
+    public async Task Writing_a_new_runner_handle_clears_retry_state_from_the_previous_cleanup_obligation()
+    {
+        var run = await SeedAsync();
+        using (var seed = Scope())
+            await seed.Resolve<CodeSpaceDbContext>().AgentRun.Where(row => row.Id == run.Id).ExecuteUpdateAsync(set => set
+                .SetProperty(row => row.SpoolCleanupAttempts, 7)
+                .SetProperty(row => row.SpoolCleanupLastAttemptAt, DateTimeOffset.UtcNow.AddMinutes(-1))
+                .SetProperty(row => row.SpoolCleanupNextAttemptAt, DateTimeOffset.UtcNow.AddHours(2))
+                .SetProperty(row => row.SpoolCleanupLastErrorCode, "filesystem-io"));
+
+        var replacement = JsonSerializer.Serialize(JsonSerializer.Deserialize<SandboxHandle>(run.Handle, AgentJson.Options)! with { ProcessId = 42 }, AgentJson.Options);
+        using (var writer = Scope())
+            await writer.Resolve<IAgentRunService>().SetRunnerHandleAsync(run.Id, replacement, CancellationToken.None);
+
+        using var reader = Scope();
+        var actual = await reader.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(row => row.Id == run.Id);
+        JsonSerializer.Deserialize<SandboxHandle>(actual.RunnerHandleJson.ShouldNotBeNull(), AgentJson.Options)
+            .ShouldBe(JsonSerializer.Deserialize<SandboxHandle>(replacement, AgentJson.Options));
+        actual.SpoolCleanupAttempts.ShouldBe(0);
+        actual.SpoolCleanupLastAttemptAt.ShouldBeNull();
+        actual.SpoolCleanupNextAttemptAt.ShouldBeNull();
+        actual.SpoolCleanupLastErrorCode.ShouldBeNull();
     }
 
     [Theory]
@@ -230,6 +303,33 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
         if (present)
             JsonSerializer.Deserialize<SandboxHandle>(handle.ShouldNotBeNull(), AgentJson.Options).ShouldBe(JsonSerializer.Deserialize<SandboxHandle>(run.Handle, AgentJson.Options));
         else handle.ShouldBeNull();
+    }
+
+    private async Task AssertRetryScheduledAsync(RunSpool run, string errorCode)
+    {
+        using var scope = Scope();
+        var row = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(value => value.Id == run.Id);
+        row.SpoolCleanupAttempts.ShouldBe(1);
+        row.SpoolCleanupLastAttemptAt.ShouldNotBeNull();
+        row.SpoolCleanupNextAttemptAt.Value.ShouldBeGreaterThan(row.SpoolCleanupLastAttemptAt.Value);
+        row.SpoolCleanupLastErrorCode.ShouldBe(errorCode);
+    }
+
+    private async Task AssertRetryClearedAsync(RunSpool run)
+    {
+        using var scope = Scope();
+        var row = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(value => value.Id == run.Id);
+        row.SpoolCleanupAttempts.ShouldBe(0);
+        row.SpoolCleanupLastAttemptAt.ShouldBeNull();
+        row.SpoolCleanupNextAttemptAt.ShouldBeNull();
+        row.SpoolCleanupLastErrorCode.ShouldBeNull();
+    }
+
+    private async Task MakeRetryDueAsync(RunSpool run)
+    {
+        using var scope = Scope();
+        await scope.Resolve<CodeSpaceDbContext>().AgentRun.Where(row => row.Id == run.Id)
+            .ExecuteUpdateAsync(set => set.SetProperty(row => row.SpoolCleanupNextAttemptAt, DateTimeOffset.UtcNow.AddMinutes(-1)));
     }
 
     private sealed class CandidateReadGate : DbCommandInterceptor

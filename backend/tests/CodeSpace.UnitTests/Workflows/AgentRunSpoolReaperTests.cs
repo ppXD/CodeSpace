@@ -76,4 +76,16 @@ public sealed class AgentRunSpoolReaperTests
         AgentRunSpoolReaper.IsUnderSpoolRoot(null).ShouldBeFalse();
         AgentRunSpoolReaper.IsUnderSpoolRoot("").ShouldBeFalse();
     }
+
+    [Fact]
+    public void Retry_delay_is_stable_monotonic_positive_and_bounded()
+    {
+        var runId = Guid.NewGuid();
+        var delays = Enumerable.Range(1, 100).Select(attempt => AgentRunSpoolReaper.RetryDelay(runId, attempt)).ToArray();
+
+        delays.ShouldAllBe(delay => delay >= TimeSpan.FromMinutes(1) && delay <= TimeSpan.FromHours(6));
+        delays.Zip(delays.Skip(1)).ShouldAllBe(pair => pair.First <= pair.Second);
+        AgentRunSpoolReaper.RetryDelay(runId, 4).ShouldBe(AgentRunSpoolReaper.RetryDelay(runId, 4), "jitter is derived from durable run identity, not process randomness");
+        AgentRunSpoolReaper.RetryDelay(runId, int.MaxValue).ShouldBe(TimeSpan.FromHours(6));
+    }
 }

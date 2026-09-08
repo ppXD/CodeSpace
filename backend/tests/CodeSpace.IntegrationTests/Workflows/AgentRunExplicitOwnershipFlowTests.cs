@@ -88,6 +88,27 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         await runs.AssertOwnershipAsync(second, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task An_owned_new_runner_handle_clears_retry_state_from_the_previous_cleanup_obligation()
+    {
+        var runId = await CreateQueuedAsync();
+        using var scope = _fixture.BeginScope();
+        var owner = (await scope.Resolve<IAgentRunService>().ClaimOwnershipAsync(runId, CancellationToken.None))!;
+        await scope.Resolve<CodeSpaceDbContext>().AgentRun.Where(row => row.Id == runId).ExecuteUpdateAsync(set => set
+            .SetProperty(row => row.SpoolCleanupAttempts, 7)
+            .SetProperty(row => row.SpoolCleanupLastAttemptAt, DateTimeOffset.UtcNow.AddMinutes(-1))
+            .SetProperty(row => row.SpoolCleanupNextAttemptAt, DateTimeOffset.UtcNow.AddHours(2))
+            .SetProperty(row => row.SpoolCleanupLastErrorCode, "filesystem-io"));
+
+        await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(owner, "{\"kind\":\"local\"}", CancellationToken.None);
+
+        var actual = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(row => row.Id == runId);
+        actual.SpoolCleanupAttempts.ShouldBe(0);
+        actual.SpoolCleanupLastAttemptAt.ShouldBeNull();
+        actual.SpoolCleanupNextAttemptAt.ShouldBeNull();
+        actual.SpoolCleanupLastErrorCode.ShouldBeNull();
+    }
+
     [Theory]
     [InlineData("heartbeat")]
     [InlineData("handle")]
