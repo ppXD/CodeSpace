@@ -76,6 +76,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return Deserialize(completion.Json, request.DeclaredDeliverablePaths) with
         {
             AuthoredByModel = completion.Model,
+            AuthoredByObservedModel = completion.ObservedModel,
             LessonArm = arm,
             InjectedLessonIds = injected.Count > 0 ? injected.Select(l => l.Id).ToList() : null,
         };

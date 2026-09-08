@@ -419,6 +419,7 @@ public static class SupervisorOutcome
         var modelUsage = new System.Text.Json.Nodes.JsonObject
         {
             ["model"] = usage.Model,
+            ["observedModel"] = usage.ObservedModel,
             ["inputTokens"] = usage.InputTokens,
             ["outputTokens"] = usage.OutputTokens,
         };
@@ -555,6 +556,7 @@ public static class SupervisorOutcome
                 ["draftAttribution"] = r.DraftAttribution,
                 ["viaAgent"] = r.ViaAgent,
                 ["reviewerModelId"] = r.ReviewerModelId,
+                ["independence"] = r.Independence.ToString(),
             });
         }
 
@@ -598,6 +600,7 @@ public static class SupervisorOutcome
                     DraftAttribution = r.TryGetProperty("draftAttribution", out var da) && da.ValueKind == JsonValueKind.String ? da.GetString() : null,
                     ViaAgent = r.TryGetProperty("viaAgent", out var va) && va.ValueKind == JsonValueKind.True,
                     ReviewerModelId = r.TryGetProperty("reviewerModelId", out var rm) && rm.ValueKind == JsonValueKind.String ? rm.GetString() : null,
+                    Independence = r.TryGetProperty("independence", out var independence) && independence.ValueKind == JsonValueKind.String && Enum.TryParse<CodeSpace.Messages.Review.ReviewModelIndependence>(independence.GetString(), out var parsedIndependence) ? parsedIndependence : CodeSpace.Messages.Review.ReviewModelIndependence.Unknown,
                 });
             }
 
@@ -629,7 +632,8 @@ public static class SupervisorOutcome
                 ? trail.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString())).Select(item => item.GetString()!).ToList()
                 : [];
 
-            return new SupervisorModelUsage { RequestedModel = requestedModel, Model = model!, FailedOver = failedOver, InputTokens = ReadIntField(u, "inputTokens"), OutputTokens = ReadIntField(u, "outputTokens") };
+            var observedModel = u.TryGetProperty("observedModel", out var observed) && observed.ValueKind == JsonValueKind.String ? observed.GetString() : null;
+            return new SupervisorModelUsage { RequestedModel = requestedModel, Model = model!, ObservedModel = observedModel, FailedOver = failedOver, InputTokens = ReadIntField(u, "inputTokens"), OutputTokens = ReadIntField(u, "outputTokens") };
         }
         catch (JsonException)
         {

@@ -366,6 +366,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     {
         RequestedModel = pick.ModelId,
         Model = completion.Model,
+        ObservedModel = completion.ObservedModel,
         FailedOver = completion.FailedOver,
         InputTokens = completion.Usage.InputTokens,
         OutputTokens = completion.Usage.OutputTokens,

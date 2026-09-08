@@ -1,6 +1,7 @@
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 
 namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 
@@ -121,14 +122,18 @@ public interface IModelPoolSelector
     /// The REVIEWER pick (Rule 7 sibling; S4d) — prefers a model DISTINCT from the producer so the critique is a
     /// second opinion, excluding the producer's configured MODEL NAME rather than merely its row (the same configured
     /// model under a second credential is the producer reviewing itself, not an independent reviewer). This is a
-    /// CONFIGURED-vs-configured comparison decided before either call runs, not alias-aware: a gateway that answers
-    /// two configured names from the same backing model can still defeat it (frozen producer provenance / alias-aware
-    /// exclusion is deferred). FALLS BACK to a row carrying the producer's own model when the pool has no alternative
+    /// CONFIGURED-vs-configured comparison decided before either call runs. Callers with provider-observed producer
+    /// evidence use the identity-aware overload below, which additionally ranks current Bound qualification observations.
+    /// FALLS BACK to a row carrying the producer's own model when the pool has no alternative
     /// — a one-model team still gets its critic, an independent call, never a silent no-review; the fallback is
     /// legible because the verdict names the model that actually answered (the provider's own wire report). Default
     /// implementation delegates to <see cref="SelectBrainRowIdAsync"/> (same-model allowed), so fakes inherit today's behavior.
     /// </summary>
     Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, Guid? producerRowId, CancellationToken cancellationToken) => SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken);
+
+    /// <summary>Identity-aware reviewer selection. Implementations may use current bound observation evidence to avoid configured aliases already known to resolve to the producer's backing model; the completed call must still compare its own wire observation.</summary>
+    Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, ReviewModelIdentity producerModel, CancellationToken cancellationToken) =>
+        SelectReviewerRowIdAsync(teamId, eligibleProviders, producerModel.ModelCredentialModelId, cancellationToken);
 
     /// <summary>
     /// Validate an OPERATOR-PINNED brain model (the Launch "Brain model" chip → one <c>ModelCredentialModel</c> row) for

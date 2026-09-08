@@ -39,6 +39,12 @@ public sealed record CriticVerdict
     /// </summary>
     public string? ReviewerModel { get; init; }
 
+    /// <summary>Comparison of the producer and reviewer provider-observed identities. Configured aliases never establish independence.</summary>
+    public ReviewModelIndependence Independence { get; init; }
+
+    /// <summary>True only when both wire observations prove that the verdict came from a distinct backing model.</summary>
+    public bool Calibrated => Independence == ReviewModelIndependence.DistinctBackingModel;
+
     /// <summary>A failed review — the caller falls back to the producer's original output. <paramref name="reason"/> is the machine-readable WHY (it rides <see cref="Rationale"/>, the one reason field), carried onto the durable review-skipped record.</summary>
     public static CriticVerdict ReviewFailed(ReviewMode mode, string reason) => new() { Mode = mode, Approved = false, Rationale = reason, Failed = true };
 }

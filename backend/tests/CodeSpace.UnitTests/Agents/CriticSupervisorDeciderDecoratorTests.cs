@@ -67,6 +67,19 @@ public class CriticSupervisorDeciderDecoratorTests
     }
 
     [Fact]
+    public async Task The_supervisors_wire_observation_reaches_the_critic_as_producer_identity()
+    {
+        var producerRow = Guid.NewGuid();
+        var inner = new FakeDecider { Usage = new SupervisorModelUsage { RequestedModel = "configured-alias", Model = "compatibility-name", ObservedModel = "backing-model" } };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true } };
+        var decorator = new CriticSupervisorDeciderDecorator(inner, critic, new NoAgentPlanReviewer());
+
+        await decorator.DecideAsync(Context(ReviewMode.Gate) with { SupervisorModelId = producerRow }, CancellationToken.None);
+
+        critic.LastRequest!.ProducerModel.ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = producerRow, ConfiguredModel = "configured-alias", ObservedModel = "backing-model" });
+    }
+
+    [Fact]
     public async Task A_disapproved_gate_re_decides_once_and_a_satisfied_second_review_ships_the_revision()
     {
         var inner = new FakeDecider();
@@ -286,12 +299,13 @@ public class CriticSupervisorDeciderDecoratorTests
         public string PayloadJson { get; set; } = "{\"agents\":[]}";
         public List<SupervisorTurnContext> Contexts { get; } = new();
         public List<string?> ScopeKinds { get; } = new();
+        public SupervisorModelUsage? Usage { get; set; }
 
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
         {
             Contexts.Add(context);
             ScopeKinds.Add(CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current?.Kind);
-            return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = PayloadJson });
+            return Task.FromResult(new SupervisorDecision { Kind = Kind, PayloadJson = PayloadJson, Usage = Usage });
         }
     }
 
@@ -598,7 +612,7 @@ public class CriticSupervisorDeciderDecoratorTests
     {
         var reviews = new[]
         {
-            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens", ViaAgent = true, ReviewerModelId = "claude-sonnet-4-6" },
+            new SupervisorDecisionReview { Approved = false, Rationale = "thin", Issues = new[] { "no tests (evidence: none named)" }, Scope = "plan", DraftAttribution = "plan draft · authored via m1 · 8,200 tokens", ViaAgent = true, ReviewerModelId = "claude-sonnet-4-6", Independence = ReviewModelIndependence.DistinctBackingModel },
             new SupervisorDecisionReview { Approved = true, Rationale = "fixed", Scope = "plan" },
         };
 
@@ -613,6 +627,7 @@ public class CriticSupervisorDeciderDecoratorTests
         read[0].DraftAttribution.ShouldBe("plan draft · authored via m1 · 8,200 tokens");
         read[0].ViaAgent.ShouldBeTrue("the agent flag survives the fold — the projection needs it to skip the double beat");
         read[0].ReviewerModelId.ShouldBe("claude-sonnet-4-6", "the reviewer's model must survive the FOLD — the journal renders it off the read-back, so a field the writer drops is a field nobody ever sees");
+        read[0].Independence.ShouldBe(ReviewModelIndependence.DistinctBackingModel, "the calibrated independence fact must survive the same replay fold as the verdict");
         read[1].Approved.ShouldBeTrue();
         read[1].ViaAgent.ShouldBeFalse();
         read[1].ReviewerModelId.ShouldBeNull("an unnamed reviewer reads back unnamed, never a guessed model");

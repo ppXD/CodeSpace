@@ -34,8 +34,11 @@ public sealed record CriticRequest
     /// <summary>The goal / task the artifact should serve — the yardstick the reviewer judges against. Optional.</summary>
     public string? Goal { get; init; }
 
-    /// <summary>The PRODUCER's credentialed-model row (when the caller knows it) — the auto reviewer pick prefers a DIFFERENT model for a real second opinion, falling back to this same model on a one-model pool. Null ⇒ no preference (today's pick).</summary>
+    /// <summary>Compatibility producer row for callers without a full <see cref="ProducerModel"/>. New model-backed producers should carry the full identity so alias evidence can participate.</summary>
     public Guid? ProducerModelRowId { get; init; }
+
+    /// <summary>The producer's routed and provider-observed identity. The row supports candidate selection; only the observed value supports an independence claim.</summary>
+    public ReviewModelIdentity? ProducerModel { get; init; }
 
     /// <summary>
     /// The journal intent label this review's model call records under — null ⇒ the critic's own default

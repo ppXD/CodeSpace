@@ -200,6 +200,19 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
+    public async Task The_cli_wire_observation_and_configured_row_reach_the_output_critic_as_producer_identity()
+    {
+        var rowId = Guid.NewGuid();
+        var task = GatedTask with { Model = "configured-alias", ModelCredentialModelId = rowId };
+        var result = SucceededWithChanges() with { Model = "backing-model" };
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), task, result, Run(runId), CancellationToken.None);
+
+        critic.ObservedRequest!.ProducerModel.ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = rowId, ConfiguredModel = "configured-alias", ObservedModel = "backing-model" });
+    }
+
+    [Fact]
     public async Task A_standalone_run_pushes_no_scope_so_the_critic_runs_byte_identically()
     {
         // A standalone agent run (no WorkflowRunId) has no workflow_run_record ledger to write to, so NO scope is pushed
@@ -246,6 +259,8 @@ public sealed class AgentRunExecutorOutputReviewTests
             customMessage: "the ledger's words and the result's ReviewFeedback come off ONE renderer — the two surfaces cannot tell different stories about one review");
         payload.GetProperty("reviewerModel").GetString().ShouldBe("claude-sonnet-4-6",
             customMessage: "the independence claim rides as its OWN key — a reviewer on the producer's own model is the one-model fallback, and nobody should have to mine that back out of a rendered sentence");
+        payload.GetProperty("independence").GetString().ShouldBe(ReviewModelIndependence.Unknown.ToString());
+        payload.GetProperty("calibrated").GetBoolean().ShouldBeFalse("a named reviewer without a trusted producer observation is not an independently calibrated verdict");
     }
 
     [Fact]

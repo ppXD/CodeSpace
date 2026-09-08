@@ -105,6 +105,9 @@ public sealed record SupervisorDecisionReview
     /// and for every pre-existing outcome (the field is additive JSON on the decision's non-hashed outcome).
     /// </summary>
     public string? ReviewerModelId { get; init; }
+
+    /// <summary>The provider-observed producer/reviewer relation. Unknown and same-model verdicts are honest reviews but cannot be treated as independently calibrated.</summary>
+    public global::CodeSpace.Messages.Review.ReviewModelIndependence Independence { get; init; }
 }
 
 /// <summary>The model call that authored a supervisor decision — the model id + its token usage, captured off the decider's LLM response. A data noun (Rule 18.1) folded into the decision's outcome so a read can attribute the decision.</summary>
@@ -114,6 +117,9 @@ public sealed record SupervisorModelUsage
     public string? RequestedModel { get; init; }
 
     public required string Model { get; init; }
+
+    /// <summary>The bounded model identifier reported by the provider response. Null when absent or untrusted; never inferred from <see cref="Model"/> or <see cref="RequestedModel"/>.</summary>
+    public string? ObservedModel { get; init; }
 
     /// <summary>Ordered candidates skipped before <see cref="Model"/> answered. Empty means the requested model answered or the legacy caller did not record a trail.</summary>
     public IReadOnlyList<string> FailedOver { get; init; } = Array.Empty<string>();

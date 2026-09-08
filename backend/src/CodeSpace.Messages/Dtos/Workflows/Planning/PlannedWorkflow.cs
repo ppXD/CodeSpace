@@ -49,6 +49,10 @@ public sealed record PlannedWorkflow
     [JsonPropertyName("authoredByModel"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AuthoredByModel { get; init; }
 
+    /// <summary>The bounded model identifier reported by the provider response. Null when the provider supplied no trusted observation; never backfilled from <see cref="AuthoredByModel"/>.</summary>
+    [JsonPropertyName("authoredByObservedModel"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AuthoredByObservedModel { get; init; }
+
     /// <summary>D2 (cross-run learning): which experiment arm this plan was authored under — <c>injected</c> (lessons in the prompt, ids in <see cref="InjectedLessonIds"/>), <c>withheld</c> (lessons existed, deterministically held back — the control), or <c>none</c> (no current lesson existed). Stamped server-side like <see cref="AuthoredByModel"/>.</summary>
     [JsonPropertyName("lessonArm")]
     public string? LessonArm { get; init; }

@@ -28,6 +28,7 @@ public class SupervisorPlanModelCallFactsSourceTests
         {
             RequestedModel = "claude-opus-4-6",
             Model = "metis-coder-plus",
+            ObservedModel = "backing-model-v2",
             FailedOver = ["Anthropic:claude-opus-4-6 — RateLimited 429"],
             InputTokens = 16902,
             OutputTokens = 1062,
@@ -37,6 +38,7 @@ public class SupervisorPlanModelCallFactsSourceTests
         read.ShouldNotBeNull();
         read!.RequestedModel.ShouldBe("claude-opus-4-6");
         read!.Model.ShouldBe("metis-coder-plus");
+        read.ObservedModel.ShouldBe("backing-model-v2", "the provider observation survives replay separately from both routing intent and compatibility name");
         read.FailedOver.ShouldBe(["Anthropic:claude-opus-4-6 — RateLimited 429"]);
         read.InputTokens.ShouldBe(16902);
         read.OutputTokens.ShouldBe(1062);
