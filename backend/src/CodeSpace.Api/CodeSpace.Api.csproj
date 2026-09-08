@@ -7,20 +7,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.*" />
-    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.*" />
-    <PackageReference Include="Hangfire.PostgreSql" Version="1.20.*" />
+    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.25" />
+    <PackageReference Include="Hangfire.PostgreSql" Version="1.20.13" />
     <!-- Transitive-vuln pin: Hangfire 1.8 floors Newtonsoft.Json at 11.0.1 (GHSA-5crp-9r3c-p9vr, high-sev
          deep-nesting DoS). Pin the patched 13.0.3 the rest of the tree already resolves; Hangfire runs on 13.x. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.*" />
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.*" />
-    <PackageReference Include="Serilog.AspNetCore" Version="9.*" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.11" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.11" />
+    <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
     <!-- Seq sink 9.x is the line built against Serilog 4.x (it floors Serilog at 4.3.1), which is what
          CodeSpace.Core references. The 5.x line other projects here are on floors Serilog at 2.x and would drag
          the whole tree back a major version. -->
-    <PackageReference Include="Serilog.Sinks.Seq" Version="9.*" />
+    <PackageReference Include="Serilog.Sinks.Seq" Version="9.1.0" />
   </ItemGroup>
 
   <ItemGroup>

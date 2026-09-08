@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Every transitive graph is committed. CI refuses drift, feed partial-publish windows, or surprise upgrades. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>
