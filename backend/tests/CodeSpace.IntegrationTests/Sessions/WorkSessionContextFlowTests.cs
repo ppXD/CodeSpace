@@ -35,7 +35,7 @@ namespace CodeSpace.IntegrationTests.Sessions;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class WorkSessionContextFlowTests
+public partial class WorkSessionContextFlowTests
 {
     private readonly PostgresFixture _fixture;
 

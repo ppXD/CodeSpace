@@ -180,8 +180,8 @@ public sealed class GetContextTool : IAgentTool
         type = "object",
         properties = new
         {
-            source = new { type = "string", description = "Which context source to read (e.g. 'session.turns', 'session.summary'). Omit to pull every available source — also how to discover what exists." },
-            query = new { type = "string", description = "Optional refinement the source interprets (session.turns filters to prior turns mentioning it)." },
+            source = new { type = "string", description = "Which context source to read (e.g. 'session.turns', 'session.summary', 'session.effects'). Omit to pull every available source — also how to discover what exists." },
+            query = new { type = "string", description = "Optional refinement the source interprets (session.turns filters prior turns; session.effects filters receipt fields)." },
             cursor = new { type = "string", description = "Opaque continuation returned by a prior partial page. Repeat the same source and query; omit to start from the newest page." },
         },
     }, AgentJson.Options);
