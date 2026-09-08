@@ -85,6 +85,20 @@ public sealed class AgentPlaneModelRankingTests
     }
 
     [Fact]
+    public void An_Unknown_probe_verdict_preserves_the_declared_prior()
+    {
+        AgentPlaneModelRanking.Effective(ModelCapabilityTier.Unknown, ModelCapabilityTier.Strong)
+            .ShouldBe(ModelCapabilityTier.Strong, "Unknown is absence of observed capability, not evidence that erases the declared prior");
+    }
+
+    [Fact]
+    public void A_conclusive_lower_probe_verdict_can_override_the_declared_prior()
+    {
+        AgentPlaneModelRanking.Effective(ModelCapabilityTier.Basic, ModelCapabilityTier.Strong)
+            .ShouldBe(ModelCapabilityTier.Basic, "a concrete observed tier is evidence and may downgrade an optimistic prior");
+    }
+
+    [Fact]
     public void An_untiered_pool_never_falls_back_to_alphabetical_ordering()
     {
         // Neither row carries ANY tier signal — both are effectively Unknown. The ranking must NOT secretly

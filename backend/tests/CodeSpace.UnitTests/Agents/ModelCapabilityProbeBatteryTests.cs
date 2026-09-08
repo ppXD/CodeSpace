@@ -30,11 +30,11 @@ public sealed class ModelCapabilityProbeBatteryTests
     }
 
     [Fact]
-    public void A_garbage_responder_gets_no_verdict_and_stays_Unknown()
+    public void A_complete_garbage_response_maps_to_an_observed_Unknown()
     {
         var garbage = ModelCapabilityProbeBattery.Tasks.Select(_ => "I cannot help with that.").ToArray();
         var (easy, hard) = Score(garbage);
-        ModelCapabilityProbeBattery.MapToTier(easy, hard).ShouldBeNull("a model that fails every task gets no verdict — it stays Unknown, never gets promoted");
+        ModelCapabilityProbeBattery.MapToTier(easy, hard).ShouldBe(ModelCapabilityTier.Unknown, "a complete measured miss is an Unknown capability verdict, distinct from an incomplete probe");
     }
 
     [Fact]
@@ -60,8 +60,8 @@ public sealed class ModelCapabilityProbeBatteryTests
     [Theory]
     [InlineData(1, 3)]   // below the easy floor — no Basic even if the hard band passes
     [InlineData(0, 0)]
-    public void MapToTier_returns_null_below_the_easy_majority(int easy, int hard)
-        => ModelCapabilityProbeBattery.MapToTier(easy, hard).ShouldBeNull();
+    public void MapToTier_returns_Unknown_below_the_easy_majority(int easy, int hard)
+        => ModelCapabilityProbeBattery.MapToTier(easy, hard).ShouldBe(ModelCapabilityTier.Unknown);
 
     [Fact]
     public void MapToTier_never_returns_Frontier_even_on_a_perfect_score()

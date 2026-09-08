@@ -13,14 +13,14 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// <summary>
 /// EF-backed <see cref="IModelCapabilityProbeService"/>. Runs the fixed <see cref="ModelCapabilityProbeBattery"/> against
 /// each opaque pool model (the model's OWN provider + credential — the whole point is to exercise THAT model) and writes
-/// a coarse, monotonic-upgrade tier. Scoped (DbContext + the client registry are per-request).
+/// a coarse observed tier. Scoped (DbContext + the client registry are per-request).
 /// </summary>
 public sealed class ModelCapabilityProbeService : IModelCapabilityProbeService, IScopedDependency
 {
     /// <summary>Small — each row is a MULTI-call battery (not one batched call like tiering, nor one ping like availability), so a tick probes few rows and the back-off drains the rest.</summary>
     private const int MaxBatch = 10;
 
-    /// <summary>Re-probe window. LONG (days): an opaque alias's backing model rarely changes (much rarer than the tier's own 24h or availability's 30min). Bounds the per-week live-call cost of the multi-call battery; the monotonic write means a re-probe can only ever raise the tier.</summary>
+    /// <summary>Re-probe window. LONG (days): an opaque alias's backing model rarely changes (much rarer than the tier's own 24h or availability's 30min). Bounds the per-week live-call cost of the multi-call battery while allowing complete newer evidence to replace stale evidence.</summary>
     private static readonly TimeSpan ProbeRetryWindow = TimeSpan.FromDays(7);
 
     /// <summary>Per-battery-call wall-clock. Generous enough for a real (small) completion — unlike the availability PING (which only needs reachability), this needs the model to actually answer — but capped so a hung gateway can't pin the worker.</summary>
@@ -102,8 +102,8 @@ public sealed class ModelCapabilityProbeService : IModelCapabilityProbeService, 
     /// Run the battery on ONE row + record a coarse tier. Stamps <see cref="ModelCredentialModel.LastProbedCapabilityAt"/>
     /// FIRST (back-off even on a no-verdict). A capability FAIL (wrong answer) counts against the band; an INFRA fault
     /// (no response / timeout / API error) is INCONCLUSIVE — excluded from the tally, never a capability signal. If the
-    /// model gave ZERO usable responses (wholesale unreachable) ⇒ no verdict (re-probe later). Else map the score and
-    /// write it as a MONOTONIC UPGRADE only (a later flaky run never downgrades a good verdict).
+    /// model did not complete every task in both bands ⇒ no verdict change (re-probe later). A complete battery replaces
+    /// the stale observation, including a lower or Unknown tier; partial infrastructure failure cannot erase prior evidence.
     /// </summary>
     private async Task ProbeRowAsync(ModelCredentialModel row, DateTimeOffset now, CancellationToken jobToken)
     {
@@ -115,7 +115,8 @@ public sealed class ModelCapabilityProbeService : IModelCapabilityProbeService, 
 
         var credential = ToCredential(row.Credential);
 
-        var responded = 0;
+        var easyResponses = 0;
+        var hardResponses = 0;
         var easyPasses = 0;
         var hardPasses = 0;
 
@@ -125,7 +126,8 @@ public sealed class ModelCapabilityProbeService : IModelCapabilityProbeService, 
 
             if (passed is null) continue;   // inconclusive (infra fault) — excluded from the band tally
 
-            responded++;
+            if (task.Band == ProbeBand.Easy) easyResponses++;
+            else hardResponses++;
 
             if (passed.Value)
             {
@@ -134,12 +136,10 @@ public sealed class ModelCapabilityProbeService : IModelCapabilityProbeService, 
             }
         }
 
-        if (responded == 0) return;   // the model never gave a usable response — infra, not a capability verdict
+        if (easyResponses != ModelCapabilityProbeBattery.CountBand(ProbeBand.Easy)
+            || hardResponses != ModelCapabilityProbeBattery.CountBand(ProbeBand.Hard)) return;
 
-        var probed = ModelCapabilityProbeBattery.MapToTier(easyPasses, hardPasses);
-
-        if (probed is { } tier && (int)tier > (int)(row.ProbedCapabilityTier ?? ModelCapabilityTier.Unknown))
-            row.ProbedCapabilityTier = tier;   // MONOTONIC upgrade only — never downgrade on a later flaky run
+        row.ProbedCapabilityTier = ModelCapabilityProbeBattery.MapToTier(easyPasses, hardPasses);
     }
 
     /// <summary>Run one battery task: <c>true</c>/<c>false</c> = a graded capability pass/fail (a real completion); <c>null</c> = INCONCLUSIVE (our timeout / a transport fault / any API error / an unexpected fault). A genuine job cancellation rethrows.</summary>

@@ -27,7 +27,7 @@ public sealed record CredentialedModelSummary
     /// <summary>The brain-inferred coding-capability tier (#762) — an advisory ordering hint. Null / <see cref="ModelCapabilityTier.Unknown"/> = un-tiered or an opaque id the brain couldn't recognise.</summary>
     public ModelCapabilityTier? CapabilityTier { get; init; }
 
-    /// <summary>The objectively-PROBED tier for an opaque id (#778). When set it OVERRIDES <see cref="CapabilityTier"/> for ordering — the picker shows the EFFECTIVE tier = probed ?? brain. Null = not probed.</summary>
+    /// <summary>The objectively-PROBED tier for an opaque id (#778). A concrete tier overrides <see cref="CapabilityTier"/> for ordering; null/Unknown falls back to that declared prior. Null = not probed.</summary>
     public ModelCapabilityTier? ProbedCapabilityTier { get; init; }
 
     /// <summary>Endpoint reachability (#774): <c>true</c> = last probe reached it, <c>false</c> = a self-hosted gateway that didn't respond (auto avoids it), <c>null</c> = not probed (a vendor model, assumed available). The picker shows a dot.</summary>
