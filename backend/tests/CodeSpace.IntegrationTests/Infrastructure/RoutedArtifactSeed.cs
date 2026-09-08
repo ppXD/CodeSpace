@@ -112,6 +112,16 @@ public static class RoutedArtifactSeed
     /// <summary>Where a routed fixture's bytes physically land, so a test can count files under it.</summary>
     public sealed record RoutedDestination(Guid ProfileId, Guid RouteId, string Root)
     {
-        public int ObjectCount => Directory.Exists(Root) ? Directory.GetFiles(Root, "*", SearchOption.AllDirectories).Length : 0;
+        /// <summary>Provider payloads only. Driver-owned lease/lock metadata under .codespace is not a stored artifact.</summary>
+        public IReadOnlyList<string> ObjectPaths
+        {
+            get
+            {
+                var objects = Path.Combine(Root, "objects");
+                return Directory.Exists(objects) ? Directory.GetFiles(objects, "*", SearchOption.AllDirectories) : [];
+            }
+        }
+
+        public int ObjectCount => ObjectPaths.Count;
     }
 }

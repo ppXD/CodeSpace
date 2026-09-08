@@ -403,7 +403,7 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
             .SingleAsync(location => location.Id == world.LocationId);
     }
 
-    private static string ObjectPath(StoredArtifact world) => Directory.GetFiles(world.Root, "*", SearchOption.AllDirectories).Single();
+    private static string ObjectPath(StoredArtifact world) => Directory.GetFiles(Path.Combine(world.Root, "objects"), "*", SearchOption.AllDirectories).Single();
 
     private static void DeleteStoredObject(StoredArtifact world) => File.Delete(ObjectPath(world));
 
