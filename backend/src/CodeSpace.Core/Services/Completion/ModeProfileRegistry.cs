@@ -90,16 +90,18 @@ public sealed class ModeProfileRegistry : IModeProfileRegistry, ISingletonDepend
 /// </summary>
 public static class RunModeClassifier
 {
+    /// <summary>Derive a launch-time mode from its structural projection before a workflow definition exists.</summary>
+    public static string DeriveProjection(string? projectionKind) => projectionKind switch
+    {
+        Messages.Tasks.TaskProjectionKinds.Supervisor => RunModeKeys.Supervisor,
+        Messages.Tasks.TaskProjectionKinds.SingleAgent => RunModeKeys.SingleAgent,
+        Messages.Tasks.TaskProjectionKinds.PlanMapSynth or Messages.Tasks.TaskProjectionKinds.PlanMapDynamic or Messages.Tasks.TaskProjectionKinds.CoordinatedLoop => RunModeKeys.PlanMap,
+        _ => RunModeKeys.Generic,
+    };
+
     public static string Derive(string? projectionKind, WorkflowDefinition definition)
     {
-        if (!string.IsNullOrEmpty(projectionKind))
-            return projectionKind switch
-            {
-                Messages.Tasks.TaskProjectionKinds.Supervisor => RunModeKeys.Supervisor,
-                Messages.Tasks.TaskProjectionKinds.SingleAgent => RunModeKeys.SingleAgent,
-                Messages.Tasks.TaskProjectionKinds.PlanMapSynth or Messages.Tasks.TaskProjectionKinds.PlanMapDynamic or Messages.Tasks.TaskProjectionKinds.CoordinatedLoop => RunModeKeys.PlanMap,
-                _ => RunModeKeys.Generic,
-            };
+        if (!string.IsNullOrEmpty(projectionKind)) return DeriveProjection(projectionKind);
 
         var keys = definition.Nodes.Select(n => n.TypeKey).ToHashSet(StringComparer.Ordinal);
 

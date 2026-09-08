@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.RunSources;
@@ -12,6 +13,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
@@ -72,6 +74,26 @@ public class TaskLaunchContractFlowTests
         contract.RequestedControls.Overrides.PushBranch.ShouldBe(false);
         contract.ResolvedRoute!.ProjectionKind.ShouldBe(projectionKind);
         contract.ResolvedRoute.EffectiveAutonomy.ShouldBe("Standard");
+        if (projectionKind == TaskProjectionKinds.Supervisor)
+        {
+            contract.SupervisorModelSelection.ShouldNotBeNull("the supervisor decision is frozen before execution and survives the real PostgreSQL snapshot path");
+            run.DefinitionSnapshotJson.ShouldContain(contract.SupervisorModelSelection!.ModelCredentialModelId.ToString(), Case.Insensitive);
+            contract.SupervisorModelSelection.Mode.ShouldBe(RunModeKeys.Supervisor);
+            contract.SupervisorModelSelection.CapabilityKey.ShouldBe(CapabilityKeys.InlineAnswer);
+            contract.PlannerModelSelection.ShouldBeNull();
+        }
+        else if (projectionKind == TaskProjectionKinds.PlanMapSynth)
+        {
+            contract.PlannerModelSelection.ShouldNotBeNull("the planner decision is frozen before execution and survives the real PostgreSQL snapshot path");
+            contract.PlannerModelSelection!.Mode.ShouldBe(RunModeKeys.PlanMap);
+            contract.PlannerModelSelection.CapabilityKey.ShouldBe(CapabilityKeys.InlineAnswer);
+            contract.SupervisorModelSelection.ShouldBeNull();
+        }
+        else
+        {
+            contract.SupervisorModelSelection.ShouldBeNull();
+            contract.PlannerModelSelection.ShouldBeNull();
+        }
         JsonElement.DeepEquals(JsonSerializer.SerializeToElement(contract.ResolvedRoute.Caps, WorkflowJson.Options), JsonSerializer.SerializeToElement(launched.Route.Caps, WorkflowJson.Options)).ShouldBeTrue();
         DefinitionHash.Compute(detail.Definition).ShouldBe(run.DefinitionSnapshotHash, "Postgres jsonb normalization cannot detach the contract from the frozen hash");
         (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.WorkflowRunId == launched.RunId)).ShouldBe(0, "this verifies persistence, not model execution or control enforcement");

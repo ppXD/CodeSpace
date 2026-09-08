@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
@@ -99,6 +100,30 @@ public class TaskLaunchContractCaptureTests
         contract.RequestedControls.Overrides!.AllowedTools.ShouldBe(new[] { "Read", "Grep" });
         contract.RequestedControls.RelatedRepositories!.Single().Alias.ShouldBe("api");
         contract.ResolvedAgentProfile!.AllowedTools.ShouldBe(new[] { "Read", "Grep" });
+    }
+
+    [Fact]
+    public void Capture_freezes_the_model_policy_receipt_with_the_launch_contract()
+    {
+        var request = Request();
+        var receiptId = Guid.NewGuid();
+        var rowId = Guid.NewGuid();
+        var selection = new ModelSelectionReceipt
+        {
+            Source = ModelSelectionSource.QualificationEvidence, ModelCredentialModelId = rowId,
+            Mode = "plan-map", CapabilityKey = "git-branch", QualificationReceiptId = receiptId,
+            SuiteDigest = "sha256:suite", EvidenceVersion = "model-qualification-observation/v1", SampleSize = 24,
+            SolveRateLowerBound = 0.7, AgeAdjustedScore = 0.68, EvaluatorHealth = 1,
+            EvidenceEffectiveFrom = DateTimeOffset.UtcNow.AddDays(-1), EvidenceExpiresAt = DateTimeOffset.UtcNow.AddDays(29),
+        };
+
+        var contract = TaskLaunchContractSnapshot.Capture(request, Context(request) with { PlannerModelRowId = rowId, PlannerModelSelection = selection });
+
+        contract.PlannerModelSelection.ShouldNotBeNull();
+        contract.PlannerModelSelection!.ShouldNotBeSameAs(selection);
+        contract.PlannerModelSelection.QualificationReceiptId.ShouldBe(receiptId);
+        contract.PlannerModelSelection.ModelCredentialModelId.ShouldBe(rowId);
+        TaskLaunchContractSnapshot.Validate(contract).ShouldBeEmpty();
     }
 
     [Fact]

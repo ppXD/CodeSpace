@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Tasks;
@@ -46,6 +47,9 @@ public sealed record TaskBuildContext
     /// <summary>The supervisor's OWN brain-model credentialed-row id (a <c>ModelCredentialModel</c> id), resolved at launch when the Deep lane projects an <c>agent.supervisor</c> node and the operator pinned none — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>supervisorModelId</c> so the decider has a brain instead of stopping turn-1. Resolved ONCE here (replay-stable: every turn + replay reads the same baked id). Null for a non-supervisor projection or an empty pool (the builder then emits no brain — the honest fail-closed floor).</summary>
     public Guid? SupervisorBrainModelId { get; init; }
 
+    /// <summary>The immutable launch-time explanation for <see cref="SupervisorBrainModelId"/>. Null on legacy, non-supervisor, or no-model launches.</summary>
+    public ModelSelectionReceipt? SupervisorModelSelection { get; init; }
+
     /// <summary>True when the operator pinned a brain model but it was ineligible (missing / disabled / cross-team / non-structured) and <see cref="SupervisorBrainModelId"/> is the auto-selected FALLBACK, not the requested pin — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>brainModelPinIneligible</c> so the run's own definition records that the pin did not apply, instead of silently baking the fallback with no trace. False/null (no pin, or the pin was honored) ⇒ the builder omits the key (byte-identical).</summary>
     public bool SupervisorBrainModelPinIneligible { get; init; }
 
@@ -69,6 +73,9 @@ public sealed record TaskBuildContext
 
     /// <summary>The operator's pinned planner-model ROW (S4b) — validated at launch like the supervisor brain; the plan-map builders bake it into the plan.author node's <c>plannerModelId</c>. Null ⇒ omitted ⇒ the node auto-picks the team's strongest structured-eligible model. Inert on non-plan-map projections.</summary>
     public Guid? PlannerModelRowId { get; init; }
+
+    /// <summary>The immutable launch-time explanation for <see cref="PlannerModelRowId"/>. Null on legacy, non-plan-map, or no-model launches.</summary>
+    public ModelSelectionReceipt? PlannerModelSelection { get; init; }
 
     /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): the plan-map builders bake it into plan.author/plan.confirm's <c>reviewMode</c>; the supervisor builder bakes it into the plan-scoped <c>planReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ omitted (byte-identical). Inert on quick.</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;

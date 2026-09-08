@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 
 namespace CodeSpace.Messages.Tasks;
 
@@ -34,4 +35,10 @@ public sealed record TaskLaunchContract
 
     /// <summary>The launch-time agent envelope, before any dispatch-time defaults or credential resolution.</summary>
     public ResolvedAgentProfile? ResolvedAgentProfile { get; init; }
+
+    /// <summary>The launch-frozen policy decision for the supervisor brain. Replays consume the baked row and never re-rank current evidence.</summary>
+    public ModelSelectionReceipt? SupervisorModelSelection { get; init; }
+
+    /// <summary>The launch-frozen policy decision for the plan-map planner. Replays consume the baked row and never re-rank current evidence.</summary>
+    public ModelSelectionReceipt? PlannerModelSelection { get; init; }
 }

@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Agents.ModelCredentials;
@@ -106,6 +107,16 @@ public interface IModelPoolSelector
     async Task<IReadOnlyList<Guid>> ListBrainRowIdsAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) =>
         await SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken).ConfigureAwait(false) is { } one ? new[] { one } : Array.Empty<Guid>();
 
+    /// <summary>Select a replay-frozen brain for one structural mode/capability cell, using current compatible qualification evidence when it is strong enough and the versioned tier prior otherwise.</summary>
+    async Task<CapabilityModelSelectionDecision?> SelectBrainForCapabilityAsync(CapabilityModelSelectionRequest request, CancellationToken cancellationToken)
+    {
+        var rowId = await SelectBrainRowIdAsync(request.TeamId, request.EligibleProviders, cancellationToken).ConfigureAwait(false);
+        return rowId is null ? null : new CapabilityModelSelectionDecision(rowId.Value, new ModelSelectionReceipt
+        {
+            Source = ModelSelectionSource.DeclaredPrior, ModelCredentialModelId = rowId.Value, Mode = request.Mode, CapabilityKey = request.CapabilityKey,
+        });
+    }
+
     /// <summary>
     /// The REVIEWER pick (Rule 7 sibling; S4d) — prefers a model DISTINCT from the producer so the critique is a
     /// second opinion, excluding the producer's configured MODEL NAME rather than merely its row (the same configured
@@ -140,6 +151,18 @@ public interface IModelPoolSelector
     /// </summary>
     Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken);
 }
+
+/// <summary>The bounded input to one capability-aware model decision. Mode and capability are open strings derived from launch structure, never task-name rules.</summary>
+public sealed record CapabilityModelSelectionRequest
+{
+    public required Guid TeamId { get; init; }
+    public required string Mode { get; init; }
+    public required string CapabilityKey { get; init; }
+    public required IReadOnlyCollection<string> EligibleProviders { get; init; }
+}
+
+/// <summary>The selected row plus the immutable explanation that must be frozen with the launch.</summary>
+public sealed record CapabilityModelSelectionDecision(Guid RowId, ModelSelectionReceipt Receipt);
 
 /// <summary>One pooled model the brain may dispatch — its canonical id, the provider tag whose harness can drive it, and its cached advisory capability <see cref="ModelCapabilityTier"/> (default <see cref="ModelCapabilityTier.Unknown"/> when un-tiered). Catalog-only (no credential, no secret).</summary>
 public sealed record PoolModelInfo(string ModelId, string Provider, ModelCapabilityTier Tier = ModelCapabilityTier.Unknown);

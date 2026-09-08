@@ -1,11 +1,16 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using System.Text.Json;
 
 namespace CodeSpace.IntegrationTests.Agents;
 
@@ -728,12 +733,85 @@ public class ModelPoolSelectorFlowTests
             .ShouldBe("reachable-frontier", "a known-dead row never wins on cost alone");
     }
 
+    [Fact]
+    public async Task Capability_selection_uses_only_current_healthy_same_cohort_evidence_and_returns_a_frozen_explanation()
+    {
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        var measuredBasic = await AddModelReturningIdAsync(credentialId, "measured-basic", tier: ModelCapabilityTier.Basic, available: true);
+        var unmeasuredStrong = await AddModelReturningIdAsync(credentialId, "unmeasured-strong", tier: ModelCapabilityTier.Strong, available: true);
+        var unavailable = await AddModelReturningIdAsync(credentialId, "unavailable", tier: ModelCapabilityTier.Unknown, available: false);
+        var now = DateTimeOffset.UtcNow;
+
+        await AppendQualificationAsync(teamId, measuredBasic, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.92, "sha256:current", now.AddMinutes(-1), now.AddDays(30));
+        await AppendQualificationAsync(teamId, unavailable, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.99, "sha256:current", now.AddMinutes(-1), now.AddDays(30));
+        await AppendQualificationAsync(teamId, unmeasuredStrong, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.99, "sha256:old", now.AddDays(-2), now.AddDays(28));
+        await AppendQualificationAsync(Guid.NewGuid(), unmeasuredStrong, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.99, "sha256:current", now.AddMinutes(-1), now.AddDays(30));
+
+        using var scope = _fixture.BeginScope();
+        var selector = scope.Resolve<IModelPoolSelector>();
+        var decision = await selector.SelectBrainForCapabilityAsync(new CapabilityModelSelectionRequest
+        {
+            TeamId = teamId, Mode = RunModeKeys.Supervisor, CapabilityKey = CapabilityKeys.GitBranch, EligibleProviders = new[] { "Anthropic" },
+        }, CancellationToken.None);
+
+        decision.ShouldNotBeNull();
+        decision!.RowId.ShouldBe(measuredBasic, "healthy evidence can outrank a stronger declared prior, while unavailable and foreign-cohort observations are excluded");
+        decision.Receipt.Source.ShouldBe(ModelSelectionSource.QualificationEvidence);
+        decision.Receipt.ModelCredentialModelId.ShouldBe(measuredBasic);
+        decision.Receipt.SuiteDigest.ShouldBe("sha256:current");
+        decision.Receipt.QualificationReceiptId.ShouldNotBeNull();
+        decision.Receipt.Mode.ShouldBe(RunModeKeys.Supervisor);
+        decision.Receipt.CapabilityKey.ShouldBe(CapabilityKeys.GitBranch);
+
+        var otherCapability = await selector.SelectBrainForCapabilityAsync(new CapabilityModelSelectionRequest
+        {
+            TeamId = teamId, Mode = RunModeKeys.Supervisor, CapabilityKey = CapabilityKeys.InlineAnswer, EligibleProviders = new[] { "Anthropic" },
+        }, CancellationToken.None);
+        otherCapability!.RowId.ShouldBe(unmeasuredStrong, "evidence is scoped to one capability cell and cannot leak into another");
+        otherCapability.Receipt.Source.ShouldBe(ModelSelectionSource.DeclaredPrior);
+    }
+
+    [Fact]
+    public async Task Database_rejects_a_bound_v1_receipt_with_null_or_empty_observation_statistics()
+    {
+        var now = DateTimeOffset.UtcNow;
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.QualificationReceipt.Add(new QualificationReceipt
+        {
+            Id = Guid.NewGuid(), Mode = RunModeKeys.Supervisor, CapabilityKey = CapabilityKeys.GitBranch, SuiteDigest = "sha256:invalid",
+            VerifierBundleJson = "{}", CohortJson = "{}", GrantedPerformance = PerformanceQualification.Shadow,
+            ModelEvidenceVersion = ModelQualificationEvidence.CurrentVersion, CandidateModelRowId = Guid.NewGuid(), ObservedModel = "observed",
+            ModelAttribution = ModelQualificationAttribution.Bound, ModelSampleSize = null, ModelObservedCellCount = 0,
+            ModelSolveRateLowerBound = 0.9, ModelEvaluatorHealth = 1, EffectiveFrom = now, ExpiresAt = now.AddDays(1),
+        });
+
+        await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
     // ─── Helpers ───
 
     private async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, params string[] eligibleProviders)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
+    }
+
+    private async Task AppendQualificationAsync(Guid cohortTeamId, Guid rowId, string mode, string capabilityKey, double lowerBound, string suiteDigest, DateTimeOffset effectiveFrom, DateTimeOffset expiresAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var cohort = new LaunchCohortDescriptor { TeamId = cohortTeamId, Mode = mode, Tier = LaunchCohortDescriptor.InternalQualificationTier, CompletionPolicyVersion = CompletionPolicy.CurrentVersion };
+        db.QualificationReceipt.Add(new QualificationReceipt
+        {
+            Id = Guid.NewGuid(), Mode = mode, CapabilityKey = capabilityKey, SuiteDigest = suiteDigest,
+            VerifierBundleJson = "{}", CohortJson = JsonSerializer.Serialize(cohort, AgentJson.Options), GrantedPerformance = PerformanceQualification.Shadow, MetricsJson = "{}",
+            ModelEvidenceVersion = ModelQualificationEvidence.CurrentVersion, CandidateModelRowId = rowId, ObservedModel = "observed-model",
+            ModelAttribution = ModelQualificationAttribution.Bound, ModelSampleSize = 20, ModelObservedCellCount = 20,
+            ModelSolveRateLowerBound = lowerBound, ModelEvaluatorHealth = 1, EffectiveFrom = effectiveFrom, ExpiresAt = expiresAt,
+        });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid rowId, params string[] eligibleProviders)
