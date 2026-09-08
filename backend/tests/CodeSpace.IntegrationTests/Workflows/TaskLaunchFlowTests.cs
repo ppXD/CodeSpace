@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -138,7 +139,7 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
-    public async Task Chat_launch_with_no_effort_auto_classifies_runs_and_rides_a_confirm_card_along()
+    public async Task Chat_auto_preview_requires_confirmation_then_an_explicit_choice_runs()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
 
@@ -150,9 +151,8 @@ public class TaskLaunchFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        // No RequestedEffort ⇒ the auto path: the heuristic classifies (always below the confirm floor). PR4 does
-        // NOT block on confirm — the run STILL launches; the confirm card rides along on the result as the
-        // operator's escalation affordance.
+        // No RequestedEffort ⇒ the auto path: the heuristic classifies below the confirm floor. Preview that advice,
+        // then model the operator choosing its proposed tier explicitly before any execution is authorized.
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,
@@ -163,24 +163,25 @@ public class TaskLaunchFlowTests
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
         };
 
-        var result = await LaunchAsync(request);
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+        preview.Route.WasAutoClassified.ShouldBeTrue();
+        preview.Route.NeedsConfirmCard.ShouldBeTrue("the heuristic is always below the confirm floor");
+        preview.Route.Confirm.ShouldNotBeNull("the preview carries the generic choices the operator can authorize");
+        preview.Route.Confirm!.Options.ShouldNotBeEmpty();
 
-        // The run launched regardless of the confirm card (always-run).
+        var result = await LaunchAsync(request with { RequestedEffort = preview.Route.EffortMode, DeliverableShape = preview.Route.DeliverableShape });
         result.RunId.ShouldNotBe(Guid.Empty);
         result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
-
-        // The escalation affordance rides along for the UI.
-        result.Route.WasAutoClassified.ShouldBeTrue();
-        result.Route.NeedsConfirmCard.ShouldBeTrue("the heuristic is always below the confirm floor");
-        result.Route.Confirm.ShouldNotBeNull("the confirm card rides along on the auto path");
-        result.Route.Confirm!.Options.ShouldNotBeEmpty();
+        result.Route.WasAutoClassified.ShouldBeFalse("an explicit choice, rather than auto advice, authorized this run");
+        result.Route.NeedsConfirmCard.ShouldBeFalse();
 
         await RunEngineAsync(result.RunId);
         await jobClient.WaitForPendingAsync();
 
         var run = await LoadRunAsync(result.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "PR4 always runs even with a confirm card pending — the auto-classified task still walks to Success; the card is an affordance, not a gate");
+            customMessage: "the confirmed route must still walk through projection, engine, executor and the real fake-CLI process to Success");
     }
 
     [Fact]
@@ -1371,7 +1372,11 @@ public class TaskLaunchFlowTests
 
     // ── B2: the deliverable SHAPE reaches the projected node — a question is no longer launched as a coding run ──
 
-    /// <summary>An AUTO-effort launch of <paramref name="taskText"/> with no repository — the classifier decides the shape, and the frozen snapshot records what the projection made of it.</summary>
+    /// <summary>
+    /// Preview an AUTO-effort launch with no repository, then make the router's proposed effort explicit while carrying
+    /// its classified deliverable shape — the same confirmation transition the UI performs. The classifier decides the
+    /// shape; routing advice alone never authorizes execution.
+    /// </summary>
     private async Task<JsonElement> LaunchAndReadAgentConfigAsync(string taskText, IReadOnlyList<string>? acceptanceChecks = null)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1380,7 +1385,7 @@ public class TaskLaunchFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = false;   // inspect the frozen snapshot; the run itself is pinned by the quick-tier E2E above
 
-        var result = await LaunchAsync(new TaskLaunchRequest
+        var auto = new TaskLaunchRequest
         {
             TeamId = teamId,
             ActorUserId = userId,
@@ -1389,7 +1394,13 @@ public class TaskLaunchFlowTests
             RequestedEffort = TaskEffortModes.Auto,
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
             AcceptanceChecks = acceptanceChecks,
-        });
+        };
+
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(auto, CancellationToken.None);
+        preview.Route.NeedsConfirmCard.ShouldBeTrue("the fallback classifier's proposal requires an operator choice before execution");
+
+        var result = await LaunchAsync(auto with { RequestedEffort = preview.Route.EffortMode, DeliverableShape = preview.Route.DeliverableShape });
 
         result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "these seeds all classify to the quick tier — the shape axis must not move the tier");
 

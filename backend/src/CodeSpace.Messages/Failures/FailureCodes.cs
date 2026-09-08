@@ -50,6 +50,7 @@ public static class FailureCodes
 
     // ── Workflows and runs ─────────────────────────────────────────────────────────
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
+    public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
     public const string TaskRouteSnapshotMismatch = "task_route_snapshot_mismatch";
     public const string WorkspaceUnresolvable = "workspace_unresolvable";
     public const string RerunAlreadyInProgress = "rerun_already_in_progress";

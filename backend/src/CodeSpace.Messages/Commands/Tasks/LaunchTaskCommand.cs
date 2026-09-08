@@ -17,8 +17,8 @@ public sealed record LaunchTaskCommand : TaskLaunchInput, ICommand<LaunchTaskRes
 /// <summary>
 /// The launch outcome (Rule 18.1, a pure data noun) — the <see cref="RunId"/> the caller tracks the run by, the
 /// <see cref="ProjectionKind"/> that built it, the full <see cref="Route"/> (so the UI can show the
-/// <c>NeedsConfirmCard</c> / <c>Confirm</c> escalation affordance — PR4 does NOT block on confirm; the operator
-/// re-POSTs with an explicit <c>Effort</c> to change), the resolved <see cref="SurfaceKind"/>, and the linked entity
+/// resolved decision that actually launched; a route carrying <c>NeedsConfirmCard</c> is rejected before staging and
+/// the operator re-POSTs with an explicit <c>Effort</c>), the resolved <see cref="SurfaceKind"/>, and the linked entity
 /// the seed carried. No <c>LaunchEnabled</c> / <c>WorkflowId</c> — there is no flag and no Workflow row.
 /// </summary>
 public sealed record LaunchTaskResult

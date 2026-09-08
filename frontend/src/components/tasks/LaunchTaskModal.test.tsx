@@ -701,7 +701,7 @@ const ROUTE: import("@/api/tasks").RoutePlan = {
 };
 
 describe("LaunchTaskModal — route preview (B1)", () => {
-  it("renders routing advice without treating low confidence as missing consent", () => {
+  it("renders routing advice and blocks Launch until the operator chooses an effort", () => {
     routeState = { route: ROUTE, failed: false, loading: false, answered: true, routeSnapshotId: "snapshot-1" };
     renderBox({ surface: "chat", autofill: {} });
     typeTask("Refactor the auth module across several files");
@@ -709,13 +709,14 @@ describe("LaunchTaskModal — route preview (B1)", () => {
     expect(screen.getByTestId("route-confirm-card")).toBeInTheDocument();
     expect(screen.getByText(/Heuristic guess \(cost tier high\)/)).toBeInTheDocument();
 
-    // Depth advice is not consent. Launch reuses the exact server-owned preview decision.
+    // Routing advice is not consent. The backend enforces the same rule for callers that bypass this UI.
     const send = screen.getByLabelText("Launch task");
-    expect(send).not.toBeDisabled();
+    expect(send).toBeDisabled();
+    expect(send).toHaveAttribute("title", "Choose an effort before launching");
     fireEvent.click(send);
-    expect(lastInput).toMatchObject({ routeSnapshotId: "snapshot-1" });
-    expect(markLaunchAttempt).toHaveBeenCalledWith("snapshot-1");
-    expect(releaseReference).toHaveBeenCalledWith("snapshot-1");
+    expect(launchSpy).not.toHaveBeenCalled();
+    expect(markLaunchAttempt).not.toHaveBeenCalled();
+    expect(releaseReference).not.toHaveBeenCalled();
   });
 
   it("picking an option sets the effort EXPLICITLY, clears the card, and enables Launch", () => {
@@ -775,7 +776,7 @@ describe("LaunchTaskModal — route preview (B1)", () => {
 
     expect(screen.getByTestId("route-risk-badge")).toBeInTheDocument();
     expect(screen.getByText(/Potential side effects/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Launch task")).not.toBeDisabled();
+    expect(screen.getByLabelText("Launch task")).toBeDisabled();
   });
 
   it("a confident route shows a one-line hint instead of a card and never blocks Launch", () => {

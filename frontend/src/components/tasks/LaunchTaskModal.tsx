@@ -323,13 +323,14 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Routing advice is not consent; server authorization remains independent of the displayed confidence.
   const acceptanceCompatibilityBlocked = cfg.acceptanceChecks.length > 0 && routePreview.acceptanceCompatibility?.state !== "Compatible";
   const acceptanceCompatibilityReason = routePreview.acceptanceCompatibility?.detail ?? "Acceptance execution compatibility is unknown. Remove the command or obtain a compatible route preview before launching it as a requirement.";
-  const canLaunch = missing.length === 0 && !routeUnanswered && !acceptanceCompatibilityBlocked && !launch.isPending;
+  const canLaunch = missing.length === 0 && !routeUnanswered && routeCard === null && !acceptanceCompatibilityBlocked && !launch.isPending;
 
   // A disabled send button must say WHY. Missing inputs first (the operator can act on those immediately), then
   // the still-open preview — never a bare disabled button the operator reads as broken.
   const launchBlockedReason = canLaunch ? "Launch"
     : missing.length ? `Add ${missing.join(" and ")}`
       : routeUnanswered ? "Checking where this task will run…"
+        : routeCard ? "Choose an effort before launching"
         : acceptanceCompatibilityBlocked ? acceptanceCompatibilityReason
           : "Launching…";
 

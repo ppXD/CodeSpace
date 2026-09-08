@@ -70,6 +70,7 @@ public class FailureTaxonomyTests
         FailureCodes.ProviderError.ShouldBe("provider_error");
         FailureCodes.RateLimited.ShouldBe("rate_limited");
         FailureCodes.WorkflowDefinitionInvalid.ShouldBe("workflow_definition_invalid");
+        FailureCodes.TaskRouteConfirmationRequired.ShouldBe("task_route_confirmation_required");
         FailureCodes.WorkspaceUnresolvable.ShouldBe("workspace_unresolvable");
         FailureCodes.RerunAlreadyInProgress.ShouldBe("rerun_already_in_progress");
         FailureCodes.RerunTargetInvalid.ShouldBe("rerun_target_invalid");
