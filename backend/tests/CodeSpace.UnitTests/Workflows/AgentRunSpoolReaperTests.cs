@@ -1,4 +1,5 @@
 using CodeSpace.Core.Settings;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using Shouldly;
@@ -13,6 +14,20 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public sealed class AgentRunSpoolReaperTests
 {
+    [Fact]
+    public void Only_nonterminal_capture_states_hold_the_raw_spool_source()
+    {
+        AgentRunSpoolReaper.CaptureSourceHoldingStates.ShouldBe([
+            AgentRunLogCaptureIntentState.Expected,
+            AgentRunLogCaptureIntentState.Opened,
+            AgentRunLogCaptureIntentState.SourceFinalized,
+        ]);
+        AgentRunSpoolReaper.CaptureSourceHoldingStates.ShouldNotContain(AgentRunLogCaptureIntentState.Completed);
+        AgentRunSpoolReaper.CaptureSourceHoldingStates.ShouldNotContain(AgentRunLogCaptureIntentState.CaptureFailed);
+        AgentRunSpoolReaper.CaptureSourceHoldingStates.ShouldNotContain(AgentRunLogCaptureIntentState.Superseded);
+        AgentRunSpoolReaper.CaptureSourceHoldingStates.ShouldNotContain(AgentRunLogCaptureIntentState.ExternalStateIndeterminate);
+    }
+
     [Fact]
     public void Retention_env_var_name_is_pinned_with_a_24h_default_and_safe_fallback()
     {

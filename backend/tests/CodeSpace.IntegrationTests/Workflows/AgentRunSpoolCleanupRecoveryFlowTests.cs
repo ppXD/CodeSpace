@@ -126,6 +126,49 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_full_batch_of_capture_held_runs_does_not_starve_a_later_cleanable_run()
+    {
+        var cleanable = await SeedAsync();
+        var blockers = new List<RunSpool>(AgentRunSpoolReaper.BatchSize);
+        var now = DateTimeOffset.UtcNow;
+        using (var seed = Scope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            for (var index = 0; index < AgentRunSpoolReaper.BatchSize; index++)
+            {
+                var id = Guid.NewGuid();
+                var directory = Path.Combine(_root, id.ToString("N"));
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "out.log"), "capture source");
+                var handle = JsonSerializer.Serialize(new SandboxHandle
+                {
+                    Kind = "local", ProcessId = 1, SpoolDirectory = directory, Deadline = now, LaunchHost = LocalProcessRunner.CurrentHost,
+                }, AgentJson.Options);
+                db.AgentRun.Add(new AgentRun { Id = id, TeamId = cleanable.TeamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = 1, RunnerHandleJson = handle });
+                db.AgentRunLogCaptureIntent.Add(ExpectedCaptureIntent(cleanable.TeamId, id, now));
+                blockers.Add(new RunSpool(cleanable.TeamId, id, directory, handle));
+            }
+            await db.SaveChangesAsync();
+            await db.AgentRun.Where(row => row.TeamId == cleanable.TeamId && row.Status == AgentRunStatus.Running)
+                .ExecuteUpdateAsync(set => set.SetProperty(row => row.Status, AgentRunStatus.Succeeded).SetProperty(row => row.CompletedAt, now.AddDays(-3)));
+        }
+
+        using (var scope = Scope())
+            (await scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1);
+
+        Directory.Exists(cleanable.Directory).ShouldBeFalse("capture-held rows must be excluded before LIMIT so ordinary eligible work remains reachable");
+        await AssertHandleAsync(cleanable, present: false);
+        blockers.ShouldAllBe(run => Directory.Exists(run.Directory));
+        using var evidence = Scope();
+        var evidenceDb = evidence.Resolve<CodeSpaceDbContext>();
+        var blockerIds = blockers.Select(run => run.Id).ToArray();
+        (await evidenceDb.AgentRun.AsNoTracking().CountAsync(row => row.TeamId == cleanable.TeamId && blockerIds.Contains(row.Id) && row.RunnerHandleJson != null))
+            .ShouldBe(AgentRunSpoolReaper.BatchSize);
+        (await evidenceDb.AgentRunLogCaptureIntent.AsNoTracking().CountAsync(intent => intent.TeamId == cleanable.TeamId && intent.State == AgentRunLogCaptureIntentState.Expected))
+            .ShouldBe(AgentRunSpoolReaper.BatchSize);
+    }
+
+    [Fact]
     public async Task A_full_batch_of_failed_local_candidates_does_not_starve_a_later_cleanable_run()
     {
         var cleanable = await SeedAsync();
@@ -227,6 +270,34 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_capture_admitted_after_candidate_discovery_holds_the_raw_source_before_deletion()
+    {
+        var run = await SeedAsync();
+        DateTimeOffset completedAt;
+        using (var reader = Scope())
+            completedAt = (await reader.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(row => row.Id == run.Id)).CompletedAt.ShouldNotBeNull();
+        var gate = new CandidateReadGate();
+        using var scope = Scope(gate);
+        var reap = scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
+        await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            using var mutation = Scope();
+            var db = mutation.Resolve<CodeSpaceDbContext>();
+            await db.AgentRun.Where(row => row.Id == run.Id).ExecuteUpdateAsync(set => set.SetProperty(row => row.Status, AgentRunStatus.Running).SetProperty(row => row.CompletedAt, (DateTimeOffset?)null));
+            var now = DateTimeOffset.UtcNow;
+            db.AgentRunLogCaptureIntent.Add(ExpectedCaptureIntent(run.TeamId, run.Id, now));
+            await db.SaveChangesAsync();
+            await db.AgentRun.Where(row => row.Id == run.Id).ExecuteUpdateAsync(set => set.SetProperty(row => row.Status, AgentRunStatus.Succeeded).SetProperty(row => row.CompletedAt, completedAt));
+        }
+        finally { gate.Release.TrySetResult(); }
+
+        (await reap.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBe(0);
+        File.ReadAllText(Path.Combine(run.Directory, "out.log")).ShouldBe("retained output");
+        await AssertHandleAsync(run, present: true);
+    }
+
+    [Fact]
     public async Task Two_reapers_can_observe_the_same_candidate_without_losing_cleanup_evidence()
     {
         var run = await SeedAsync();
@@ -288,6 +359,13 @@ public sealed class AgentRunSpoolCleanupRecoveryFlowTests : IDisposable
     {
         Id = id, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Succeeded, FenceEpoch = 1,
         RunnerHandleJson = handle, CompletedAt = completedAt,
+    };
+
+    private static AgentRunLogCaptureIntent ExpectedCaptureIntent(Guid teamId, Guid agentRunId, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, WorkerFenceEpoch = 1, CaptureSessionId = Guid.NewGuid(),
+        StreamKind = "stdout/v1", ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "durable-spool/v1",
+        State = AgentRunLogCaptureIntentState.Expected, Revision = 1, NextRecoveryAt = now, CreatedAt = now, LastModifiedAt = now,
     };
 
     private ILifetimeScope Scope(params IInterceptor[] interceptors) => interceptors.Length == 0 ? _fixture.BeginScope() : _fixture.BeginScope(builder =>
