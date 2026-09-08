@@ -358,6 +358,15 @@ public class PlanMapSynthDefinitionBuilderTests
             .ShouldBe($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapFailed}}}}}");
     }
 
+    [Fact]
+    public void The_done_terminal_surfaces_the_total_branch_count_beside_the_failed_count()
+    {
+        var done = Builder.Build(Context()).Nodes.Single(n => n.Id == "done");
+
+        done.Inputs.GetProperty(WorkflowOutputKeys.MapCount).GetString()
+            .ShouldBe($"{{{{nodes.map.outputs.{WorkflowOutputKeys.MapCount}}}}}");
+    }
+
     /// <summary>
     /// The planner types each item with an open kind, and the DEFAULT lane must read it too: <c>agent.run</c> maps a
     /// recognised <c>research</c> kind to read-only + no produced branch under the autonomy ceiling. Privilege only

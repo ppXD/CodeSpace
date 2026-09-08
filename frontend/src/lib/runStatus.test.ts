@@ -50,7 +50,7 @@ describe("outcomeWord — the honest account beside the graph status", () => {
   it("never reuses the word already spent on a user-cancelled run", () => {
     // "Stopped" means "a human stopped this". Reusing it for a give-up would swap one misleading word for another.
     const cancelled = statusWord("Cancelled");
-    for (const outcome of ["GaveUp", "Forced", "NeedsClarification", "AcceptanceFailed"]) {
+    for (const outcome of ["GaveUp", "Forced", "NeedsClarification", "AcceptanceFailed", "PartialFailure", "AllBranchesFailed"]) {
       expect(outcomeWord("Success", outcome)).not.toBe(cancelled);
     }
   });
@@ -71,5 +71,8 @@ describe("outcomeWord — the honest account beside the graph status", () => {
     expect(isDegradedOutcome(undefined)).toBe(false);
     expect(isDegradedOutcome("Succeeded")).toBe(false);
     expect(isDegradedOutcome("GaveUp")).toBe(true);
+    expect(isDegradedOutcome("PartialFailure")).toBe(true);
+    expect(outcomeWord("Success", "PartialFailure")).toBe("Partially complete");
+    expect(outcomeWord("Failure", "AllBranchesFailed")).toBe("Failed");
   });
 });

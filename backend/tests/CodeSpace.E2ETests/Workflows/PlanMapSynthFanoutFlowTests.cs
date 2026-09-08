@@ -163,6 +163,7 @@ public class PlanMapSynthFanoutFlowTests
 
             run.Status.ShouldBe(WorkflowRunStatus.Success,
                 customMessage: $"continue-on-error: the flunked item marks itself failed and the map still finishes, so the surviving sibling's work reaches the reduce — error: {run.Error}");
+            run.Outcome.ShouldBe(WorkflowRunOutcomes.PartialFailure, "a structurally completed fan-out with one failed unit must not persist as a clean success");
 
             var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).OrderBy(r => r.IterationKey).ToListAsync();
             agentRuns.Count(r => r.Status == AgentRunStatus.Failed).ShouldBe(1);
@@ -185,6 +186,7 @@ public class PlanMapSynthFanoutFlowTests
             JsonDocument.Parse(mapNode.OutputsJson!).RootElement.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1);
 
             var runOutputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
+            runOutputs.GetProperty(WorkflowOutputKeys.MapCount).GetInt32().ShouldBe(2);
             runOutputs.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1,
                 customMessage: "a partial answer must be legible from the run's own outcome, not only from the map node's bag");
 

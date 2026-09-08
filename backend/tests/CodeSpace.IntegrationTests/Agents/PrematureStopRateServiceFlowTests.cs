@@ -207,6 +207,19 @@ public class PrematureStopRateServiceFlowTests
     }
 
     [Fact]
+    public async Task A_partial_map_outcome_is_counted_as_degraded_despite_structural_success()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await SeedRunAsync(teamId, WorkflowRunStatus.Success, TaskProjectionKinds.PlanMapSynth, outcome: WorkflowRunOutcomes.PartialFailure);
+
+        var report = await ComputeAsync(teamId);
+
+        report.SucceededRuns.ShouldBe(0);
+        report.DegradedRuns.ShouldBe(1);
+        report.PrematureStopRate.ShouldBe(1.0);
+    }
+
+    [Fact]
     public async Task The_since_filter_windows_on_created_date()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -257,7 +270,7 @@ public class PrematureStopRateServiceFlowTests
     }
 
     /// <summary>A snapshot-style (WorkflowId-less) task run, mirroring <c>UnattendedDeliveryScorecardFlowTests.SeedTerminalRunAsync</c> but additionally stamping <see cref="WorkflowRun.ProjectionKind"/> — the axis THIS service dispatches its classification on. Null projection kind seeds a non-task (authored) run.</summary>
-    private async Task<Guid> SeedRunAsync(Guid teamId, WorkflowRunStatus status, string? projectionKind, DateTimeOffset? createdAt = null)
+    private async Task<Guid> SeedRunAsync(Guid teamId, WorkflowRunStatus status, string? projectionKind, DateTimeOffset? createdAt = null, string? outcome = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -288,6 +301,7 @@ public class PrematureStopRateServiceFlowTests
             SourceType = WorkflowRunSourceTypes.Manual,
             ProjectionKind = projectionKind,
             Status = status,
+            Outcome = outcome,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
             CreatedDate = createdAt ?? default,

@@ -284,6 +284,9 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// <summary>The coverage of the results the reduce actually read, composed from <see cref="WorkflowOutputKeys.MapResultsCoverage"/> the same way. A sole-placeholder binding resolves to the WHOLE object, so the run output carries the fact intact rather than a stringified copy.</summary>
     private const string SynthResultsCoverageRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsCoverage + "}}";
 
+    /// <summary>Total branches, persisted beside the failed count so terminal truth can distinguish a partial result from an all-failed fan-out.</summary>
+    private const string SynthCountRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapCount + "}}";
+
     /// <summary>How many branches FAILED, composed from <see cref="WorkflowOutputKeys.MapFailed"/> the same way. Under continue-on-error this is the map's own count of the error markers sitting in the results — the reduce is told the number so a partial answer cannot read as a whole one.</summary>
     private const string SynthFailedRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapFailed + "}}";
 
@@ -305,10 +308,11 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         {
             ["combined"] = "{{nodes.synth.outputs.text}}",
             [WorkflowOutputKeys.MapResultsCoverage] = SynthResultsCoverageRef,
+            [WorkflowOutputKeys.MapCount] = SynthCountRef,
             // The same reasoning as the coverage above, for the OTHER way a combined answer can be less than whole:
-            // under continue-on-error the run reaches Success with a failed subtask inside it, so the count of failed
-            // branches rides onto the run row beside the answer it qualifies — a partial result is legible from the
-            // run's outcome, not only from the map node's bag.
+            // under continue-on-error the run reaches a terminal with a failed subtask inside it, so the count of
+            // failed branches rides onto the run row beside the answer it qualifies — a partial result is legible
+            // from the run's outcome, not only from the map node's bag.
             [WorkflowOutputKeys.MapFailed] = SynthFailedRef,
         };
 

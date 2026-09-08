@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -55,7 +56,7 @@ public sealed class PrematureStopRateService : IPrematureStopRateService, IScope
         if (since is { } from) query = query.Where(r => r.CreatedDate >= from);
 
         var runs = await query
-            .Select(r => new RunRow(r.Id, r.Status, r.ProjectionKind!, r.CreatedDate))
+            .Select(r => new RunRow(r.Id, r.Status, r.ProjectionKind!, r.CreatedDate, r.Outcome))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (runs.Count == 0) return Empty();
@@ -117,7 +118,9 @@ public sealed class PrematureStopRateService : IPrematureStopRateService, IScope
 
         // Single-agent / plan-map / any future projection: no "clean status hides a forced stop" gap exists —
         // a genuine node failure already propagates to Failure, so the run's own terminal status is the honest signal.
-        return run.Status == WorkflowRunStatus.Success ? RunOutcomeBucket.Succeeded : RunOutcomeBucket.Degraded;
+        return run.Status == WorkflowRunStatus.Success && run.Outcome != WorkflowRunOutcomes.PartialFailure
+            ? RunOutcomeBucket.Succeeded
+            : RunOutcomeBucket.Degraded;
     }
 
     /// <summary>The LAST (highest-Sequence) "stop" decision per supervisor run id, batched in ONE query — never N+1. Small per-call id set (the team's own supervisor runs in the window), so the per-run max-Sequence pick happens in memory.</summary>
@@ -142,5 +145,5 @@ public sealed class PrematureStopRateService : IPrematureStopRateService, IScope
     private static readonly IReadOnlyDictionary<Guid, (string? PayloadJson, string? OutcomeJson)> EmptyStops = new Dictionary<Guid, (string?, string?)>();
 
     /// <summary>One run's classification inputs — a pure data noun so <see cref="Classify"/> is unit-testable without a DB.</summary>
-    internal readonly record struct RunRow(Guid Id, WorkflowRunStatus Status, string ProjectionKind, DateTimeOffset CreatedDate);
+    internal readonly record struct RunRow(Guid Id, WorkflowRunStatus Status, string ProjectionKind, DateTimeOffset CreatedDate, string? Outcome = null);
 }
