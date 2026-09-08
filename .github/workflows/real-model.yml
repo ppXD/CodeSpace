@@ -837,13 +837,14 @@ jobs:
     needs: real-model-benchmark-extended
     runs-on: ubuntu-latest
     # Q-ops — the qualification REHEARSAL, dispatch-only like the extended corpus: stages the operator-held hidden
-    # suite from a secret URL (absent ⇒ the test self-skips loudly), runs the EXACT IQualificationRunner chain the
-    # deployment's minting entry drives, and prints the would-be bound/health/digest so the operator can price a
-    # round before minting the durable receipt on the deployment. The receipt appended here lands in the job-local
-    # throwaway db — a rehearsal never mints the deployment's claim. Dispatch via
+    # suite from a secret URL (absent ⇒ the tests self-skip loudly), runs both the deployed IQualificationRunner
+    # receipt path and the paired TaskLaunch qualification path, and prints their bound/health/digest reports. The
+    # paired path persists every graded and infra cell with exact arm/model/session/revision provenance in the
+    # job-local throwaway db, then rejects incomplete or identical observed-model evidence. Nothing here mints a
+    # deployment claim. Dispatch via
     # `gh workflow run real-model.yml --ref <branch>`.
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     services:
       postgres:
@@ -864,8 +865,11 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # Optional second arm. When absent, the E2E deliberately runs the same model twice to prove the physical
+      # paired path and must report identical-observed-model rather than claiming a comparison.
+      CODESPACE_LLM_BASELINE_MODEL_ID: ${{ secrets.CODESPACE_LLM_BASELINE_MODEL_ID }}
       # Same rationale as the corpus lanes: a suite round is many live coding-agent runs; 45m per attempt bounds a
-      # genuine hang while fitting a real suite inside the job's 60-minute cap.
+      # genuine hang while fitting a real suite inside the job's 180-minute cap.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-qualification-rehearsal-lane
       CODESPACE_AGENT_MAX_PROCESSES: '0'

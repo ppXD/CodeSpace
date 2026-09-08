@@ -41,6 +41,12 @@ public sealed record BenchmarkResult
     /// </summary>
     public AgentTokenUsage? TokenUsage { get; init; }
 
+    /// <summary>Total priced spend reported by all physical agent attempts in this cell. Null is unknown, never zero.</summary>
+    public decimal? CostUsd { get; init; }
+
+    /// <summary>True when any physical attempt could not be completely priced under the cell's budget contract.</summary>
+    public bool CostIndeterminate { get; init; }
+
     /// <summary>How many bounded revise rounds the executor ran inside this run (<c>AgentRunResult.ReviseRounds</c>). In a critic-on arm this is the retry a critic flag bought; 0 in a critic-off arm. The retry-share disclosure that keeps an A/B honest — a solve-rate lift riding on extra attempts is visible here, not hidden.</summary>
     public int ReviseRounds { get; init; }
 

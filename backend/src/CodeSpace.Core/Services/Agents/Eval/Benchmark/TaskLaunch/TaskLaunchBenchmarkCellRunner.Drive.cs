@@ -76,6 +76,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
             Autonomy = selection?.Autonomy?.ToString(),
             CompletionMode = WorkflowDefinition.CompletionModeShadow,
             Purpose = WorkflowRunPurposes.Qualification,
+            CapsOverride = selection?.MaxCostUsd is { } maxCostUsd ? new RouteCaps { MaxCostUsd = maxCostUsd } : null,
             Overrides = new TaskExecutionOverrides
             {
                 Harness = selection?.Harness ?? task.Harness,

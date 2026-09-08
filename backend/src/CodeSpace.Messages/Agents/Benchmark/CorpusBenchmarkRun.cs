@@ -44,6 +44,13 @@ public sealed record CorpusBenchmarkRun
     public FormatFaultTally FormatFaults { get; init; } = new();
 }
 
+/// <summary>Two complete frozen-denominator runs produced in balanced cell order.</summary>
+public sealed record PairedCorpusBenchmarkRun
+{
+    public required CorpusBenchmarkRun Control { get; init; }
+    public required CorpusBenchmarkRun Candidate { get; init; }
+}
+
 /// <summary>One (task,mode) pair the corpus runner could not execute (an infra fault during fixture staging or the run) — kept so a flaky pair is visible without aborting the whole corpus or polluting the solve-rate.</summary>
 public sealed record CorpusBenchmarkError
 {

@@ -62,7 +62,7 @@ public class EvalSuiteTests
         // reworded goal, a fixture edit reflected in these fields, a mode set change — MUST consciously update
         // this pin alongside re-baselining any recorded solve-rate expectations. A failing pin here is the
         // system telling you a percentage somewhere is about to be compared across different measurements.
-        EvalSuite.ManifestFor(SeedBenchmarkCorpus.Tasks).Version.ShouldBe("sha256/corpus-v2:afa44be37e273f1a");
+        EvalSuite.ManifestFor(SeedBenchmarkCorpus.Tasks).Version.ShouldBe("sha256/corpus-v3:ab418be35a681ad8");
     }
 
     [Fact]

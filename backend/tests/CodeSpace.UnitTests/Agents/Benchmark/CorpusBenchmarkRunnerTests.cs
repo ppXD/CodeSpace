@@ -216,16 +216,17 @@ public class CorpusBenchmarkRunnerTests
     }
 
     [Fact]
-    public async Task A_pair_that_never_ran_is_never_persisted()
+    public async Task An_infra_cell_never_creates_a_false_graded_row()
     {
         var store = new RecordingResultStore();
         var runner = new StubRunner(passWhen: (_, _) => true, throwWhen: (taskId, _) => taskId == "task-b");
         var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
 
-        await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
+        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
         store.Recorded.Count.ShouldBe(2, "an infra-errored cell has no grade to record — persisting it would put a capability claim behind an evaluator fault");
         store.Recorded.ShouldAllBe(r => r.Result.TaskId == "task-a");
+        run.Errored.Count.ShouldBe(2, "the fixed denominator retains both infra observations even though this legacy recording double only captures graded writes");
     }
 
     [Fact]
@@ -270,6 +271,54 @@ public class CorpusBenchmarkRunnerTests
         first.SuiteVersion.ShouldNotBe(EvalSuite.ManifestFor(tasks).Version);
         store.Recorded.Take(2).ShouldAllBe(r => r.SuiteVersion == first.SuiteVersion);
         store.Recorded.Skip(2).ShouldAllBe(r => r.SuiteVersion == second.SuiteVersion);
+    }
+
+    [Fact]
+    public async Task Paired_cells_run_adjacent_in_both_content_derived_orders_and_keep_one_observation_identity()
+    {
+        var runner = new StubRunner((_, _) => true);
+        var store = new RecordingPairedStore();
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var tasks = Enumerable.Range(0, 20).Select(index => MakeTask($"task-{index}", new[] { BenchmarkMode.TaskLaunchQuick })).ToList();
+        var control = new BenchmarkAgentSelection { Harness = "claude-code", Model = "control", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m };
+        var candidate = new BenchmarkAgentSelection { Harness = "claude-code", Model = "candidate", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m };
+        var groupId = Guid.NewGuid();
+
+        var run = await sut.RunPairedAsync(new PairedCorpusBenchmarkRequest
+        {
+            Tasks = tasks, TeamId = Guid.NewGuid(), Control = control, Candidate = candidate,
+            ObservationGroupId = groupId, ObservationSession = 3, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+        }, CancellationToken.None);
+
+        run.Control.Cells!.Count.ShouldBe(20);
+        run.Candidate.Cells!.Count.ShouldBe(20);
+        var adjacent = runner.Calls.Chunk(2).ToList();
+        adjacent.ShouldAllBe(pair => pair[0].TaskId == pair[1].TaskId && pair[0].Mode == pair[1].Mode);
+        adjacent.ShouldAllBe(pair => pair.Select(call => call.Selection!.Model).ToHashSet().SetEquals(new[] { "control", "candidate" }));
+        adjacent.Count(pair => pair[0].Selection!.Model == "control").ShouldBe(10);
+        adjacent.Count(pair => pair[0].Selection!.Model == "candidate").ShouldBe(10);
+        store.Writes.Count.ShouldBe(40);
+        store.Writes.ShouldAllBe(write => write.ObservationGroupId == groupId && write.ObservationSession == 3);
+        store.Writes.ShouldAllBe(write => write.CodeRevision == new string('a', 40));
+        store.Writes.Count(write => write.ObservationArm == "control").ShouldBe(20);
+        store.Writes.Count(write => write.ObservationArm == "candidate").ShouldBe(20);
+    }
+
+    [Fact]
+    public async Task Paired_qualification_stops_when_its_durable_observation_cannot_be_appended()
+    {
+        var sut = new CorpusBenchmarkRunner(new StubRunner((_, _) => true), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var request = new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+        };
+
+        var failure = await Should.ThrowAsync<InvalidOperationException>(() => sut.RunPairedAsync(request, CancellationToken.None));
+
+        failure.Message.ShouldContain("could not be appended");
     }
 
     // ─── stubs ───
@@ -360,6 +409,13 @@ public class CorpusBenchmarkRunnerTests
     {
         public Task RecordAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("the benchmark_result write failed");
+    }
+
+    private sealed class RecordingPairedStore : IBenchmarkResultStore
+    {
+        public List<BenchmarkObservationWrite> Writes { get; } = new();
+        public Task RecordAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) => throw new InvalidOperationException("paired runner must use the typed observation write");
+        public Task RecordAsync(BenchmarkObservationWrite request, CancellationToken cancellationToken) { Writes.Add(request); return Task.CompletedTask; }
     }
 
     private sealed class RecordingStager : IBenchmarkFixtureStager

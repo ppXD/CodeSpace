@@ -109,6 +109,29 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
     }
 
     [Fact]
+    public async Task A_paired_arm_cost_ceiling_reaches_the_real_TaskLaunch_request()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var workspace = Fixture.Stage(checkExitCode: 0);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var launch = new CapturingFailTaskLaunchService();
+        using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(launch).As<ITaskLaunchService>());
+        var sut = scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+        var context = new BenchmarkExecutionContext
+        {
+            WorkspaceDirectory = workspace.Directory,
+            TeamId = teamId,
+            Selection = new BenchmarkAgentSelection { MaxCostUsd = 2.75m },
+        };
+
+        await Should.ThrowAsync<InvalidOperationException>(() => sut.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+
+        launch.Request.ShouldNotBeNull("the production TaskLaunch entry must receive the paired arm");
+        launch.Request.CapsOverride.ShouldNotBeNull().MaxCostUsd.ShouldBe(2.75m, "the paired cap must constrain the physical launch, not only the later statistics");
+    }
+
+    [Fact]
     public async Task A_solved_fixture_launched_at_Standard_effort_fans_the_plan_map_out_over_real_agent_runs_and_grades_pass()
     {
         // Coverage gap this closes: only TaskLaunchQuick (single-agent) had ANY integration coverage before this —
@@ -522,6 +545,17 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
             throw new InvalidOperationException("simulated post-commit failure — mirrors route/purpose stamping, the ledger write, or the post-commit dispatcher throwing after the real WorkSession+WorkflowRun commit");
+        }
+    }
+
+    private sealed class CapturingFailTaskLaunchService : ITaskLaunchService
+    {
+        public TaskLaunchRequest? Request { get; private set; }
+
+        public Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+        {
+            Request = request;
+            throw new InvalidOperationException("captured the launch request");
         }
     }
 

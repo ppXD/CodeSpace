@@ -42,4 +42,7 @@ public sealed record BenchmarkAgentSelection
 
     /// <summary>How many bounded revise rounds a flagged attempt may take before it settles — the critic's teeth (critique → re-verify). Null ⇒ the executor default for the resolved review mode. Folds into <see cref="AgentTask.MaxReviseRounds"/>; inert when <see cref="OutputReviewMode"/> is None.</summary>
     public int? MaxReviseRounds { get; init; }
+
+    /// <summary>The per-Launch monitored USD ceiling used by matched-budget qualification. Null keeps the route preset. Both paired arms must carry the same positive value.</summary>
+    public decimal? MaxCostUsd { get; init; }
 }

@@ -16,12 +16,18 @@ public class BenchmarkResultRecordConfiguration : IEntityTypeConfiguration<Bench
         builder.Property(r => r.Mode).HasMaxLength(40);
         builder.Property(r => r.Harness).HasMaxLength(60);
         builder.Property(r => r.Model).HasMaxLength(200);
+        builder.Property(r => r.ObservedModel).HasMaxLength(200);
+        builder.Property(r => r.ObservationArm).HasMaxLength(40);
+        builder.Property(r => r.OutcomeState).HasMaxLength(30);
+        builder.Property(r => r.OutcomeDetail).HasColumnType("text");
         builder.Property(r => r.RunStatus).HasMaxLength(20);
         builder.Property(r => r.ExitReason).HasMaxLength(60);
         builder.Property(r => r.GitSha).HasMaxLength(60);
         builder.Property(r => r.CiRunId).HasMaxLength(40);
         builder.Property(r => r.CostUsd).HasPrecision(18, 6);   // matches the migration's NUMERIC(18,6)
+        builder.Property(r => r.MaxCostUsd).HasPrecision(18, 6);
         builder.HasIndex(r => new { r.TeamId, r.SuiteVersion, r.CreatedDate });
         builder.HasIndex(r => new { r.TeamId, r.TaskId, r.Mode });
+        builder.HasIndex(r => new { r.TeamId, r.ObservationGroupId, r.ObservationArm, r.ObservationSession, r.TaskId, r.Mode }).IsUnique().HasFilter("observation_group_id IS NOT NULL");
     }
 }

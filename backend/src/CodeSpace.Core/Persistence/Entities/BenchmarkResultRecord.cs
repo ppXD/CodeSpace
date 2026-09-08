@@ -29,6 +29,20 @@ public class BenchmarkResultRecord : IEntity<Guid>, IAuditable
     /// <summary>The model the attempting agent was pinned to; null under the fake CLI.</summary>
     public string? Model { get; set; }
 
+    public Guid? ModelCredentialModelId { get; set; }
+
+    public string? ObservedModel { get; set; }
+
+    public Guid? ObservationGroupId { get; set; }
+
+    public string? ObservationArm { get; set; }
+
+    public int? ObservationSession { get; set; }
+
+    public string OutcomeState { get; set; } = string.Empty;
+
+    public string? OutcomeDetail { get; set; }
+
     /// <summary>The agent run that executed the cell — provenance back to its event log. Null when the run was never created (a setup failure).</summary>
     public Guid? AgentRunId { get; set; }
 
@@ -49,6 +63,10 @@ public class BenchmarkResultRecord : IEntity<Guid>, IAuditable
 
     /// <summary>Priced USD over the cell's billed tokens; null when the run reported no usage (the fake CLI emits none) or the model is unpriceable.</summary>
     public decimal? CostUsd { get; set; }
+
+    public bool CostIndeterminate { get; set; }
+
+    public decimal? MaxCostUsd { get; set; }
 
     public double? DurationSeconds { get; set; }
 
