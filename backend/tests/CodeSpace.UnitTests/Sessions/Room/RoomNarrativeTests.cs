@@ -612,6 +612,39 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void Logs_row_keeps_an_incomplete_agent_visible_beside_a_successful_turn()
+    {
+        var healthy = Guid.NewGuid();
+        var incomplete = Guid.NewGuid();
+        var phase = new RunPhase
+        {
+            Id = "decision-1", Label = "Agents", Kind = SupervisorDecisionKinds.Spawn, Status = PhaseStatus.Succeeded, Order = SupervisorPhaseSource.OrderBase + 1, SourceKey = SupervisorPhaseSource.Key,
+            Agents =
+            [
+                new PhaseAgentRef { AgentRunId = healthy, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "API" },
+                new PhaseAgentRef { AgentRunId = incomplete, Status = nameof(AgentRunStatus.Succeeded), AssignedSubtask = "Web" },
+            ],
+        };
+        var facts = new RoomTurnFacts
+        {
+            AgentLogs = new Dictionary<Guid, RoomAgentLogSummary>
+            {
+                [healthy] = new(RoomAgentLogStatus.Verified, 1, "1 stream · integrity verified"),
+                [incomplete] = new(RoomAgentLogStatus.Incomplete, 2, "2 streams · 1 capture failed · 1 integrity verified"),
+            },
+            FinalAnswer = new RoomFinalAnswer { Text = "Shipped.", Verified = true },
+        };
+
+        var narrative = Build([phase], WorkflowRunStatus.Success, facts: facts);
+        var logs = narrative.Blocks.OfType<StatBlock>().Single(block => block.Kind == "logs");
+
+        logs.Detail.ShouldBe("3 streams · incomplete");
+        logs.Items.Single(item => item.Text == "API").Tone.ShouldBe(NarrativeTone.Success);
+        logs.Items.Single(item => item.Text == "Web").Tone.ShouldBe(NarrativeTone.Error);
+        narrative.Blocks.OfType<FinalAnswerBlock>().Single().Degraded.ShouldBeFalse("log capture truth is independent from objective acceptance; it remains visible without rewriting the task verdict");
+    }
+
+    [Fact]
     public void Agent_cards_carry_their_own_files_and_the_final_answer_attributes_a_file_to_its_producer()
     {
         var a1 = Guid.NewGuid();

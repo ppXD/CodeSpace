@@ -242,6 +242,7 @@ public static class RoomNarrative
         if (FilesStat(idPrefix, seq, facts, fileProducers, agentById) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
         if (NetworkStat(idPrefix, seq, facts) is { } network) blocks.Add(network);
+        if (LogsStat($"{idPrefix}:stat:logs", seq, facts.AgentLogs, agentById.ToDictionary(pair => pair.Key, pair => UnitLabel(pair.Value))) is { } logs) blocks.Add(logs);
 
         blocks.AddRange(DeliveriesFrom(idPrefix, seq, facts));
         if (DeliverablesFrom(idPrefix, seq, facts) is { } deliverables) blocks.Add(deliverables);
@@ -496,6 +497,46 @@ public static class RoomNarrative
     /// </summary>
     private static StatBlock? NetworkStat(string idPrefix, long seq, RoomTurnFacts f) =>
         f.NetworkPosture is not { Length: > 0 } posture ? null : new StatBlock { Id = $"{idPrefix}:stat:network", Seq = seq, Kind = "launch", Label = "Launch", Detail = posture };
+
+    /// <summary>One durable log-health row for the turn. The weakest agent wins the headline, while every agent with a recorded stream remains individually visible.</summary>
+    internal static StatBlock? LogsStat(string id, long seq, IReadOnlyDictionary<Guid, RoomAgentLogSummary> summaries, IReadOnlyDictionary<Guid, string> labels)
+    {
+        var visible = labels.Where(pair => summaries.ContainsKey(pair.Key)).Select(pair => (Label: pair.Value, Summary: summaries[pair.Key])).ToList();
+        if (visible.Count == 0) return null;
+
+        var weakest = visible.Select(item => item.Summary.Status).OrderBy(LogStatusRank).First();
+        var streamCount = visible.Sum(item => item.Summary.StreamCount);
+
+        return new StatBlock
+        {
+            Id = id, Seq = seq, Kind = "logs", Label = "Logs", Detail = $"{Count(streamCount, "stream")} · {LogStatusWord(weakest)}",
+            Items = visible.Select(item => new StatItem { Text = item.Label, Detail = item.Summary.Detail, Tone = LogStatusTone(item.Summary.Status) }).ToList(),
+        };
+    }
+
+    private static int LogStatusRank(RoomAgentLogStatus status) => status switch
+    {
+        RoomAgentLogStatus.Incomplete => 0,
+        RoomAgentLogStatus.Finalizing => 1,
+        RoomAgentLogStatus.Captured => 2,
+        _ => 3,
+    };
+
+    private static string LogStatusWord(RoomAgentLogStatus status) => status switch
+    {
+        RoomAgentLogStatus.Incomplete => "incomplete",
+        RoomAgentLogStatus.Finalizing => "finalizing",
+        RoomAgentLogStatus.Captured => "captured; integrity proof unavailable",
+        _ => "integrity verified",
+    };
+
+    private static NarrativeTone LogStatusTone(RoomAgentLogStatus status) => status switch
+    {
+        RoomAgentLogStatus.Incomplete => NarrativeTone.Error,
+        RoomAgentLogStatus.Finalizing => NarrativeTone.Info,
+        RoomAgentLogStatus.Captured => NarrativeTone.Info,
+        _ => NarrativeTone.Success,
+    };
 
     /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>

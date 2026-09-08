@@ -109,7 +109,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 ? await _cache.GetOrAddRoomAsync(turn.RunId, () => BuildTurnAsync(turn, null, teamId, cancellationToken)).ConfigureAwait(false)
                 : await BuildTurnAsync(turn, isFocused ? anchorRunId : null, teamId, cancellationToken).ConfigureAwait(false);
             if (!isFocused && WorkflowRunState.IsTerminal(turn.RunStatus))
-                assistant = assistant with { Attempts = await AttemptsOf(turn, assistant.RunId, teamId, cancellationToken).ConfigureAwait(false) };
+                assistant = assistant with
+                {
+                    Attempts = await AttemptsOf(turn, assistant.RunId, teamId, cancellationToken).ConfigureAwait(false),
+                    Blocks = await RefreshTerminalLogsAsync(assistant, teamId, cancellationToken).ConfigureAwait(false),
+                };
 
             cursor = Math.Max(cursor, assistant.Seq);
             blocks.Add(assistant);
@@ -125,6 +129,28 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             AnchorBlockId = focused != null ? $"turn-{focused.TurnIndex}" : null,
             Blocks = blocks,
         };
+    }
+
+    /// <summary>
+    /// Terminal-flow projections are cached, but log capture may legitimately settle after the workflow does. Overlay
+    /// the one lightweight log-health row on every collapsed terminal read so Open → Verified/CaptureFailed cannot be
+    /// frozen in the cache. The other roughly 28 immutable reads remain cached.
+    /// </summary>
+    private async Task<IReadOnlyList<RoomBlock>> RefreshTerminalLogsAsync(AssistantTurnBlock assistant, Guid teamId, CancellationToken cancellationToken)
+    {
+        var labels = assistant.Blocks.OfType<AgentGroupBlock>().SelectMany(block => block.Agents)
+            .GroupBy(agent => agent.AgentRunId).ToDictionary(group => group.Key, group => group.First().Label);
+        var summaries = await AgentLogsAsync(labels.Keys.ToList(), teamId, cancellationToken).ConfigureAwait(false);
+        var logs = RoomNarrative.LogsStat($"turn-{assistant.TurnIndex}:stat:logs", assistant.Seq, summaries, labels);
+        var hadLogs = assistant.Blocks.Any(block => block is StatBlock { Kind: "logs" });
+        if (logs is null && !hadLogs) return assistant.Blocks;
+
+        var blocks = assistant.Blocks.Where(block => block is not StatBlock { Kind: "logs" }).ToList();
+        if (logs is null) return blocks;
+
+        var lastStat = blocks.FindLastIndex(block => block is StatBlock);
+        blocks.Insert(lastStat + 1, logs);
+        return blocks;
     }
 
     private async Task<AssistantTurnBlock> BuildTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
@@ -579,6 +605,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
+            AgentLogs = await AgentLogsAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false),
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ChangedFileIdentities = changedFileIdentities,
@@ -597,6 +624,56 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             NetworkPosture = await NetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
         };
     }
+
+    /// <summary>Read every captured stream for the turn's agents in one narrow query and reduce it without treating absent legacy streams as success or failure.</summary>
+    private async Task<IReadOnlyDictionary<Guid, RoomAgentLogSummary>> AgentLogsAsync(IReadOnlyCollection<Guid> agentIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (agentIds.Count == 0) return EmptyAgentLogs;
+
+        var rows = await _db.AgentRunLogStream.AsNoTracking()
+            .Where(stream => stream.TeamId == teamId && agentIds.Contains(stream.AgentRunId))
+            .Select(stream => new AgentLogRow(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(row => row.AgentRunId).ToDictionary(group => group.Key, group => SummarizeLogs(group.ToList()));
+    }
+
+    internal static RoomAgentLogSummary SummarizeLogs(IReadOnlyList<AgentLogRow> rows)
+    {
+        var incomplete = rows.Where(row => row.State is not AgentRunLogStreamState.Open and not AgentRunLogStreamState.Completed).ToList();
+        var open = rows.Count(row => row.State == AgentRunLogStreamState.Open);
+        var verified = rows.Count(row => row.State == AgentRunLogStreamState.Completed && row.SchemaVersion == 3 && row.HasManifestDigest);
+        var captured = rows.Count(row => row.State == AgentRunLogStreamState.Completed) - verified;
+        var status = incomplete.Count > 0 ? RoomAgentLogStatus.Incomplete : open > 0 ? RoomAgentLogStatus.Finalizing : captured > 0 ? RoomAgentLogStatus.Captured : RoomAgentLogStatus.Verified;
+        var details = incomplete.GroupBy(row => row.State).OrderBy(group => LogStateRank(group.Key)).Select(group => $"{group.Count()} {LogStateWord(group.Key)}").ToList();
+        if (open > 0) details.Add($"{open} finalizing");
+        if (captured > 0) details.Add($"{captured} captured; integrity proof unavailable");
+        if (verified > 0) details.Add($"{verified} integrity verified");
+
+        return new RoomAgentLogSummary(status, rows.Count, $"{rows.Count} stream{(rows.Count == 1 ? "" : "s")} · {string.Join(" · ", details)}");
+    }
+
+    private static int LogStateRank(AgentRunLogStreamState state) => state switch
+    {
+        AgentRunLogStreamState.Corrupt => 0,
+        AgentRunLogStreamState.CaptureFailed => 1,
+        AgentRunLogStreamState.Unavailable => 2,
+        AgentRunLogStreamState.Truncated => 3,
+        _ => 4,
+    };
+
+    private static string LogStateWord(AgentRunLogStreamState state) => state switch
+    {
+        AgentRunLogStreamState.CaptureFailed => "capture failed",
+        AgentRunLogStreamState.Corrupt => "corrupt",
+        AgentRunLogStreamState.Unavailable => "unavailable",
+        AgentRunLogStreamState.Truncated => "truncated",
+        _ => state.ToString().ToLowerInvariant(),
+    };
+
+    private static readonly IReadOnlyDictionary<Guid, RoomAgentLogSummary> EmptyAgentLogs = new Dictionary<Guid, RoomAgentLogSummary>();
+
+    internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest);
 
     /// <summary>
     /// The run's effective network posture, read from the two columns that record it — the launch-stamped route
