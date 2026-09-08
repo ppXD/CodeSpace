@@ -568,7 +568,14 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// LAST RE-PIN: corpus GROWTH and nothing else — <c>first-infra-failure</c> joined it (arc-3 item 4.3's
+    /// LAST RE-PIN: the prompt gained the bounded per-unit MODEL/TOKEN/COST recitation produced by
+    /// <see cref="SupervisorBudgetRecitation.RenderUnits"/>. This is an intentional rendering change for tapes with
+    /// durable agent attempts: the supervisor can now compare retries and model spend by planned unit instead of
+    /// reasoning from a run-wide total. The superseded corpus still reproduces exactly after
+    /// <see cref="AsRenderedBeforeTheTurnRoster"/> removes this one insertion together with the earlier named blocks.
+    /// Unit tests pin aggregation, unknown-price honesty, and the long-run output bound.
+    ///
+    /// PREVIOUS RE-PIN: corpus GROWTH and nothing else — <c>first-infra-failure</c> joined it (arc-3 item 4.3's
     /// residual), a 27th decision point for the FIRST time a subtask's check comes back UNRUNNABLE, before any
     /// re-plan or co-sign is on the tape. No rendering changed: <see cref="LlmSupervisorDecider.InfraSteerFor"/>'s
     /// <c>None</c>/<c>None</c> arm renders <see cref="LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck"/>,
@@ -610,7 +617,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "8f66578a085c85d58b0242296933f95eafe2df59c708d4772703e1b5054bfd2d";
+    private const string GoldenPromptDigest = "99ee159b12d165b89fa9dbbe4adf9ce6aef9935aad69b7c1972244290239187f";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -692,13 +699,14 @@ public class SupervisorGoldenPromptFidelityTests
     [Fact]
     public void The_rendered_corpus_matches_its_pinned_digest()
     {
-        // The roster commit's receipt: wind the two blocks it moved back to what they replaced — the roster to the
-        // mask block it grew out of, the cap-aware closing line to the invitation it retired — and the pin that
+        // The historical receipt: wind the four named blocks back to what they replaced — the roster to the
+        // mask block it grew out of, the cap-aware closing line to the invitation it retired, the cap-aware ending
+        // to its unconditional predecessor, and the newly inserted per-unit cost recital to absence — and the pin that
         // stood before them must return, over the 25 scenarios that pin was measured at (AddedSinceTheRosterPin —
         // the per-pin-corpus rule the set below states). A block that drifted into this commit fails here, where the named
         // ones are still separable from it, instead of hiding inside the re-pin below.
         Digest(RenderedCorpus(s => AsRenderedBeforeTheTurnRoster(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context), PredatesTheRosterPin)).ShouldBe(StaticVerbRosterCorpusDigest,
-            "undoing the roster and the cap-aware closing line no longer reproduces the pin this corpus carried before them — so those two blocks are not the whole delta, and the new pin below cannot be attributed to them");
+            "undoing the four named prompt blocks no longer reproduces the pin this corpus carried before them — an unrelated delta entered the historical reconstruction");
 
         // This re-pin's receipt: over the scenarios that predate it, today's rendering still digests to the
         // superseded pin — so the move is corpus GROWTH and nothing else, and every score taken under the old pin
@@ -917,29 +925,33 @@ public class SupervisorGoldenPromptFidelityTests
         "    To reconcile: choose 'resolve' — the server spawns ONE agent that reconciles these branches, builds, and runs the tests, then you merge again. Or stop to leave the conflict for a human.";
 
     /// <summary>
-    /// One scenario's prompt wound back to the rendering that produced the superseded pins below. THREE blocks are
-    /// undone, and they are the three this commit moved:
+    /// One scenario's prompt wound back to the rendering that produced the superseded pins below. FOUR blocks are
+    /// undone, and they are the four later changes moved:
     /// <list type="number">
     ///   <item>the turn's VERB ROSTER, replaced by the action mask it grew out of — as that mask read before it
     ///         could withhold <c>amend_acceptance</c> (<see cref="AsMaskedBeforeTheAmendArm"/>);</item>
     ///   <item>the conflicted-integration block's cap-aware closing line, replaced by the invitation it retired;</item>
     ///   <item>the prompt's cap-aware CLOSING SENTENCE, replaced by the unconditional "then merge the successful
     ///         results, then stop." it retired.</item>
+    ///   <item>the per-unit MODEL/TOKEN/COST recitation, removed because it did not exist when any superseded digest
+    ///         was recorded.</item>
     /// </list>
     /// It exists because the roster renders on EVERY turn where the mask rendered on most, so a superseded digest
     /// recomputed over today's raw rendering can no longer reproduce itself, and every receipt below would have to
     /// be deleted or re-pinned into a tautology.
     ///
     /// <para>Winding them back keeps the receipts, and makes them stronger than a re-pin would: the roster is a pure
-    /// INSERTION over the mask and the other two are pure SUBSTITUTIONS, so undoing exactly those three must return
+    /// INSERTION over the mask, the unit-cost recital is a pure insertion, and the other two are pure substitutions,
+    /// so undoing exactly those four must return
     /// the pre-commit bytes — which is what the anchors assert by still reproducing their old digests over the
     /// corpus each was taken at. Anything else that drifted into this commit shows up as a failure here rather than
     /// as a digest nobody can attribute.</para>
     ///
-    /// <para>THE COST, stated plainly: every anchor that routes through this helper is now BLIND to the three blocks
-    /// it undoes. A reword of the roster, of the cap-aware closing line, or of the closing sentence moves no
-    /// superseded digest — by construction, since the wind-back reads today's renderers for two of the three. Only
-    /// the live <see cref="GoldenPromptDigest"/> catches a change in them, so a re-pin of THAT constant is the only
+    /// <para>THE COST, stated plainly: every anchor that routes through this helper is now BLIND to the four blocks
+    /// it undoes. A reword of the roster, the per-unit cost recital, the cap-aware closing line, or the closing
+    /// sentence moves no superseded digest — by construction, since the wind-back derives the roster and cost-recital
+    /// bytes from today's renderers. Only the live <see cref="GoldenPromptDigest"/> catches a change in them, so a
+    /// re-pin of THAT constant is the only
     /// place such a change becomes visible, and the per-block unit tests
     /// (<c>SupervisorActionRosterTests</c>) are what pin the copy itself.</para>
     /// </summary>
@@ -947,8 +959,10 @@ public class SupervisorGoldenPromptFidelityTests
     {
         var roster = $"{Environment.NewLine}{SupervisorActionRoster.Render(context)}{Environment.NewLine}";
         var mask = AsMaskedBeforeTheAmendArm(context) is { } withheld ? $"{Environment.NewLine}{withheld}{Environment.NewLine}" : string.Empty;
+        var unitCosts = SupervisorBudgetRecitation.RenderUnits(context.PriorDecisions, context.ModelPrices);
+        var beforeUnitCosts = unitCosts is null ? prompt : prompt.Replace($"{Environment.NewLine}{unitCosts}{Environment.NewLine}", string.Empty, StringComparison.Ordinal);
 
-        return prompt
+        return beforeUnitCosts
             .Replace(roster, mask, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingCannotLand, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal);
