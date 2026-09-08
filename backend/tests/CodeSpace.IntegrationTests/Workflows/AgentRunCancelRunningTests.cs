@@ -4,6 +4,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -20,6 +21,11 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// Running run → Cancelled with the orphan process TERMINATED; a non-Running run is a no-op no-kill; an
 /// epoch-mismatch (the run was reclaimed since the cancel observed it) loses the CAS → no-op no-kill.
 /// Mirrors AgentRunRecoveryFlowTests' real-durable-process setup (🟢 high fidelity for the kill).
+///
+/// <para>Also pins the sibling defect to AgentRunRecoveryFlowTests' reconciler closer tests: a cancel that wins
+/// the CAS must ALSO close its own open <c>WorkflowRunHarnessProcessAttempt</c>/<c>WorkflowRunHarnessExecution</c>
+/// rows (stamped <see cref="AgentRunAbandonCause.OperatorCancelled"/>), not just flip the Agent Run — otherwise a
+/// cancelled run still reads as a live process to every reader of the native record plane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -43,7 +49,7 @@ public class AgentRunCancelRunningTests : IDisposable
 
         bool won;
         using (var scope = _fixture.BeginScope())
-            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", CancellationToken.None);
+            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
 
         won.ShouldBeTrue("CancelRunningAsync won the Running → Cancelled CAS");
 
@@ -70,7 +76,7 @@ public class AgentRunCancelRunningTests : IDisposable
 
         bool won;
         using (var scope = _fixture.BeginScope())
-            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", CancellationToken.None);
+            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
 
         won.ShouldBeFalse("CancelRunningAsync only flips a Running run; everything else loses the CAS");
 
@@ -97,13 +103,68 @@ public class AgentRunCancelRunningTests : IDisposable
 
         bool won;
         using (var scope = _fixture.BeginScope())
-            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", CancellationToken.None);
+            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
 
         won.ShouldBeFalse("a run that completed in the same instant (no longer Running) loses the CAS — no kill");
 
         using (var verify = _fixture.BeginScope())
             (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
                 .ShouldBe(AgentRunStatus.Succeeded, "the legitimately-completed run is NOT trampled by the cancel");
+    }
+
+    // The defect these two tests pin — the sibling of AgentRunRecoveryFlowTests' reconciler closer tests: a won
+    // cancel CAS flips the Agent Run but never touched its own open WorkflowRunHarnessProcessAttempt /
+    // WorkflowRunHarnessExecution rows, so a phantom "live" process survived forever in every reader of the native
+    // record plane even after the run itself was Cancelled.
+
+    [Fact]
+    public async Task Running_run_with_an_open_native_attempt_has_it_closed_as_operator_cancelled()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        bool won;
+        using (var scope = _fixture.BeginScope())
+            won = await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
+
+        won.ShouldBeTrue();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Cancelled, "the cancel's own terminal decision must not change");
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "a won cancel must close the open attempt row it leaves behind, not leave it Running forever");
+        attempt.ExitCode.ShouldBeNull();
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.CancelOperatorCancelledErrorCode);
+
+        var execution = await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId);
+        execution.State.ShouldBe(HarnessExecutionState.Exited, "a launched process (attempt_count > 0) closes Exited, never Abandoned");
+        execution.TerminalAt.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task A_native_attempt_an_operator_cancel_closed_cannot_be_reopened_by_a_late_close()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
+
+        // A late writer: the ORIGINAL worker's own executor, unaware its run was already cancelled, still reaches
+        // its ordinary happy-path close for the same attempt.
+        using (var lateScope = _fixture.BeginScope())
+            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "the cancel's close already landed; a late writer's happy-path close must not reopen or overwrite it");
+        attempt.ExitCode.ShouldBeNull("a late writer's exit code must never overwrite an already-terminal row");
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.CancelOperatorCancelledErrorCode);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -140,14 +201,32 @@ public class AgentRunCancelRunningTests : IDisposable
         return (runId, handle.ProcessId);
     }
 
-    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status)
+    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, long fenceEpoch = 0)
     {
         var runId = Guid.NewGuid();
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status });
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, FenceEpoch = fenceEpoch });
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    /// <summary>
+    /// Open a REAL native-record capture against a manually-seeded run — mints the Running execution + attempt a
+    /// launch would, via the production plane, rather than hand-building rows that would have to satisfy 0137's
+    /// triggers by guesswork. <paramref name="fenceEpoch"/> must match the run's own seeded <c>FenceEpoch</c>, which
+    /// 0137's attempt-insert guard requires to equal the run's CURRENT fence.
+    /// </summary>
+    private async Task<NativeRecordCaptureHandle> SeedOpenAttemptAsync(Guid teamId, Guid runId, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var plane = scope.Resolve<INativeRecordPlane>();
+
+        return (await plane.OpenAsync(new NativeRecordCaptureRequest
+        {
+            TeamId = teamId, AgentRunId = runId, HarnessTypeKey = "codex-cli/v1", RunnerKind = "local",
+            RunnerLocatorJson = "{}", WorkerFenceEpoch = fenceEpoch, Channel = NativeRecordChannel.Stdout,
+        }, CancellationToken.None).ConfigureAwait(false)).ShouldNotBeNull("the plane must open a capture against a freshly seeded Running run");
     }
 
     private async Task<Guid> SeedTeamAsync()

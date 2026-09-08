@@ -237,7 +237,7 @@ public sealed class RealModelAnswerReviewDelegationE2ETests
         var runs = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(run => run.TeamId == teamId).ToListAsync(cleanup.Token);
         foreach (var run in runs)
         {
-            await scope.Resolve<IAgentRunService>().CancelRunningAsync(run.Id, "live reviewer fixture teardown", cleanup.Token);
+            await scope.Resolve<IAgentRunService>().CancelRunningAsync(run.Id, "live reviewer fixture teardown", AgentRunAbandonCause.OperatorCancelled, cleanup.Token);
             if (run.RunnerHandleJson is not { } handleJson) continue;
             var handle = JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options).ShouldNotBeNull();
             var runner = scope.Resolve<ISandboxRunnerRegistry>().Resolve(handle.Kind).ShouldBeAssignableTo<ISandboxDurableRunner>();

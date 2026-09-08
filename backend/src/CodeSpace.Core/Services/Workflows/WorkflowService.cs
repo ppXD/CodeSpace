@@ -1132,7 +1132,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private async Task<bool> KillBranchAgentAsync(Guid agentId, AgentRunStatus snapshotStatus, CancellationToken cancellationToken)
     {
         if (snapshotStatus == AgentRunStatus.Running)
-            return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
+            return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, AgentRunAbandonCause.OperatorCancelled, cancellationToken).ConfigureAwait(false);
 
         if (await _agentRunService.CancelQueuedAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false))
             return true;
@@ -1147,7 +1147,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (liveStatus != AgentRunStatus.Running) return false;
 
-        return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
+        return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, AgentRunAbandonCause.OperatorCancelled, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Cancel the run's staged non-terminal sub-workflow children (Pending/Enqueued → Cancelled CAS), mirroring the engine's source-side cleanup. Child runs that already started running / finished are left to their own lifecycle.</summary>

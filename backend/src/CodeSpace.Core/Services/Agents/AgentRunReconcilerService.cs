@@ -177,7 +177,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         try
         {
-            if (!await _runs.CancelRunningAsync(runId, OrphanedParentTerminalRunningError, cancellationToken).ConfigureAwait(false))
+            if (!await _runs.CancelRunningAsync(runId, OrphanedParentTerminalRunningError, AgentRunAbandonCause.ParentTerminal, cancellationToken).ConfigureAwait(false))
                 return 0;
 
             await TryAppendEventAsync(runId, AgentEventKind.Error, OrphanedParentTerminalRunningError, cancellationToken).ConfigureAwait(false);

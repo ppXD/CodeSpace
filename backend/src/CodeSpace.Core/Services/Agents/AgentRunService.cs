@@ -110,10 +110,13 @@ public interface IAgentRunService
     /// ONLY on a won CAS, so a run that legitimately completed in the same instant (a lost CAS) is never killed
     /// out from under its worker. On a won CAS it best-effort <c>TerminateAsync</c>s the durable process tree (so
     /// the orphaned agent stops holding its workspace + burning the injected model credential) — the kill failing
-    /// never undoes the cancel. <paramref name="reason"/> is stamped as the run's Error. Returns whether it won
+    /// never undoes the cancel — and best-effort closes the run's own live native-record execution + any attempt
+    /// still Running inside it (mirroring the reconciler's own abandon closes), stamped with <paramref name="cause"/>
+    /// so a later reader can tell this deliberate cancel apart from a give-up or an ordinary terminal.
+    /// <paramref name="reason"/> is stamped as the run's Error. Returns whether it won
     /// the row (false = no longer Running — already terminal / not yet launched → leave it alone).
     /// </summary>
-    Task<bool> CancelRunningAsync(Guid runId, string reason, CancellationToken cancellationToken);
+    Task<bool> CancelRunningAsync(Guid runId, string reason, AgentRunAbandonCause cause, CancellationToken cancellationToken);
 
     /// <summary>
     /// As <see cref="CompleteAsync(Guid,AgentRunResult,CancellationToken)"/>, but ALSO fenced on
@@ -177,6 +180,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
     private readonly IArtifactOffloader _offloader;
     private readonly IToolCallLedgerService _ledger;
     private readonly Completion.ICompletionContractStore _contracts;
+    private readonly Capture.INativeRecordPlane _nativeRecords;
     private readonly ILogger<AgentRunService> _logger;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
 
@@ -188,6 +192,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         _offloader = runtime.Offloader;
         _ledger = runtime.Ledger;
         _contracts = runtime.Contracts;
+        _nativeRecords = runtime.NativeRecords;
         _authority = authority;
         _logger = logger;
         _completeness = completeness;
@@ -724,7 +729,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         return true;
     }
 
-    public async Task<bool> CancelRunningAsync(Guid runId, string reason, CancellationToken cancellationToken)
+    public async Task<bool> CancelRunningAsync(Guid runId, string reason, AgentRunAbandonCause cause, CancellationToken cancellationToken)
     {
         // Read the run's epoch + handle FRESH + untracked, then flip via a status-guarded, epoch-fenced CAS pinned
         // to Running (mirrors the reconciler's AbandonAsync, but → Cancelled, a deliberate cancel, not Failed).
@@ -734,7 +739,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // longer Running at this epoch → leave it alone.
         var snapshot = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => new { r.Status, r.FenceEpoch, r.RunnerHandleJson })
+            .Select(r => new { r.TeamId, r.Status, r.FenceEpoch, r.RunnerHandleJson })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return false;
@@ -750,6 +755,10 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         if (cancelled == 0) return false;
 
+        // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own
+        // fencing is what makes a call here safe even if that read were ever stale.
+        await TerminalizeCancelledHarnessExecutionQuietlyAsync(snapshot.TeamId, runId, snapshot.FenceEpoch + 1, cause, cancellationToken).ConfigureAwait(false);
+
         // Won the CAS → kill the sandbox process tree so the orphaned agent stops holding its workspace + burning
         // the injected model credential. Best-effort (mirrors AbandonAsync's TerminateQuietlyAsync): the cancel
         // stands even if the kill can't be issued. Only a durable runner with a parseable handle can be killed; a
@@ -762,6 +771,24 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         _logger.LogInformation("Agent run cancelled while running. RunId={RunId} Reason={Reason}", runId, reason);
         return true;
+    }
+
+    /// <summary>
+    /// Close the cancelled run's own live native-record execution + any attempt still Running inside it, stamped
+    /// with <paramref name="cause"/> — the same closer the reconciler's own abandon paths use (#1864), reached here
+    /// too so a deliberate cancel doesn't leave a phantom "live" process behind either. Best-effort and last: the
+    /// run already reached Cancelled, and no failure here may change that. A no-op when the deployed plane does not
+    /// implement the closing side at all.
+    /// </summary>
+    private async Task TerminalizeCancelledHarnessExecutionQuietlyAsync(Guid teamId, Guid runId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+    {
+        if (_nativeRecords is not Capture.INativeRecordExecutionPlane executions) return;
+
+        try { await executions.TerminalizeAbandonedAsync(teamId, runId, expectedEpoch, cause, cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} harness execution could not be terminalized after cancel (cause {Cause}); the row stays live for a later sweep", runId, cause);
+        }
     }
 
     /// <summary>Resolve the durable runner for a persisted handle, or null when the handle is absent/unparseable or its runner isn't durable (then there is no detached process to terminate). Mirrors the reconciler's resolver.</summary>

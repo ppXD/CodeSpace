@@ -292,7 +292,7 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         using var scope = _fixture.BeginScope();
         var runs = scope.Resolve<IAgentRunService>();
         var owner = (await runs.ClaimOwnershipAsync(runId, CancellationToken.None))!;
-        if (administrative) (await runs.CancelRunningAsync(runId, "operator cancelled", CancellationToken.None)).ShouldBeTrue();
+        if (administrative) (await runs.CancelRunningAsync(runId, "operator cancelled", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue();
         else await runs.CompleteAsync(owner, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None);
         var terminal = await runs.GetAsync(runId, CancellationToken.None);
         if (administrative) await Should.ThrowAsync<AgentRunOwnershipLostException>(() => runs.HeartbeatAsync(owner, CancellationToken.None));
