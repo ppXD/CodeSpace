@@ -8,6 +8,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Capture;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Review;
@@ -386,7 +387,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 {
                     // Known invalid or unavailable verification cannot be repaired by billing an agent invocation.
                     // No process or capture intent exists yet; normal terminal ownership and cleanup still apply.
-                    await CompleteAndNotifyAsync(owner, run.TeamId, FoldGrade(new() { Status = AgentRunStatus.Failed, ExitReason = "acceptance-unavailable" }, unavailable), cancellationToken).ConfigureAwait(false);
+                    var unavailableResult = FoldGrade(new() { Status = AgentRunStatus.Failed, ExitReason = "acceptance-unavailable" }, unavailable);
+                    await CompleteAndNotifyAsync(owner, run.TeamId, AgentRunBudget.WithoutInvocation(effectiveTask, unavailableResult), cancellationToken).ConfigureAwait(false);
                     return;
                 }
             }
@@ -422,6 +424,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
+            var modelPrices = effectiveTask.MaxCostUsd is null ? ModelPriceResolver.Empty : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
+            result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
 
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
             // individually best-effort side effects (diff, offload, push, manifest). A crash inside the window
@@ -442,6 +446,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             for (var round = 1; round <= reviseBudget; round++)
             {
+                // The opaque CLI can only report usage after it exits. Once that observation reaches the ceiling (or
+                // cannot be priced), no in-run revision may launch: the current result will fail closed at the node.
+                if (CostBudgetStopsFurtherCalls(effectiveTask, result)) break;
                 if (ReviseReasonFor(effectiveTask, result) is not { } reason) break;   // nothing left to revise — approved / passed
 
                 // Convergence (P1b-2): a CRITIC that re-raises the identical feedback means the prior revision moved
@@ -495,8 +502,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // the string join's empty short-circuits did.
                 transcript.MarkSeam(ReviseTranscriptSeam);
 
-                result = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
-                result = result with { TokenUsage = SumTokenUsage(priorUsage, result.TokenUsage), ReviseRounds = round };
+                var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
+                result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
@@ -681,6 +688,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // workspace handle (repo clone OR scratch) died with the worker, so the repo-less lane has no world
             // here either — null keeps the fail-closed posture.
             result = await GradeAcceptanceIfPresentAsync(new(run, task, null, owner), result, cancellationToken).ConfigureAwait(false);
+
+            result = AgentRunBudget.Apply(task, result, task.MaxCostUsd is null ? ModelPriceResolver.Empty : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false));
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
@@ -944,6 +953,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         await TerminalizeHarnessExecutionAsync(teamId, runId, expectedEpoch, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Whether observed accounting leaves no honest budget for another physical CLI invocation. Exactly-at-cap stops only further calls; the already-produced result still proceeds to its normal terminal fold.</summary>
+    internal static bool CostBudgetStopsFurtherCalls(AgentTask task, AgentRunResult result) =>
+        task.MaxCostUsd is { } cap && (result.CostIndeterminate || result.CumulativeCostUsd is null || result.CumulativeCostUsd >= cap);
 
     /// <summary>
     /// Close the run's live harness execution. This is the ONE place every executor terminal passes through — the

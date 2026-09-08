@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -84,6 +85,7 @@ public sealed class RealModelAnswerReviewE2ETests
                 OutputReviewMode = ReviewMode.Gate,
                 ReviewerModelId = reviewerRowId,
                 Acceptance = new SupervisorAcceptanceSpec { Command = new[] { AnswerFilePath }, Kind = BenchmarkGradingKind.ArtifactPresent, Description = "the answer names both primitives and states the difference" },
+                MaxCostUsd = 100m,
                 TimeoutSeconds = 240,
             };
 
@@ -109,6 +111,13 @@ public sealed class RealModelAnswerReviewE2ETests
 
                 return (false, $"{Provider} '{model}': the claude run produced no inspectable reply — a real miss, not gateway infra: {reason}");
             }
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.TokenUsage.ShouldNotBeNull("the real CLI's usage is the physical observation that makes a monitored cap honest");
+            var expectedCost = (result.TokenUsage!.InputTokens + result.TokenUsage.OutputTokens) / 1_000_000m;
+            result.CostUsd.ShouldBe(expectedCost, "the executor must price the live CLI's observed usage with the credentialed model row");
+            result.CumulativeCostUsd.ShouldBe(expectedCost, "a first attempt's cumulative spend equals its observed attempt spend");
+            result.CostIndeterminate.ShouldBeFalse("a live priced CLI result cannot silently degrade into unknown accounting");
 
             var reviewed = await read.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
                 .CountAsync(r => r.RunId == workflowRunId
@@ -163,7 +172,11 @@ public sealed class RealModelAnswerReviewE2ETests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var rowId = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel
+        {
+            Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true,
+            InputUsdPerMillion = 1m, OutputUsdPerMillion = 1m,
+        });
 
         await db.SaveChangesAsync();
         return rowId;

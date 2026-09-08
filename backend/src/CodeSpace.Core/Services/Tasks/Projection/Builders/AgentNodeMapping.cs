@@ -109,6 +109,16 @@ internal static class AgentNodeMapping
         return JsonSerializer.SerializeToElement(config);
     }
 
+    /// <summary>Add the route-owned monitored cost ceiling without widening the already broad profile-mapping signature. Null leaves the serialized config byte-identical.</summary>
+    public static JsonElement WithCostCap(JsonElement config, decimal? maxCostUsd)
+    {
+        if (maxCostUsd is null) return config;
+
+        var mapped = config.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+        mapped["maxCostUsd"] = JsonSerializer.SerializeToElement(maxCostUsd.Value);
+        return JsonSerializer.SerializeToElement(mapped);
+    }
+
     /// <summary>Append the operator's acceptance criteria to the agent's goal (S5b, the quick tier's steer — deep renders them into the supervisor prompt, standard into the planner prompt). Null / empty ⇒ verbatim (byte-identical).</summary>
     private static string ComposeGoalWithCriteria(string goal, IReadOnlyList<string>? criteria)
     {

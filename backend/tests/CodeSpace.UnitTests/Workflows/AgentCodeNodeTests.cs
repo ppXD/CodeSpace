@@ -610,6 +610,91 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Quick_cost_cap_stops_a_success_whose_reported_cumulative_spend_exceeded_the_cap()
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(1m);
+        var resume = JsonDocument.Parse("""{"status":"Succeeded","costUsd":1.25,"cumulativeCostUsd":1.25,"summary":"done"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldContain("cost cap reached");
+    }
+
+    [Fact]
+    public async Task Quick_cost_cap_fails_closed_when_the_cli_usage_cannot_be_priced()
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(1m);
+        var resume = JsonDocument.Parse("""{"status":"Succeeded","costIndeterminate":true,"summary":"done"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldContain("cannot be priced");
+    }
+
+    [Fact]
+    public async Task Quick_retry_carries_the_prior_reported_spend_into_the_next_agent_envelope()
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(2m);
+        var prior = JsonDocument.Parse("""{"status":"Failed","error":"gateway 429","cumulativeCostUsd":0.75}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null, priorAttemptPayload: prior), CancellationToken.None);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.MaxCostUsd.ShouldBe(2m);
+        task.BudgetSpentUsd.ShouldBe(0.75m);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("not-money")]
+    public async Task Quick_cost_cap_rejects_non_positive_or_malformed_authored_values(string raw)
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(raw);
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("positive USD amount");
+    }
+
+    [Fact]
+    public async Task A_success_exactly_at_the_cap_qualifies_but_a_failure_cannot_retry()
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(1m);
+
+        var success = await new AgentCodeNode().RunAsync(BuildContext(config, JsonDocument.Parse("""{"status":"Succeeded","cumulativeCostUsd":1}""").RootElement), CancellationToken.None);
+        var failure = await new AgentCodeNode().RunAsync(BuildContext(config, JsonDocument.Parse("""{"status":"Failed","error":"gateway 429","cumulativeCostUsd":1}""").RootElement), CancellationToken.None);
+
+        success.Status.ShouldBe(NodeStatus.Success);
+        failure.Status.ShouldBe(NodeStatus.Failure);
+        failure.Retryable.ShouldBeFalse();
+        failure.Error.ShouldContain("cost cap reached");
+    }
+
+    [Fact]
+    public async Task A_capped_retry_with_missing_prior_accounting_fails_closed_before_staging()
+    {
+        var config = RequiredConfig();
+        config["maxCostUsd"] = JsonSerializer.SerializeToElement(2m);
+        var legacyPrior = JsonDocument.Parse("""{"status":"Failed","error":"gateway 429"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null, priorAttemptPayload: legacyPrior), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("prior agent attempt cannot be priced");
+    }
+
+    [Fact]
     public async Task D3_a_deterministic_acceptance_failure_becomes_RETRYABLE_when_a_stronger_model_exists()
     {
         // The reachability fix: a non-infra acceptance failure is deterministic (the SAME model reproduces the

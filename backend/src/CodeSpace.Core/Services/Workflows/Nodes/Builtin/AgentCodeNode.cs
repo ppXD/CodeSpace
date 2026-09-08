@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -58,6 +59,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Empty → the deployment default, set by the Agents:DefaultRunnerKind configuration key (Agents__DefaultRunnerKind in the environment); \"local\" when that is unset." },
                 "cwdMode":        { "type": "string", "enum": ["Auto", "WorkspaceRoot", "PrimaryRepo"], "title": "Working directory", "x-control": "radioCards", "x-enumLabels": { "Auto": "Automatic (default)", "WorkspaceRoot": "Shared workspace root", "PrimaryRepo": "Primary repo root" }, "x-optionConsequence": { "Auto": "A one-repo run starts at the repo root; a many-repo run starts at the shared workspace root.", "WorkspaceRoot": "A multi-repo run starts at the shared root with every repo as a sibling folder (no effect on single-repo runs).", "PrimaryRepo": "A multi-repo run starts inside the primary repo, reaching the others by relative path (no effect on single-repo runs)." }, "description": "MULTI-repo only: where the agent's working directory points. Ignored for a single-repo run, which always runs at the repo root." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
+                "maxCostUsd":     { "type": "number", "exclusiveMinimum": 0, "description": "Monitored USD ceiling across this node's attempts. The external CLI reports usage after an invocation, so an in-flight call may cross it; an observed overage or unpriceable result stops qualification and further retries." },
                 "autonomyLevel":  { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "title": "Autonomy", "x-control": "radioCards", "x-enumLabels": { "Confined": "Read-only, no network", "Standard": "Workspace write, no network", "Trusted": "Adds network access", "Unleashed": "Unattended, no approvals" }, "x-optionConsequence": { "Confined": "The agent reads and analyzes only — no file changes, no network, and destructive tools are refused.", "Standard": "The agent edits files in its workspace with no network; risky tool calls pause for human approval.", "Trusted": "Same workspace writes as Standard plus outbound network; risky tool calls still pause for approval.", "Unleashed": "Same writes and network as Trusted, but risky tool calls run without asking — except irreversible or dangerous ones (a PR merge, rm -rf, sudo…), which still require approval." }, "description": "How much the agent may do — one dial for write scope + network. The network/readOnly fields below are advanced per-field overrides of this tier.", "x-spotlight": 3 },
                 "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
                 "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." },
@@ -128,8 +130,12 @@ public sealed class AgentCodeNode : INodeRuntime
 
     public Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
+        if (!TryReadCostCap(context.Config, out var maxCostUsd)) return Fail("Config 'maxCostUsd' must be a positive USD amount when set.");
+
         // Resumed: the agent run finished. ResumePayload = { status, summary, changedFiles, branch, error }.
-        if (context.ResumePayload.HasValue) return Task.FromResult(MapResult(context.ResumePayload.Value));
+        if (context.ResumePayload.HasValue) return Task.FromResult(MapResult(context.ResumePayload.Value, maxCostUsd));
+
+        if (!TryReadPriorSpend(context.PriorAttemptPayload, maxCostUsd, out var budgetSpentUsd, out var budgetError)) return Fail(budgetError!);
 
         var goal = ReadString(context.Config, "goal");
         var displayTitle = ReadOptionalString(context.Config, "displayTitle");
@@ -183,6 +189,8 @@ public sealed class AgentCodeNode : INodeRuntime
             // the stall watchdog + cost cap, the operator's "no timeout" choice); ABSENT → the bounded 1h default. Only
             // an explicit non-positive value is infinite, so an unset config is never accidentally unbounded.
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") is { } t ? (t > 0 ? t : (int?)null) : 3600,
+            MaxCostUsd = maxCostUsd,
+            BudgetSpentUsd = budgetSpentUsd,
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
@@ -281,9 +289,21 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure, marked retryable only when a fresh respawn could change the outcome.</summary>
-    private static NodeResult MapResult(JsonElement payload)
+    private static NodeResult MapResult(JsonElement payload, decimal? maxCostUsd)
     {
         var status = ReadString(payload, "status");
+
+        if (maxCostUsd is { } cap)
+        {
+            if (ReadFlag(payload, "costIndeterminate"))
+                return NodeResult.Fail($"Agent run cannot be priced under the monitored ${cap.ToString(CultureInfo.InvariantCulture)} cost cap.", retryable: false);
+
+            if (!TryReadNonNegativeDecimal(payload, "cumulativeCostUsd", out var cumulative) || cumulative is null)
+                return NodeResult.Fail($"Agent run cannot be priced under the monitored ${cap.ToString(CultureInfo.InvariantCulture)} cost cap because cumulative spend is missing.", retryable: false);
+
+            if (cumulative > cap || (cumulative == cap && status != nameof(AgentRunStatus.Succeeded)))
+                return NodeResult.Fail($"Agent run stopped: {Supervisor.SupervisorStopReasons.CostCapReached} (${cumulative.Value.ToString(CultureInfo.InvariantCulture)} of ${cap.ToString(CultureInfo.InvariantCulture)} observed).", retryable: false);
+        }
 
         if (status != nameof(AgentRunStatus.Succeeded))
         {
@@ -659,6 +679,55 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <summary>Read a boolean FACT off the resume payload. Absent / non-boolean → false — the shape every payload written before the key existed has, so an old settled wait re-read after a deploy reads as "not mitigated" rather than throwing.</summary>
     private static bool ReadFlag(JsonElement bag, string key) =>
         bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>Read the route-owned safety ceiling strictly. Absent/null means uncapped; present malformed, non-finite-equivalent, zero or negative values fail the node instead of silently disabling enforcement.</summary>
+    private static bool TryReadCostCap(IReadOnlyDictionary<string, JsonElement> bag, out decimal? value)
+    {
+        value = null;
+        if (!bag.TryGetValue("maxCostUsd", out var raw) || raw.ValueKind == JsonValueKind.Null) return true;
+        if (!TryReadDecimal(raw, out var parsed) || parsed <= 0) return false;
+        value = parsed;
+        return true;
+    }
+
+    /// <summary>Carry prior realized spend into a retry. A capped legacy/corrupt payload with no trustworthy cumulative value fails closed; otherwise a fresh/uncapped attempt is unchanged.</summary>
+    private static bool TryReadPriorSpend(JsonElement? priorAttemptPayload, decimal? maxCostUsd, out decimal? value, out string? error)
+    {
+        value = null;
+        error = null;
+        if (maxCostUsd is null || priorAttemptPayload is null) return true;
+
+        var payload = priorAttemptPayload.Value;
+        if (ReadFlag(payload, "costIndeterminate") || !TryReadNonNegativeDecimal(payload, "cumulativeCostUsd", out value) || value is null)
+        {
+            error = "The prior agent attempt cannot be priced under the monitored cost cap; retry refused.";
+            return false;
+        }
+
+        if (value >= maxCostUsd)
+        {
+            error = $"Agent retry refused: {Supervisor.SupervisorStopReasons.CostCapReached} (${value.Value.ToString(CultureInfo.InvariantCulture)} of ${maxCostUsd.Value.ToString(CultureInfo.InvariantCulture)} observed).";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryReadNonNegativeDecimal(JsonElement bag, string key, out decimal? value)
+    {
+        value = null;
+        if (bag.ValueKind != JsonValueKind.Object || !bag.TryGetProperty(key, out var raw) || raw.ValueKind == JsonValueKind.Null) return true;
+        if (!TryReadDecimal(raw, out var parsed) || parsed < 0) return false;
+        value = parsed;
+        return true;
+    }
+
+    private static bool TryReadDecimal(JsonElement value, out decimal parsed)
+    {
+        parsed = default;
+        if (value.ValueKind == JsonValueKind.Number) return value.TryGetDecimal(out parsed);
+        return value.ValueKind == JsonValueKind.String && decimal.TryParse(value.GetString(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out parsed);
+    }
 
     private static string? ReadOptionalString(JsonElement bag, string objectKey, string key) =>
         bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(objectKey, out var nested) && nested.ValueKind == JsonValueKind.Object

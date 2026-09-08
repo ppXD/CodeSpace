@@ -109,6 +109,11 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // node's retry verdict tell a grader INFRA fault (AgentAcceptanceContract.IsInfraFailure) from a
             // genuine failed check even though both share exitReason "acceptance-failed".
             acceptanceDetail = result?.AcceptanceDetail,
+            // The executor's observed coding-CLI spend. The agent.run node owns the retry decision, so these durable
+            // accounting facts must cross the wait boundary with the outcome they qualify.
+            costUsd = result?.CostUsd,
+            cumulativeCostUsd = result?.CumulativeCostUsd,
+            costIndeterminate = result?.CostIndeterminate == true,
             // D3: the over-claim fact + the model the attempt ACTUALLY ran. The model falls back to the dispatched
             // task's own envelope (the executor keeps it truthful per round), because a harness that never names
             // its model in-stream would otherwise leave the next attempt blind about what already ran.

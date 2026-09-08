@@ -90,6 +90,19 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_attempt_and_cumulative_cost_facts_across_the_wait()
+    {
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", CostUsd = 0.25m, CumulativeCostUsd = 0.75m };
+        var run = new AgentRun { Status = AgentRunStatus.Failed, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        var payload = JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement;
+
+        payload.GetProperty("costUsd").GetDecimal().ShouldBe(0.25m);
+        payload.GetProperty("cumulativeCostUsd").GetDecimal().ShouldBe(0.75m);
+        payload.GetProperty("costIndeterminate").GetBoolean().ShouldBeFalse();
+    }
+
+    [Fact]
     public void BuildResumePayload_carries_the_contradiction_and_the_dispatched_model_for_the_escalation_trigger()
     {
         // D3: the respawning node decides escalation from the payload ALONE (it has no DB). It needs the
