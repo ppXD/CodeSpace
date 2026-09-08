@@ -63,8 +63,8 @@ public sealed record RoomTurnFacts
     /// <summary>The objective acceptance verdict (the Review stage): true = passed, false = failed, null = not graded.</summary>
     public bool? AcceptancePassed { get; init; }
 
-    /// <summary>The delivered change set (the PR card), when the turn opened one.</summary>
-    public RoomDelivery? Delivery { get; init; }
+    /// <summary>Every repository delivery outcome in the current set. Failures and skips remain alongside opened PRs.</summary>
+    public IReadOnlyList<RoomDelivery> Deliveries { get; init; } = Array.Empty<RoomDelivery>();
 
     /// <summary>
     /// True when the completion authority REFUSED this attempt's terminal and parked it. The reason itself arrives as
@@ -143,10 +143,14 @@ public sealed record RoomAttachment(AnswerAttachmentKind Kind, string Label, str
 public sealed record RoomDelivery
 {
     public required string Title { get; init; }
+    public Guid? RepositoryId { get; init; }
+    public string? RepositoryAlias { get; init; }
+    public RoomPullRequestDisposition? Disposition { get; init; }
     public string? Reference { get; init; }
     public string? BranchHead { get; init; }
     public string? BranchBase { get; init; }
     public string? Checks { get; init; }
     public bool? ChecksOk { get; init; }
     public string? Url { get; init; }
+    public string? Error { get; init; }
 }

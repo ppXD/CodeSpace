@@ -146,6 +146,28 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
     }
 
     [Fact]
+    public async Task Every_repository_delivery_outcome_reads_back_over_real_http()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var turn = await LaunchAsync(userId, teamId, "Ship the repository set", continueSessionId: null);
+        await SeedDeliveryResultAsync(turn.RunId);
+
+        var response = await SendAsync(userId, teamId, $"/api/sessions/by-run/{turn.RunId}/room");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: $"GET room failed: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()}");
+
+        var body = await response.Content.ReadAsStringAsync();
+        var room = JsonSerializer.Deserialize<RoomView>(body, Json).ShouldNotBeNull();
+        var deliveries = room.Blocks.OfType<AssistantTurnBlock>().Single().Blocks.OfType<DeliveryBlock>().ToList();
+
+        deliveries.Count.ShouldBe(2);
+        deliveries.Single(delivery => delivery.RepositoryAlias == "api").Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+        var failed = deliveries.Single(delivery => delivery.RepositoryAlias == "web");
+        failed.Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
+        failed.Error.ShouldBe("credential cannot create pull requests");
+        body.ShouldContain("\"disposition\":\"Failed\"", Case.Sensitive, "the frontend consumes the string-enum wire value");
+    }
+
+    [Fact]
     public async Task A_foreign_runs_room_is_404_never_leaked()
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
@@ -327,6 +349,27 @@ public sealed class SessionsEndpointE2ETests : IClassFixture<TaskLaunchApiFactor
             Kind = ArtifactManifestKind.Document, LogicalPath = path, ContentArtifactId = artifactId, Sha256 = sha,
             SizeBytes = payload.Length, ContentType = "text/markdown",
             CreatedDate = now, LastModifiedDate = now,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedDeliveryResultAsync(Guid runId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.DeliveryPullRequests, OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                pullRequests = new object[]
+                {
+                    new { repositoryId = Guid.NewGuid(), alias = "api", disposition = "Opened", number = 42, url = "https://example.test/api/pull/42", error = (string?)null },
+                    new { repositoryId = Guid.NewGuid(), alias = "web", disposition = "Failed", number = (int?)null, url = (string?)null, error = "credential cannot create pull requests" },
+                },
+            }, Json),
         });
 
         await db.SaveChangesAsync();

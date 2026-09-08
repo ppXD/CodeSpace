@@ -1952,17 +1952,25 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
   );
 }
 
-/** The delivered change set — the terracotta PR card. */
-function PrCard({ delivery }: { delivery: DeliveryBlock }) {
+/** One repository's durable delivery outcome. Failed and skipped siblings remain visible after a Room reload. */
+export function PrCard({ delivery }: { delivery: DeliveryBlock }) {
+  const disposition = delivery.disposition === "AlreadyOpened" ? "Already open" : delivery.disposition;
+  const tone = delivery.disposition === "Failed" ? "err" : delivery.disposition === "Skipped" ? "warn" : "ok";
   return (
-    <div className="room-pr">
+    <div className={`room-pr room-pr-${tone}`}>
       <span className="room-pr-av"><Sym n="pr" s={16} /></span>
       <div className="room-pr-main">
-        <div className="room-pr-title"><span className="room-pr-name">{delivery.title}</span>{delivery.reference && <span className="room-pr-ref">{delivery.reference}</span>}</div>
-        {(delivery.branchHead || delivery.checks) && (
+        <div className="room-pr-title">
+          {delivery.repositoryAlias && <span className="room-pr-alias">{delivery.repositoryAlias}</span>}
+          <span className="room-pr-name">{delivery.title}</span>
+          {delivery.reference && <span className="room-pr-ref">{delivery.reference}</span>}
+          {disposition && <span className={`room-pr-state room-pr-state-${tone}`}>{disposition}</span>}
+        </div>
+        {(delivery.branchHead || delivery.checks || delivery.error) && (
           <div className="room-pr-sub">
             {delivery.branchHead && <span className="room-pr-branch"><Sym n="branch" s={11} /> {delivery.branchHead} → {delivery.branchBase ?? "main"}</span>}
             {delivery.checks && <><span className="room-row-mid">·</span><span className={delivery.checksOk ? "room-good" : delivery.checksOk === false ? "room-danger" : "room-muted"}>{delivery.checks}</span></>}
+            {delivery.error && <span className={tone === "err" ? "room-danger" : "room-muted"}>{delivery.error}</span>}
           </div>
         )}
       </div>

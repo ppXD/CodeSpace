@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
@@ -219,6 +220,15 @@ public sealed class RoomPullRequestServiceFlowTests
         degraded.Error.ShouldNotBeNullOrEmpty();
 
         (await ManifestRowCountAsync(runId, teamId)).ShouldBe(2, "only the two genuinely-opened repos get a manifest row");
+
+        using var scope = _fixture.BeginScope();
+        var payload = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.DeliveryPullRequests)
+            .OrderByDescending(r => r.Sequence)
+            .Select(r => r.PayloadJson)
+            .FirstOrDefaultAsync();
+        payload.ShouldNotBeNull("the full per-repository result must remain durable after the response and Room cache entry are gone");
+        JsonSerializer.Deserialize<RoomPullRequestResult>(payload!, AgentJson.Options)!.PullRequests.Count.ShouldBe(3);
     }
 
     [Fact]

@@ -243,7 +243,7 @@ public static class RoomNarrative
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
         if (NetworkStat(idPrefix, seq, facts) is { } network) blocks.Add(network);
 
-        if (DeliveryFrom(idPrefix, seq, facts) is { } delivery) blocks.Add(delivery);
+        blocks.AddRange(DeliveriesFrom(idPrefix, seq, facts));
         if (DeliverablesFrom(idPrefix, seq, facts) is { } deliverables) blocks.Add(deliverables);
 
         // Pending decisions are "now" — the current ask.
@@ -574,17 +574,14 @@ public static class RoomNarrative
             Files = f.Deliverables,
         };
 
-    private static DeliveryBlock? DeliveryFrom(string idPrefix, long seq, RoomTurnFacts f)
-    {
-        if (f.Delivery is not { } d) return null;
-
-        return new DeliveryBlock
+    private static IReadOnlyList<DeliveryBlock> DeliveriesFrom(string idPrefix, long seq, RoomTurnFacts f) =>
+        f.Deliveries.Select((d, index) => new DeliveryBlock
         {
-            Id = $"{idPrefix}:delivery", Seq = seq,
-            Title = d.Title, Reference = d.Reference, BranchHead = d.BranchHead, BranchBase = d.BranchBase,
-            Checks = d.Checks, ChecksOk = d.ChecksOk, Url = d.Url,
-        };
-    }
+            Id = f.Deliveries.Count == 1 ? $"{idPrefix}:delivery" : $"{idPrefix}:delivery:{index}", Seq = seq,
+            Title = d.Title, RepositoryId = d.RepositoryId, RepositoryAlias = d.RepositoryAlias, Disposition = d.Disposition,
+            Reference = d.Reference, BranchHead = d.BranchHead, BranchBase = d.BranchBase,
+            Checks = d.Checks, ChecksOk = d.ChecksOk, Url = d.Url, Error = d.Error,
+        }).ToList();
 
     // ─── summary + diagnostic ───────────────────────────────────────────────────────
 
@@ -686,7 +683,7 @@ public static class RoomNarrative
     /// turn's own facts carry no produced artifact at all; the resumability half is true either way.
     /// </summary>
     private static string StandingWork(RoomTurnFacts facts) =>
-        facts.Delivery != null || facts.Deliverables.Count > 0 || facts.ChangedFiles.Count > 0
+        facts.Deliveries.Count > 0 || facts.Deliverables.Count > 0 || facts.ChangedFiles.Count > 0
             ? "No terminal was stamped, so the work it already produced is still resumable."
             : "Nothing was delivered and no terminal was stamped, so the work is still resumable.";
 
