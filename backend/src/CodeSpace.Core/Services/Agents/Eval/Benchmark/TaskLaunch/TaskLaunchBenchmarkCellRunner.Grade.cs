@@ -6,6 +6,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
@@ -35,6 +36,12 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// </summary>
     internal static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
         ParseResult(attempts[^1])?.Model ?? attempts.Select(ParseResult).Select(r => r?.Model).FirstOrDefault(model => model is not null);
+
+    internal static ReviewModelIdentity ProducerModelOf(BenchmarkAgentSelection? selection, IReadOnlyList<AgentRun> attempts)
+    {
+        var observed = attempts.Select(ParseResult).Select(result => result?.Model).Where(model => !string.IsNullOrWhiteSpace(model)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return new ReviewModelIdentity { ModelCredentialModelId = selection?.ModelCredentialModelId, ConfiguredModel = selection?.Model, ObservedModel = observed.Count == 1 ? observed[0] : null };
+    }
 
     /// <summary>
     /// Bring the pristine fixture directory forward to the state the Launch run actually produced: every

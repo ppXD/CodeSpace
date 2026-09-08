@@ -1,7 +1,10 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Review;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -14,6 +17,24 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public sealed class LlmRubricJudgeTests
 {
+    [Theory]
+    [InlineData("producer-model", "PRODUCER-MODEL", ReviewModelIndependence.SameBackingModel, false)]
+    [InlineData("producer-model", "judge-model", ReviewModelIndependence.DistinctBackingModel, true)]
+    [InlineData("producer-model", null, ReviewModelIndependence.Unknown, false)]
+    public async Task A_judge_is_calibrated_only_when_both_wire_identities_prove_distinct_backing_models(string producer, string? judgeModel, ReviewModelIndependence expected, bool calibrated)
+    {
+        var selector = new JudgeSelector();
+        var judge = new LlmRubricJudge(new LLMClientRegistry([new JudgeClient(judgeModel)]), selector);
+        var producerIdentity = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "producer-alias", ObservedModel = producer };
+
+        var verdict = await judge.JudgeAsync(new RubricJudgeRequest { Rubric = Rubric("a"), Artifact = "complete", TeamId = Guid.NewGuid(), ProducerModel = producerIdentity }, CancellationToken.None);
+
+        verdict.Failed.ShouldBeFalse();
+        verdict.JudgeModel.ShouldBe(judgeModel);
+        verdict.Independence.ShouldBe(expected);
+        verdict.Calibrated.ShouldBe(calibrated);
+        selector.ProducerModel.ShouldBe(producerIdentity, "automatic judge selection receives the same trusted producer identity used by the post-call comparison");
+    }
     [Fact]
     public void A_complete_echo_projects_joined_by_id_in_rubric_order()
     {
@@ -137,4 +158,29 @@ public sealed class LlmRubricJudgeTests
     private static SupervisorAcceptanceSpec Spec(Messages.Agents.Benchmark.BenchmarkGradingKind? kind) => new() { Command = new[] { "report.md" }, Kind = kind };
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
+
+    private sealed class JudgeClient(string? observedModel) : ILLMClient, IStructuredLLMClient
+    {
+        public string Provider => "test";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) => Task.FromResult(new StructuredLLMCompletion
+        {
+            Model = observedModel ?? request.Model, ObservedModel = observedModel,
+            Json = JsonSerializer.SerializeToElement(new { criteria = new[] { new { id = "a", met = true, evidence = "complete" } } }),
+        });
+    }
+
+    private sealed class JudgeSelector : IModelPoolSelector
+    {
+        private readonly Guid _rowId = Guid.NewGuid();
+        public ReviewModelIdentity? ProducerModel { get; private set; }
+        public Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, ReviewModelIdentity producerModel, CancellationToken cancellationToken) { ProducerModel = producerModel; return Task.FromResult<Guid?>(_rowId); }
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => Task.FromResult<ModelPoolPick?>(new() { ModelId = "judge-alias", Credential = new ResolvedModelCredential { Provider = "test" } });
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(_rowId);
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
 }

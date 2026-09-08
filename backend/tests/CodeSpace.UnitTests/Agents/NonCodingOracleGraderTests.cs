@@ -133,6 +133,20 @@ public sealed class NonCodingOracleGraderTests : IDisposable
         judge.LastArtifact.ShouldContain("the report body");
     }
 
+    [Fact]
+    public async Task The_model_backed_grader_preserves_producer_identity_and_judge_independence()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root, "report.md"), "the report body");
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "producer-alias", ObservedModel = "producer-wire" };
+        var judge = new FakeJudge { Verdict = Verdict(("a", true)) with { Independence = ReviewModelIndependence.DistinctBackingModel } };
+        var grader = new LlmJudgeGrader(new FakeScopeFactory(judge));
+
+        var grade = await grader.GradeAsync(Context(JudgeSpec("report.md")) with { ProducerModel = producer }, CancellationToken.None);
+
+        judge.LastRequest.ShouldNotBeNull().ProducerModel.ShouldBe(producer);
+        grade.EvaluatorIndependence.ShouldBe(ReviewModelIndependence.DistinctBackingModel);
+    }
+
     // ─── CitationsResolveGrader ──────────────────────────────────────────────
 
     [Fact]
@@ -262,10 +276,18 @@ public sealed class NonCodingOracleGraderTests : IDisposable
     {
         public RubricJudgeVerdict Verdict { get; set; } = new() { Criteria = Array.Empty<RubricCriterionVerdict>() };
         public string? LastArtifact { get; private set; }
+        public RubricJudgeRequest? LastRequest { get; private set; }
 
         public Task<RubricJudgeVerdict> JudgeAsync(AcceptanceRubric rubric, string artifact, string? goal, Guid teamId, CancellationToken cancellationToken)
         {
             LastArtifact = artifact;
+            return Task.FromResult(Verdict);
+        }
+
+        public Task<RubricJudgeVerdict> JudgeAsync(RubricJudgeRequest request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            LastArtifact = request.Artifact;
             return Task.FromResult(Verdict);
         }
     }
