@@ -57,6 +57,9 @@ public sealed record RoomTurnFacts
     /// <summary>Each agent's durable log-stream health. An absent agent has no declared/captured stream and remains unsaid; a present summary never changes the task verdict.</summary>
     public IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs { get; init; } = new Dictionary<Guid, RoomAgentLogSummary>();
 
+    /// <summary>The run's priced spend, token usage, cap, and durable budget commitments. Null when the run has no cost or budget evidence.</summary>
+    public RoomBudgetSummary? Budget { get; init; }
+
     /// <summary>How many reasoning entries the turn produced — the "Reasoning" row's count.</summary>
     public int ReasoningCount { get; init; }
 
@@ -167,4 +170,19 @@ public enum RoomAgentLogStatus
     Captured,
     Finalizing,
     Incomplete,
+}
+
+/// <summary>Run-level budget truth. Estimated spend and committed reservation headroom remain separate because an unresolved commitment is not an actual bill.</summary>
+public sealed record RoomBudgetSummary
+{
+    public long InputTokens { get; init; }
+    public long OutputTokens { get; init; }
+    public decimal? AgentExecutionUsd { get; init; }
+    public decimal? BrainPlaneUsd { get; init; }
+    public decimal? TotalUsd { get; init; }
+    public int UnknownAgentRuns { get; init; }
+    public int UnknownBrainCalls { get; init; }
+    public decimal? CommittedUsd { get; init; }
+    public decimal? CapUsd { get; init; }
+    public int UnresolvedClaims { get; init; }
 }

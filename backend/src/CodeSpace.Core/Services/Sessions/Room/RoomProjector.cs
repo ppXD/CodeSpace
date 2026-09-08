@@ -13,6 +13,7 @@ using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
@@ -44,10 +45,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IArtifactManifestStore _producedFiles;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly IArtifactRangeReader _artifacts;
+    private readonly ITeamCostService _costs;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -59,6 +61,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _producedFiles = producedFiles;
         _publishedBranches = publishedBranches;
         _artifacts = artifacts;
+        _costs = costs;
         _db = db;
         _cache = cache;
     }
@@ -89,6 +92,9 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private async Task<RoomView> BuildAsync(SessionSkeleton detail, int? focusTurnIndex, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var focused = (focusTurnIndex is { } fi ? detail.Turns.FirstOrDefault(t => t.TurnIndex == fi) : null) ?? detail.Turns.LastOrDefault();
+        var terminalRunIds = detail.Turns.Where(turn => (focused == null || turn.TurnIndex != focused.TurnIndex) && WorkflowRunState.IsTerminal(turn.RunStatus))
+            .Select(turn => turn.RunId).Distinct().ToList();
+        var terminalEvidence = await TerminalEvidenceAsync(terminalRunIds, teamId, cancellationToken).ConfigureAwait(false);
 
         var blocks = new List<RoomBlock>();
         long cursor = 0;
@@ -112,7 +118,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 assistant = assistant with
                 {
                     Attempts = await AttemptsOf(turn, assistant.RunId, teamId, cancellationToken).ConfigureAwait(false),
-                    Blocks = await RefreshTerminalLogsAsync(assistant, teamId, cancellationToken).ConfigureAwait(false),
+                    Blocks = RefreshTerminalEvidence(assistant, terminalEvidence.GetValueOrDefault(assistant.RunId)),
                 };
 
             cursor = Math.Max(cursor, assistant.Seq);
@@ -132,25 +138,58 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>
-    /// Terminal-flow projections are cached, but log capture may legitimately settle after the workflow does. Overlay
-    /// the one lightweight log-health row on every collapsed terminal read so Open → Verified/CaptureFailed cannot be
-    /// frozen in the cache. The other roughly 28 immutable reads remain cached.
+    /// Terminal-flow projections are cached, but log capture and budget settlement may legitimately change after the
+    /// workflow does. Overlay their preloaded rows on every collapsed terminal read so mutable evidence cannot freeze
+    /// in the cache. <see cref="TerminalEvidenceAsync"/> loads every collapsed turn in a fixed number of team-scoped
+    /// queries, so a long session does not turn the refresh into an N+1 read storm.
     /// </summary>
-    private async Task<IReadOnlyList<RoomBlock>> RefreshTerminalLogsAsync(AssistantTurnBlock assistant, Guid teamId, CancellationToken cancellationToken)
+    private static IReadOnlyList<RoomBlock> RefreshTerminalEvidence(AssistantTurnBlock assistant, TerminalEvidence? evidence)
     {
         var labels = assistant.Blocks.OfType<AgentGroupBlock>().SelectMany(block => block.Agents)
             .GroupBy(agent => agent.AgentRunId).ToDictionary(group => group.Key, group => group.First().Label);
-        var summaries = await AgentLogsAsync(labels.Keys.ToList(), teamId, cancellationToken).ConfigureAwait(false);
-        var logs = RoomNarrative.LogsStat($"turn-{assistant.TurnIndex}:stat:logs", assistant.Seq, summaries, labels);
+        var logs = RoomNarrative.LogsStat($"turn-{assistant.TurnIndex}:stat:logs", assistant.Seq, evidence?.AgentLogs ?? EmptyAgentLogs, labels);
+        var budget = RoomNarrative.BudgetStat($"turn-{assistant.TurnIndex}", assistant.Seq, evidence?.Budget);
         var hadLogs = assistant.Blocks.Any(block => block is StatBlock { Kind: "logs" });
-        if (logs is null && !hadLogs) return assistant.Blocks;
+        var hadBudget = assistant.Blocks.Any(block => block is StatBlock { Kind: "budget" });
+        if (logs is null && budget is null && !hadLogs && !hadBudget) return assistant.Blocks;
 
-        var blocks = assistant.Blocks.Where(block => block is not StatBlock { Kind: "logs" }).ToList();
+        var blocks = assistant.Blocks.Where(block => block is not StatBlock { Kind: "logs" or "budget" }).ToList();
+        if (budget is not null)
+        {
+            var beforePosture = blocks.FindIndex(block => block is StatBlock { Kind: "launch" });
+            blocks.Insert(beforePosture >= 0 ? beforePosture : blocks.FindLastIndex(block => block is StatBlock) + 1, budget);
+        }
         if (logs is null) return blocks;
 
         var lastStat = blocks.FindLastIndex(block => block is StatBlock);
         blocks.Insert(lastStat + 1, logs);
         return blocks;
+    }
+
+    private async Task<IReadOnlyDictionary<Guid, TerminalEvidence>> TerminalEvidenceAsync(IReadOnlyCollection<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (runIds.Count == 0) return EmptyTerminalEvidence;
+
+        var costs = await _costs.ComputeRunsAsync(teamId, runIds, cancellationToken).ConfigureAwait(false);
+        var logRows = await (from stream in _db.AgentRunLogStream.AsNoTracking()
+            join agent in _db.AgentRun.AsNoTracking() on new { stream.TeamId, AgentRunId = stream.AgentRunId } equals new { agent.TeamId, AgentRunId = agent.Id }
+            where stream.TeamId == teamId && agent.WorkflowRunId.HasValue && runIds.Contains(agent.WorkflowRunId.Value)
+            select new RunAgentLogRow(agent.WorkflowRunId.GetValueOrDefault(), stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var reservations = await _db.BudgetReservation.AsNoTracking()
+            .Where(row => row.TeamId == teamId && runIds.Contains(row.WorkflowRunId))
+            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var routes = await _db.WorkflowRun.AsNoTracking().Where(row => row.TeamId == teamId && runIds.Contains(row.Id))
+            .Select(row => new RunRouteRow(row.Id, row.RoutePlanJson)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var logsByRun = logRows.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group =>
+            (IReadOnlyDictionary<Guid, RoomAgentLogSummary>)group.GroupBy(row => row.AgentRunId).ToDictionary(agents => agents.Key, agents => SummarizeLogs(agents.Select(row => row.Log).ToList())));
+        var ledgerByRun = reservations.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => (IReadOnlyList<BudgetLedgerRow>)group.ToList());
+        var routeByRun = routes.ToDictionary(row => row.RunId, row => row.RouteJson);
+
+        return runIds.ToDictionary(runId => runId, runId => new TerminalEvidence(
+            logsByRun.GetValueOrDefault(runId) ?? EmptyAgentLogs,
+            SummarizeBudget(costs.GetValueOrDefault(runId), ledgerByRun.GetValueOrDefault(runId) ?? Array.Empty<BudgetLedgerRow>(), routeByRun.GetValueOrDefault(runId))));
     }
 
     private async Task<AssistantTurnBlock> BuildTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
@@ -606,6 +645,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
             AgentLogs = await AgentLogsAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false),
+            Budget = await BudgetAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ChangedFileIdentities = changedFileIdentities,
@@ -672,8 +712,47 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     };
 
     private static readonly IReadOnlyDictionary<Guid, RoomAgentLogSummary> EmptyAgentLogs = new Dictionary<Guid, RoomAgentLogSummary>();
+    private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
 
     internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest);
+    private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest)
+    {
+        public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest);
+    }
+    private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget);
+    private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd);
+    private readonly record struct RunRouteRow(Guid RunId, string? RouteJson);
+
+    private async Task<RoomBudgetSummary?> BudgetAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var cost = await _costs.ComputeRunAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
+        var reservations = await _db.BudgetReservation.AsNoTracking()
+            .Where(row => row.WorkflowRunId == runId && row.TeamId == teamId)
+            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var routeJson = await _db.WorkflowRun.AsNoTracking().Where(row => row.Id == runId && row.TeamId == teamId).Select(row => row.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return SummarizeBudget(cost, reservations, routeJson);
+    }
+
+    private static RoomBudgetSummary? SummarizeBudget(RunCostSummary? cost, IReadOnlyList<BudgetLedgerRow> reservations, string? routeJson)
+    {
+        var routeCap = string.IsNullOrWhiteSpace(routeJson) ? null : TryReadRoute(routeJson)?.Caps.MaxCostUsd;
+        var ledgerCaps = reservations.Select(row => row.CapUsd).OfType<decimal>().Distinct().ToList();
+        var cap = routeCap ?? (ledgerCaps.Count == 1 ? ledgerCaps[0] : null);
+        var committedRows = reservations.Where(row => row.State is not BudgetReservationStates.Released and not BudgetReservationStates.Expired).ToList();
+        var unresolved = committedRows.Count(row => row.SettledUsd is null && row.State is BudgetReservationStates.Reserved or BudgetReservationStates.InFlight or BudgetReservationStates.Indeterminate or BudgetReservationStates.Reconciled);
+        var hasCostEvidence = cost is { } value && (value.CountedRuns > 0 || value.BrainPlaneUsd is not null || value.UnknownBrainCalls > 0);
+
+        if (!hasCostEvidence && reservations.Count == 0 && cap is null) return null;
+
+        return new RoomBudgetSummary
+        {
+            InputTokens = cost?.SummedInputTokens ?? 0, OutputTokens = cost?.SummedOutputTokens ?? 0, AgentExecutionUsd = cost?.EstimatedCostUsd,
+            BrainPlaneUsd = cost?.BrainPlaneUsd, TotalUsd = cost?.TotalUsd, UnknownAgentRuns = cost?.UnknownCostRuns ?? 0,
+            UnknownBrainCalls = cost?.UnknownBrainCalls ?? 0, CommittedUsd = reservations.Count == 0 ? null : committedRows.Sum(row => row.SettledUsd ?? row.ReservedUsd),
+            CapUsd = cap, UnresolvedClaims = unresolved,
+        };
+    }
 
     /// <summary>
     /// The run's effective network posture, read from the two columns that record it — the launch-stamped route

@@ -429,18 +429,21 @@ public class ModelPricingUnderCapFlowTests : IDisposable
         await SeedTerminalAgentAsync(teamId, runId, "claude-opus-4-8", input: 1_000_000, output: 0);            // agent lane: $5
         await SeedInteractionAsync(runId, "supervisor.decision", "claude-opus-4-8", 400_000, 0);               // brain lane: $2
         await SeedInteractionAsync(runId, "critic.review", "claude-sonnet-4-6", 1_000_000, 0);                 // brain lane: $3
+        await SeedInteractionAsync(runId, "acceptance.grade", "future-model", 100_000, 10_000);                // explicitly unpriced
 
         using var scope = _fixture.BeginScope();
         var rollup = await scope.Resolve<ITeamCostService>().ComputeRollupAsync(teamId, since: null, CancellationToken.None);
 
         rollup.EstimatedCostUsd.ShouldBe(5m, "the pre-existing number keeps its EXACT prior meaning — agent execution only");
         rollup.BrainPlaneUsd.ShouldBe(5m, "the supervisor decision + the critic review, priced by the SAME pricer");
-        rollup.TotalUsd.ShouldBe(10m, "what the team actually paid");
+        rollup.TotalUsd.ShouldBe(10m, "the known priced total across both lanes");
+        rollup.UnknownBrainCalls.ShouldBe(1, "the known total stays visibly partial when a brain-plane call cannot be priced");
 
         var run = rollup.Runs.Single(r => r.WorkflowRunId == runId);
         run.EstimatedCostUsd.ShouldBe(5m);
         run.BrainPlaneUsd.ShouldBe(5m);
         run.TotalUsd.ShouldBe(10m);
+        run.UnknownBrainCalls.ShouldBe(1);
     }
 
     [Fact]

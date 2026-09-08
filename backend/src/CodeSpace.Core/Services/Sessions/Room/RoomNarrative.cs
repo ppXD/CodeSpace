@@ -1,3 +1,4 @@
+using System.Globalization;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
@@ -241,6 +242,7 @@ public static class RoomNarrative
 
         if (FilesStat(idPrefix, seq, facts, fileProducers, agentById) is { } files) blocks.Add(files);
         if (ToolsStat(idPrefix, seq, facts) is { } tools) blocks.Add(tools);
+        if (BudgetStat(idPrefix, seq, facts.Budget) is { } budget) blocks.Add(budget);
         if (NetworkStat(idPrefix, seq, facts) is { } network) blocks.Add(network);
         if (LogsStat($"{idPrefix}:stat:logs", seq, facts.AgentLogs, agentById.ToDictionary(pair => pair.Key, pair => UnitLabel(pair.Value))) is { } logs) blocks.Add(logs);
 
@@ -497,6 +499,40 @@ public static class RoomNarrative
     /// </summary>
     private static StatBlock? NetworkStat(string idPrefix, long seq, RoomTurnFacts f) =>
         f.NetworkPosture is not { Length: > 0 } posture ? null : new StatBlock { Id = $"{idPrefix}:stat:network", Seq = seq, Kind = "launch", Label = "Launch", Detail = posture };
+
+    internal static StatBlock? BudgetStat(string idPrefix, long seq, RoomBudgetSummary? summary)
+    {
+        if (summary is null) return null;
+
+        var partiallyPriced = summary.UnknownAgentRuns + summary.UnknownBrainCalls > 0;
+        var headline = new List<string>();
+        if (summary.TotalUsd is { } total) headline.Add($"{Usd(total)} estimated");
+        if (summary.CapUsd is { } cap) headline.Add($"{Usd(cap)} cap");
+        if (partiallyPriced) headline.Add("partially priced");
+        if (headline.Count == 0 && summary.CommittedUsd is { } committed) headline.Add($"{Usd(committed)} committed");
+
+        var items = new List<StatItem>();
+        if (summary.AgentExecutionUsd is not null || summary.UnknownAgentRuns > 0)
+            items.Add(new StatItem { Text = "Agent execution", Detail = SpendDetail(summary.AgentExecutionUsd, summary.UnknownAgentRuns, "run"), Tone = summary.UnknownAgentRuns > 0 ? NarrativeTone.Info : NarrativeTone.Success });
+        if (summary.BrainPlaneUsd is not null || summary.UnknownBrainCalls > 0)
+            items.Add(new StatItem { Text = "Supervisor / critic / grader", Detail = SpendDetail(summary.BrainPlaneUsd, summary.UnknownBrainCalls, "call"), Tone = summary.UnknownBrainCalls > 0 ? NarrativeTone.Info : NarrativeTone.Success });
+        if (summary.CommittedUsd is not null || summary.UnresolvedClaims > 0)
+            items.Add(new StatItem { Text = "Budget ledger", Detail = $"{Usd(summary.CommittedUsd ?? 0m)} committed{(summary.UnresolvedClaims > 0 ? $" · {Count(summary.UnresolvedClaims, "unresolved claim")}" : "")}", Tone = summary.UnresolvedClaims > 0 ? NarrativeTone.Error : NarrativeTone.Success });
+        if (summary.InputTokens + summary.OutputTokens > 0)
+            items.Add(new StatItem { Text = "Tokens", Detail = $"{summary.InputTokens.ToString("N0", CultureInfo.InvariantCulture)} input · {summary.OutputTokens.ToString("N0", CultureInfo.InvariantCulture)} output" });
+
+        return headline.Count == 0 && items.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:budget", Seq = seq, Kind = "budget", Label = "Budget", Detail = string.Join(" · ", headline), Items = items };
+    }
+
+    private static string SpendDetail(decimal? usd, int unknown, string noun)
+    {
+        var parts = new List<string>();
+        if (usd is { } known) parts.Add($"{Usd(known)} estimated");
+        if (unknown > 0) parts.Add(Count(unknown, $"unpriced {noun}"));
+        return string.Join(" · ", parts);
+    }
+
+    private static string Usd(decimal value) => $"${value.ToString(value >= 1m ? "0.00" : "0.0000", CultureInfo.InvariantCulture)}";
 
     /// <summary>One durable log-health row for the turn. The weakest agent wins the headline, while every agent with a recorded stream remains individually visible.</summary>
     internal static StatBlock? LogsStat(string id, long seq, IReadOnlyDictionary<Guid, RoomAgentLogSummary> summaries, IReadOnlyDictionary<Guid, string> labels)

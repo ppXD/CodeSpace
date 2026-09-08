@@ -29,8 +29,11 @@ public sealed record RunCostSummary
     /// <summary>D1 — the run's BRAIN-PLANE spend: its supervisor decision calls, critic reviews, and acceptance graders (the <c>interaction.completed</c> ledger rows), priced. Null when the run recorded no priceable in-process model call. Kept SEPARATE from <see cref="EstimatedCostUsd"/> so neither displayed number changes meaning.</summary>
     public decimal? BrainPlaneUsd { get; init; }
 
-    /// <summary>D1 — what the run ACTUALLY cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced. Before this existed, the bill showed the coding agents' dollars and silently dropped the brain's.</summary>
+    /// <summary>D1 — the run's known priced cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced. <see cref="UnknownCostRuns"/> and <see cref="UnknownBrainCalls"/> qualify it when the actual total is higher but unknowable.</summary>
     public decimal? TotalUsd { get; init; }
+
+    /// <summary>Brain-plane model calls whose recorded model/usage could not be priced. Keeps a partial known total from reading as the complete bill.</summary>
+    public int UnknownBrainCalls { get; init; }
 }
 
 /// <summary>
@@ -65,8 +68,11 @@ public sealed record TeamCostRollup
     /// <summary>D1 — the window's BRAIN-PLANE spend (supervisor decisions, critic reviews, acceptance graders), priced. Null when nothing in the window recorded a priceable in-process model call. Separate from <see cref="EstimatedCostUsd"/> so neither displayed number changes meaning.</summary>
     public decimal? BrainPlaneUsd { get; init; }
 
-    /// <summary>D1 — what the window ACTUALLY cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced.</summary>
+    /// <summary>D1 — the window's known priced cost: <see cref="EstimatedCostUsd"/> + <see cref="BrainPlaneUsd"/>. Null only when NEITHER lane could be priced; the unknown counters qualify any partial total.</summary>
     public decimal? TotalUsd { get; init; }
+
+    /// <summary>Brain-plane model calls in the window whose recorded model/usage could not be priced.</summary>
+    public int UnknownBrainCalls { get; init; }
 
     /// <summary>The per-run breakdown (most-recent first), possibly payload-bounded (see <see cref="Truncated"/>).</summary>
     public IReadOnlyList<RunCostSummary> Runs { get; init; } = Array.Empty<RunCostSummary>();
