@@ -75,8 +75,8 @@ public sealed class CriticObservedModelFlowTests(PostgresFixture fixture)
         var decisions = new List<(Guid Id, bool ProducerKnown)>();
         foreach (var producerKnown in new[] { true, false })
         {
-            var outcome = SupervisorOutcome.WriteModelUsage("{}", producerKnown ? new SupervisorModelUsage { Model = "producer-model" } : null);
-            outcome = SupervisorOutcome.WriteReviews(outcome, [new SupervisorDecisionReview { Approved = verdict.Approved, Rationale = verdict.Rationale, ReviewerModelId = verdict.ReviewerModel, Scope = "decision" }]);
+            var outcome = SupervisorOutcome.WriteModelUsage("{}", producerKnown ? new SupervisorModelUsage { Model = "producer-model", ObservedModel = "producer-model" } : null);
+            outcome = SupervisorOutcome.WriteReviews(outcome, [new SupervisorDecisionReview { Approved = verdict.Approved, Rationale = verdict.Rationale, ReviewerModelId = verdict.ReviewerModel, Independence = verdict.Independence, Scope = "decision" }]);
             var id = Guid.NewGuid();
             db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord { Id = id, TeamId = teamId, SupervisorRunId = runId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"critic-identity:{id:N}", InputHash = new string('0', 64), Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome });
             decisions.Add((id, producerKnown));
@@ -114,8 +114,8 @@ public sealed class CriticObservedModelFlowTests(PostgresFixture fixture)
 
         var runId = Guid.NewGuid();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var outcome = SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage("{}", new SupervisorModelUsage { Model = "producer-model" }),
-            [new SupervisorDecisionReview { Approved = verdict.Approved, Rationale = verdict.Rationale, ReviewerModelId = verdict.ReviewerModel, Scope = "decision" }]);
+        var outcome = SupervisorOutcome.WriteReviews(SupervisorOutcome.WriteModelUsage("{}", new SupervisorModelUsage { Model = "producer-model", ObservedModel = "producer-model" }),
+            [new SupervisorDecisionReview { Approved = verdict.Approved, Rationale = verdict.Rationale, ReviewerModelId = verdict.ReviewerModel, Independence = ReviewModelIndependence.DistinctBackingModel, Scope = "decision" }]);
         var decisionId = Guid.NewGuid();
         db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord { Id = decisionId, TeamId = teamId, SupervisorRunId = runId, DecisionKind = SupervisorDecisionKinds.Plan, IdempotencyKey = $"shared-critic-fake:{decisionId:N}", InputHash = new string('0', 64), Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome });
         await db.SaveChangesAsync();
@@ -124,6 +124,7 @@ public sealed class CriticObservedModelFlowTests(PostgresFixture fixture)
         var review = (await read.Resolve<DecisionReviewFactsSource>().GatherAsync(runId, teamId, CancellationToken.None))[DecisionReviewTimelineMap.EventId(decisionId, 0)].Review.ShouldNotBeNull();
         review.ReviewerModel.ShouldBe("critic-model", "the known identity the shared fake now reports reaches the journal facts a real run's Room card reads");
         review.SameModelAsProducer.ShouldBe(false, "a known, differently-named reviewer is known-and-different, not unknown");
+        review.Calibrated.ShouldBeTrue();
     }
 
     /// <summary>The shared fake's ONE deliberate unknown-identity flow (<see cref="DeterministicCriticLlmClient.UnknownIdentityMarker"/>) — proves the default-known-identity change above did not erase the unknown branch from the fake's own repertoire.</summary>

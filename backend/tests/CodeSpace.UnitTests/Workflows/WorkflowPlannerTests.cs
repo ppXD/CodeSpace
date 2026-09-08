@@ -730,6 +730,9 @@ public class WorkflowPlannerTests
 
         json.GetProperty("authoredByModel").GetString().ShouldBe("claude-x", "the stamp has to survive to the node output, which is the only place a gate can read it");
         JsonSerializer.SerializeToElement(plan, AgentJson.Options).TryGetProperty("authoredByModel", out _).ShouldBeFalse("null-omitted keeps an unstamped plan byte-identical to before");
+
+        var observed = plan with { AuthoredByObservedModel = "backing-model" };
+        JsonSerializer.SerializeToElement(observed, AgentJson.Options).GetProperty("authoredByObservedModel").GetString().ShouldBe("backing-model");
     }
 
     [Fact]

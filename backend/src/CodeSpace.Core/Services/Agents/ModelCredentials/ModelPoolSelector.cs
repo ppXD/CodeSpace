@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Completion;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 
@@ -288,9 +289,9 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // producer's MODEL — not merely its row. This is a CONFIGURED-vs-configured comparison (the pool's own model
         // id strings, decided before either call runs — there is no wire response yet to check): the same configured
         // model under a second credential is the producer reviewing itself, so excluding only the row counted that as
-        // independent. It is NOT alias-aware — a gateway that answers two configured names from the same backing
-        // model, or renames one over time, can still defeat this exclusion (frozen producer provenance / alias-aware
-        // exclusion is deferred). A one-model team must still get its critic, so an empty excluded pick falls back to
+        // independent. This compatibility overload is configured-name-only; the ReviewModelIdentity overload below
+        // adds current Bound observation evidence for alias-aware ranking. A one-model team must still get its critic,
+        // so an empty excluded pick falls back to
         // the full pool — which yields A ROW CARRYING the producer's model (not necessarily the producer's own row:
         // any credential backing that model serves, and the pool's total order decides which), independently
         // prompted. The verdict now NAMES the model that actually answered (the provider's own wire report, not this
@@ -304,6 +305,33 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         return await SelectBrainRowIdAsync(teamId, eligibleProviders, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<Guid?> SelectReviewerRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, ReviewModelIdentity producerModel, CancellationToken cancellationToken)
+    {
+        var producerModelId = producerModel.ModelCredentialModelId is { } rowId ? await ProducerModelIdAsync(teamId, rowId, cancellationToken).ConfigureAwait(false) : producerModel.ConfiguredModel;
+        var distinct = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, producerModelId, cancellationToken).ConfigureAwait(false);
+        var all = await OrderedBrainRowIdsAsync(teamId, eligibleProviders, excludeModelId: null, cancellationToken).ConfigureAwait(false);
+        var candidates = distinct.Concat(all).Distinct().ToList();
+
+        if (candidates.Count == 0) return null;
+        if (string.IsNullOrWhiteSpace(producerModel.ObservedModel)) return candidates[0];
+
+        var now = DateTimeOffset.UtcNow;
+        var observedRows = await _db.QualificationReceipt.AsNoTracking()
+            .Where(receipt => receipt.CandidateModelRowId != null && candidates.Contains(receipt.CandidateModelRowId.Value)
+                && receipt.ModelAttribution == ModelQualificationAttribution.Bound && receipt.ModelEvidenceVersion == ModelQualificationEvidence.CurrentVersion
+                && receipt.ModelObservedCellCount > 0 && receipt.ObservedModel != null && receipt.RevokedAt == null && receipt.EffectiveFrom <= now && receipt.ExpiresAt > now)
+            .Select(receipt => new { RowId = receipt.CandidateModelRowId!.Value, receipt.ObservedModel, receipt.EffectiveFrom, receipt.CohortJson, receipt.Id })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var latest = observedRows.Where(row => CohortIdentifiesTeam(row.CohortJson, teamId)).GroupBy(row => row.RowId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(row => row.EffectiveFrom).ThenByDescending(row => row.Id).First().ObservedModel);
+        var order = candidates.Select((candidate, index) => new { Candidate = candidate, Index = index }).ToList();
+
+        return order.OrderBy(item => ObservationRank(latest.GetValueOrDefault(item.Candidate), producerModel.ObservedModel)).ThenBy(item => item.Index).First().Candidate;
+    }
+
+    private static int ObservationRank(string? candidateObservedModel, string producerObservedModel) =>
+        string.IsNullOrWhiteSpace(candidateObservedModel) ? 1 : string.Equals(candidateObservedModel, producerObservedModel, StringComparison.OrdinalIgnoreCase) ? 2 : 0;
 
     /// <summary>The producer row's model NAME — what the reviewer pick excludes. Deliberately UNGUARDED by enabled/active: the producer already ran on this model, so its independence claim stands regardless of what happened to that row since. Null (a row of another team / gone) excludes nothing, which is the pre-existing pick.</summary>
     private async Task<string?> ProducerModelIdAsync(Guid teamId, Guid producerRowId, CancellationToken cancellationToken) =>
@@ -370,6 +398,19 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         {
             var cohort = JsonSerializer.Deserialize<LaunchCohortDescriptor>(cohortJson, AgentJson.Options);
             return cohort?.TeamId == teamId && cohort.Mode == mode && cohort.CompletionPolicyVersion == CompletionPolicy.CurrentVersion;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool CohortIdentifiesTeam(string cohortJson, Guid teamId)
+    {
+        try
+        {
+            var cohort = JsonSerializer.Deserialize<LaunchCohortDescriptor>(cohortJson, AgentJson.Options);
+            return cohort?.TeamId == teamId && cohort.CompletionPolicyVersion == CompletionPolicy.CurrentVersion;
         }
         catch (JsonException)
         {

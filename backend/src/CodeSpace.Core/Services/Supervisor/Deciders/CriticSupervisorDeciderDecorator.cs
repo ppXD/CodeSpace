@@ -134,6 +134,7 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
                 DraftAttribution = draft is null ? null : DescribeDraft(draft),
                 ViaAgent = agentReviewed,
                 ReviewerModelId = verdict.ReviewerModel,
+                Independence = verdict.Independence,
             },
         };
     }
@@ -174,7 +175,12 @@ public sealed class CriticSupervisorDeciderDecorator : ISupervisorDecider
         if (!verdict.Failed) return (verdict, true);
 
         return (await _critic.ReviewAsync(
-            new CriticRequest { Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? CriticArtifactKinds.WorkflowPlan : CriticArtifactKinds.SupervisorDecision, Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId },
+            new CriticRequest
+            {
+                Mode = mode, ArtifactKind = decision.Kind == SupervisorDecisionKinds.Plan ? CriticArtifactKinds.WorkflowPlan : CriticArtifactKinds.SupervisorDecision,
+                Artifact = Render(decision), Goal = ComposeYardstick(context), ProducerModelRowId = context.SupervisorModelId,
+                ProducerModel = new ReviewModelIdentity { ModelCredentialModelId = context.SupervisorModelId, ConfiguredModel = decision.Usage?.RequestedModel, ObservedModel = decision.Usage?.ObservedModel },
+            },
             context.TeamId, context.ReviewerModelId, cancellationToken).ConfigureAwait(false), false);
     }
 

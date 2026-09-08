@@ -2458,7 +2458,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             using var scope = _scopeFactory.CreateScope();
-            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId = run.Id, approved = verdict.Approved, reason, reviewerModel = verdict.ReviewerModel });
+            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId = run.Id, approved = verdict.Approved, reason, reviewerModel = verdict.ReviewerModel, independence = verdict.Independence.ToString(), calibrated = verdict.Calibrated });
 
             await scope.ServiceProvider.GetRequiredService<IRunRecordLogger>()
                 .RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.ReviewCompleted, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
@@ -2550,12 +2550,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (HasDiff(result))
-            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id };
+            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id, ProducerModel = ProducerModelOf(task, result) };
 
         var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
 
-        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id };
+        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id, ProducerModel = ProducerModelOf(task, result) };
     }
+
+    private static ReviewModelIdentity ProducerModelOf(AgentTask task, AgentRunResult result) => new() { ModelCredentialModelId = task.ModelCredentialModelId, ConfiguredModel = task.Model, ObservedModel = result.Model };
 
     /// <summary>The goal the critic judges an ANSWER against — the task goal plus the acceptance criteria the operator/planner authored, so "is this done?" is asked against the stated contract rather than against the prose alone. No contract ⇒ the goal verbatim.</summary>
     internal static string? ReviewGoal(AgentTask task)

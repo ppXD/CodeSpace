@@ -30,7 +30,7 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
             // The decision's OWN authoring model — the other half of the identity comparison. Read once per decision:
             // a DIFFERENT reported name is not, by itself, evidence of a second opinion (a gateway alias can make one
             // backing model answer under two names) — see SameModel below for what this comparison actually is.
-            var producerModel = SupervisorOutcome.ReadModelUsage(decision.OutcomeJson)?.Model;
+            var producerModel = SupervisorOutcome.ReadModelUsage(decision.OutcomeJson)?.ObservedModel;
 
             for (var i = 0; i < reviews.Count; i++)
             {
@@ -48,6 +48,7 @@ public sealed class DecisionReviewFactsSource : IJournalFactsSource
                             ReviewerHarness = null,
                             ReviewerModel = r.ReviewerModelId,
                             SameModelAsProducer = SameModel(r.ReviewerModelId, producerModel),
+                            Independence = r.Independence,
                             Scope = r.Scope,
                         },
                     };

@@ -33,6 +33,11 @@ public sealed record JournalReviewVerdict
     /// </summary>
     public bool? SameModelAsProducer { get; init; }
 
+    /// <summary>The trusted backing-model relation recorded by the evaluator. Only DistinctBackingModel supports an independently calibrated verdict.</summary>
+    public global::CodeSpace.Messages.Review.ReviewModelIndependence Independence { get; init; }
+
+    public bool Calibrated => Independence == global::CodeSpace.Messages.Review.ReviewModelIndependence.DistinctBackingModel;
+
     /// <summary>WHAT was reviewed — <see cref="OutputScope"/> (a produced change) or <see cref="PlanScope"/> (a plan verified against the repository).</summary>
     public required string Scope { get; init; }
 

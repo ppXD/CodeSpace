@@ -60,6 +60,19 @@ public class CriticPlannerDecoratorTests
     }
 
     [Fact]
+    public async Task The_planners_wire_observation_reaches_the_critic_as_producer_identity()
+    {
+        var producerRow = Guid.NewGuid();
+        var planner = new FakePlanner { Plan = FakePlanner.DefaultPlan with { AuthoredByModel = "configured-alias", AuthoredByObservedModel = "backing-model" } };
+        var critic = new FakeCritic { Verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = true } };
+        var decorator = new CriticPlannerDecorator(planner, critic, new NoAgentPlanReviewer());
+
+        await decorator.PlanAsync(new WorkflowPlanRequest { TaskText = "t", TeamId = Guid.NewGuid(), Review = ReviewMode.Gate, BrainModelId = producerRow }, CancellationToken.None);
+
+        critic.LastRequest!.ProducerModel.ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = producerRow, ConfiguredModel = "configured-alias", ObservedModel = "backing-model" });
+    }
+
+    [Fact]
     public async Task Gate_annotates_the_plan_risks_without_re_planning_or_discarding()
     {
         var planner = new FakePlanner();
@@ -239,12 +252,14 @@ public class CriticPlannerDecoratorTests
 
     private sealed class FakePlanner : IWorkflowPlanner
     {
+        public static PlannedWorkflow DefaultPlan => new() { Goal = "g", Subtasks = new[] { new PlannedSubtask { Id = "1", Title = "t", Instruction = "i" } } };
         public List<WorkflowPlanRequest> Requests { get; } = new();
+        public PlannedWorkflow Plan { get; set; } = DefaultPlan;
 
         public Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
-            return Task.FromResult(new PlannedWorkflow { Goal = "g", Subtasks = new[] { new PlannedSubtask { Id = "1", Title = "t", Instruction = "i" } } });
+            return Task.FromResult(Plan);
         }
     }
 

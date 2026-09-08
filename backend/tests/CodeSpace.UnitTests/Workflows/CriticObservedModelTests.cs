@@ -23,6 +23,28 @@ public sealed class CriticObservedModelTests
     private const string Key = "synthetic-review-credential";
     private const string Endpoint = "https://review.test/v1";
 
+    public static IEnumerable<object?[]> IndependenceCases()
+    {
+        yield return ["producer-model", "PRODUCER-MODEL", ReviewModelIndependence.SameBackingModel, false];
+        yield return ["producer-model", "independent-model", ReviewModelIndependence.DistinctBackingModel, true];
+        yield return ["producer-model", null, ReviewModelIndependence.Unknown, false];
+        yield return [null, "independent-model", ReviewModelIndependence.Unknown, false];
+    }
+
+    [Theory]
+    [MemberData(nameof(IndependenceCases))]
+    public async Task A_critic_verdict_calibrates_only_when_both_wire_identities_prove_distinct_backing_models(string? producer, string? reviewer, ReviewModelIndependence expected, bool calibrated)
+    {
+        var critic = new LlmStructuredCritic(new LLMClientRegistry([new CompatibilityClient(reviewer)]), new PinnedSelector("test"), NullLogger<LlmStructuredCritic>.Instance);
+        var request = Request() with { ProducerModel = new ReviewModelIdentity { ObservedModel = producer } };
+
+        var verdict = await critic.ReviewAsync(request, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None);
+
+        verdict.Failed.ShouldBeFalse();
+        verdict.Independence.ShouldBe(expected);
+        verdict.Calibrated.ShouldBe(calibrated, "configured aliases and missing observations cannot establish evaluator independence");
+    }
+
     public static IEnumerable<object?[]> WireModels()
     {
         foreach (var anthropic in new[] { false, true })

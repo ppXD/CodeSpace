@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using System.Text.Json;
@@ -304,6 +305,24 @@ public class ModelPoolSelectorFlowTests
 
         (await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, producer, CancellationToken.None))
             .ShouldBe(distinct, "a genuinely different model is still preferred over both same-model rows");
+    }
+
+    [Fact]
+    public async Task SelectReviewerRowId_prefers_current_observed_identity_evidence_over_configured_aliases()
+    {
+        var teamId = await SeedTeamAsync();
+        var cred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var producer = await AddModelReturningIdAsync(cred, "producer-alias");
+        var sameBackingAlias = await AddModelReturningIdAsync(cred, "aaa-reviewer-alias", isDefault: true);
+        var distinctBackingAlias = await AddModelReturningIdAsync(cred, "zzz-reviewer-alias");
+        var now = DateTimeOffset.UtcNow;
+        await AppendQualificationAsync(teamId, sameBackingAlias, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.9, "sha256:same", now.AddMinutes(-2), now.AddDays(7), "backing-a");
+        await AppendQualificationAsync(teamId, distinctBackingAlias, RunModeKeys.Supervisor, CapabilityKeys.GitBranch, 0.9, "sha256:distinct", now.AddMinutes(-1), now.AddDays(7), "backing-b");
+
+        using var scope = _fixture.BeginScope();
+        var picked = await scope.Resolve<IModelPoolSelector>().SelectReviewerRowIdAsync(teamId, new[] { "Anthropic" }, new ReviewModelIdentity { ModelCredentialModelId = producer, ConfiguredModel = "producer-alias", ObservedModel = "backing-a" }, CancellationToken.None);
+
+        picked.ShouldBe(distinctBackingAlias, "current bound wire evidence outranks a starred alias already known to resolve to the producer's backing model");
     }
 
     [Fact]
@@ -798,7 +817,7 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
     }
 
-    private async Task AppendQualificationAsync(Guid cohortTeamId, Guid rowId, string mode, string capabilityKey, double lowerBound, string suiteDigest, DateTimeOffset effectiveFrom, DateTimeOffset expiresAt)
+    private async Task AppendQualificationAsync(Guid cohortTeamId, Guid rowId, string mode, string capabilityKey, double lowerBound, string suiteDigest, DateTimeOffset effectiveFrom, DateTimeOffset expiresAt, string observedModel = "observed-model")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -807,7 +826,7 @@ public class ModelPoolSelectorFlowTests
         {
             Id = Guid.NewGuid(), Mode = mode, CapabilityKey = capabilityKey, SuiteDigest = suiteDigest,
             VerifierBundleJson = "{}", CohortJson = JsonSerializer.Serialize(cohort, AgentJson.Options), GrantedPerformance = PerformanceQualification.Shadow, MetricsJson = "{}",
-            ModelEvidenceVersion = ModelQualificationEvidence.CurrentVersion, CandidateModelRowId = rowId, ObservedModel = "observed-model",
+            ModelEvidenceVersion = ModelQualificationEvidence.CurrentVersion, CandidateModelRowId = rowId, ObservedModel = observedModel,
             ModelAttribution = ModelQualificationAttribution.Bound, ModelSampleSize = 20, ModelObservedCellCount = 20,
             ModelSolveRateLowerBound = lowerBound, ModelEvaluatorHealth = 1, EffectiveFrom = effectiveFrom, ExpiresAt = expiresAt,
         });

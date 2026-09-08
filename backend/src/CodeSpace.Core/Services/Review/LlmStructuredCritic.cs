@@ -61,7 +61,8 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
         // to the original output). Any failure of resolution / the brain call / the parse returns a Failed verdict.
         try
         {
-            var rowId = reviewerModelId ?? await ResolveAutoReviewerAsync(teamId, request.ProducerModelRowId, cancellationToken).ConfigureAwait(false);
+            var producerModel = request.ProducerModel ?? new ReviewModelIdentity { ModelCredentialModelId = request.ProducerModelRowId };
+            var rowId = reviewerModelId ?? await ResolveAutoReviewerAsync(teamId, producerModel, cancellationToken).ConfigureAwait(false);
 
             if (rowId is not { } id) return await SkippedAsync(request, "No reviewer model is available in the team's pool.").ConfigureAwait(false);
 
@@ -79,13 +80,23 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
             // Only the provider-reported identity can accompany a completed review. A missing observation stays unknown;
             // the selected alias and compatibility Model fallback cannot establish reviewer diversity.
-            return verdict.Failed ? await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false) : verdict with { ReviewerModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential) };
+            if (verdict.Failed) return await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false);
+
+            var reviewerModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential);
+            return verdict with { ReviewerModel = reviewerModel, Independence = IndependenceOf(request.ProducerModel?.ObservedModel, reviewerModel) };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return await SkippedAsync(request, Reason(ex)).ConfigureAwait(false);
         }
     }
+
+    internal static ReviewModelIndependence IndependenceOf(string? producerObservedModel, string? reviewerObservedModel) =>
+        string.IsNullOrWhiteSpace(producerObservedModel) || string.IsNullOrWhiteSpace(reviewerObservedModel)
+            ? ReviewModelIndependence.Unknown
+            : string.Equals(producerObservedModel, reviewerObservedModel, StringComparison.OrdinalIgnoreCase)
+                ? ReviewModelIndependence.SameBackingModel
+                : ReviewModelIndependence.DistinctBackingModel;
 
     /// <summary>
     /// The one exit for a review that did NOT happen: say so at Warning, leave a DURABLE user-visible beat on the run's
@@ -147,11 +158,11 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     }
 
     /// <summary>Auto-pick the reviewer via the distinct-first ladder: prefer a model DIFFERENT from the producer (a real second opinion), fall back to the producer's own model on a one-model pool — an independent call either way, never a silent no-review. Null only when NOTHING structured-eligible exists.</summary>
-    private async Task<Guid?> ResolveAutoReviewerAsync(Guid teamId, Guid? producerRowId, CancellationToken cancellationToken)
+    private async Task<Guid?> ResolveAutoReviewerAsync(Guid teamId, ReviewModelIdentity producerModel, CancellationToken cancellationToken)
     {
         var providers = _clientRegistry.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
-        return providers.Count == 0 ? null : await _modelSelector.SelectReviewerRowIdAsync(teamId, providers, producerRowId, cancellationToken).ConfigureAwait(false);
+        return providers.Count == 0 ? null : await _modelSelector.SelectReviewerRowIdAsync(teamId, providers, producerModel, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Project the schema-valid model review into the canonical <see cref="CriticVerdict"/>, FAIL-CLOSED per mode. Internal for direct unit testing.</summary>
