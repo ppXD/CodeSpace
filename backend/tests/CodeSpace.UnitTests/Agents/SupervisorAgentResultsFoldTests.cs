@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -49,6 +50,37 @@ public class SupervisorAgentResultsFoldTests
         compact.ChangedFiles.ShouldBe(new[] { "a.cs", "b.cs" });
         compact.ProducedBranch.ShouldBe("codespace/agent/x");
         compact.Error.ShouldBeNull();
+    }
+
+    [Fact]
+    public void ProjectCompact_keeps_configured_and_observed_model_identity_separate()
+    {
+        var modelRowId = Guid.NewGuid();
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = Messages.Enums.AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Model = "provider-observed-model",
+        }, AgentJson.Options);
+
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Succeeded", rowError: null, resultJson,
+            new ReviewModelIdentity { ModelCredentialModelId = modelRowId, ConfiguredModel = "configured-alias" });
+
+        compact.Model.ShouldBe("provider-observed-model", "pricing/display keeps preferring the actual result label");
+        compact.ModelCredentialModelId.ShouldBe(modelRowId);
+        compact.ConfiguredModel.ShouldBe("configured-alias");
+        compact.ObservedModel.ShouldBe("provider-observed-model", "only the CLI result is provider observation");
+    }
+
+    [Fact]
+    public void ProjectCompact_never_promotes_configured_model_to_observed_identity()
+    {
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Cancelled", rowError: "cancelled", resultJson: null,
+            new ReviewModelIdentity { ConfiguredModel = "configured-only" });
+
+        compact.Model.ShouldBe("configured-only", "the compatibility pricing label may fall back to routing intent");
+        compact.ConfiguredModel.ShouldBe("configured-only");
+        compact.ObservedModel.ShouldBeNull("an absent provider observation must remain unknown");
     }
 
     [Fact]

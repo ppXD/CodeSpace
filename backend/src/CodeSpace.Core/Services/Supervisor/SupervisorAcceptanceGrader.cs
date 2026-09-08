@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -28,7 +29,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v6";   // v6: restore/void is scoped to oracle files the run OWNS — an authored ProtectedPaths (minus any file this same check EXECUTES that the floor does not own) plus the operator floor's own program files — anchored on the same shared derivation the per-unit base-sha resolver uses; every other program file the command runs is the SUBJECT under test (or, when owned but absent at base, the candidate's own new check): reported in the evidence, named on a PASSING grade's detail, graded, never restored
+    public const string EvaluatorVersion = "supervisor-acceptance/v7";   // v7: delayed repository, patch, and captured-deliverable grades carry the producer's durable row/configured/observed identity into model-backed oracles; missing legacy evidence stays Unknown and is never inferred from the compatibility price label
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -60,8 +61,13 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, OracleAnchor.None, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken) =>
+        GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, Branch = branch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor }, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
+        var (repositoryId, teamId, branch, spec, timeoutSeconds, anchor) = (request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor);
+
         try
         {
             var clone = await _workspaceResolver.ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken, @ref: branch).ConfigureAwait(false)
@@ -82,7 +88,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(workspace.Directory, spec, teamId, timeoutSeconds, cancellationToken, protection).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(workspace.Directory, spec, teamId, timeoutSeconds, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -105,11 +111,15 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         if (!Directory.Exists(directory))
             return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
 
-        return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+        GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds }, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
+        var (agentRunId, teamId, spec, timeoutSeconds) = (request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "captured-" + Guid.NewGuid().ToString("N"));
 
         try
@@ -121,7 +131,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
                 return Failed(ISupervisorAcceptanceGrader.NoDeliverablesCaptured, GradeFailureClass.Genuine);
             }
 
-            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.ProducerModel), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -222,8 +232,12 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
         GradePatchAsync(repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, oracleFloorPrograms: null, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
+        GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, InlinePatch = inlinePatch, PatchArtifactId = patchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms }, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
+        var (repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, oracleFloorPrograms) = (request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, request.OracleFloorPrograms);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-" + Guid.NewGuid().ToString("N"));
 
         try
@@ -263,7 +277,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken, protection).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -292,7 +306,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
 
-            return await GradeWorkspaceAsync(directory, spec, teamId, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -628,15 +642,17 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         TimeoutSeconds = timeoutSeconds,
     };
 
-    private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken, OracleProtectionOutcome protection = default)
+    private async Task<BenchmarkGrade> GradeWorkspaceAsync(WorkspaceGradeRequest request, CancellationToken cancellationToken)
     {
+        var (directory, spec, teamId, timeoutSeconds, producerModel, protection) = request;
+
         if (spec.SetupCommand is { Count: > 0 } setupCommand)
         {
             var setupFailure = await RunSetupCommandAsync(setupCommand, directory, timeoutSeconds, cancellationToken).ConfigureAwait(false);
             if (setupFailure is not null) return setupFailure;
         }
 
-        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(GradingRunnerKind));
+        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(GradingRunnerKind)) with { ProducerModel = producerModel };
 
         var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -658,6 +674,8 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         return await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
     }
+
+    private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default);
 
     /// <summary>
     /// P3a-1: the oracle run's output becomes a durable CAS artifact — the id a receipt's <c>EvidenceRef</c> binds

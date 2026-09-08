@@ -80,6 +80,36 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
     }
 
     [Fact]
+    public async Task Rehydrate_persists_configured_and_observed_producer_identity_without_conflating_them()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var agentRunId = Guid.NewGuid();
+        var modelRowId = Guid.NewGuid();
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Model = "provider-observed-model" }, AgentJson.Options);
+
+        await SeedAgentRunAsync(runId, teamId, agentRunId, AgentRunStatus.Succeeded, rowError: null, resultJson);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var row = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+            row.TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "work", Harness = "codex-cli", Model = "configured-alias", ModelCredentialModelId = modelRowId }, AgentJson.Options);
+            await db.SaveChangesAsync();
+        }
+
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, SpawnOutcome(agentRunId));
+
+        var context = await RehydrateAsync(runId, teamId);
+        var compact = SupervisorOutcome.ReadAgentResults(context.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+
+        compact.Model.ShouldBe("provider-observed-model");
+        compact.ModelCredentialModelId.ShouldBe(modelRowId);
+        compact.ConfiguredModel.ShouldBe("configured-alias");
+        compact.ObservedModel.ShouldBe("provider-observed-model");
+    }
+
+    [Fact]
     public async Task Rehydrate_folds_a_multi_repo_agents_per_repo_results_into_the_compact()
     {
         // Resolver loop #379 S7-B — a MULTI-repo agent's per-repo outcomes (result_jsonb RepositoryResults) survive the

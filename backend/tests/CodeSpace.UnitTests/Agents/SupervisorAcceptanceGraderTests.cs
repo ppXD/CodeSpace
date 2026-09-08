@@ -963,11 +963,9 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
-        // v6: restore/void covers only oracle files the run OWNS — an authored ProtectedPaths, or a program file
-        // the OPERATOR FLOOR itself runs — and the per-unit base sha is anchored on that same shared derivation.
-        // Every other program file the command executes is the SUBJECT under test: graded on the candidate's own
-        // bytes, reported in the evidence, never restored.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v6");
+        // v7: delayed repository, patch, and captured-world grades preserve the candidate producer's trusted
+        // routing and observed identity for model-backed oracles; legacy missing evidence remains Unknown.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v7");
     }
 
     [Fact]

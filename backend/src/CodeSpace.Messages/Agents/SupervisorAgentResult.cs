@@ -90,8 +90,20 @@ public sealed record SupervisorAgentResult
     /// <summary>Output (completion) tokens the agent produced (0 when its harness reported none). See <see cref="InputTokens"/>.</summary>
     public int OutputTokens { get; init; }
 
-    /// <summary>The model the agent ran on (from its <c>AgentTask</c>), used to PRICE <see cref="InputTokens"/>/<see cref="OutputTokens"/>. Null/blank/unknown → unpriceable → the run contributes 0 to summed cost (fail-open).</summary>
+    /// <summary>The best available model label for pricing and display: the observed model when present, otherwise the configured model. This compatibility field is not proof of which model answered.</summary>
     public string? Model { get; init; }
+
+    /// <summary>The credentialed-model row selected for the producer. Routing provenance only; null on legacy or unpinned runs.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? ModelCredentialModelId { get; init; }
+
+    /// <summary>The model configured in the producer's durable task envelope. Routing intent only; never treated as provider observation.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ConfiguredModel { get; init; }
+
+    /// <summary>The model reported by the producer's actual CLI result. Null means unknown and is never backfilled from configuration.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ObservedModel { get; init; }
 
     /// <summary>
     /// The per-UNIT OBJECTIVE acceptance verdict (loopability slice 3): <c>true</c> = this unit's own planned-subtask

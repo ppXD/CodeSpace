@@ -12,6 +12,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Shouldly;
@@ -55,7 +56,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
         var agentId = Guid.NewGuid();
-        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "configured-agent", ObservedModel = "observed-agent" };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1") with { ModelCredentialModelId = producer.ModelCredentialModelId, ConfiguredModel = producer.ConfiguredModel, ObservedModel = producer.ObservedModel }));
 
         var grader = new RecordingGrader(new BenchmarkGrade { Passed = gradePasses, Detail = gradePasses ? "tests-passed" : "tests-failed-exit-1" });
         var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
@@ -65,6 +67,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         grader.LastCall.Value.Branch.ShouldBe("codespace/agent/s1", "the unit is graded against the branch IT produced");
         grader.LastCall.Value.Command.ShouldBe(Check, "the subtask's authored acceptance command is the graded argv");
         grader.LastCall.Value.Kind.ShouldBe(BenchmarkGradingKind.TestsPass, "a subtask with no authored oracle kind defaults to TestsPass");
+        grader.RepositoryProducerModels.Count.ShouldBe(1);
+        grader.RepositoryProducerModels.Single().ShouldBe(producer, "the delayed branch grade receives the unit's provider-observed producer identity");
 
         var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
         SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AcceptancePassed.ShouldBe(expectedVerdict, "the per-unit verdict folds onto the agent result");
@@ -575,7 +579,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         var agentId = Guid.NewGuid();
 
         await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
-        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: null)));
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "configured-agent", ObservedModel = "observed-agent" };
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: null) with { ModelCredentialModelId = producer.ModelCredentialModelId, ConfiguredModel = producer.ConfiguredModel, ObservedModel = producer.ObservedModel }));
         await SeedManifestAsync(teamId, agentId, repoId, branch: null, baseSha: "deadbeef", patchArtifactId: Guid.NewGuid());
 
         var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
@@ -586,6 +591,8 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         grader.PatchCalls[0].RepositoryId.ShouldBe(repoId);
         grader.PatchCalls[0].BaseSha.ShouldBe("deadbeef");
         grader.PatchCalls[0].Command.ShouldBe(Check);
+        grader.PatchProducerModels.Count.ShouldBe(1);
+        grader.PatchProducerModels.Single().ShouldBe(producer, "the delayed patch grade receives the unit's provider-observed producer identity");
 
         var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
         SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AcceptancePassed.ShouldBe(true);
@@ -1566,10 +1573,18 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         public RecordingGrader(Func<string, BenchmarkGrade> gradeByBranch) { _gradeByBranch = gradeByBranch; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
         public List<(Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)> Calls { get; } = new();
+        public List<ReviewModelIdentity?> RepositoryProducerModels { get; } = new();
         public int CallCount => Calls.Count;
         public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall => Calls.Count > 0 ? Calls[^1] : null;
 
         public List<(Guid RepositoryId, Guid TeamId, string BaseSha, Guid? PatchArtifactId, IReadOnlyList<string> Command)> PatchCalls { get; } = new();
+        public List<ReviewModelIdentity?> PatchProducerModels { get; } = new();
+
+        public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            RepositoryProducerModels.Add(request.ProducerModel);
+            return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
@@ -1583,6 +1598,12 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             PatchCalls.Add((repositoryId, teamId, baseSha, patchArtifactId, spec.Command));
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            PatchProducerModels.Add(request.ProducerModel);
+            return GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 
         public List<(Guid RepositoryId, string BaseSha, IReadOnlyList<string> Command)> BaseCalls { get; } = new();

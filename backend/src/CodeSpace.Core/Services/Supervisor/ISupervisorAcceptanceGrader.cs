@@ -18,6 +18,18 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public interface ISupervisorAcceptanceGrader
 {
+    /// <summary>Grade a repository request while preserving the candidate producer's trusted routing and observed identity for model-backed oracles.</summary>
+    Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor, cancellationToken);
+
+    /// <summary>Grade a captured-deliverable request while preserving the producer identity across the delayed fold.</summary>
+    Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        GradeCapturedAsync(request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds, cancellationToken);
+
+    /// <summary>Grade a patch request while preserving the producer identity across the delayed fold.</summary>
+    Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, request.OracleFloorPrograms, cancellationToken);
+
     /// <summary>
     /// Clone <paramref name="repositoryId"/> at <paramref name="branch"/> (team-scoped) and grade it with the oracle
     /// the spec names (<c>Kind</c> null ⇒ <c>TestsPass</c>) against the spec's command + kind-specific payload, capped

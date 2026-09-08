@@ -39,6 +39,17 @@ public sealed class SupervisorBranchlessStopGradeTests
     }
 
     [Fact]
+    public async Task A_branchless_delayed_grade_uses_the_folded_units_observed_producer_identity()
+    {
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "configured-agent", ObservedModel = "observed-agent" };
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent), producers: new ProducerFixture(producer, null));
+
+        grader.ProducerModels.ShouldBe(new[] { producer });
+    }
+
+    [Fact]
     public async Task A_failing_deliverable_kind_stop_records_the_failure_named_by_its_gate()
     {
         var grader = new CapturingGrader(new BenchmarkGrade { Passed = false, Detail = "missing: REPORT.md" });
@@ -73,6 +84,18 @@ public sealed class SupervisorBranchlessStopGradeTests
         judge.JudgedGoal.ShouldBe("compare the two languages", customMessage: "the run's goal frames the rubric, as it does for a file-backed judge");
         SupervisorOutcome.ReadAcceptanceGradePassed(outcome).ShouldBe(true);
         outcome.ShouldContain("judged the stop summary", customMessage: "the detail says out loud WHAT was judged — a summary grade must never be mistaken for a deliverable grade");
+    }
+
+    [Fact]
+    public async Task A_summary_judge_receives_the_stop_decisions_observed_producer_identity()
+    {
+        var producer = new ReviewModelIdentity { ModelCredentialModelId = Guid.NewGuid(), ConfiguredModel = "configured-supervisor", ObservedModel = "observed-supervisor" };
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = false, Detail = ISupervisorAcceptanceGrader.NoDeliverablesCaptured });
+        var judge = new StubRubricJudge(met: true);
+
+        await GradeAsync(grader, StopWith(BenchmarkGradingKind.LlmJudge, WithRubric), judge, producers: new ProducerFixture(null, producer));
+
+        judge.ProducerModel.ShouldBe(producer, "judge independence must compare against the model that authored the stop prose");
     }
 
     [Fact]
@@ -202,7 +225,7 @@ public sealed class SupervisorBranchlessStopGradeTests
     private static readonly AcceptanceRubric WithRubric = new() { Criteria = new[] { new AcceptanceRubricCriterion { Id = "sources", Requirement = "names at least one source" } } };
 
     /// <summary>Drive the stop grade directly with a branchless context (the fake resolver finds no published branch when the tape carries none).</summary>
-    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null)
+    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null, ProducerFixture? producers = null)
     {
         // Only the stop-grade path's own collaborators are real here: the grader under test, the branch resolver (the
         // source of the branchless world), the manifest store the oracle anchor reads, and the budget ledger the call
@@ -218,25 +241,33 @@ public sealed class SupervisorBranchlessStopGradeTests
             NodeId = "sup",
             Goal = "compare the two languages",
             AcceptanceChecks = acceptanceChecks,
-            PriorDecisions = new[] { SpawnDecisionWithUnit() },
+            PriorDecisions = new[] { SpawnDecisionWithUnit(producers?.Unit) },
+            SupervisorModelId = producers?.Stop?.ModelCredentialModelId,
         };
 
-        var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = stopPayloadJson };
+        var decision = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Stop,
+            PayloadJson = stopPayloadJson,
+            Usage = producers?.Stop is { } stop ? new SupervisorModelUsage { Model = stop.ConfiguredModel ?? stop.ObservedModel ?? "", RequestedModel = stop.ConfiguredModel, ObservedModel = stop.ObservedModel } : null,
+        };
         var execution = await service.ApplyStopAcceptanceGradeAsync(SupervisorExecution.Synchronous("{}"), context, decision, TeamId, CancellationToken.None);
 
         return execution.OutcomeJson ?? "";
     }
 
     /// <summary>A spawn whose outcome folded ONE agent result — the unit whose captured world the branchless gate grades.</summary>
-    private static SupervisorPriorDecision SpawnDecisionWithUnit() => new()
+    private static SupervisorPriorDecision SpawnDecisionWithUnit(ReviewModelIdentity? producer = null) => new()
     {
         Id = Guid.NewGuid(),
         Sequence = 1,
         Status = SupervisorDecisionStatus.Succeeded,
         DecisionKind = SupervisorDecisionKinds.Spawn,
         PayloadJson = """{"subtaskIds":["s1"]}""",
-        OutcomeJson = JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = UnitId, status = "Succeeded" } } }),
+        OutcomeJson = JsonSerializer.Serialize(new { agentResults = new[] { new { agentRunId = UnitId, status = "Succeeded", modelCredentialModelId = producer?.ModelCredentialModelId, configuredModel = producer?.ConfiguredModel, observedModel = producer?.ObservedModel } } }),
     };
+
+    private sealed record ProducerFixture(ReviewModelIdentity? Unit, ReviewModelIdentity? Stop);
 
     private static string StopWith(BenchmarkGradingKind? kind, AcceptanceRubric? rubric = null) => JsonSerializer.Serialize(new SupervisorStopPayload
     {
@@ -270,6 +301,13 @@ public sealed class SupervisorBranchlessStopGradeTests
         public CapturingGrader(Exception toThrow) { _throw = toThrow; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
         public List<Guid> CapturedCalls { get; } = new();
+        public List<ReviewModelIdentity?> ProducerModels { get; } = new();
+
+        public Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            ProducerModels.Add(request.ProducerModel);
+            return GradeCapturedAsync(request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
@@ -292,6 +330,13 @@ public sealed class SupervisorBranchlessStopGradeTests
         public bool Called { get; private set; }
         public string? JudgedArtifact { get; private set; }
         public string? JudgedGoal { get; private set; }
+        public ReviewModelIdentity? ProducerModel { get; private set; }
+
+        public Task<RubricJudgeVerdict> JudgeAsync(RubricJudgeRequest request, CancellationToken cancellationToken)
+        {
+            ProducerModel = request.ProducerModel;
+            return JudgeAsync(request.Rubric, request.Artifact, request.Goal, request.TeamId, cancellationToken);
+        }
 
         public Task<RubricJudgeVerdict> JudgeAsync(AcceptanceRubric rubric, string artifact, string? goal, Guid teamId, CancellationToken cancellationToken)
         {
