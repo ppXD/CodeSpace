@@ -8,17 +8,19 @@ namespace CodeSpace.Core.Services.Agents;
 
 public sealed class AgentRunRuntimeServices : IScopedDependency
 {
-    public AgentRunRuntimeServices(IAdmissionController admission, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, ICompletionContractStore contracts)
+    public AgentRunRuntimeServices(IAdmissionController admission, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, ICompletionContractStore contracts, Capture.INativeRecordPlane nativeRecords)
     {
         Admission = admission;
         Runners = runners;
         Offloader = offloader;
         Ledger = ledger;
         Contracts = contracts;
+        NativeRecords = nativeRecords;
     }
     public IAdmissionController Admission { get; }
     public ISandboxRunnerRegistry Runners { get; }
     public IArtifactOffloader Offloader { get; }
     public IToolCallLedgerService Ledger { get; }
     public ICompletionContractStore Contracts { get; }
+    public Capture.INativeRecordPlane NativeRecords { get; }
 }

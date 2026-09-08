@@ -66,7 +66,7 @@ public sealed class ThrowingAgentRunService : IAgentRunService
 
     public Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken) => _inner.CancelQueuedAsync(runId, reason, cancellationToken);
 
-    public Task<bool> CancelRunningAsync(Guid runId, string reason, CancellationToken cancellationToken) => _inner.CancelRunningAsync(runId, reason, cancellationToken);
+    public Task<bool> CancelRunningAsync(Guid runId, string reason, AgentRunAbandonCause cause, CancellationToken cancellationToken) => _inner.CancelRunningAsync(runId, reason, cause, cancellationToken);
 
     public Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) => _inner.GetAsync(runId, cancellationToken);
 

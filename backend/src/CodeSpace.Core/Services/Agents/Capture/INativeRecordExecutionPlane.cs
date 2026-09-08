@@ -54,11 +54,13 @@ public interface INativeRecordExecutionPlane
 
     /// <summary>
     /// Exactly <see cref="TerminalizeAsync"/> — close the live execution and any attempt still Running inside it,
-    /// fenced the same way — but for the RECONCILER's own give-up paths rather than an executor's own terminal.
-    /// Nothing here was ever going to observe this process's exit (the run has no live worker left at all), so the
-    /// closed attempt is stamped with the reconciler's own <paramref name="cause"/> instead of the executor's generic
-    /// "never observed" reason, which is what lets an operator (or a later "is anything live?" reader) tell a
-    /// genuinely dead process apart from one the reconciler simply could not wait for any longer.
+    /// fenced the same way — but for a close that is NOT the executor's own ordinary terminal: the reconciler
+    /// giving up on a run with no live worker left, or a deliberate cancel (an operator's kill, or the
+    /// reconciler's parent-terminal kill-wave) that best-effort terminates the process without waiting to
+    /// observe its exit. Either way nothing here read this process's actual outcome, so the closed attempt is
+    /// stamped with the caller's own <paramref name="cause"/> instead of the executor's generic "never observed"
+    /// reason, which is what lets an operator (or a later "is anything live?" reader) tell a genuinely dead
+    /// process apart from one nobody could wait for, or one that was deliberately killed.
     /// </summary>
     Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken);
 }
@@ -82,11 +84,21 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
     /// <summary>Reason stamped on an attempt the reconciler abandoned because the run's lease lapsed with no worker left to renew it and no probe could confirm either outcome in time.</summary>
     public const string ReconcilerAbandonedLeaseLapsedErrorCode = "capture.reconciler-abandoned-lease-lapsed";
 
+    /// <summary>Reason stamped on an attempt closed because an operator deliberately cancelled its run while it was actively Running.</summary>
+    public const string CancelOperatorCancelledErrorCode = "capture.cancel-operator-cancelled";
+
+    /// <summary>Reason stamped on an attempt closed because the reconciler's kill-wave backstop cancelled its run after the parent workflow run had already reached a terminal state.</summary>
+    public const string CancelParentTerminalErrorCode = "capture.cancel-parent-terminal";
+
     private const string ReconcilerAbandonedNoHandleMessage = "The reconciler abandoned this run with no durable process handle ever recorded, so it had no way to check whether a process was still alive.";
 
     private const string ReconcilerAbandonedProcessDeadMessage = "The reconciler abandoned this run after a liveness probe against its recorded handle positively confirmed the process was no longer running.";
 
     private const string ReconcilerAbandonedLeaseLapsedMessage = "The reconciler abandoned this run because its lease lapsed with no worker left to renew it, and no probe could confirm either a live or a dead process before giving up.";
+
+    private const string CancelOperatorCancelledMessage = "An operator cancelled this run while it was actively running, so its process was stopped rather than left to finish.";
+
+    private const string CancelParentTerminalMessage = "The reconciler's kill-wave backstop cancelled this run because its parent workflow run had already reached a terminal state before the per-agent CAS ran.";
 
     private const string ExecutionUnlaunchedMessage = "The harness execution was closed with no process ever appended, so nothing it could have exited from was recorded.";
 
@@ -140,6 +152,8 @@ public sealed partial class NativeRecordPlane : INativeRecordExecutionPlane
         AgentRunAbandonCause.NoHandle => (ReconcilerAbandonedNoHandleErrorCode, ReconcilerAbandonedNoHandleMessage),
         AgentRunAbandonCause.ProcessConfirmedDead => (ReconcilerAbandonedProcessDeadErrorCode, ReconcilerAbandonedProcessDeadMessage),
         AgentRunAbandonCause.LeaseLapsed => (ReconcilerAbandonedLeaseLapsedErrorCode, ReconcilerAbandonedLeaseLapsedMessage),
+        AgentRunAbandonCause.OperatorCancelled => (CancelOperatorCancelledErrorCode, CancelOperatorCancelledMessage),
+        AgentRunAbandonCause.ParentTerminal => (CancelParentTerminalErrorCode, CancelParentTerminalMessage),
         _ => throw new ArgumentOutOfRangeException(nameof(cause), cause, "Unrecognized agent-run abandon cause."),
     };
 

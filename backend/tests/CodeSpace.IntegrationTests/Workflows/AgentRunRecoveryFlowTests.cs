@@ -469,6 +469,62 @@ public class AgentRunRecoveryFlowTests : IDisposable
         attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedNoHandleErrorCode);
     }
 
+    // The sibling of the six tests above, for the kill-wave's own parent-terminal Running sweep
+    // (AgentRunReconcilerService.CancelOrphanRunningAsync): it too flips the Agent Run via CancelRunningAsync's CAS
+    // without touching its open native-record rows, so the same phantom-live-process defect applies to a cancelled
+    // orphan exactly as it does to an abandoned one — just stamped with a cause naming the parent-terminal sweep
+    // rather than a give-up.
+
+    [Fact]
+    public async Task Reconciler_kill_wave_cancel_of_a_running_orphan_closes_its_open_native_attempt()
+    {
+        var teamId = await SeedTeamAsync();
+        var parentRunId = await SeedTerminalWorkflowRunAsync(teamId, WorkflowRunStatus.Cancelled);
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.Zero, withRecentEvent: false, fenceEpoch: 1, workflowRunId: parentRunId);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).CancelledRunningUnderTerminalParent.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Cancelled, "the parent-terminal kill-wave's own terminal decision must not change");
+
+        var attempt = await db.WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+        attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "the kill-wave backstop must close the open attempt row it leaves behind, not leave it Running forever");
+        attempt.ExitCode.ShouldBeNull();
+        attempt.ErrorCode.ShouldBe(NativeRecordPlane.CancelParentTerminalErrorCode);
+
+        var execution = await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId);
+        execution.State.ShouldBe(HarnessExecutionState.Exited, "a launched process (attempt_count > 0) closes Exited, never Abandoned");
+        execution.TerminalAt.ShouldNotBeNull();
+    }
+
+    /// <summary>Seed a parent workflow run (request + run) in the given TERMINAL status — WorkflowId null (no Workflow row needed; the FK is optional). Mirrors AgentRunOrphanSweepFlowTests' own helper of the same shape.</summary>
+    private async Task<Guid> SeedTerminalWorkflowRunAsync(Guid teamId, WorkflowRunStatus status)
+    {
+        var requestId = Guid.NewGuid();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Manual, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed,
+            ReceivedAt = DateTimeOffset.UtcNow, VerifiedAt = DateTimeOffset.UtcNow, NormalizedAt = DateTimeOffset.UtcNow,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = runId, TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Manual,
+            Status = status, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return runId;
+    }
+
     /// <summary>Plant an unanswered agent-grain decision (an AwaitingApproval <c>decision.request</c> ledger row) for a run — what the completion contract checks at recovery.</summary>
     private async Task<Guid> SeedPendingDecisionAsync(Guid teamId, Guid runId)
     {
@@ -583,7 +639,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, TimeSpan livenessAgo, bool withRecentEvent, long fenceEpoch = 0)
+    private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, TimeSpan livenessAgo, bool withRecentEvent, long fenceEpoch = 0, Guid? workflowRunId = null)
     {
         var runId = Guid.NewGuid();
         var stamp = DateTimeOffset.UtcNow - livenessAgo;
@@ -593,7 +649,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         // Lease = last heartbeat + the window, so the reconciler's lease-gate reproduces the heartbeat behaviour:
         // a 20-min-old stamp → lapsed lease (reclaimable); a 10s-old stamp → still-valid lease (left alone).
-        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, FenceEpoch = fenceEpoch, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window });
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, FenceEpoch = fenceEpoch, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window, WorkflowRunId = workflowRunId });
 
         if (withRecentEvent)
             db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = AgentEventKind.CommandExecuted, Text = "still working" });

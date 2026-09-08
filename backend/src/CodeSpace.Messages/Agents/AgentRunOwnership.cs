@@ -19,10 +19,12 @@ public sealed record AgentRunReconciliationCandidate
 }
 
 /// <summary>
-/// Why the reconciler gave up on a Running Agent Run, rather than an executor's own ordinary terminal — the
-/// vocabulary a closed <c>WorkflowRunHarnessProcessAttempt</c>/<c>WorkflowRunHarnessExecution</c> row needs so an
-/// operator (or a later "is anything live?" reader) can tell a genuinely dead process from one nobody could
-/// reach in time, rather than reading every reconciler close as the same generic "never observed" outcome.
+/// Why a Running Agent Run's own native-record rows were closed by something other than the executor's ordinary
+/// terminal — the reconciler giving up, or a deliberate cancel — the vocabulary a closed
+/// <c>WorkflowRunHarnessProcessAttempt</c>/<c>WorkflowRunHarnessExecution</c> row needs so an operator (or a
+/// later "is anything live?" reader) can tell a genuinely dead process from one nobody could reach in time, or
+/// from one an operator or backstop deliberately killed, rather than reading every one of these closes as the
+/// same generic "never observed" outcome.
 /// </summary>
 public enum AgentRunAbandonCause
 {
@@ -34,4 +36,10 @@ public enum AgentRunAbandonCause
 
     /// <summary>The run's lease lapsed with no worker left to renew it, and no probe could confirm either a live or a dead process in time — the run's handle could not be probed, its process outlived every re-attach attempt, or its host never answered before the run's own deadline passed.</summary>
     LeaseLapsed,
+
+    /// <summary>An operator deliberately cancelled this run while it was actively Running — <c>CancelRunningAsync</c>'s own CAS, not the reconciler giving up.</summary>
+    OperatorCancelled,
+
+    /// <summary>The reconciler's kill-wave backstop cancelled this run because its parent workflow run had already reached a terminal state before the per-agent CAS ran.</summary>
+    ParentTerminal,
 }

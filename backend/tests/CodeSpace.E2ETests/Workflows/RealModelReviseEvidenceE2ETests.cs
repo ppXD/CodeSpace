@@ -163,7 +163,7 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
         var runs = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(run => run.TeamId == teamId).ToListAsync(cleanup.Token);
         foreach (var run in runs)
         {
-            await scope.Resolve<IAgentRunService>().CancelRunningAsync(run.Id, "live revision fixture teardown", cleanup.Token);
+            await scope.Resolve<IAgentRunService>().CancelRunningAsync(run.Id, "live revision fixture teardown", AgentRunAbandonCause.OperatorCancelled, cleanup.Token);
             if (run.RunnerHandleJson is not { } handleJson) continue;
             var handle = JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options).ShouldNotBeNull();
             await scope.Resolve<ISandboxRunnerRegistry>().Resolve(handle.Kind).ShouldBeAssignableTo<ISandboxDurableRunner>().TerminateAsync(handle, cleanup.Token);
