@@ -14,4 +14,7 @@ namespace CodeSpace.Core.Services.Review;
 public interface IRubricJudge
 {
     Task<RubricJudgeVerdict> JudgeAsync(AcceptanceRubric rubric, string artifact, string? goal, Guid teamId, CancellationToken cancellationToken);
+
+    Task<RubricJudgeVerdict> JudgeAsync(RubricJudgeRequest request, CancellationToken cancellationToken) =>
+        JudgeAsync(request.Rubric, request.Artifact, request.Goal, request.TeamId, cancellationToken);
 }

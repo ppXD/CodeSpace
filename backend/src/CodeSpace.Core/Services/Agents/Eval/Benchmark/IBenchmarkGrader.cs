@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
@@ -45,11 +46,14 @@ public sealed record BenchmarkGradingContext
     /// <summary>The sandbox runner the grader runs its grading command in — the SAME runner kind the agent ran on, so the test command executes in an environment consistent with the run.</summary>
     public required ISandboxRunner Runner { get; init; }
 
-    /// <summary>The team the graded run belongs to — what a model-backed grader (the rubric judge) resolves its model pool with. Null on the corpus path (<see cref="ForCommand"/>), whose graders are all model-free; the judge grader fails closed without it.</summary>
+    /// <summary>The team the graded run belongs to — what a model-backed grader resolves its model pool with. Null only for ad-hoc command contexts whose graders are model-free; the judge grader fails closed without it.</summary>
     public Guid? TeamId { get; init; }
 
     /// <summary>The FULL acceptance spec being graded (triad S7) — kind-specific payloads beyond the command ride here (the <c>LlmJudge</c> rubric, the <c>ArtifactSchema</c> schema). Null on the corpus path; spec-requiring graders fail closed without it.</summary>
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
+
+    /// <summary>The model-backed producer whose artifact is being graded. Only its harness/provider observation can establish judge independence.</summary>
+    public ReviewModelIdentity? ProducerModel { get; init; }
 
     /// <summary>
     /// Build a grading context for an AD-HOC command grade — a caller that holds only a test command + a prepared

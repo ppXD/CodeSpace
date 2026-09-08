@@ -2,8 +2,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents.Benchmark;
@@ -48,6 +50,16 @@ public class TaskLaunchBenchmarkCellRunnerTests
         var attempts = new[] { Attempt(firstModel), Attempt(gradedModel) };
 
         TaskLaunchBenchmarkCellRunner.ObservedModelOf(attempts).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_multi_branch_launch_only_claims_one_producer_wire_identity_when_every_observation_agrees()
+    {
+        var rowId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { ModelCredentialModelId = rowId, Model = "configured-alias" };
+
+        TaskLaunchBenchmarkCellRunner.ProducerModelOf(selection, [Attempt("wire-a"), Attempt("WIRE-A")]).ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = rowId, ConfiguredModel = "configured-alias", ObservedModel = "wire-a" });
+        TaskLaunchBenchmarkCellRunner.ProducerModelOf(selection, [Attempt("wire-a"), Attempt("wire-b")]).ObservedModel.ShouldBeNull("a union of work from different backing models has no single producer identity and cannot establish judge independence");
     }
 
     private static AgentRun Attempt(string? model) => new()

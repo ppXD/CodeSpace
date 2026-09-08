@@ -50,7 +50,7 @@ public sealed class LlmJudgeGrader : IBenchmarkGrader, ISingletonDependency
 
         if (artifact is null) return Fail(readError!);
 
-        var verdict = await JudgeAsync(rubric, artifact, context.Task.Goal, teamId, cancellationToken).ConfigureAwait(false);
+        var verdict = await JudgeAsync(new RubricJudgeRequest { Rubric = rubric, Artifact = artifact, Goal = context.Task.Goal, TeamId = teamId, ProducerModel = context.ProducerModel }, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed) return Fail($"grade-error: {verdict.FailureDetail}");
 
@@ -75,12 +75,12 @@ public sealed class LlmJudgeGrader : IBenchmarkGrader, ISingletonDependency
         return (builder.ToString(), null);
     }
 
-    private async Task<RubricJudgeVerdict> JudgeAsync(AcceptanceRubric rubric, string artifact, string? goal, Guid teamId, CancellationToken cancellationToken)
+    private async Task<RubricJudgeVerdict> JudgeAsync(RubricJudgeRequest request, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
 
         return await scope.ServiceProvider.GetRequiredService<IRubricJudge>()
-            .JudgeAsync(rubric, artifact, string.IsNullOrWhiteSpace(goal) ? null : goal, teamId, cancellationToken).ConfigureAwait(false);
+            .JudgeAsync(request with { Goal = string.IsNullOrWhiteSpace(request.Goal) ? null : request.Goal }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -103,15 +103,15 @@ public sealed class LlmJudgeGrader : IBenchmarkGrader, ISingletonDependency
             if (met.Contains(criterion.Id)) metWeight += weight;
         }
 
-        if (totalWeight <= 0) return Fail("no-effective-weight: every rubric criterion weighs zero");
+        if (totalWeight <= 0) return Fail("no-effective-weight: every rubric criterion weighs zero") with { EvaluatorIndependence = verdict.Independence };
 
         var threshold = Math.Clamp(rubric.Threshold ?? DefaultThreshold, double.Epsilon, 1.0);
         var score = metWeight / totalWeight;
         var passed = score + 1e-9 >= threshold;   // float-safe: 0.9 of thirds must not flunk on representation error
 
         return passed
-            ? new BenchmarkGrade { Passed = true, Detail = $"rubric {score:0.00} ≥ {threshold:0.00} — {met.Count}/{rubric.Criteria.Count} criteria met" }
-            : new BenchmarkGrade { Passed = false, Detail = RenderFailure(rubric, verdict, score, threshold) };
+            ? new BenchmarkGrade { Passed = true, Detail = $"rubric {score:0.00} ≥ {threshold:0.00} — {met.Count}/{rubric.Criteria.Count} criteria met", EvaluatorIndependence = verdict.Independence }
+            : new BenchmarkGrade { Passed = false, Detail = RenderFailure(rubric, verdict, score, threshold), EvaluatorIndependence = verdict.Independence };
     }
 
     /// <summary>The failing detail: the score line + every UNMET criterion with its requirement and the judge's evidence, bounded so the revise instruction stays readable.</summary>

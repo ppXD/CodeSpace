@@ -28,14 +28,18 @@ public sealed class LlmRubricJudge : IRubricJudge, IScopedDependency
     }
 
     public async Task<RubricJudgeVerdict> JudgeAsync(AcceptanceRubric rubric, string artifact, string? goal, Guid teamId, CancellationToken cancellationToken)
+        => await JudgeAsync(new RubricJudgeRequest { Rubric = rubric, Artifact = artifact, Goal = goal, TeamId = teamId }, cancellationToken).ConfigureAwait(false);
+
+    public async Task<RubricJudgeVerdict> JudgeAsync(RubricJudgeRequest request, CancellationToken cancellationToken)
     {
         try
         {
-            var rowId = rubric.JudgeModelId ?? await ResolveAutoJudgeAsync(teamId, cancellationToken).ConfigureAwait(false);
+            var producerModel = request.ProducerModel ?? new ReviewModelIdentity();
+            var rowId = request.Rubric.JudgeModelId ?? await ResolveAutoJudgeAsync(request.TeamId, producerModel, cancellationToken).ConfigureAwait(false);
 
             if (rowId is not { } id) return RubricJudgeVerdict.JudgeFailed("no-judge-model: the team's pool has no structured-eligible model");
 
-            var pick = await _modelSelector.ResolveByRowIdAsync(teamId, id, cancellationToken).ConfigureAwait(false);
+            var pick = await _modelSelector.ResolveByRowIdAsync(request.TeamId, id, cancellationToken).ConfigureAwait(false);
 
             if (pick == null) return RubricJudgeVerdict.JudgeFailed("no-judge-model: the judge model row is not available in the team's pool");
 
@@ -43,9 +47,12 @@ public sealed class LlmRubricJudge : IRubricJudge, IScopedDependency
 
             if (structured == null) return RubricJudgeVerdict.JudgeFailed("no-judge-model: no structured-output provider for the judge model");
 
-            var completion = await structured.CompleteStructuredAsync(BuildRequest(rubric, artifact, goal, pick), cancellationToken).ConfigureAwait(false);
+            var completion = await structured.CompleteStructuredAsync(BuildRequest(request.Rubric, request.Artifact, request.Goal, pick), cancellationToken).ConfigureAwait(false);
 
-            return Project(rubric, completion.Json);
+            var verdict = Project(request.Rubric, completion.Json);
+            if (verdict.Failed) return verdict;
+            var judgeModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential);
+            return verdict with { JudgeModel = judgeModel, Independence = LlmStructuredCritic.IndependenceOf(producerModel.ObservedModel, judgeModel) };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -53,12 +60,12 @@ public sealed class LlmRubricJudge : IRubricJudge, IScopedDependency
         }
     }
 
-    /// <summary>The judge auto-pick: the team's strongest structured-eligible brain (the same selector the critics use). Producer independence is moot here — the artifact's producer row isn't known at grade time, and the judge answers narrow evidence-backed questions rather than re-doing the work.</summary>
-    private async Task<Guid?> ResolveAutoJudgeAsync(Guid teamId, CancellationToken cancellationToken)
+    /// <summary>The judge auto-pick uses the critic selector's qualification-aware identity ranking. The post-call wire comparison remains authoritative because configured aliases can still converge on one backing model.</summary>
+    private async Task<Guid?> ResolveAutoJudgeAsync(Guid teamId, ReviewModelIdentity producerModel, CancellationToken cancellationToken)
     {
         var providers = _clientRegistry.All.OfType<IStructuredLLMClient>().Select(c => c.Provider).ToList();
 
-        return providers.Count == 0 ? null : await _modelSelector.SelectBrainRowIdAsync(teamId, providers, cancellationToken).ConfigureAwait(false);
+        return providers.Count == 0 ? null : await _modelSelector.SelectReviewerRowIdAsync(teamId, providers, producerModel, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Project the schema-valid judge output onto the canonical verdict, joined by criterion id and FAIL-CLOSED on an incomplete echo. Internal for direct unit testing.</summary>

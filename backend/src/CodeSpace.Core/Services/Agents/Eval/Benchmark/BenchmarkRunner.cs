@@ -4,6 +4,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
@@ -72,13 +73,19 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, context, cancellationToken).ConfigureAwait(false);
 
-        var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
+        var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, new BenchmarkTaskGradingRequest { Task = task, WorkspaceDirectory = workspaceDirectory, TeamId = teamId, ProducerModel = ProducerModelOf(selection, attempts) }, cancellationToken).ConfigureAwait(false);
 
         grade = ApplyMcpFabricRule(grade, mode, attempts[^1]);
 
         grade = await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
 
         return BuildResult(task, mode, attempts, grade, mcpFullCatalog);
+    }
+
+    internal static ReviewModelIdentity ProducerModelOf(BenchmarkAgentSelection? selection, IReadOnlyList<AgentRun> attempts)
+    {
+        var gradedModel = attempts[^1].ResultJson is { } json ? JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)?.Model : null;
+        return new ReviewModelIdentity { ModelCredentialModelId = selection?.ModelCredentialModelId, ConfiguredModel = selection?.Model, ObservedModel = ObservedModelOf(attempts, gradedModel) };
     }
 
     /// <summary>

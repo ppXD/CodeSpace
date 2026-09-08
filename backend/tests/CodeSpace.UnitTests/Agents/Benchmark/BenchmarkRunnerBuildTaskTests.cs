@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -325,6 +326,18 @@ public class BenchmarkRunnerBuildTaskTests
 
         BenchmarkRunner.BuildResult(Task(), BenchmarkMode.HarnessCli, new[] { died, graded }, PassingGrade, mcpFullCatalog: false)
             .ObservedModel.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("claude-first-wire", null, "claude-first-wire")]
+    [InlineData("claude-first-wire", "claude-graded-wire", "claude-graded-wire")]
+    public void The_judge_receives_the_identity_of_the_attempt_whose_tree_is_graded(string? firstModel, string? gradedModel, string expected)
+    {
+        var rowId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { ModelCredentialModelId = rowId, Model = "configured-alias" };
+        var attempts = new[] { Attempt(0, 0, 0, model: firstModel), Attempt(0, 0, 0, model: gradedModel) };
+
+        BenchmarkRunner.ProducerModelOf(selection, attempts).ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = rowId, ConfiguredModel = "configured-alias", ObservedModel = expected });
     }
 
     [Fact]

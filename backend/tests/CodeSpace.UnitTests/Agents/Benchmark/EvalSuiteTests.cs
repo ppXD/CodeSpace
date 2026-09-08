@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Review;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents.Benchmark;
@@ -125,6 +126,22 @@ public class EvalSuiteTests
 
         cells.Single(c => c is { TaskId: "t1", Mode: BenchmarkMode.HarnessCli }).State.ShouldBe(CorpusCellState.InfraUnknown);
         cells.Single(c => c is { TaskId: "t1", Mode: BenchmarkMode.HarnessCliWithMcp }).State.ShouldBe(CorpusCellState.Unsolved, "an unclassified genuine failure still counts against the candidate");
+    }
+
+    [Theory]
+    [InlineData(ReviewModelIndependence.Unknown)]
+    [InlineData(ReviewModelIndependence.SameBackingModel)]
+    public void An_uncalibrated_model_judge_verdict_cannot_enter_qualification_as_a_capability_verdict(ReviewModelIndependence independence)
+    {
+        var manifest = EvalSuite.ManifestFor(Corpus());
+        var result = Result("t1", BenchmarkMode.HarnessCli, passed: true) with
+        {
+            Grade = new BenchmarkGrade { Passed = true, Detail = "rubric 1.00", EvaluatorIndependence = independence },
+        };
+
+        var cells = EvalSuite.Classify(manifest, [result], []);
+
+        cells.Single(cell => cell is { TaskId: "t1", Mode: BenchmarkMode.HarnessCli }).State.ShouldBe(CorpusCellState.InfraUnknown, "self-judgment and unknown identity are evidence gaps, not model capability evidence");
     }
 
     [Fact]

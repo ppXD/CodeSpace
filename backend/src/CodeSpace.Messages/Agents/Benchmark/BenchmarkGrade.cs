@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using CodeSpace.Messages.Review;
 
 namespace CodeSpace.Messages.Agents.Benchmark;
 
@@ -69,4 +70,8 @@ public sealed record BenchmarkGrade
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OracleNote { get; init; }
+
+    /// <summary>For a model-backed oracle, whether provider-observed identities establish an independent evaluator. Null for deterministic graders.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ReviewModelIndependence? EvaluatorIndependence { get; init; }
 }

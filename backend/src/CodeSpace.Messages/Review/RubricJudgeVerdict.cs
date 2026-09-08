@@ -18,7 +18,25 @@ public sealed record RubricJudgeVerdict
     /// <summary>Why the judge failed (only when <see cref="Failed"/>).</summary>
     public string? FailureDetail { get; init; }
 
+    /// <summary>The bounded provider-observed judge identity. Null when the provider supplied no trusted observation; never inferred from the configured alias.</summary>
+    public string? JudgeModel { get; init; }
+
+    /// <summary>The provider-observed producer/judge relation. Only DistinctBackingModel is independently calibrated.</summary>
+    public ReviewModelIndependence Independence { get; init; }
+
+    public bool Calibrated => Independence == ReviewModelIndependence.DistinctBackingModel;
+
     public static RubricJudgeVerdict JudgeFailed(string reason) => new() { Failed = true, FailureDetail = reason };
+}
+
+/// <summary>The complete rubric-judge invocation, including producer identity evidence. One data object keeps the evaluator API extensible without accumulating loose parameters.</summary>
+public sealed record RubricJudgeRequest
+{
+    public required Agents.AcceptanceRubric Rubric { get; init; }
+    public required string Artifact { get; init; }
+    public string? Goal { get; init; }
+    public required Guid TeamId { get; init; }
+    public ReviewModelIdentity? ProducerModel { get; init; }
 }
 
 /// <summary>One criterion's binary verdict: met or not, with the judge's evidence quoted from the artifact.</summary>
