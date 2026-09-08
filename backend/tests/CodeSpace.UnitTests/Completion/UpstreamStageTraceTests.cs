@@ -191,12 +191,76 @@ public class UpstreamStageTraceTests
     }
 
     [Fact]
-    public void An_agent_kind_manifest_never_evidences_integrate()
+    public void A_single_accepted_frontier_unit_published_directly_evidences_integrate()
     {
-        // Per-agent pushes are fragments, not the candidate — only the run-level Integration row speaks for the cell.
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(),
+                new[] { AgentManifest(agentRunId, PublishState.Pushed, "codespace/agent/a") })
+            .ShouldContain(CompletionStage.Integrate,
+                "the completion authority must accept the same qualified ledger-direct delivery that I3 already lets terminalize");
+    }
+
+    [Fact]
+    public void An_orphan_agent_manifest_never_self_certifies_integrate()
+    {
         UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), Array.Empty<SupervisorPriorDecision>(), Array.Empty<AttemptProjection>(),
-                new[] { IntegrationManifest(PublishState.Pushed, "codespace/agent/a", PublishManifestKind.Agent) })
-            .ShouldNotContain(CompletionStage.Integrate);
+                new[] { AgentManifest(Guid.NewGuid(), PublishState.Pushed, "codespace/agent/a") })
+            .ShouldNotContain(CompletionStage.Integrate, "a manifest must belong to the accepted frontier on the durable supervisor tape");
+    }
+
+    [Fact]
+    public void One_published_unit_cannot_certify_a_multi_unit_frontier()
+    {
+        var published = Guid.NewGuid();
+        var unpublished = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(published, unpublished)) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(),
+                new[] { AgentManifest(published, PublishState.Pushed, "codespace/agent/a") })
+            .ShouldNotContain(CompletionStage.Integrate, "ledger-direct delivery is a single-unit terminal shape; a multi-unit wave still needs consolidation");
+    }
+
+    [Fact]
+    public void A_rejected_unit_cannot_self_certify_by_publishing_early()
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcomeWithAcceptance(agentRunId, acceptancePassed: false)) };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(),
+                new[] { AgentManifest(agentRunId, PublishState.Pushed, "codespace/agent/rejected") })
+            .ShouldNotContain(CompletionStage.Integrate, "publication happens before the objective grade folds; a rejected head is never delivery evidence");
+    }
+
+    [Fact]
+    public void A_partially_published_multi_repository_unit_does_not_evidence_integrate()
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new[] { Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)) };
+        var manifests = new[]
+        {
+            AgentManifest(agentRunId, PublishState.Pushed, "codespace/agent/api", "api"),
+            AgentManifest(agentRunId, PublishState.PatchOnly, branch: null, alias: "web"),
+        };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(), manifests)
+            .ShouldNotContain(CompletionStage.Integrate, "one repository's branch cannot hide an unpublished sibling from the all-or-nothing publication fold");
+    }
+
+    [Fact]
+    public void A_later_diagnosed_integration_failure_outranks_the_earlier_direct_push()
+    {
+        var agentRunId = Guid.NewGuid();
+        var tape = new[]
+        {
+            Decision(1, SupervisorDecisionKinds.Spawn, outcomeJson: SpawnOutcome(agentRunId)),
+            Decision(2, SupervisorDecisionKinds.Merge, outcomeJson: """{"integration":{"status":"Failed","reason":"tests failed"}}"""),
+        };
+
+        UpstreamStageTrace.Derive(Array.Empty<RequirementEnvelope>(), tape, Array.Empty<AttemptProjection>(),
+                new[] { AgentManifest(agentRunId, PublishState.Pushed, "codespace/agent/a") })
+            .ShouldNotContain(CompletionStage.Integrate, "a real later integration failure remains authoritative over an earlier contributor push");
     }
 
     [Fact]
@@ -394,6 +458,14 @@ public class UpstreamStageTraceTests
     private static string SpawnOutcome(params Guid[] agentRunIds) =>
         $$"""{"agentRunIds":[{{string.Join(",", agentRunIds.Select(id => $"\"{id}\""))}}],"agentCount":{{agentRunIds.Length}},"agentResults":[{{string.Join(",", agentRunIds.Select(id => $$"""{"agentRunId":"{{id}}","status":"Succeeded","changedFiles":["a.txt"]}"""))}}]}""";
 
+    private static string SpawnOutcomeWithAcceptance(Guid agentRunId, bool acceptancePassed) =>
+        JsonSerializer.Serialize(new
+        {
+            agentRunIds = new[] { agentRunId },
+            agentCount = 1,
+            agentResults = new[] { new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Succeeded", ChangedFiles = new[] { "a.txt" }, AcceptancePassed = acceptancePassed } },
+        }, AgentJson.Options);
+
     /// <summary>The delivery gate's OWN card recording a publish-policy skip, answered unless <paramref name="answer"/> is null — the durable record that a human was shown this repository's policy conflict and ruled on it.</summary>
     private static SupervisorPriorDecision AnsweredPolicySkipCard(long sequence, string? answer = "patch-only is deliberate")
     {
@@ -418,5 +490,11 @@ public class UpstreamStageTraceTests
     {
         Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = kind, WorkflowRunId = Guid.NewGuid(),
         RepositoryAlias = "primary", Branch = branch, PublishStateValue = state,
+    };
+
+    private static PublishManifest AgentManifest(Guid agentRunId, PublishState state, string? branch, string alias = "primary") => new()
+    {
+        Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, WorkflowRunId = Guid.NewGuid(), AgentRunId = agentRunId,
+        RepositoryAlias = alias, Branch = branch, PublishStateValue = state,
     };
 }

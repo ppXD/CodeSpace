@@ -13,8 +13,8 @@ namespace CodeSpace.Core.Services.Completion;
 /// Plan (an authorized plan on the tape), Execute (attempts projected), Integrate (integration work that
 /// LANDED — the tape's final reviewable head (<see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>), any
 /// EXECUTED merge that integrated a branch (<see cref="SupervisorOutcome.AnyMergeIntegratedABranch"/>), OR the
-/// run-level <c>Integration</c> manifest row a <c>git.integrate_run</c> step records, the plan-map lane's
-/// candidate fact — three ledgers, one cell; <see cref="NotApplicableIntegration"/> is the same cell's fourth
+/// run-level <c>Integration</c> manifest row a <c>git.integrate_run</c> step records, OR the supervisor's qualified
+/// single-unit ledger-direct publication — four ledgers, one cell; <see cref="NotApplicableIntegration"/> is the same cell's fifth
 /// reading, where the repository policy put the stage out of reach and nobody owes it).
 /// The completion-side six (Verify/Capture/Deliver/Handoff/Assess/Terminal) are enforced by
 /// <see cref="TerminalDecider"/>'s own conjuncts — 4 by trace + 6 by decider covers the ten-stage chain
@@ -47,7 +47,7 @@ public static class UpstreamStageTrace
     /// The Integrate cell's evidence ledgers: the supervisor tape's final reviewable head, OR an EXECUTED merge that
     /// integrated a branch at any point (<see cref="SupervisorOutcome.AnyMergeIntegratedABranch"/>), OR a PUSHED
     /// run-level Integration manifest row with its branch named (a PatchOnly/branch-less row attests no reviewable
-    /// candidate and stays silent).
+    /// candidate and stays silent), OR the same single accepted published frontier unit the stop gate recognizes.
     ///
     /// <para>The middle ledger is deliberately BARRIER-FREE while the first is not. The final-head readers answer
     /// "which head may we ship now", so they must go silent past fresh un-integrated work; this cell asks whether the
@@ -70,7 +70,8 @@ public static class UpstreamStageTrace
         return SupervisorOutcome.ReadFinalIntegratedBranch(publishable) is not null
             || SupervisorOutcome.ReadFinalRepositoryBranches(publishable).Count > 0
             || SupervisorOutcome.AnyMergeIntegratedABranch(publishable)
-            || manifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 });
+            || manifests.Any(m => m.Kind == PublishManifestKind.Integration && m.PublishStateValue == PublishState.Pushed && m.Branch is { Length: > 0 })
+            || SupervisorLedgerDirectPublication.Qualifies(decisions, SupervisorLedgerDirectPublication.FoldPublishedAgentRunIds(manifests));
     }
 
     /// <summary>

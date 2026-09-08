@@ -191,6 +191,23 @@ public class SupervisorPublishGateTests
     }
 
     [Fact]
+    public void One_published_contributor_never_satisfies_a_multi_unit_frontier()
+    {
+        var published = Guid.NewGuid();
+        var unpublished = Guid.NewGuid();
+        var results = new[]
+        {
+            new SupervisorAgentResult { AgentRunId = published, Status = "Succeeded", ChangedFiles = new[] { "a.txt" } },
+            new SupervisorAgentResult { AgentRunId = unpublished, Status = "Succeeded", ChangedFiles = new[] { "b.txt" } },
+        };
+        var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { published, unpublished }, agentCount = 2, agentResults = results }, AgentJson.Options);
+        var context = Context(published: new[] { published }, Decision(SupervisorDecisionKinds.Spawn, 1, outcome));
+
+        SupervisorPublishGate.Validate(context, StopDecision("done"))!.Kind.ShouldBe(SupervisorDecisionKinds.Merge,
+            "ledger-direct completion is the degenerate single-unit integration shape; one raw branch cannot stand for an unconsolidated multi-unit frontier");
+    }
+
+    [Fact]
     public void A_pushed_but_acceptance_rejected_contributor_never_satisfies_i3_via_the_published_shortcut()
     {
         // A raw push happens BEFORE the per-unit acceptance grade folds (AgentRunExecutor pushes at execution time;
