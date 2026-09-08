@@ -16,35 +16,35 @@
 
   <ItemGroup>
     <PackageReference Include="AlibabaCloud.OSS.V2" Version="0.2.0" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.*" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.*" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.*" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.6.0" />
     <PackageReference Include="NGitLab" Version="11.7.0" />
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.*" />
-    <PackageReference Include="EFCore.NamingConventions" Version="10.0.*" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
 
-    <PackageReference Include="Autofac" Version="8.*" />
-    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.*" />
+    <PackageReference Include="Autofac" Version="8.4.0" />
+    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.0.0" />
 
-    <PackageReference Include="MediatR" Version="12.*" />
-    <PackageReference Include="MediatR.Extensions.Autofac.DependencyInjection" Version="12.*" />
+    <PackageReference Include="MediatR" Version="12.5.0" />
+    <PackageReference Include="MediatR.Extensions.Autofac.DependencyInjection" Version="12.3.0" />
     <PackageReference Include="Octokit" Version="14.0.0" />
 
-    <PackageReference Include="Serilog" Version="4.*" />
+    <PackageReference Include="Serilog" Version="4.4.0" />
 
-    <PackageReference Include="Hangfire" Version="1.8.*" />
-    <PackageReference Include="Cronos" Version="0.8.*" />
+    <PackageReference Include="Hangfire" Version="1.8.25" />
+    <PackageReference Include="Cronos" Version="0.8.4" />
 
     <!-- Transitive-vuln pin: Hangfire 1.8 floors Newtonsoft.Json at 11.0.1, which has a high-severity
          deep-nesting DoS (GHSA-5crp-9r3c-p9vr). Hangfire runs on 13.x; pin the patched version (the rest
          of the tree already resolves 13.0.3). The codebase itself uses System.Text.Json, not Newtonsoft. -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
 
-    <PackageReference Include="dbup-core" Version="6.0.*" />
-    <PackageReference Include="dbup-postgresql" Version="6.0.*" />
+    <PackageReference Include="dbup-core" Version="6.0.15" />
+    <PackageReference Include="dbup-postgresql" Version="6.0.3" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.5.0" />
-    <PackageReference Include="YamlDotNet" Version="16.*" />
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
   </ItemGroup>
 
   <ItemGroup Label="DbUp">
