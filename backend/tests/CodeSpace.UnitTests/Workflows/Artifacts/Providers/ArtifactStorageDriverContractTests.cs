@@ -108,7 +108,7 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
 
         probe.Status.ShouldBe(ArtifactStorageProbeStatus.Available, probe.Error?.Message);
         Directory.Exists(Path.Combine(_root, "objects")).ShouldBeTrue("a root-level CreateNew probe does not qualify the driver's advertised conditional-create path");
-        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("a successful probe must remove its published object and staging alias");
+        ShouldContainOnlyRegistryCoordinationMetadata("a successful probe must remove its published object and staging alias");
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
         probe.Status.ShouldBe(ArtifactStorageProbeStatus.Unavailable);
         probe.Error.ShouldNotBeNull().Code.ShouldBe(ArtifactStorageErrorCode.Unsupported);
         probe.Error.ProviderCode.ShouldBe("errno:95");
-        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("a refused publication must clean its staging file and expose no final object");
+        ShouldContainOnlyRegistryCoordinationMetadata("a refused publication must clean its staging file and expose no final object");
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
 
         await Should.ThrowAsync<OperationCanceledException>(() => driver.ProbeAsync(new ArtifactStorageProbeRequest { VerifyWriteAccess = true }, cancellation.Token).AsTask());
 
-        Directory.GetFiles(_root, "*", SearchOption.AllDirectories).ShouldBeEmpty("cancellation after commit must not strand the probe's private object");
+        ShouldContainOnlyRegistryCoordinationMetadata("cancellation after commit must not strand the probe's private object");
     }
 
     public void Dispose()
@@ -180,6 +180,16 @@ public sealed class LocalRwxArtifactStorageDriverContractTests : ArtifactStorage
 
         var factory = new LocalRwxArtifactStorageDriverFactory();
         return await factory.CreateAsync(new ArtifactStorageDriverCreateRequest(Profile()), CancellationToken.None);
+    }
+
+    private void ShouldContainOnlyRegistryCoordinationMetadata(string reason)
+    {
+        var files = Directory.GetFiles(_root, "*", SearchOption.AllDirectories);
+        var registryLockPath = Path.Combine(_root, ".codespace", "staging-leases", "registry.lock");
+
+        files.Length.ShouldBe(1, $"{reason}; the single durable registry lock is the only permitted provider metadata");
+        files.Single().ShouldBe(registryLockPath, $"{reason}; no object or per-operation staging metadata may remain");
+        new FileInfo(registryLockPath).Length.ShouldBe(0, "the registry lock is coordination metadata and must never carry mutable state");
     }
 
     private StorageProfileSnapshot Profile(StorageSecretReference? secretReference = null) => new()
