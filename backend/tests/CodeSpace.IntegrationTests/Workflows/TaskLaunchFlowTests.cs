@@ -139,7 +139,7 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
-    public async Task Chat_launch_with_no_effort_auto_classifies_runs_and_rides_a_confirm_card_along()
+    public async Task Chat_auto_preview_requires_confirmation_then_an_explicit_choice_runs()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
 
@@ -151,9 +151,8 @@ public class TaskLaunchFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = true;
 
-        // No RequestedEffort ⇒ the auto path: the heuristic classifies (always below the confirm floor). PR4 does
-        // NOT block on confirm — the run STILL launches; the confirm card rides along on the result as the
-        // operator's escalation affordance.
+        // No RequestedEffort ⇒ the auto path: the heuristic classifies below the confirm floor. Preview that advice,
+        // then model the operator choosing its proposed tier explicitly before any execution is authorized.
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,
@@ -164,24 +163,25 @@ public class TaskLaunchFlowTests
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
         };
 
-        var result = await LaunchAsync(request);
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+        preview.Route.WasAutoClassified.ShouldBeTrue();
+        preview.Route.NeedsConfirmCard.ShouldBeTrue("the heuristic is always below the confirm floor");
+        preview.Route.Confirm.ShouldNotBeNull("the preview carries the generic choices the operator can authorize");
+        preview.Route.Confirm!.Options.ShouldNotBeEmpty();
 
-        // The run launched regardless of the confirm card (always-run).
+        var result = await LaunchAsync(request with { RequestedEffort = preview.Route.EffortMode, DeliverableShape = preview.Route.DeliverableShape });
         result.RunId.ShouldNotBe(Guid.Empty);
         result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
-
-        // The escalation affordance rides along for the UI.
-        result.Route.WasAutoClassified.ShouldBeTrue();
-        result.Route.NeedsConfirmCard.ShouldBeTrue("the heuristic is always below the confirm floor");
-        result.Route.Confirm.ShouldNotBeNull("the confirm card rides along on the auto path");
-        result.Route.Confirm!.Options.ShouldNotBeEmpty();
+        result.Route.WasAutoClassified.ShouldBeFalse("an explicit choice, rather than auto advice, authorized this run");
+        result.Route.NeedsConfirmCard.ShouldBeFalse();
 
         await RunEngineAsync(result.RunId);
         await jobClient.WaitForPendingAsync();
 
         var run = await LoadRunAsync(result.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "PR4 always runs even with a confirm card pending — the auto-classified task still walks to Success; the card is an affordance, not a gate");
+            customMessage: "the confirmed route must still walk through projection, engine, executor and the real fake-CLI process to Success");
     }
 
     [Fact]
