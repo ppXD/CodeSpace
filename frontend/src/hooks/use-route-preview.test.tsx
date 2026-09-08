@@ -46,6 +46,27 @@ describe("route snapshot references", () => {
     hook.unmount();
   });
 
+  it("invalidates posture with controls and never revives it from a stale response", async () => {
+    // Same invalidate-on-control-change / never-revive-from-stale shape as acceptanceCompatibility above — posture
+    // is just as input-dependent (arc3 item 3.2), so a changed control must drop it rather than show a posture the
+    // NEW input never asked about.
+    const onPosture: TaskRoutePreviewResult = { ...reply("on"), posture: { autonomy: "Trusted", networkOn: true, network: "Network: on (Trusted)", completionMode: "Shadow" } };
+    let resolveStale!: (value: TaskRoutePreviewResult) => void;
+    vi.mocked(tasksApi.routePreview).mockResolvedValueOnce(onPosture).mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve; })).mockResolvedValueOnce(reply("current-unknown"));
+    const hook = renderHook(({ value }) => useRoutePreview(value), { initialProps: { value: input } });
+    await settle();
+    expect(hook.result.current.posture?.network).toBe("Network: on (Trusted)");
+    hook.rerender({ value: { ...input, autonomy: "Standard" } });
+    expect(hook.result.current.posture).toBeNull();
+    await settle();
+    hook.rerender({ value: { ...input, effort: "standard" } });
+    await settle();
+    await act(async () => { resolveStale(onPosture); });
+    expect(hook.result.current.routeSnapshotId).toBe("current-unknown");
+    expect(hook.result.current.posture).toBeNull();
+    hook.unmount();
+  });
+
   it("refreshes an expired reference before treating the current route as answered", async () => {
     vi.mocked(tasksApi.routePreview).mockImplementationOnce(async () => reply("expired", 2_000)).mockImplementationOnce(async () => reply("renewed"));
     const hook = renderHook(() => useRoutePreview(input));

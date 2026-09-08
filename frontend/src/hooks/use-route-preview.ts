@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { tasksApi, type RoutePlan, type RoutePreviewInput, type TaskAcceptanceCompatibility } from "@/api/tasks";
+import { tasksApi, type RoutePlan, type RoutePreviewInput, type TaskAcceptanceCompatibility, type TaskRoutePosture } from "@/api/tasks";
 
 /** Fire after the goal has been stable this long — the classifier may be a model call; keystrokes must never race it. */
 export const ROUTE_PREVIEW_DEBOUNCE_MS = 700;
@@ -16,7 +16,7 @@ export const ROUTE_PREVIEW_MIN_GOAL_LENGTH = 3;
 /** Debounced routing preview bound to the full input. Responses are exposed only for the current key and
  * generation; an expiring reference triggers a refresh. A failed preview remains an explicit legacy-path fallback.
  * Routing advice is not consent. Actual launch authority is checked by the server on every request. */
-type PreviewReply = { key: string; generation: number; route: RoutePlan | null; deploymentAutonomyCeiling: string; routeSnapshotId?: string; refreshAfterMs?: number; launchAttempted?: boolean; acceptanceCompatibility?: TaskAcceptanceCompatibility | null };
+type PreviewReply = { key: string; generation: number; route: RoutePlan | null; deploymentAutonomyCeiling: string; routeSnapshotId?: string; refreshAfterMs?: number; launchAttempted?: boolean; acceptanceCompatibility?: TaskAcceptanceCompatibility | null; posture?: TaskRoutePosture | null };
 
 export function useRoutePreview(input: RoutePreviewInput | null) {
   const [{ reply, generation }, setState] = useState<{ reply: PreviewReply | null; generation: number }>({ reply: null, generation: 0 });
@@ -42,7 +42,7 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
         if (seq.current !== mySeq) return;
         const lifetime = Date.parse(result.expiresAt ?? "") - Date.parse(result.createdAt ?? "");
         const refreshAfterMs = Number.isFinite(lifetime) ? Math.max(0, lifetime - (performance.now() - startedAt)) : undefined;
-        setState(previous => ({ ...previous, reply: { key, generation, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "", routeSnapshotId: result.routeSnapshotId, refreshAfterMs, acceptanceCompatibility: result.acceptanceCompatibility } }));
+        setState(previous => ({ ...previous, reply: { key, generation, route: result.route ?? null, deploymentAutonomyCeiling: result.deploymentAutonomyCeiling ?? "", routeSnapshotId: result.routeSnapshotId, refreshAfterMs, acceptanceCompatibility: result.acceptanceCompatibility, posture: result.posture } }));
       } catch {
         // A failed preview is NOT a failed launch — record the miss (which counts as ANSWERED, so the gate
         // opens for ordinary launch) and leave compatibility unknown for mandatory command adoption.
@@ -69,6 +69,10 @@ export function useRoutePreview(input: RoutePreviewInput | null) {
     route: current?.route ?? null,
     routeSnapshotId: current?.routeSnapshotId,
     acceptanceCompatibility: current?.acceptanceCompatibility ?? null,
+    /** The posture a launch of the CURRENT input would take — network / autonomy / completion mode, all computed
+     *  server-side (arc3 item 3.2). Null until a reply for this exact input has landed; the composer then shows
+     *  its own "checking" wording rather than guessing. */
+    posture: current?.posture ?? null,
     /** Preserve an attempted reference through expiry until the server resolves whether it committed a run. */
     markLaunchAttempt: (snapshotId: string) => setState(previous => previous.reply?.routeSnapshotId === snapshotId ? { ...previous, reply: { ...previous.reply, launchAttempted: true } } : previous),
     /** Only a conclusive success or rejection ends this admission intent; transport failures keep the reference. */

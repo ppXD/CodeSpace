@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, describeNetwork, NETWORK_CONFINEMENT_CAVEAT, routeCeiling, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
-import fixture from "./networkPosture.fixture.json";
+import { buildLaunchInput, buildRoutePreviewInput, DEFAULT_ACCEPTANCE, routeCeiling, type LaunchFormState, type LaunchWorkspaceRepo } from "./launchInput";
 
 const repo = (over: Partial<LaunchWorkspaceRepo> = {}): LaunchWorkspaceRepo => ({
   repositoryId: "r1", branch: "", access: "write", alias: "repo", isPrimary: false, ...over,
@@ -484,58 +483,11 @@ describe("buildLaunchInput — network access (B5)", () => {
   });
 });
 
-describe("network posture wording — the cross-stack drift detector", () => {
-  // describeNetwork MIRRORS AgentAutonomyPolicy.DescribeNetwork: the composer states the posture before a run
-  // exists, so it cannot read the backend's sentence off the wire. Both stacks assert on this one committed
-  // fixture (backend: NetworkPostureWordingDriftTests), so neither wording can move without the other going red.
-  it.each(fixture.cases)("says $line for $effective under ceiling $ceiling / deployment $deployment", ({ effective, ceiling, deployment, line }) => {
-    expect(describeNetwork(effective, ceiling, deployment)).toBe(line);
-  });
-
-  it("covers the deployment-ceiling state — a fixture that skipped it would let that wording drift alone", () => {
-    expect(fixture.cases.some(c => c.line.startsWith("Network: clamped off by deployment ceiling ("))).toBe(true);
-  });
-
-  it("says nothing about a deployment ceiling it has not been told — the composer never guesses a bound", () => {
-    // "" is what the composer holds until a route preview has reported the ceiling (an explicitly-tiered launch asks
-    // for no preview). The sentence then states only what the route accounts for; the SERVER clamps either way.
-    expect(describeNetwork("Standard", "Trusted", "")).toBe(`Network: off (Standard)${NETWORK_CONFINEMENT_CAVEAT}`);
-    expect(describeNetwork("Standard", "Trusted")).toBe(`Network: off (Standard)${NETWORK_CONFINEMENT_CAVEAT}`);
-  });
-
-  it("qualifies EVERY off posture — the tier's Off is a permission, not a proven severed namespace", () => {
-    // Sandbox:RequireConfinement is committed off, so a host without bubblewrap runs unconfined; an unqualified
-    // "off" would be a claim this sentence cannot make.
-    for (const effective of ["Confined", "Standard"]) {
-      for (const ceiling of ["Confined", "Standard", "Trusted", "Unleashed"]) {
-        for (const deployment of ["", "Confined", "Standard", "Trusted", "Unleashed"])
-          expect(describeNetwork(effective, ceiling, deployment).endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
-      }
-    }
-  });
-
-  // Once a run's launch RECORDS what the sandbox actually did, the backend REPLACES the hedge with the truth
-  // (AgentAutonomyPolicy.DescribeNetwork's confinement branch). The composer can never produce those lines — it
-  // speaks before a run exists — so the frontend's obligation is the boundary, not the wording: it must keep
-  // hedging, and the resolved sentences must never be the hedge with something bolted on.
-  it("never predicts a resolved posture, and the resolved ones never keep the hedge", () => {
-    for (const c of fixture.confinementCases) {
-      expect(c.line.includes(NETWORK_CONFINEMENT_CAVEAT)).toBe(false);
-
-      // The composer, having no record, still says the hedged (or plain "on") thing for the same tier pair.
-      const predicted = describeNetwork(c.effective, c.ceiling);
-      if (predicted.includes("Network: on (")) continue;
-      expect(predicted.endsWith(NETWORK_CONFINEMENT_CAVEAT)).toBe(true);
-    }
-  });
-
-  it("pins an unconfined run as LOUD — an unenforced 'off' must not read like a severed one", () => {
-    const unconfined = fixture.confinementCases.filter((c) => c.confinement.outcome !== "Confined");
-
-    expect(unconfined.length).toBeGreaterThan(0);
-    for (const c of unconfined) expect(c.line).toContain("UNCONFINED");
-  });
-
+describe("routeCeiling — the composer's own input-gating ceiling", () => {
+  // The posture SENTENCE is now server-sourced (arc3 item 3.2 — see LaunchTaskModal's networkPosture), pinned by
+  // AgentAutonomyPolicyTests + NetworkPostureWordingDriftTests on the backend. routeCeiling survives here because
+  // the composer still needs it CLIENT-SIDE, synchronously, to decide which Permission tiers and which Network-access
+  // control state to render before any preview round-trip lands (reachablePerms, the armed-vs-muted Network row).
   it("resolves the composer's ceiling from BOTH bounds — the preset's and the operator's", () => {
     expect(routeCeiling("deep")).toBe("Trusted");
     expect(routeCeiling("standard")).toBe("Trusted");

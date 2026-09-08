@@ -164,34 +164,12 @@ export const routeCeiling = (effort: string, autonomyCeiling = "") =>
 export const effectiveAutonomy = (autonomy: string, effort: string, autonomyCeiling = "") =>
   lowerTier(autonomy, routeCeiling(effort, autonomyCeiling));
 
-/** Mirrors `AgentAutonomyPolicy.Derive`: `Trusted` is the lowest tier granted `AgentNetworkAccess.On`. */
-const tierHasNetwork = (tier: string) => tier === "Trusted" || tier === "Unleashed";
-
 /** The qualifier every "off" posture carries — mirrors `AgentAutonomyPolicy.ConfinementCaveat`. The tier's Network.Off
  *  becomes a severed namespace only where the runner rewrites the command through bubblewrap, and the setting that
- *  would refuse an unconfinable host (`Sandbox:RequireConfinement`) is committed OFF. */
+ *  would refuse an unconfinable host (`Sandbox:RequireConfinement`) is committed OFF. Still used by the static
+ *  Network-access option copy below; the run's own posture SENTENCE (arc3 item 3.2) now comes from the route
+ *  preview's `posture.network` — `AgentAutonomyPolicy.DescribeNetwork` computed server-side — not a FE mirror. */
 export const NETWORK_CONFINEMENT_CAVEAT = " — severed only where the sandbox confines";
-
-/**
- * The run's effective network posture in one sentence — a MIRROR of `AgentAutonomyPolicy.DescribeNetwork`, which
- * authors the same sentence for the run's journal. The composer states it BEFORE a run exists, so it cannot read the
- * backend's words off the wire and necessarily duplicates them; `networkPosture.fixture.json` is the committed
- * fixture BOTH stacks assert on, so neither wording can move without the other's test going red.
- *
- * `deploymentCeiling` is this host's own bound (`Sandbox:MaxAutonomy`), reported by the route preview. It is named
- * FIRST when it binds, because it is the one bound the operator cannot lift by choosing a different effort tier.
- * Blank means "not reported yet" — the sentence then says only what the route can account for, never a guess.
- */
-export const describeNetwork = (effective: string, ceiling: string, deploymentCeiling = "") => {
-  if (tierHasNetwork(effective)) return `Network: on (${effective})`;
-
-  if (deploymentCeiling && !tierHasNetwork(deploymentCeiling))
-    return `Network: clamped off by deployment ceiling (${deploymentCeiling})${NETWORK_CONFINEMENT_CAVEAT}`;
-
-  if (!tierHasNetwork(ceiling)) return `Network: clamped off by policy (ceiling ${ceiling})${NETWORK_CONFINEMENT_CAVEAT}`;
-
-  return `Network: off (${effective})${NETWORK_CONFINEMENT_CAVEAT}`;
-};
 
 /**
  * Map the Launch-modal form state to the wire `LaunchTaskInput`. The single source of truth for what the

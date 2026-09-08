@@ -234,6 +234,20 @@ export interface TaskAcceptanceCompatibility {
   detail: string;
 }
 
+/** Mirror of the backend `TaskRoutePosture` — the posture a launch of this exact input WOULD take, computed
+ *  server-side by the SAME derivations the launch itself calls. The Launch modal renders `network` verbatim
+ *  instead of deriving its own sentence (arc3 item 3.2 — "preview is not the run"). */
+export interface TaskRoutePosture {
+  /** The tier the run's agents WILL run at — the operator's request clamped to the route's ceiling. */
+  autonomy: string;
+  /** Whether `autonomy`'s own baseline actually grants network — decides whether `network`'s "on" consequence applies. */
+  networkOn: boolean;
+  /** The one-line network posture, e.g. "Network: off (Standard) — severed only where the sandbox confines". */
+  network: string;
+  /** The completion-enforcement mode a run of this exact input would be stamped with. */
+  completionMode: "Legacy" | "Shadow" | "Enforced";
+}
+
 export interface TaskRoutePreviewResult {
   acceptanceCompatibility?: TaskAcceptanceCompatibility | null;
   /** Optional for compatibility with an older server. Current previews always return the reference and database timestamps. */
@@ -245,6 +259,8 @@ export interface TaskRoutePreviewResult {
    *  and named separately so the composer's posture line can say WHICH bound denied the network: a route ceiling the
    *  operator can lift by picking another effort tier, or this one, which they cannot. */
   deploymentAutonomyCeiling: string;
+  /** The posture the launch would actually take — absent only from an older server that has not yet computed it. */
+  posture?: TaskRoutePosture | null;
 }
 
 /** Preview binds the entire launch intent; controls recorded here are not claims of enforcement. */
