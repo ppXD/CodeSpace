@@ -39,6 +39,8 @@ const OUTCOME_WORDS: Record<string, string> = {
   Forced: "Cut short",
   NeedsClarification: "Needs input",
   AcceptanceFailed: "Checks failed",
+  PartialFailure: "Partially complete",
+  AllBranchesFailed: "All branches failed",
 };
 
 /** True when the run finished but did not cleanly achieve its goal — the case a bare "Done" misrepresents. */

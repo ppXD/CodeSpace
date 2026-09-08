@@ -5,7 +5,6 @@ using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
-using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
@@ -169,7 +168,7 @@ public class MapFlowTests
     }
 
     [Fact]
-    public async Task Continue_on_error_records_a_failure_marker_and_the_map_survives()
+    public async Task Continue_on_error_with_no_surviving_branch_fails_the_run_honestly()
     {
         // errorHandling=continue: the element whose value is "boom" makes its branch terminal fail (a
         // FlakyTestNode that always fails); that element's result is a failure marker + failed counts it,
@@ -183,8 +182,10 @@ public class MapFlowTests
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
-        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-            .ShouldBe(WorkflowRunStatus.Success, "continue-on-error keeps the map alive despite a failing branch");
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure, "the map may collect every error, but an all-failed fan-out delivered no successful work");
+        run.Outcome.ShouldBe(WorkflowRunOutcomes.AllBranchesFailed);
+        run.Error.ShouldBe("All 2 branches failed in map 'map'.");
 
         var outputs = JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement;
         outputs.GetProperty("count").GetInt32().ShouldBe(2);

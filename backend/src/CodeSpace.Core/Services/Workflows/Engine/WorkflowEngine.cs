@@ -223,8 +223,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         try
         {
-            var walkerOutputs = await WalkGraphAsync(run, definition, scope, cancellationToken).ConfigureAwait(false);
-            await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Success, null, JsonSerializer.Serialize(walkerOutputs), DateTimeOffset.UtcNow - engineStartedAt, walkerOutputs.Count > 0), cancellationToken).ConfigureAwait(false);
+            var walk = await WalkGraphAsync(run, definition, scope, cancellationToken).ConfigureAwait(false);
+            var disposition = MapTerminalOutcome.Classify(walk.CompletedMaps);
+            var request = new TerminalCompletionRequest(disposition.Status, disposition.Error, JsonSerializer.Serialize(walk.Outputs), DateTimeOffset.UtcNow - engineStartedAt, walk.Outputs.Count > 0) { Outcome = disposition.Outcome };
+            await CompleteAndRecordAsync(run, request, cancellationToken).ConfigureAwait(false);
         }
         catch (NodeFailureException ex)
         {
@@ -297,7 +299,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task CompleteAndRecordAsync(WorkflowRun run, TerminalCompletionRequest request, CancellationToken cancellationToken)
     {
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        var completion = await CompleteRunAsync(run, request.Status, request.Error, request.OutputsJson, cancellationToken).ConfigureAwait(false);
+        var completion = await CompleteRunAsync(run, request, cancellationToken).ConfigureAwait(false);
         await RecordTerminalAsync(run.Id, completion, request.Duration, request.OutputsPresent, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
@@ -944,13 +946,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// A1 (wire honesty): the run's honest terminal WORD, re-derived from the LAST terminal stop decision on the
-    /// supervisor tape. <see cref="WorkflowRun.Status"/> answers "did the graph finish"; a bound-forced stop, a
-    /// model give-up, an abstention and a failed objective check all answer that with Success, so the word the
-    /// user is owed lives here. Null for a run with no supervisor tape (its status is already honest) and
-    /// best-effort by construction — a fault here must never strand a terminal that is otherwise ready to write.
+    /// The run's honest terminal word. A terminal supervisor decision owns the outcome when present; otherwise the
+    /// engine's durable-fact fold supplies the fallback, such as a partially successful map. Best-effort by
+    /// construction: a supervisor-tape read fault must never discard a known fallback or strand the terminal write.
     /// </summary>
-    private async Task<string?> HonestOutcomeAsync(WorkflowRun run, CancellationToken cancellationToken)
+    private async Task<string?> HonestOutcomeAsync(WorkflowRun run, string? fallback, CancellationToken cancellationToken)
     {
         try
         {
@@ -962,12 +962,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             return stop is not null && Supervisor.SupervisorDecisionStateMachine.IsTerminal(stop.Status)
                 ? Supervisor.SupervisorOutcome.HonestOutcome(stop.PayloadJson, stop.OutcomeJson)
-                : null;
+                : fallback;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Deriving the honest outcome for run {RunId} failed; the run terminalizes with no outcome word", run.Id);
-            return null;
+            _logger.LogWarning(ex, "Deriving the supervisor outcome for run {RunId} failed; terminalizing with the engine-derived fallback", run.Id);
+            return fallback;
         }
     }
 
@@ -1003,8 +1003,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return updated == 1;
     }
 
-    private async Task<RunCompletion> CompleteRunAsync(WorkflowRun run, WorkflowRunStatus status, string? error, string outputsJson, CancellationToken cancellationToken)
+    private async Task<RunCompletion> CompleteRunAsync(WorkflowRun run, TerminalCompletionRequest request, CancellationToken cancellationToken)
     {
+        var (status, error, outputsJson) = (request.Status, request.Error, request.OutputsJson);
         // The run's declared outputs are part of the terminal row, so they arrive WITH it — ONE value feeding
         // every writer below, and the tracked copy the post-terminal readers (the sub-workflow parent resume) see.
         // Assigned by the caller instead, they persisted on the tracked-save branches only: the arbitrated stamp
@@ -1047,7 +1048,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         (status, error) = (arbitration.Status, arbitration.Reason ?? error);
 
-        var outcome = await HonestOutcomeAsync(run, cancellationToken).ConfigureAwait(false);
+        var outcome = await HonestOutcomeAsync(run, request.Outcome, cancellationToken).ConfigureAwait(false);
 
         // P2 (v4.3, terminal CAS): an ARBITRATED terminal (watermarks present ⇔ the Enforced authority composed
         // over the ledger at version R) is stamped through ONE conditional UPDATE — status still Running AND the
@@ -1106,7 +1107,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     private sealed record RunCompletion(WorkflowRunStatus Status, string? Error);
-    private sealed record TerminalCompletionRequest(WorkflowRunStatus Status, string? Error, string OutputsJson, TimeSpan Duration, bool OutputsPresent);
+    private sealed record WorkflowWalkResult(IReadOnlyDictionary<string, JsonElement> Outputs, IReadOnlyList<MapCompletionFacts> CompletedMaps);
+    private sealed record TerminalCompletionRequest(WorkflowRunStatus Status, string? Error, string OutputsJson, TimeSpan Duration, bool OutputsPresent)
+    {
+        public string? Outcome { get; init; }
+    }
 
     /// <summary>Best-effort: free the active-rerun leases this fork holds (status-guarded CAS by fork id). NEVER
     /// throws out of completion — the reconciler's terminal-join sweep re-releases anything this misses.</summary>
@@ -1250,7 +1255,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     // Returns the workflow's outputs (filled by the last successful Terminal). Empty when
     // no Terminal ran or the Terminal had no Inputs declared.
-    private async Task<IReadOnlyDictionary<string, JsonElement>> WalkGraphAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, CancellationToken cancellationToken)
+    private async Task<WorkflowWalkResult> WalkGraphAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, CancellationToken cancellationToken)
     {
         // The top-level walk sees only top-level nodes (ParentId == null); a flow.loop's body
         // (ParentId == loopId) is owned by its container and walked per-iteration inside
@@ -1320,8 +1325,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // Success when the frontier empties.
         }
 
-        return state.WorkflowOutputs;
+        return new WorkflowWalkResult(state.WorkflowOutputs, CompletedMapFacts(state, scope));
     }
+
+    /// <summary>Reads only successfully settled map containers from the engine-owned scope. The reducer always writes both counters; missing or malformed values remain explicit so terminal classification fails closed.</summary>
+    private IReadOnlyList<MapCompletionFacts> CompletedMapFacts(WalkerState state, NodeRunScope scope)
+    {
+        var facts = new List<MapCompletionFacts>();
+
+        foreach (var node in state.NodeById.Values)
+        {
+            if (!state.Statuses.TryGetValue(node.Id, out var status) || status != NodeStatus.Success || _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind != NodeKind.Map) continue;
+
+            scope.Nodes.TryGetValue(node.Id, out var outputs);
+            facts.Add(new MapCompletionFacts(node.Id, ReadMapCounter(outputs, WorkflowOutputKeys.MapCount), ReadMapCounter(outputs, WorkflowOutputKeys.MapFailed)));
+        }
+
+        return facts;
+    }
+
+    private static int? ReadMapCounter(IReadOnlyDictionary<string, JsonElement>? outputs, string key) =>
+        outputs is not null && outputs.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var count) ? count : null;
 
     /// <summary>Drain the entire ready frontier into one wave (mutually-independent nodes), skipping any already fired in a prior wave and de-duping within the drain.</summary>
     private static List<NodeDefinition> DrainReadyWave(WalkerState state)

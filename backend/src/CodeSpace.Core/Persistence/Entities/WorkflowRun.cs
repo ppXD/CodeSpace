@@ -149,13 +149,12 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public DateTimeOffset? CompletionParkedAt { get; set; }
 
     /// <summary>
-    /// A1 (wire honesty): how the work actually ENDED, re-derived at the terminal write from the supervisor tape's
-    /// last stop decision — <c>SupervisorOutcome.HonestOutcome</c>, whose vocabulary is <c>SupervisorStopKind</c>
-    /// plus <c>AcceptanceFailed</c>. <see cref="Status"/> answers "did the graph finish"; this answers "did the
-    /// work get done", a question a bound-forced stop, a give-up, an abstention and a failed check all currently
-    /// answer as Success.
+    /// How the work actually ended, derived at the terminal write from durable execution facts. Supervisor runs read
+    /// their last terminal decision; map workflows fold their engine-owned branch counters. <see cref="Status"/>
+    /// answers whether the graph completed; this field records a degraded completion such as a failed objective check
+    /// or a partially successful fan-out.
     ///
-    /// <para>NULL for a non-supervisor run (no stop decision to classify), for a terminal landed outside
+    /// <para>NULL for a clean non-supervisor run, for a terminal landed outside
     /// <c>CompleteRunAsync</c> (bootstrap failure, operator cancel, reconciler abandon — already-honest statuses),
     /// and for every pre-deploy run. Every reader MUST treat NULL as "fall back to the status word".</para>
     ///

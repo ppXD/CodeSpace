@@ -246,7 +246,7 @@ public class RerunMapBranchFlowTests
     [Fact]
     public async Task Rerun_a_set_in_continue_mode_replays_the_unchosen_failed_siblings_without_re_firing_them()
     {
-        // Continue-mode map where every branch abandons → Success with failed=4. Rerun the SET {0,2}: the UNCHOSEN
+        // Continue-mode map where every branch abandons → terminal Failure with failed=4. Rerun the SET {0,2}: the UNCHOSEN
         // abandoned siblings 1/3 are REPLAYED (their failing node never re-fires — the #302 guard at set cardinality),
         // branches 0 AND 2 re-run (and abandon again), and the failed count is reconstructed over the mix.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -254,12 +254,12 @@ public class RerunMapBranchFlowTests
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, ContinueModeFailingMapDef(key));
         var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
-        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+        await AssertAllBranchesFailedAsync(originalRunId);
 
         var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 2 }, teamId, userId);
         await RunEngineAsync(rerunId);
 
-        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        await AssertAllBranchesFailedAsync(rerunId);
         FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "chosen branch 0 re-ran (and abandoned again)");
         FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "replayed abandoned sibling 1 MUST NOT re-fire its failing node");
         FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(2, "chosen branch 2 re-ran");
@@ -321,8 +321,8 @@ public class RerunMapBranchFlowTests
     [Fact]
     public async Task Rerun_map_branch_in_continue_mode_replays_a_failed_sibling_without_re_firing_it()
     {
-        // Continue-mode map where EVERY branch abandons (its body node fails, no error edge) → the map still
-        // completes Success with failed=N. Rerun branch 0: siblings 1/2/3's abandon-failure rows are REPLAYED
+        // Continue-mode map where EVERY branch abandons (its body node fails, no error edge) → the map terminates
+        // honestly as Failure with failed=N. Rerun branch 0: siblings 1/2/3's abandon-failure rows are REPLAYED
         // (their failing node never re-fires — the #302 guard, and the proof the seeder faithfully re-emits the
         // abandon body row), only branch 0 re-runs, and the failed count is reconstructed.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -330,13 +330,13 @@ public class RerunMapBranchFlowTests
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, ContinueModeFailingMapDef(key));
         var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
-        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success, "continue-mode map completes even with all branches abandoned");
+        await AssertAllBranchesFailedAsync(originalRunId);
         for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1);
 
         var rerunId = await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId);
         await RunEngineAsync(rerunId);
 
-        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        await AssertAllBranchesFailedAsync(rerunId);
         FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "the target branch re-ran (and abandoned again)");
         FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "a replayed abandoned sibling MUST NOT re-fire its failing node");
         FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(1);
@@ -1579,6 +1579,15 @@ public class RerunMapBranchFlowTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         run.Status.ShouldBe(expected, $"{because} (run {runId}; error={run.Error})");
+    }
+
+    private async Task AssertAllBranchesFailedAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure, $"an all-failed map must never claim success (run {runId}; error={run.Error})");
+        run.Outcome.ShouldBe(WorkflowRunOutcomes.AllBranchesFailed);
+        run.Error.ShouldContain("All 4 branches failed in map 'map'.");
     }
 
     private async Task<Core.Persistence.Entities.WorkflowRunNode> LoadCellAsync(Guid runId, string nodeId)

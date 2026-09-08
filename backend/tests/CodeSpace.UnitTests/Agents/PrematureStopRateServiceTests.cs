@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
@@ -59,6 +60,14 @@ public sealed class PrematureStopRateServiceTests
     public void A_plan_map_run_that_reached_Failure_is_Degraded()
     {
         var run = new PrematureStopRateService.RunRow(Guid.NewGuid(), WorkflowRunStatus.Failure, TaskProjectionKinds.PlanMapDynamic, DateTimeOffset.UtcNow);
+
+        PrematureStopRateService.Classify(run, NoStops).ShouldBe(RunOutcomeBucket.Degraded);
+    }
+
+    [Fact]
+    public void A_plan_map_run_that_delivered_partial_work_is_Degraded_despite_structural_Success()
+    {
+        var run = new PrematureStopRateService.RunRow(Guid.NewGuid(), WorkflowRunStatus.Success, TaskProjectionKinds.PlanMapDynamic, DateTimeOffset.UtcNow, WorkflowRunOutcomes.PartialFailure);
 
         PrematureStopRateService.Classify(run, NoStops).ShouldBe(RunOutcomeBucket.Degraded);
     }

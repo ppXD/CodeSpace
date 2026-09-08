@@ -155,6 +155,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
             run.Status.ShouldBe(WorkflowRunStatus.Success,
                 customMessage: $"one flunked item must not sink the whole fan-out — error: {run.Error}");
+            run.Outcome.ShouldBe(WorkflowRunOutcomes.PartialFailure, "the surviving branch is delivered, but the run must persist that the result is partial");
 
             var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
 
@@ -170,6 +171,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
             var outputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
 
+            outputs.GetProperty(WorkflowOutputKeys.MapCount).GetInt32().ShouldBe(2);
             outputs.GetProperty(WorkflowOutputKeys.MapFailed).GetInt32().ShouldBe(1, "the run row counts the failure beside the answer it qualifies");
 
             var integrationBranch = $"codespace/integration/{runId:N}";
