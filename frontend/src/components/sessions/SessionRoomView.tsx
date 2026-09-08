@@ -30,6 +30,7 @@ import type {
   RoomFilePreview,
   RoomFileIdentity,
   RoomPlanQuestion,
+  RoomPullRequestOpened,
   RoomTurnAttempt,
   RoomView,
   StatBlock,
@@ -50,7 +51,7 @@ import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { compactAge } from "@/components/workflows/cockpit";
 import { formatTokens } from "@/components/workflows/runActivity";
 import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
-import { useAlert, useConfirm } from "@/components/dialog";
+import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
 import { statusWord } from "@/lib/runStatus";
@@ -2100,7 +2101,7 @@ export function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen
   const cont = useContinueRun(turn.runId);
   const openPr = useOpenPullRequest(turn.runId);
   const confirm = useConfirm();
-  const alert = useAlert();
+  const [pullRequestOutcomes, setPullRequestOutcomes] = useState<ReadonlyArray<RoomPullRequestOpened> | null>(null);
   if (actions.length === 0) return null;
 
   const onRerun = async () => {
@@ -2119,16 +2120,11 @@ export function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen
     if (rerun) { const result = await replay.mutateAsync(turn.runId); onOpenRun(result.runId); }
   };
 
-  // Opens a real PR/MR for this turn's published branch(es) and jumps straight to it — mirrors PrCard's own
-  // "View PR" external-link behavior, since there's nothing more to confirm here (the branch already exists).
-  // A multi-repo run isolates each repo's failure (a missing credential scope, a rejected branch) into a Failed
-  // disposition rather than throwing — surface it rather than silently doing nothing on click.
+  // Keep every repository's result in the Room. Opening the first successful URL discarded later failed/skipped
+  // entries, turning a partial multi-repo publication into an apparently complete one.
   const onOpenPr = async () => {
     const result = await openPr.mutateAsync();
-    const url = result.pullRequests.find((p) => p.url)?.url;
-    if (url) { window.open(url, "_blank", "noreferrer"); return; }
-    const failure = result.pullRequests.find((p) => p.error);
-    if (failure) await alert({ title: "Couldn't open the pull request", message: failure.error, variant: "error" });
+    setPullRequestOutcomes(result.pullRequests);
   };
 
   // The doing-actions render first; the pane summon ("開啟Canvas") is always last (a quiet ghost). Stop is excluded — the
@@ -2139,18 +2135,41 @@ export function TurnActions({ actions, turn, onOpenCanvas, onOpenRun, canvasOpen
   const doing = actions.filter((a) => a.kind !== "OpenTrace" && a.kind !== "Stop" && a.enabled);
 
   return (
-    <div className="room-foot">
-      {doing.map((a) => {
-        if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
-        if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending} title="Try again from scratch — a fresh attempt; the current result is kept in the turn's history."><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
-        if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
-        if (a.kind === "OpenPullRequest") {
-          if (a.url) return <a key={a.kind} className="room-btn" href={a.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> {a.label}</a>;
-          return <button key={a.kind} className="room-btn" onClick={() => void onOpenPr()} disabled={openPr.isPending}><Sym n="pr" s={13} /> {openPr.isPending ? "Opening…" : a.label}</button>;
-        }
-        return null;
+    <>
+      <div className="room-foot">
+        {doing.map((a) => {
+          if (a.kind === "Continue") return <button key={a.kind} className="room-btn-primary" onClick={() => void onContinue()} disabled={cont.isPending} title="Resume this turn where it stopped — re-runs the interrupted step, keeping the work already done."><Sym n="play" s={12} /> {cont.isPending ? "Resuming…" : a.label}</button>;
+          if (a.kind === "RerunTurn") return <button key={a.kind} className="room-btn" onClick={() => void onRerun()} disabled={replay.isPending} title="Try again from scratch — a fresh attempt; the current result is kept in the turn's history."><Sym n="rerun" s={13} /> {replay.isPending ? "Rerunning…" : a.label}</button>;
+          if (a.kind === "RerunFromNode") return <button key={a.kind} className="room-btn" title={a.disabledReason ?? undefined}><Sym n="branch" s={13} /> {a.label}</button>;
+          if (a.kind === "OpenPullRequest") {
+            if (a.url) return <a key={a.kind} className="room-btn" href={a.url} target="_blank" rel="noreferrer"><Sym n="pr" s={13} /> {a.label}</a>;
+            return <button key={a.kind} className="room-btn" onClick={() => void onOpenPr()} disabled={openPr.isPending}><Sym n="pr" s={13} /> {openPr.isPending ? "Opening…" : a.label}</button>;
+          }
+          return null;
+        })}
+        {trace && onOpenCanvas && <button className="room-btn room-btn-canvas" data-open={canvasOpen || undefined} onClick={onOpenCanvas} title={canvasOpen ? "Close the canvas" : "Open this turn's execution graph in the canvas"}><span aria-hidden="true">⧉</span> Open canvas</button>}
+      </div>
+      {pullRequestOutcomes && <PullRequestOutcomes outcomes={pullRequestOutcomes} />}
+    </>
+  );
+}
+
+function PullRequestOutcomes({ outcomes }: { outcomes: ReadonlyArray<RoomPullRequestOpened> }) {
+  return (
+    <div className="room-pr-outcomes" role="status" aria-label="Pull request outcomes">
+      {outcomes.map((outcome, index) => {
+        const alias = outcome.alias || "repository";
+        const state = outcome.disposition === "AlreadyOpened" ? "Already open" : outcome.disposition;
+        const failed = outcome.disposition === "Failed";
+        return (
+          <div className="room-pr-outcome" key={`${outcome.repositoryId ?? alias}:${index}`}>
+            <span className="room-pr-outcome-alias">{alias}</span>
+            <span className={failed ? "room-danger" : outcome.disposition === "Skipped" ? "room-muted" : "room-good"}>{state}</span>
+            {outcome.url && <a href={outcome.url} target="_blank" rel="noreferrer" aria-label={`${alias} View PR`}>View PR{outcome.number != null ? ` #${outcome.number}` : ""}</a>}
+            {outcome.error && <span className={failed ? "room-danger" : "room-muted"}>{outcome.error}</span>}
+          </div>
+        );
       })}
-      {trace && onOpenCanvas && <button className="room-btn room-btn-canvas" data-open={canvasOpen || undefined} onClick={onOpenCanvas} title={canvasOpen ? "Close the canvas" : "Open this turn's execution graph in the canvas"}><span aria-hidden="true">⧉</span> Open canvas</button>}
     </div>
   );
 }

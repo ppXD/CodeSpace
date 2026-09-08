@@ -217,9 +217,23 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         if (branches.Count == 0) return new RoomPublishState { HasPublishedBranch = false };
 
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
-        var openedUrl = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })?.PullRequestUrl;
+        var opened = manifests
+            .Where(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })
+            .GroupBy(m => m.RepositoryAlias, StringComparer.Ordinal)
+            .Select(group => group.OrderByDescending(m => m.CreatedDate).First())
+            .ToList();
+        var openedAliases = opened.Select(m => m.RepositoryAlias).ToHashSet(StringComparer.Ordinal);
+        var urls = opened.Select(m => m.PullRequestUrl!).Distinct(StringComparer.Ordinal).ToList();
+        var hasUnopened = branches.Any(branch => !openedAliases.Contains(branch.Alias));
 
-        return new RoomPublishState { HasPublishedBranch = true, OpenedPullRequestUrl = openedUrl };
+        return new RoomPublishState
+        {
+            HasPublishedBranch = true,
+            PublishedBranchCount = branches.Count,
+            HasUnopenedPublishedBranch = hasUnopened,
+            OpenedPullRequestUrls = urls,
+            OpenedPullRequestUrl = !hasUnopened && urls.Count == 1 ? urls[0] : null,
+        };
     }
 
     private sealed record FocusRun(Guid RunId, Messages.Enums.WorkflowRunStatus Status, string? Error, DateTimeOffset CreatedDate, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, DateTimeOffset? CompletionParkedAt, bool IsLatest);
