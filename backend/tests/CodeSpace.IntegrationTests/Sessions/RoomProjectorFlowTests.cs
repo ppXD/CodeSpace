@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -1439,6 +1440,88 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_terminal_budget_row_refreshes_settlement_and_keeps_unknown_cost_visible()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Keep budget truth visible");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: null);
+        await SeedAgentNodeAsync(teamId, run, summary: "Known work.", changedFiles: Array.Empty<string>(), nodeId: "known", model: "claude-sonnet-4-6", tokenUsage: new AgentTokenUsage { InputTokens = 1_200, OutputTokens = 300 });
+        await SeedAgentNodeAsync(teamId, run, summary: "Unknown-priced work.", changedFiles: Array.Empty<string>(), nodeId: "unknown", model: "future-model", tokenUsage: new AgentTokenUsage { InputTokens = 10, OutputTokens = 5 });
+        await SeedRoutePlanAsync(run, effective: "Standard", ceiling: "Trusted", maxCostUsd: 1m);
+        var focusRun = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Next turn", resultSummary: "Done.");
+        var reservationId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunRecord.AddRange(
+                new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = run, RecordType = WorkflowRunRecordTypes.InteractionCompleted, OccurredAt = now, PayloadJson = JsonSerializer.Serialize(new { kind = "supervisor.decision", model = "claude-sonnet-4-6", usage = new { inputTokens = 1_000, outputTokens = 200 } }) },
+                new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = run, RecordType = WorkflowRunRecordTypes.InteractionCompleted, OccurredAt = now.AddMilliseconds(1), PayloadJson = JsonSerializer.Serialize(new { kind = "critic.review", model = "future-model", usage = new { inputTokens = 50, outputTokens = 10 } }) });
+            db.BudgetReservation.Add(new BudgetReservation
+            {
+                Id = reservationId, TeamId = teamId, WorkflowRunId = run, Kind = "model-call", ScopeKey = "call-1",
+                State = BudgetReservationStates.Reserved, ReservedUsd = 0.30m, CapUsd = 1m, PriceVersion = "test",
+                CreatedDate = now, LastModifiedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var before = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        var initial = before.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+        initial.Detail.ShouldBe("$0.0141 estimated · $1.00 cap · partially priced");
+        initial.Items.Single(item => item.Text == "Agent execution").Detail.ShouldBe("$0.0081 estimated · 1 unpriced run");
+        initial.Items.Single(item => item.Text == "Supervisor / critic / grader").Detail.ShouldBe("$0.0060 estimated · 1 unpriced call");
+        initial.Items.Single(item => item.Text == "Budget ledger").Tone.ShouldBe(NarrativeTone.Error);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var reservation = await db.BudgetReservation.SingleAsync(row => row.Id == reservationId);
+            reservation.State = BudgetReservationStates.Settled;
+            reservation.SettledUsd = 0.08m;
+            reservation.LastModifiedDate = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var after = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        var settled = after.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+        settled.Items.Single(item => item.Text == "Budget ledger").Detail.ShouldBe("$0.0800 committed");
+        settled.Items.Single(item => item.Text == "Budget ledger").Tone.ShouldBe(NarrativeTone.Success);
+    }
+
+    [Fact]
+    public async Task Cached_terminal_mutable_evidence_is_batched_once_for_a_long_session()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Bound long-session evidence reads");
+
+        for (var turn = 1; turn <= 3; turn++)
+        {
+            var runId = await SeedTurnAsync(teamId, sessionId, turn, $"Terminal {turn}", $"Done {turn}.");
+            var agentId = await SeedAgentNodeAsync(teamId, runId, $"Done {turn}.", Array.Empty<string>(), model: "claude-sonnet-4-6", tokenUsage: new AgentTokenUsage { InputTokens = turn, OutputTokens = turn });
+            await SeedMutableEvidenceAsync(teamId, runId, agentId);
+        }
+
+        var focusedRun = await SeedTurnAsync(teamId, sessionId, turn: 4, goal: "Current", resultSummary: "Current done.");
+        _ = await ProjectByRunAsync(focusedRun, teamId); // warm the immutable terminal-turn cache
+
+        var recorder = new MutableEvidenceReadRecorder();
+        using var scope = _fixture.BeginScope(builder =>
+        {
+            var options = new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(_fixture.ConnectionString)
+                .UseSnakeCaseNamingConvention().AddInterceptors(recorder).Options;
+            builder.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+        });
+
+        var room = await scope.Resolve<IRoomProjector>().ProjectByRunAsync(focusedRun, teamId, CancellationToken.None);
+
+        room.ShouldNotBeNull().Blocks.OfType<AssistantTurnBlock>().Count().ShouldBe(4);
+        recorder.LogStreamReads.ShouldBe(1, "all collapsed terminal turns share one log-health query");
+        recorder.BudgetReservationReads.ShouldBe(2, "all three collapsed turns share one reservation query, plus the focused turn's one fresh read");
+    }
+
+    [Fact]
     public async Task Tool_histogram_hydrates_a_bounded_offloaded_payload_and_tolerates_an_unavailable_one()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1539,7 +1622,7 @@ public class RoomProjectorFlowTests
         {
             Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = "",
             Harness = "codex-cli", Status = AgentRunStatus.Succeeded,
-            TaskJson = goal is null ? "{}" : JsonSerializer.Serialize(new { goal }, Json),
+            TaskJson = goal is null && model is null ? "{}" : JsonSerializer.Serialize(new AgentTask { Goal = goal ?? nodeId, Harness = "codex-cli", Model = model }, AgentJson.Options),
             ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });
@@ -1547,6 +1630,28 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
 
         return agentId;
+    }
+
+    private async Task SeedMutableEvidenceAsync(Guid teamId, Guid runId, Guid agentId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agent = await db.AgentRun.SingleAsync(row => row.Id == agentId);
+        agent.FenceEpoch = 1;
+        db.AgentRunLogStream.Add(new AgentRunLogStream
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentId, StreamKind = "stdout/v1", CaptureSource = "sandbox-spool/v1",
+            WorkerFenceEpoch = 1, CaptureSessionId = Guid.NewGuid(), State = AgentRunLogStreamState.Open, Revision = 1, SchemaVersion = 3,
+            CreatedAt = now, LastModifiedAt = now,
+        });
+        db.BudgetReservation.Add(new BudgetReservation
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Kind = "model-call", ScopeKey = "batch-test",
+            State = BudgetReservationStates.Settled, ReservedUsd = 0.01m, SettledUsd = 0.001m, CapUsd = 1m, PriceVersion = "test",
+            CreatedDate = now, LastModifiedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
     }
 
     [Fact]
@@ -1967,7 +2072,7 @@ public class RoomProjectorFlowTests
             .Single(b => b.Id.EndsWith(":stat:network", StringComparison.Ordinal)).Detail;
 
     /// <summary>Stamp the launch-time route provenance the posture sentence's tier + ceiling are read from.</summary>
-    private async Task SeedRoutePlanAsync(Guid runId, string effective, string ceiling)
+    private async Task SeedRoutePlanAsync(Guid runId, string effective, string ceiling, decimal? maxCostUsd = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -1975,7 +2080,7 @@ public class RoomProjectorFlowTests
         var plan = new RoutePlan
         {
             ProjectionKind = "task", EffectiveAutonomy = effective,
-            Caps = new RouteCaps { AutonomyCeiling = ceiling },
+            Caps = new RouteCaps { AutonomyCeiling = ceiling, MaxCostUsd = maxCostUsd },
         };
 
         await db.WorkflowRun.Where(r => r.Id == runId)
@@ -2412,6 +2517,19 @@ public class RoomProjectorFlowTests
         private void Record(DbCommand command)
         {
             if (command.CommandText.Contains("supervisor_decision", StringComparison.OrdinalIgnoreCase)) Reads++;
+        }
+    }
+
+    private sealed class MutableEvidenceReadRecorder : DbCommandInterceptor
+    {
+        public int LogStreamReads { get; private set; }
+        public int BudgetReservationReads { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("agent_run_log_stream", StringComparison.OrdinalIgnoreCase)) LogStreamReads++;
+            if (command.CommandText.Contains("budget_reservation", StringComparison.OrdinalIgnoreCase)) BudgetReservationReads++;
+            return ValueTask.FromResult(result);
         }
     }
 }

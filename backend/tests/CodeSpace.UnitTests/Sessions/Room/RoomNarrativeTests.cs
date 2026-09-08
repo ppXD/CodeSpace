@@ -645,6 +645,31 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void Budget_row_separates_priced_spend_from_unresolved_commitments_and_unknown_cost()
+    {
+        var facts = new RoomTurnFacts
+        {
+            Budget = new RoomBudgetSummary
+            {
+                InputTokens = 1_200, OutputTokens = 300, AgentExecutionUsd = 0.04m, BrainPlaneUsd = 0.01m, TotalUsd = 0.05m,
+                UnknownAgentRuns = 1, UnknownBrainCalls = 2, CommittedUsd = 0.30m, CapUsd = 1m, UnresolvedClaims = 1,
+            },
+        };
+
+        var narrative = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Running, facts: facts);
+        var budget = narrative.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+
+        budget.Detail.ShouldBe("$0.0500 estimated · $1.00 cap · partially priced");
+        budget.Items.Select(item => (item.Text, item.Detail, item.Tone)).ShouldBe(new[]
+        {
+            ("Agent execution", "$0.0400 estimated · 1 unpriced run", NarrativeTone.Info),
+            ("Supervisor / critic / grader", "$0.0100 estimated · 2 unpriced calls", NarrativeTone.Info),
+            ("Budget ledger", "$0.3000 committed · 1 unresolved claim", NarrativeTone.Error),
+            ("Tokens", "1,200 input · 300 output", (NarrativeTone?)null),
+        });
+    }
+
+    [Fact]
     public void Agent_cards_carry_their_own_files_and_the_final_answer_attributes_a_file_to_its_producer()
     {
         var a1 = Guid.NewGuid();

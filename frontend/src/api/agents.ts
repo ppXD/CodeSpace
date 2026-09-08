@@ -403,12 +403,14 @@ export interface RunScorecardTrend {
 export interface TeamCostRollup {
   totalInputTokens: number;
   totalOutputTokens: number;
-  /** The AGENT-EXECUTION lane only. Kept at its original meaning; read `totalUsd` for what the team actually paid. */
+  /** The AGENT-EXECUTION lane only. Kept at its original meaning; `totalUsd` combines both known priced lanes. */
   estimatedCostUsd: number | null;
   /** Supervisor decisions, critic reviews and acceptance graders — the in-process model calls. Null when none was priceable. */
   brainPlaneUsd?: number | null;
-  /** `estimatedCostUsd` + `brainPlaneUsd`. Null only when NEITHER lane could be priced. */
+  /** Known priced `estimatedCostUsd` + `brainPlaneUsd`. Unknown counters qualify a partial total. */
   totalUsd?: number | null;
+  /** Brain-plane calls whose captured model/usage could not be priced. Optional for old API payloads. */
+  unknownBrainCalls?: number;
   runCount: number;
   unknownCostRuns: number;
   windowRunCount: number;

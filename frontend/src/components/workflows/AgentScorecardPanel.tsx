@@ -58,7 +58,7 @@ export function AgentScorecardView({ card, cost }: { card: AgentRunScorecard | u
         <Stat label="P50 latency" value={formatDuration(overall.p50DurationSeconds)} />
         <Stat label="P95 latency" value={formatDuration(overall.p95DurationSeconds)} />
         <Stat label="Runs scored" value={`${overall.succeeded}/${overall.total}`} />
-        {/* The BILL is both lanes. Showing the agent-execution figure alone under-reported every supervised run by
+        {/* The known priced bill is both lanes. Showing the agent-execution figure alone under-reported every supervised run by
             whatever its brain spent deliberating. `totalUsd` is absent on a pre-D1 payload — fall back so an older
             server still renders the number it used to. */}
         {cost && <Stat label="Est. cost" value={formatUsd(cost.totalUsd ?? cost.estimatedCostUsd)} hint={costHint(cost)} />}
@@ -122,9 +122,11 @@ function formatUsd(usd: number | null | undefined): string {
 
 /** The two-lane split behind the headline figure, so "why is this more than my agents cost" is answerable on hover. */
 function costHint(cost: TeamCostRollup): string | undefined {
-  if (cost.brainPlaneUsd === null || cost.brainPlaneUsd === undefined) return undefined;
+  const unknown = cost.unknownCostRuns + (cost.unknownBrainCalls ?? 0);
+  const qualifier = unknown > 0 ? ` · ${unknown} unpriced` : "";
+  if (cost.brainPlaneUsd === null || cost.brainPlaneUsd === undefined) return qualifier.length > 0 ? qualifier.slice(3) : undefined;
 
-  return `Agents ${formatUsd(cost.estimatedCostUsd)} + supervisor/critic/grader ${formatUsd(cost.brainPlaneUsd)}`;
+  return `Agents ${formatUsd(cost.estimatedCostUsd)} + supervisor/critic/grader ${formatUsd(cost.brainPlaneUsd)}${qualifier}`;
 }
 
 /** Seconds → a compact human duration ("8s", "1m 30s", "2h 5m"); an em-dash when there's no latency to show. */

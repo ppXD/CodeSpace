@@ -14,12 +14,12 @@ namespace CodeSpace.Core.Services.Agents.Cost;
 /// <para>D1 — the bill covers BOTH lanes. It used to sum only <c>agent_run</c> rows, so every dollar the brain plane
 /// spent (supervisor decisions, critic reviews, acceptance graders — the <c>interaction.completed</c> ledger rows) was
 /// missing from the team's own bill. Those rows are now summed too and reported as <c>BrainPlaneUsd</c>, with
-/// <c>TotalUsd</c> as the sum of the two; <c>EstimatedCostUsd</c> keeps its EXACT prior meaning (agent execution only)
+/// <c>TotalUsd</c> as their known priced sum; <c>EstimatedCostUsd</c> keeps its EXACT prior meaning (agent execution only)
 /// so no already-displayed number silently changes what it counts. A run with ONLY brain spend (a supervisor that
 /// never spawned an agent) now appears in the breakdown instead of vanishing from it.</para>
 ///
 /// <para>HONEST: terminal-only (a non-null ResultJson means the run completed + persisted its result). A row whose
-/// model/usage cannot be priced contributes 0 to the cost sum and increments the UnknownCostRuns qualifier
+/// model/usage cannot be priced contributes 0 to the cost sum and increments the corresponding agent-run or brain-call unknown qualifier
 /// (fail-open — never silently $0, never blocks). A DB-load fault PROPAGATES (fail-closed — the query is not
 /// try/caught, mirroring AdmissionController). A single malformed result row degrades to unknown, never crashes
 /// the whole roll-up. The summed totals cover the FULL window; only the per-run breakdown is payload-bounded.</para>
@@ -55,6 +55,7 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
             EstimatedCostUsd = SumKnown(priced),
             BrainPlaneUsd = SumBrain(brain.Values),
             TotalUsd = Combine(SumKnown(priced), SumBrain(brain.Values)),
+            UnknownBrainCalls = brain.Values.Sum(value => value.UnknownCalls),
             RunCount = Math.Min(byRecency.Count, RecentRunCap),
             UnknownCostRuns = priced.Count(p => p.Cost is null),
             WindowRunCount = byRecency.Count,
@@ -151,6 +152,7 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
                 {
                     LatestAt = g.Max(r => r.OccurredAt),
                     CostUsd = known.Count == 0 ? null : known.Sum(r => r.Spend.CostUsd!.Value),
+                    UnknownCalls = rows.Count(r => r.Spend.CostUsd is null),
                 };
             });
 
@@ -193,6 +195,7 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
             EstimatedCostUsd = agentCost,
             BrainPlaneUsd = brainSpend?.CostUsd,
             TotalUsd = Combine(agentCost, brainSpend?.CostUsd),
+            UnknownBrainCalls = brainSpend?.UnknownCalls ?? 0,
             CountedRuns = list.Count,
             UnknownCostRuns = list.Count(r => r.Cost is null),
         };
@@ -223,7 +226,7 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
 
     private sealed record CostRow { public required Guid WorkflowRunId { get; init; } public required string ResultJson { get; init; } public required string TaskJson { get; init; } public DateTimeOffset CreatedAt { get; init; } }
     private sealed record PricedRow { public required Guid WorkflowRunId { get; init; } public DateTimeOffset CreatedAt { get; init; } public int InputTokens { get; init; } public int OutputTokens { get; init; } public decimal? Cost { get; init; } }
-    private sealed record BrainSpend { public DateTimeOffset LatestAt { get; init; } public decimal? CostUsd { get; init; } }
+    private sealed record BrainSpend { public DateTimeOffset LatestAt { get; init; } public decimal? CostUsd { get; init; } public int UnknownCalls { get; init; } }
 
     private static readonly IReadOnlyDictionary<Guid, RunCostSummary> EmptySummaries = new Dictionary<Guid, RunCostSummary>();
 }

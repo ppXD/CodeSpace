@@ -66,6 +66,18 @@ describe("AgentScorecardView", () => {
     expect(within(head).getByText("$12.40")).toBeInTheDocument();
   });
 
+  it("qualifies a two-lane total when agent runs or brain calls are unpriced", () => {
+    const cost: TeamCostRollup = {
+      totalInputTokens: 1000, totalOutputTokens: 500, estimatedCostUsd: 8, brainPlaneUsd: 4.4, totalUsd: 12.4,
+      runCount: 4, unknownCostRuns: 1, unknownBrainCalls: 2, windowRunCount: 4, truncated: false,
+    };
+
+    render(<AgentScorecardView card={card} cost={cost} />);
+
+    const head = screen.getByText("Est. cost").parentElement!;
+    expect(head).toHaveAttribute("title", "Agents $8.00 + supervisor/critic/grader $4.40 · 3 unpriced");
+  });
+
   it("renders an em-dash for cost when nothing in the window could be priced (null, not $0.00)", () => {
     const cost: TeamCostRollup = { totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: null, runCount: 0, unknownCostRuns: 2, windowRunCount: 2, truncated: false };
 
