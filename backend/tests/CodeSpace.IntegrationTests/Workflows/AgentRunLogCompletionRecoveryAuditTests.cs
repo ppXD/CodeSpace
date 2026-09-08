@@ -199,9 +199,14 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(ITestOutputH
         });
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
-        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "test-harness", Status = AgentRunStatus.Running, TaskJson = "{}", FenceEpoch = 7, CreatedDate = now, CreatedBy = actorId, LastModifiedDate = now, LastModifiedBy = actorId });
-        await db.SaveChangesAsync();
-        if (legacy != null) await legacy.InsertStreamAndUpgradeAsync(new AgentRunLogOpenRequest { TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1" });
+        var agentRun = new AgentRun { Id = runId, TeamId = teamId, Harness = "test-harness", Status = AgentRunStatus.Running, TaskJson = "{}", FenceEpoch = 7, CreatedDate = now, CreatedBy = actorId, LastModifiedDate = now, LastModifiedBy = actorId };
+        var open = new AgentRunLogOpenRequest { TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1" };
+        if (legacy == null)
+        {
+            db.AgentRun.Add(agentRun);
+            await db.SaveChangesAsync();
+        }
+        else await legacy.InsertRunAndStreamThenUpgradeAsync(agentRun, open);
         var logs = Logs(scope, scope.Resolve<IArtifactCasRuntimeCoordinator>());
         if (declareRecovery)
         {
@@ -211,7 +216,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(ITestOutputH
                 Streams = [new AgentRunLogExpectedStream(AgentRunLogKinds.StandardOutput, "text/plain", "utf-8", "test-spool/v1")],
             }, CancellationToken.None)).ShouldBeOfType<AgentRunLogCaptureDeclarationResult.Declared>();
         }
-        var metadata = (await logs.OpenAsync(new AgentRunLogOpenRequest { TeamId = teamId, AgentRunId = runId, WorkerFenceEpoch = 7, CaptureSessionId = sessionId, StreamKind = AgentRunLogKinds.StandardOutput, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1" }, CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
+        var metadata = (await logs.OpenAsync(open, CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().Metadata;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var segment = new byte[segmentBytes];
         var objects = new List<Guid>();
