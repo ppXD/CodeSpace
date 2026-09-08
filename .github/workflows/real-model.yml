@@ -769,6 +769,69 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  real-model-judge-calibration:
+    name: real model (rubric-judge adversarial calibration — report only)
+    needs: real-model-footer-signals
+    runs-on: ubuntu-latest
+    # P16 — a new evaluator must publish measured error intervals before it can become qualification evidence.
+    # This dispatch-only lane runs the production structured judge over an immutable owner-labelled corpus and
+    # stratifies FP/FN by provider-observed model identity + evaluator generation. Quality is report-only while the
+    # history is small; a missing clause, corpus drift, broken identity plumbing or partial secret config fails.
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 40
+    env:
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      CODESPACE_REALMODEL_ATTEMPT_DEADLINE_SECONDS: '1800'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the production judge over the versioned adversarial corpus — report only)
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelJudgeCalibration"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-judge-calibration.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the calibration actually ran (no silent skip)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-model-judge-calibration.trx RealModelJudgeCalibration
+
+      - name: Collect the real-model verdicts from the step summaries
+        if: always()
+        run: bash .github/scripts/collect-real-model-verdicts.sh backend/TestResults
+
+      - name: Upload the calibration report (trx + redacted verdicts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-judge-calibration-results
+          path: backend/TestResults/
+          if-no-files-found: warn
+          retention-days: 30
+
   real-model-qualification-rehearsal:
     name: real model (hidden-suite qualification rehearsal — report only)
     needs: real-model-benchmark-extended
