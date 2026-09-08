@@ -45,22 +45,23 @@ public class GetContextToolTests
     }
 
     [Fact]
-    public void Input_schema_makes_source_and_query_optional()
+    public void Input_schema_makes_source_query_and_cursor_optional()
     {
         var schema = Tool().InputSchema;
 
         schema.GetProperty("type").GetString().ShouldBe("object");
         schema.GetProperty("properties").TryGetProperty("source", out _).ShouldBeTrue();
         schema.GetProperty("properties").TryGetProperty("query", out _).ShouldBeTrue();
-        schema.TryGetProperty("required", out _).ShouldBeFalse("both inputs are optional — calling with no arguments pulls every source");
+        schema.GetProperty("properties").TryGetProperty("cursor", out _).ShouldBeTrue();
+        schema.TryGetProperty("required", out _).ShouldBeFalse("all inputs are optional — calling with no arguments pulls every source");
     }
 
     [Fact]
-    public void Output_schema_requires_found_source_and_text()
+    public void Output_schema_requires_content_and_explicit_page_coverage()
     {
         var required = Tool().OutputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList();
 
-        required.ShouldBe(new[] { "found", "source", "text" }, ignoreOrder: true);
+        required.ShouldBe(new[] { "found", "source", "text", "coverage", "continuations" }, ignoreOrder: true);
     }
 
     [Theory]
@@ -68,9 +69,13 @@ public class GetContextToolTests
     [InlineData("""{"source":"session.turns"}""", true)]
     [InlineData("""{"query":"auth"}""", true)]
     [InlineData("""{"source":"session.turns","query":"auth"}""", true)]
+    [InlineData("""{"source":"session.turns","cursor":"opaque"}""", true)]
+    [InlineData("""{"cursor":"opaque"}""", false)]                 // cursors are source-specific
     [InlineData("[]", false)]                                  // not an object
     [InlineData("""{"source":123}""", false)]                  // wrong type
     [InlineData("""{"query":true}""", false)]                  // wrong type
+    [InlineData("""{"source":"session.turns","cursor":12}""", false)]
+    [InlineData("""{"source":"session.turns","cursor":"   "}""", false)]
     public void ValidateInput_accepts_optional_string_fields_only(string json, bool expectedValid)
     {
         Tool().ValidateInput(Parse(json)).IsValid.ShouldBe(expectedValid);

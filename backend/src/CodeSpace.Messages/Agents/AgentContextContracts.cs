@@ -21,6 +21,9 @@ public sealed record AgentContextQuery
 
     /// <summary>Optional free-text refinement the source interprets its own way (the session-turns source treats it as a case-insensitive filter; a future semantic source as the search query). Null/blank = no refinement.</summary>
     public string? Query { get; init; }
+
+    /// <summary>An opaque continuation minted by the selected source. The generic tool transports it without interpreting it; the source validates that it belongs to this trusted scope and refinement.</summary>
+    public string? Cursor { get; init; }
 }
 
 /// <summary>
@@ -37,9 +40,15 @@ public sealed record AgentContextResult
     /// <summary>The retrieved content (already bounded by the source). Empty string when <see cref="Found"/> is false.</summary>
     public string Text { get; init; } = "";
 
+    /// <summary>Opaque source-owned continuation when this answer covers only a prefix of the matching source. Null means the requested source was exhaustively covered.</summary>
+    public string? NextCursor { get; init; }
+
     /// <summary>A clean miss — the source had nothing to return.</summary>
     public static AgentContextResult Empty { get; } = new() { Found = false };
 
     /// <summary>A hit carrying <paramref name="text"/>.</summary>
     public static AgentContextResult From(string text) => new() { Found = true, Text = text };
+
+    /// <summary>A bounded page, optionally empty after source-specific post-filtering, with more source rows left to inspect.</summary>
+    public static AgentContextResult Partial(string text, string nextCursor) => new() { Found = !string.IsNullOrEmpty(text), Text = text, NextCursor = nextCursor };
 }
