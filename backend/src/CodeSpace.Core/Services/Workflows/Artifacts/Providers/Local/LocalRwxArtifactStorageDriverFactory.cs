@@ -47,10 +47,14 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
         | StorageProviderCapabilities.Delete
         | StorageProviderCapabilities.HealthProbe;
     private readonly string _root;
+    private readonly Func<string, string, ArtifactStorageError?> _createOnly;
 
-    public LocalRwxArtifactStorageDriver(string root)
+    public LocalRwxArtifactStorageDriver(string root) : this(root, LocalRwxAtomicFilePublication.CreateOnly) { }
+
+    internal LocalRwxArtifactStorageDriver(string root, Func<string, string, ArtifactStorageError?> createOnly)
     {
         _root = Path.GetFullPath(root);
+        _createOnly = createOnly ?? throw new ArgumentNullException(nameof(createOnly));
     }
 
     public StorageProviderCapabilities Capabilities => SupportedCapabilities;
@@ -82,7 +86,7 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
             {
                 if (request.Condition == ArtifactStorageWriteCondition.CreateOnly)
                 {
-                    var placementError = LocalRwxAtomicFilePublication.CreateOnly(temporaryPath, path);
+                    var placementError = _createOnly(temporaryPath, path);
                     if (placementError != null)
                     {
                         TryDelete(temporaryPath);
@@ -249,15 +253,31 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
 
             if (request.VerifyWriteAccess)
             {
-                var probePath = Path.Combine(_root, ".codespace-probe-" + Guid.NewGuid().ToString("N"));
+                var objectKey = ".codespace-probe/" + Guid.NewGuid().ToString("N");
+                if (!TryResolveObjectPath(objectKey, out var probePath, out var pathError)) return FailedProbe(stopwatch, pathError!);
+                var ownsProbeObject = false;
                 try
                 {
-                    await using var probe = new FileStream(probePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.Asynchronous);
-                    await probe.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    var empty = Array.Empty<byte>();
+                    await using var content = new MemoryStream(empty, writable: false);
+                    var put = await PutAsync(new ArtifactStoragePutRequest(objectKey, content)
+                    {
+                        Condition = ArtifactStorageWriteCondition.CreateOnly,
+                        ContentLength = 0,
+                        ExpectedSha256 = Convert.ToHexStringLower(SHA256.HashData(empty)),
+                    }, cancellationToken).ConfigureAwait(false);
+                    if (!put.IsSuccess) return FailedProbe(stopwatch, put.Error!);
+                    ownsProbeObject = true;
+
+                    // Cleanup is part of the advertised destination contract and must finish even if cancellation
+                    // arrives after publication. The caller still receives cancellation after its private object is gone.
+                    var deleted = await DeleteAsync(new ArtifactStorageDeleteRequest(objectKey), CancellationToken.None).ConfigureAwait(false);
+                    if (!deleted.Deleted) return FailedProbe(stopwatch, deleted.Error!);
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
                 finally
                 {
-                    TryDelete(probePath);
+                    if (ownsProbeObject) TryDelete(probePath);
                 }
             }
 
@@ -378,6 +398,12 @@ internal sealed class LocalRwxArtifactStorageDriver : IArtifactStorageDriver
 
     private static ArtifactStorageError Missing(string objectKey) => Error(ArtifactStorageErrorCode.Missing, $"Object '{objectKey}' does not exist.");
     private static ArtifactStorageError Error(ArtifactStorageErrorCode code, string message, bool isRetryable = false) => new(code, message, isRetryable);
+    private static ArtifactStorageProbeResult FailedProbe(Stopwatch stopwatch, ArtifactStorageError error) => new()
+    {
+        Status = error.Code is ArtifactStorageErrorCode.Forbidden or ArtifactStorageErrorCode.Unauthorized ? ArtifactStorageProbeStatus.ReadOnly : ArtifactStorageProbeStatus.Unavailable,
+        Latency = stopwatch.Elapsed,
+        Error = error,
+    };
     private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 
     private static void TryDelete(string path)
