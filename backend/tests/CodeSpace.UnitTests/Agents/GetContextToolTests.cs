@@ -54,6 +54,7 @@ public class GetContextToolTests
         schema.GetProperty("properties").TryGetProperty("query", out _).ShouldBeTrue();
         schema.GetProperty("properties").TryGetProperty("cursor", out _).ShouldBeTrue();
         schema.TryGetProperty("required", out _).ShouldBeFalse("all inputs are optional — calling with no arguments pulls every source");
+        schema.GetProperty("properties").GetProperty("source").GetProperty("description").GetString().ShouldContain("session.events");
     }
 
     [Fact]
