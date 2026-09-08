@@ -173,16 +173,17 @@ public sealed class CompletionTerminalAuthorityFlowTests
     }
 
     [Theory]
-    [InlineData(false, TerminalDecision.CleanSuccess)]   // patch-only: the policy put Integrate out of reach — nobody owes it
-    [InlineData(true, TerminalDecision.Park)]            // the SAME tape on a repository that DID reach a branch still owes it
-    public async Task A_patch_only_runs_completed_stop_finishes_while_a_publish_permitting_one_still_parks(bool pushed, TerminalDecision expected)
+    [InlineData(false)]   // patch-only: the policy put Integrate out of reach — nobody owes it
+    [InlineData(true)]    // ledger-direct: the single accepted unit's own published head is the delivered candidate
+    public async Task A_single_unit_completed_stop_finishes_through_either_qualified_delivery_shape(bool pushed)
     {
         // Audit D nail 1's second half. A PATCH-ONLY repository captures its work as branchless patch manifests BY
         // POLICY, so no merge head and no run-level Integration row can EVER exist — and the Integrate cell read
         // that as "missing" and parked the run's honest `completed` stop forever, with no answer from inside the run
-        // able to change it. The stage reads NOT APPLICABLE here, and ONLY here: flip the same run's ledger to a
-        // branch that arrived and the identical claim is refused again, so #1762/#1771/#1774's fragmented-delivery
-        // park (the test above) keeps its full force on every repository that permits a push.
+        // able to change it. A single accepted unit on a publish-permitting repository is the other qualified shape:
+        // its own pushed branch is the delivered head I3 already accepted, so the completion authority must read the
+        // same durable fact as Integrate evidence. Orphan, partial, multi-unit, rejected, waived, and failed-merge
+        // shapes remain fail-closed in the pure qualification suite.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedRunningRunAsync(teamId, userId, mode: "Enforced");
         var attemptId = await SeedGradedTapeAsync(runId, teamId, acceptancePassed: true, merged: false, adjudicatedPolicySkip: true);
@@ -194,10 +195,9 @@ public sealed class CompletionTerminalAuthorityFlowTests
         using var scope = _fixture.BeginScope();
         var arbitration = await scope.Resolve<ICompletionTerminalAuthority>().ArbitrateAsync(runId, teamId, "Enforced", WorkflowRunStatus.Success, CancellationToken.None);
 
-        arbitration.Decision.ShouldBe(expected);
-        arbitration.Status.ShouldBe(pushed ? WorkflowRunStatus.Suspended : WorkflowRunStatus.Success);
-
-        if (pushed) arbitration.Reason!.ShouldContain("Integrate", customMessage: "a run that reached a branch was never policy-bounded — the stage is still owed and still named");
+        arbitration.Decision.ShouldBe(TerminalDecision.CleanSuccess);
+        arbitration.Status.ShouldBe(WorkflowRunStatus.Success,
+            "both delivery shapes are fully accounted for: patch-only is explicitly not applicable, while the qualified direct branch evidences Integrate");
 
         // The recital the decider reads mid-run must agree with the arbitration it is predicting, in BOTH arms.
         var composed = await scope.Resolve<ICompletionAssessmentComposer>().ComposeIfStoppedNowAsync(runId, teamId, CancellationToken.None);
@@ -206,8 +206,8 @@ public sealed class CompletionTerminalAuthorityFlowTests
 
         recital!.Contains("integration not applicable — patch-only policy; 1 patch delivered.", StringComparison.Ordinal).ShouldBe(!pushed,
             "the model must be told the stage is unreachable, never steered to land work it cannot");
-        recital.Contains(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBe(pushed,
-            "the refusal warning renders exactly when the authority raises it — never over a stage nobody owes");
+        recital.Contains(Core.Services.Supervisor.Deciders.SupervisorStopNowRecital.RefusalLead, StringComparison.Ordinal).ShouldBeFalse(
+            "the mid-run mirror must not threaten a refusal that the terminal authority no longer raises");
     }
 
     [Theory]

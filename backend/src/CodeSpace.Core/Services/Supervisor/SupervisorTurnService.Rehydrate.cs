@@ -235,12 +235,7 @@ public sealed partial class SupervisorTurnService
     /// production gate for a ledger-direct publication the auditor simply never looked at.
     /// </summary>
     internal static IReadOnlySet<Guid> FoldPublishedAgentRunIds(IReadOnlyList<Persistence.Entities.PublishManifest> manifests) =>
-        manifests
-            .Where(m => m.AgentRunId is not null)
-            .GroupBy(m => m.AgentRunId!.Value)
-            .Where(g => g.All(m => m.PublishStateValue == PublishState.Pushed || m.PullRequestNumber is not null))
-            .Select(g => g.Key)
-            .ToHashSet();
+        SupervisorLedgerDirectPublication.FoldPublishedAgentRunIds(manifests);
 
     /// <summary>The DISTINCT agent-run ids this run's spawn/retry/resolve decisions staged (in recorded spawn order) — the key both the agent-results fold and the pending-decision read fan out over. Lifted so the two reads share ONE id source.</summary>
     private static List<Guid> StagedChildAgentRunIds(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows) =>

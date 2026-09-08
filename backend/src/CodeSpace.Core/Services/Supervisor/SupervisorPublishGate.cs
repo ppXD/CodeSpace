@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// are independent facts about the same branch, so a diagnosed failure must never be silently overridden. Only once
 /// no such diagnosed failure exists does the ladder check whether the frontier's OWN contributor(s) already have a
 /// genuinely published <see cref="Messages.Agents.SupervisorTurnContext.PublishedAgentRunIds"/> entry, excluding any
-/// contributor its own acceptance grade objectively rejected (P0-5) — a single already-pushed, accepted agent
+/// contributor its own acceptance grade objectively rejected (P0-5) — exactly one already-pushed, accepted agent
 /// satisfies "published" directly off the canonical <c>PublishManifest</c> ledger, with no merge required at all.
 /// Only when NEITHER of those applies does the ladder fall to ONE server-authored <c>merge</c>
 /// (<see cref="ServerAuthoredMerge"/>, <c>ForcedByPublishGate</c>) — integration just happens transparently this
@@ -91,7 +91,7 @@ public static class SupervisorPublishGate
         if (attemptedMerge is not null && SupervisorOutcome.ReadIntegration(attemptedMerge.OutcomeJson) is { } integration)
             return AdjudicateUnpublishedMerge(priorDecisions, attemptedMerge, integration.Status, integration.Reason);
 
-        // The frontier's OWN accepted contributor(s) may already have a genuinely published PublishManifest row
+        // The frontier's ONE accepted contributor may already have a genuinely published PublishManifest row
         // (Pushed, or an opened PR/MR) even though no SEPARATE Integration-kind manifest exists for a later merge
         // — e.g. a single-contributor accept where the model's own ordinary merge never triggered the (opt-in-gated)
         // integrate-at-stop augmentation. Recognize that DIRECTLY off the canonical ledger rather than forcing a
@@ -100,7 +100,7 @@ public static class SupervisorPublishGate
         // (AgentRunExecutor pushes at execution time; FoldUnitAcceptanceGradeAsync grades later), so a REJECTED unit
         // can still show up as Pushed in the ledger — the same "局部綠≠整合綠" bar every other door to the head already
         // enforces (SupervisorOutcome.IsWithheldFromHead, shared with the merge + resolver doors) must apply here too.
-        if (frontierResults.Any(r => !SupervisorOutcome.IsWithheldFromHead(r) && context.PublishedAgentRunIds.Contains(r.AgentRunId)))
+        if (SupervisorLedgerDirectPublication.Qualifies(priorDecisions, context.PublishedAgentRunIds))
             return !requireSummary || HasSummary(decision) ? null : IntoAskHuman("the run has published work but no summary — provide one before the run can complete");
 
         if (attemptedMerge is null) return ServerAuthoredMerge();   // first attempt — auto-integrate-at-stop
