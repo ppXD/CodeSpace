@@ -179,6 +179,12 @@ public class TaskRoutePreviewServiceTests
         preview.Posture!.Autonomy.ShouldBe(expectedAutonomy);
         preview.Posture.NetworkOn.ShouldBe(expectedNetworkOn);
         preview.Posture.Network.ShouldStartWith(expectedNetworkPrefix);
+        preview.Posture.Write.ShouldBe(expectedAutonomy == "Confined"
+            ? "Write scope: read-only requested (Confined) — OS-enforced only where the sandbox confines"
+            : $"Write scope: workspace ({expectedAutonomy})");
+        preview.Posture.Approval.ShouldBe(expectedAutonomy == "Confined"
+            ? "Risky tools: refused (Confined); tools marked irreversible cannot auto-run"
+            : $"Risky tools: require human approval ({expectedAutonomy}); tools marked irreversible cannot auto-run");
     }
 
     [Fact]
@@ -204,6 +210,12 @@ public class TaskRoutePreviewServiceTests
         var preview = await Preview(Router()).PreviewAsync(Request("Roll out the change", effort, completionMode: completionMode), CancellationToken.None);
 
         preview.Posture!.CompletionMode.ShouldBe(expected);
+        preview.Posture.Completion.ShouldBe(expected switch
+        {
+            CompletionEnforcementMode.Enforced => "Completion: Enforced — terminal success requires durable evidence",
+            CompletionEnforcementMode.Shadow => "Completion: Shadow — evidence is assessed without overriding the legacy terminal result",
+            _ => "Completion: Legacy — the legacy terminal result is authoritative",
+        });
     }
 
     [Fact]

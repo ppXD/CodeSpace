@@ -168,6 +168,32 @@ public static class AgentAutonomyPolicy
         return $"Network: off ({effective}){qualifier}";
     }
 
+    /// <summary>The write posture derived from the same permission row the process runner receives. Before launch there is no confinement record, so read-only is explicitly qualified rather than presented as an OS guarantee.</summary>
+    public static string DescribeWrite(AgentAutonomyLevel effective) => Derive(effective).WriteScope switch
+    {
+        AgentWriteScope.ReadOnly => $"Write scope: read-only requested ({effective}) — OS-enforced only where the sandbox confines",
+        AgentWriteScope.Workspace => $"Write scope: workspace ({effective})",
+        _ => $"Write scope: unknown ({effective})",
+    };
+
+    /// <summary>The risky-tool posture derived by asking the same per-call gate used by MCP and supervisor decisions. Irreversible tools remain a separate, stricter class.</summary>
+    public static string DescribeApproval(AgentAutonomyLevel effective)
+    {
+        var risky = AgentToolGate.Decide(effective, requiresApproval: true);
+        var irreversible = AgentToolGate.Decide(effective, requiresApproval: true, alwaysRequiresApproval: true);
+        var riskyText = risky switch
+        {
+            AgentToolGateDecision.Allow => "may run unattended",
+            AgentToolGateDecision.RequireApproval => "require human approval",
+            _ => "refused",
+        };
+        var irreversibleText = risky == AgentToolGateDecision.Allow && irreversible == AgentToolGateDecision.RequireApproval
+            ? "tools marked irreversible still require human approval"
+            : "tools marked irreversible cannot auto-run";
+
+        return $"Risky tools: {riskyText} ({effective}); {irreversibleText}";
+    }
+
     /// <summary>
     /// What replaces <see cref="ConfinementCaveat"/> once a run's launch recorded its posture. An unconfined run is
     /// stated LOUDLY (upper case, naming the reason): "off" there is a permission the OS never enforced, which is a

@@ -269,15 +269,16 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
   // Wait for the current preview to settle so launch can consume the decision being shown. A settled failure
   // allows the legacy launch path, where the server computes the route and checks authority normally.
   const routeUnanswered = !routePreview.answered;
-  // The one honest consequence line: the route preview's OWN posture — AgentAutonomyPolicy.DescribeNetwork, computed
-  // server-side (arc3 item 3.2) from the SAME resolved route this preview carries, plus what On actually costs. This
-  // is no longer a FE mirror: the composer states exactly what the server said, never a guess it derived itself, so
-  // it cannot show a posture the launch would not also reach. Unresolved (the debounce window, an in-flight
-  // request, or a failed preview) says so instead of predicting one.
+  // Safety consequences come from the route preview's OWN server-derived posture. The composer renders each line
+  // verbatim, so it cannot show a write, approval, network, or completion posture the launch would not also reach.
+  // Unresolved previews say so instead of predicting one.
   const posture = routePreview.posture;
   const networkPosture = posture
     ? `${posture.network}.${posture.networkOn ? ` ${NETWORK_ON_CONSEQUENCE}` : ""}`
     : "Checking the network posture…";
+  const writePosture = posture?.write ?? "Checking the write posture…";
+  const approvalPosture = posture?.approval ?? "Checking the approval posture…";
+  const completionPosture = posture?.completion ?? "Checking the completion posture…";
   // Answering the card picks a TIER, which rides the wire as an explicit effort and short-circuits the classifier —
   // so the shape the card was raised about has to ride along too, or every confirmed launch silently reverts to the
   // coding projection. Stored with the text it was classified for; see formState for the staleness guard.
@@ -673,9 +674,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched, inline
                     ? <TierRow label="Network access" tier={`Off — the Coordination tab's ${ceilingShown} ceiling forbids it`} />
                     : <Combo label="Network access" value={networkOn ? "on" : "off"} options={NETWORK_OPTIONS} onChange={v => setAutonomy(v === "on" ? "Trusted" : "Standard")} />}
                 <div className="lt3-poolhint" data-testid="network-posture">{networkPosture}</div>
-                <SToggleRow label="Ask when uncertain" on locked />
-                <SToggleRow label="Approve irreversible actions" on locked />
-                <SToggleRow label="Stop before merge / push" on locked />
+                <div className="lt3-poolhint" data-testid="write-posture">{writePosture}</div>
+                <div className="lt3-poolhint" data-testid="approval-posture">{approvalPosture}</div>
+                <div className="lt3-poolhint" data-testid="completion-posture">{completionPosture}</div>
                 <Combo label="Time limit" value={effectiveTimeLimit} options={timeLimitOpts} onChange={v => { setTimeLimitTouched(true); setC({ timeLimit: v }); }} />
               </>}
 
@@ -774,7 +775,7 @@ function SendGlyph() {
 }
 
 /** A settings row whose value opens a custom popover (Limits, Acceptance). */
-/** An off-tier control rendered honestly: a muted read-only row naming the tier that owns it — never an armed switch the wire would silently drop (the same doctrine as the locked safety rows). */
+/** An off-tier control rendered honestly: a muted read-only row naming the tier that owns it, never an armed switch the wire would silently drop. */
 function TierRow({ label, tier }: { label: string; tier: string }) {
   return (
     <div className="lt3-srow lt3-srow-ro">
@@ -815,18 +816,7 @@ function Pop({ align, wide, children }: { align: "left" | "right"; wide?: boolea
 }
 
 /** Settings toggle row: label · On/Off · switch. */
-function SToggleRow({ label, on, onToggle, locked }: { label: string; on: boolean; onToggle?: () => void; locked?: boolean }) {
-  // A `locked` row is an HONEST display of an always-enforced safety floor (the irreversible-HITL gate + the decision
-  // substrate) — not a real toggle. Showing it as a switch would be a lie: there is no per-run way to turn these off,
-  // so we render a non-interactive "Always on" indicator instead of a fake switch.
-  if (locked) {
-    return (
-      <div className="lt3-srow lt3-srow-ro">
-        <span className="lt3-srow-l">{label}</span>
-        <span className="lt3-combo-v">Always on</span>
-      </div>
-    );
-  }
+function SToggleRow({ label, on, onToggle }: { label: string; on: boolean; onToggle?: () => void }) {
   return (
     <button type="button" className="lt3-srow" onClick={onToggle} aria-pressed={on}>
       <span className="lt3-srow-l">{label}</span>

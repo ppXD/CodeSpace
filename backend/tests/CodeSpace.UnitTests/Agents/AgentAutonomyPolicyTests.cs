@@ -13,6 +13,17 @@ namespace CodeSpace.UnitTests.Agents;
 public class AgentAutonomyPolicyTests
 {
     [Theory]
+    [InlineData(AgentAutonomyLevel.Confined, "Write scope: read-only requested (Confined) — OS-enforced only where the sandbox confines", "Risky tools: refused (Confined); tools marked irreversible cannot auto-run")]
+    [InlineData(AgentAutonomyLevel.Standard, "Write scope: workspace (Standard)", "Risky tools: require human approval (Standard); tools marked irreversible cannot auto-run")]
+    [InlineData(AgentAutonomyLevel.Trusted, "Write scope: workspace (Trusted)", "Risky tools: require human approval (Trusted); tools marked irreversible cannot auto-run")]
+    [InlineData(AgentAutonomyLevel.Unleashed, "Write scope: workspace (Unleashed)", "Risky tools: may run unattended (Unleashed); tools marked irreversible still require human approval")]
+    public void Descriptions_follow_the_same_write_and_tool_policies_the_runtime_enforces(AgentAutonomyLevel level, string write, string approval)
+    {
+        AgentAutonomyPolicy.DescribeWrite(level).ShouldBe(write);
+        AgentAutonomyPolicy.DescribeApproval(level).ShouldBe(approval);
+    }
+
+    [Theory]
     [InlineData(AgentAutonomyLevel.Confined, AgentNetworkAccess.Off, AgentWriteScope.ReadOnly)]
     [InlineData(AgentAutonomyLevel.Standard, AgentNetworkAccess.Off, AgentWriteScope.Workspace)]
     [InlineData(AgentAutonomyLevel.Trusted, AgentNetworkAccess.On, AgentWriteScope.Workspace)]

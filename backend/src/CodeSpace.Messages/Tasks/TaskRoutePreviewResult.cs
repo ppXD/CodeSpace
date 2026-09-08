@@ -49,8 +49,17 @@ public sealed record TaskRoutePosture
     /// <summary>The one-line network posture for a reader — <c>AgentAutonomyPolicy.DescribeNetwork</c> fed by the SAME resolved tier and ceilings. No run exists yet, so it carries no confinement record (the pre-launch caveat wording), exactly like the run journal's own sentence before a run has one.</summary>
     public required string Network { get; init; }
 
+    /// <summary>The effective write scope from the same autonomy policy the runner consumes, with a pre-launch confinement caveat where needed.</summary>
+    public required string Write { get; init; }
+
+    /// <summary>The risky and irreversible tool-call posture from the same gate MCP and supervisor decisions consume.</summary>
+    public required string Approval { get; init; }
+
     /// <summary>The completion-enforcement mode a run launched with these exact inputs would be stamped with — <c>CompletionPolicy.StampModeFor</c> fed by the SAME <c>RunModeClassifier</c> reading the launch's own run-staging uses.</summary>
     public required CompletionEnforcementMode CompletionMode { get; init; }
+
+    /// <summary>The operator-facing meaning of <see cref="CompletionMode"/>, authored by the completion policy.</summary>
+    public required string Completion { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<TaskAcceptanceCompatibilityState>))]
