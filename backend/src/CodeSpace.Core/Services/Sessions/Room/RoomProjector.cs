@@ -548,7 +548,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .GroupBy(e => e.AgentRunId)
             .ToDictionary(g => g.Key, g => g.First().Text!.Trim());
 
-        var delivery = await DeliveryAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var deliveries = await DeliveriesAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         // The run's durable plan checklist (contract + tape-derived states) — null for pre-plan runs, which then
         // project exactly as before (the per-round plan stat rows carry the story).
@@ -574,7 +574,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             Rounds = rounds,
             Checklist = checklist,
-            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, delivery, verdict,
+            FinalAnswer = BuildFinalAnswer(finalAnswerText, changedFileIdentities, deliveries, verdict,
                 await VerificationOf(runId, status, verdict, acceptance, SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(stop?.OutcomeJson), units, ReviewUnitLabels(agentRefs), cancellationToken).ConfigureAwait(false)),
             LatestLines = latestLines,
             AgentFiles = agentFiles,
@@ -589,7 +589,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             ReasoningSteps = reasoningSteps,
             AgentSummaries = agentSummaries,
             AcceptancePassed = acceptance,
-            Delivery = delivery,
+            Deliveries = deliveries,
             RawError = deepError ?? error,
             PolicyBoundedStage = policyBoundedStage,
             RetrySteps = retrySteps,
@@ -1160,14 +1160,14 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>The rich final answer — the stop summary text + typed attachments (the changed files + the PR). Images are a true gap (no run output exposes them). Null when there's nothing to deliver. <paramref name="verdict"/> marks a stop that did NOT finish well (a give-up / forced stop, or a failed acceptance grade) so the card renders neutral, not a green success.</summary>
-    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, RoomDelivery? pr, (bool Degraded, string? Reason) verdict, (bool? Verified, string? Note) verification)
+    private static RoomFinalAnswer? BuildFinalAnswer(string? text, IReadOnlyList<RoomFileIdentity> files, IReadOnlyList<RoomDelivery> deliveries, (bool Degraded, string? Reason) verdict, (bool? Verified, string? Note) verification)
     {
         var attachments = new List<RoomAttachment>();
 
         foreach (var file in files.Take(MaxAnswerFiles))
             attachments.Add(new RoomAttachment(AnswerAttachmentKind.FileLink, file.Path, Url: null, PreviewUrl: null, DownloadUrl: null, File: file));
 
-        if (pr is { } d)
+        foreach (var d in deliveries.Where(delivery => delivery.Url is { Length: > 0 }))
             attachments.Add(new RoomAttachment(AnswerAttachmentKind.Pr, d.Reference is { Length: > 0 } r ? $"{d.Title} {r}" : d.Title, Url: d.Url, PreviewUrl: null, DownloadUrl: null));
 
         var body = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
@@ -1262,6 +1262,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private const int MaxToolArtifactHydrates = 128;
     private const int MaxToolPayloadPrefixBytes = 16 * 1024;
     private const int MaxFailureScan = 50;
+    private const int MaxDeliveryRecordScan = 20;
 
     /// <summary>
     /// Resolve the narrow <c>data.name</c> display fact without loading whole large payloads. At most 128 distinct
@@ -1352,39 +1353,85 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     private sealed record ToolPayload(string? DataJson, Guid? DataArtifactId);
 
-    /// <summary>The PR the turn opened, joined from the run's open-PR node output (number/url) + its inputs (title / branches) — OR, DC-3, a fallback onto <c>PublishManifest</c> for a PR opened OUTSIDE any workflow node (the Room's own Open-PR button, or a server-authored delivery step) that a pre-wired <c>git.open_pr</c> node never ran for. Null when the turn opened none either way.</summary>
-    private async Task<RoomDelivery?> DeliveryAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Every repository's latest durable PR disposition. The server-authored operation record is authoritative because it retains failures and skips that cannot produce a manifest; node output and manifests remain backwards-compatible fallbacks.</summary>
+    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
+        var recorded = await _db.WorkflowRunRecord.AsNoTracking()
+            .Where(record => record.RunId == runId && record.Run.TeamId == teamId && record.RecordType == WorkflowRunRecordTypes.DeliveryPullRequests)
+            .OrderByDescending(record => record.Sequence)
+            .Select(record => record.PayloadJson)
+            .Take(MaxDeliveryRecordScan)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var deliveries = recorded.Select(payload => RoomDeliveryParser.ParseMany(payload, inputsJson: null)).FirstOrDefault(parsed => parsed.Count > 0) ?? Array.Empty<RoomDelivery>();
+
+        if (deliveries.Count > 0) return await EnrichDeliveriesAsync(runId, teamId, deliveries, cancellationToken).ConfigureAwait(false);
+
         var nodes = await _db.WorkflowRunNode.AsNoTracking()
             .Where(n => n.RunId == runId)
             .Select(n => new { n.OutputsJson, n.InputsJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        deliveries = nodes.SelectMany(n => RoomDeliveryParser.ParseMany(n.OutputsJson, n.InputsJson)).ToList();
 
-        return nodes.Select(n => RoomDeliveryParser.Parse(n.OutputsJson, n.InputsJson)).FirstOrDefault(d => d != null)
-            ?? await DeliveryFromManifestAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        if (deliveries.Count > 0) return await EnrichDeliveriesAsync(runId, teamId, DistinctDeliveries(deliveries), cancellationToken).ConfigureAwait(false);
+
+        return await DeliveriesFromManifestAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Joins the resolver's branch (for head/base) with the manifest's own PR reference (number/url), by alias — the ONE non-node-output source of "did this run open a PR" the card can show.</summary>
-    private async Task<RoomDelivery?> DeliveryFromManifestAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Joins every repository's current integration manifest with the resolver's branch facts. This fallback covers PRs opened before disposition records existed.</summary>
+    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesFromManifestAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
-        var opened = manifests.FirstOrDefault(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 });
+        var opened = manifests.Where(m => m.Kind == PublishManifestKind.Integration && m.PullRequestUrl is { Length: > 0 })
+            .GroupBy(m => m.RepositoryAlias, StringComparer.Ordinal)
+            .Select(group => group.OrderByDescending(m => m.CreatedDate).First())
+            .ToList();
 
-        if (opened is null) return null;
+        if (opened.Count == 0) return Array.Empty<RoomDelivery>();
 
         var priorDecisions = await ReadTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
-        var branch = branches.FirstOrDefault(b => b.Alias == opened.RepositoryAlias);
 
-        return new RoomDelivery
+        return opened.Select(manifest =>
         {
-            Title = $"Pull request #{opened.PullRequestNumber}",
-            Reference = opened.PullRequestNumber is { } n ? $"#{n}" : null,
-            BranchHead = branch?.SourceBranch ?? opened.Branch,
-            BranchBase = branch?.TargetBranch,
-            Url = opened.PullRequestUrl,
-        };
+            var branch = branches.FirstOrDefault(candidate => SameRepository(candidate, manifest.RepositoryId, manifest.RepositoryAlias));
+            return new RoomDelivery
+            {
+                Title = manifest.PullRequestNumber is { } number ? $"Pull request #{number}" : $"Pull request for {manifest.RepositoryAlias}",
+                RepositoryId = manifest.RepositoryId ?? branch?.RepositoryId,
+                RepositoryAlias = manifest.RepositoryAlias,
+                Disposition = RoomPullRequestDisposition.AlreadyOpened,
+                Reference = manifest.PullRequestNumber is { } n ? $"#{n}" : null,
+                BranchHead = branch?.SourceBranch ?? manifest.Branch,
+                BranchBase = branch?.TargetBranch,
+                Url = manifest.PullRequestUrl,
+            };
+        }).ToList();
     }
+
+    private async Task<IReadOnlyList<RoomDelivery>> EnrichDeliveriesAsync(Guid runId, Guid teamId, IReadOnlyList<RoomDelivery> deliveries, CancellationToken cancellationToken)
+    {
+        var priorDecisions = await ReadTerminalDecisionsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var branches = await _publishedBranches.ResolveAsync(runId, teamId, priorDecisions, primaryRepositoryId: null, cancellationToken).ConfigureAwait(false);
+
+        return deliveries.Select(delivery =>
+        {
+            var branch = branches.FirstOrDefault(candidate => SameRepository(candidate, delivery.RepositoryId, delivery.RepositoryAlias));
+            return branch is null ? delivery : delivery with
+            {
+                RepositoryId = delivery.RepositoryId ?? branch.RepositoryId,
+                RepositoryAlias = delivery.RepositoryAlias ?? branch.Alias,
+                BranchHead = delivery.BranchHead ?? branch.SourceBranch,
+                BranchBase = delivery.BranchBase ?? branch.TargetBranch,
+            };
+        }).ToList();
+    }
+
+    private static bool SameRepository(SupervisorRepositoryBranch branch, Guid? repositoryId, string? alias) =>
+        repositoryId is { } id && branch.RepositoryId == id || alias is { Length: > 0 } name && string.Equals(branch.Alias, name, StringComparison.Ordinal);
+
+    private static IReadOnlyList<RoomDelivery> DistinctDeliveries(IEnumerable<RoomDelivery> deliveries) =>
+        deliveries.GroupBy(delivery => delivery.RepositoryId?.ToString() ?? delivery.RepositoryAlias ?? delivery.Url ?? delivery.Title, StringComparer.Ordinal)
+            .Select(group => group.Last()).ToList();
 
     /// <summary>The run's append-only change watermark — MAX(Sequence) over its records, 0 before any record. The streaming cursor + the focused turn's block Seq.</summary>
     private async Task<long> WatermarkAsync(Guid runId, CancellationToken cancellationToken) =>

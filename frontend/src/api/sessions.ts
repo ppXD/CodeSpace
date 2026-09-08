@@ -307,12 +307,16 @@ export type SupervisorAnswerDecision = "approve" | "revise" | "reject";
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
   title: string;
+  repositoryId?: string | null;
+  repositoryAlias?: string | null;
+  disposition?: "Opened" | "AlreadyOpened" | "Skipped" | "Failed" | null;
   reference?: string | null;
   branchHead?: string | null;
   branchBase?: string | null;
   checks?: string | null;
   checksOk?: boolean | null;
   url?: string | null;
+  error?: string | null;
 }
 /// One file a turn produced as a file. `artifactId` is what fetches its bytes.
 export interface DeliverableFile {

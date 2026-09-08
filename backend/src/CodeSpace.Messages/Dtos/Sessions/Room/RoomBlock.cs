@@ -360,6 +360,10 @@ public sealed record DeliveryBlock : RoomBlock
 {
     public required string Title { get; init; }
 
+    public Guid? RepositoryId { get; init; }
+    public string? RepositoryAlias { get; init; }
+    public RoomPullRequestDisposition? Disposition { get; init; }
+
     /// <summary>The change-set reference chip (e.g. "#128"). Null when none.</summary>
     public string? Reference { get; init; }
 
@@ -372,6 +376,9 @@ public sealed record DeliveryBlock : RoomBlock
 
     /// <summary>The external URL to open the change set. Null when none.</summary>
     public string? Url { get; init; }
+
+    /// <summary>The redacted provider or policy reason when this repository failed or was skipped.</summary>
+    public string? Error { get; init; }
 }
 
 /// <summary>

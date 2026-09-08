@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 
 namespace CodeSpace.Core.Services.Sessions.Room;
 
@@ -11,30 +12,35 @@ namespace CodeSpace.Core.Services.Sessions.Room;
 /// </summary>
 public static class RoomDeliveryParser
 {
-    public static RoomDelivery? Parse(string? outputsJson, string? inputsJson)
+    public static RoomDelivery? Parse(string? outputsJson, string? inputsJson) => ParseMany(outputsJson, inputsJson).FirstOrDefault();
+
+    public static IReadOnlyList<RoomDelivery> ParseMany(string? outputsJson, string? inputsJson)
     {
-        if (string.IsNullOrWhiteSpace(outputsJson)) return null;
+        if (string.IsNullOrWhiteSpace(outputsJson)) return Array.Empty<RoomDelivery>();
 
         try
         {
-            var root = JsonDocument.Parse(outputsJson).RootElement;
-            if (root.ValueKind != JsonValueKind.Object) return null;
+            using var document = JsonDocument.Parse(outputsJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return Array.Empty<RoomDelivery>();
 
             var inputs = TryParseObject(inputsJson);
 
             // Multi-repo change set — the pullRequests[] key is PR-specific (an issue node never carries it).
             if (root.TryGetProperty("pullRequests", out var prs) && prs.ValueKind == JsonValueKind.Array)
-                foreach (var pr in prs.EnumerateArray())
-                    if (PrFields(pr) is { } multi) return Build(multi, inputs);
+            {
+                var repositories = InputsRepositories(inputs);
+                return prs.EnumerateArray().Select((pr, index) => BuildOutcome(pr, inputs, RepositoryInput(pr, repositories, index), index)).Where(d => d != null).Cast<RoomDelivery>().ToList();
+            }
 
             // Single PR — only when the inputs carry a branch, which distinguishes it from an issue that shares the {number,url} shape.
-            if (PrFields(root) is { } single && HasBranch(inputs)) return Build(single, inputs);
+            if (PrFields(root) is { } single && HasBranch(inputs)) return [Build(single, inputs)];
 
-            return null;
+            return Array.Empty<RoomDelivery>();
         }
         catch (JsonException)
         {
-            return null;
+            return Array.Empty<RoomDelivery>();
         }
     }
 
@@ -51,11 +57,57 @@ public static class RoomDeliveryParser
     private static RoomDelivery Build((long Number, string Url) pr, JsonElement? inputs) => new()
     {
         Title = Str(inputs, "title") ?? $"Pull request #{pr.Number}",
+        RepositoryAlias = Str(inputs, "alias"),
+        Disposition = RoomPullRequestDisposition.Opened,
         Reference = $"#{pr.Number}",
         BranchHead = Str(inputs, "sourceBranch") ?? Str(inputs, "head"),
         BranchBase = Str(inputs, "targetBranch") ?? Str(inputs, "base"),
         Url = pr.Url,
     };
+
+    private static RoomDelivery? BuildOutcome(JsonElement outcome, JsonElement? inputs, JsonElement? repository, int index)
+    {
+        if (outcome.ValueKind != JsonValueKind.Object) return null;
+
+        var pr = PrFields(outcome);
+        var disposition = Enum.TryParse<RoomPullRequestDisposition>(Str(outcome, "disposition"), ignoreCase: true, out var parsed)
+            ? parsed
+            : pr is not null ? RoomPullRequestDisposition.Opened : (RoomPullRequestDisposition?)null;
+        var repositoryId = Guid.TryParse(Str(outcome, "repositoryId") ?? Str(repository, "repositoryId"), out var id) ? id : (Guid?)null;
+        var alias = Str(outcome, "alias") ?? Str(repository, "alias") ?? repositoryId?.ToString();
+
+        if (disposition is null && repositoryId is null && alias is null) return null;
+
+        var number = Number(outcome, "number");
+        return new RoomDelivery
+        {
+            Title = Str(inputs, "title") ?? (number is { } n ? $"Pull request #{n}" : alias ?? $"Repository {index + 1}"),
+            RepositoryId = repositoryId,
+            RepositoryAlias = alias,
+            Disposition = disposition,
+            Reference = number is { } reference ? $"#{reference}" : null,
+            BranchHead = Str(repository, "producedBranch") ?? Str(repository, "sourceBranch") ?? Str(inputs, "sourceBranch") ?? Str(inputs, "head"),
+            BranchBase = Str(repository, "baseBranch") ?? Str(repository, "targetBranch") ?? Str(inputs, "targetBranch") ?? Str(inputs, "base"),
+            Url = Str(outcome, "url"),
+            Error = Str(outcome, "error"),
+        };
+    }
+
+    private static IReadOnlyList<JsonElement> InputsRepositories(JsonElement? inputs) =>
+        inputs is { } value && value.TryGetProperty("repositories", out var repositories) && repositories.ValueKind == JsonValueKind.Array
+            ? repositories.EnumerateArray().Select(item => item.Clone()).ToList()
+            : Array.Empty<JsonElement>();
+
+    private static JsonElement? RepositoryInput(JsonElement outcome, IReadOnlyList<JsonElement> repositories, int index)
+    {
+        var id = Str(outcome, "repositoryId");
+        if (id is not null)
+        {
+            var matched = repositories.FirstOrDefault(repository => Str(repository, "repositoryId") == id);
+            if (matched.ValueKind != JsonValueKind.Undefined) return matched;
+        }
+        return index < repositories.Count ? repositories[index] : null;
+    }
 
     private static JsonElement? TryParseObject(string? json)
     {
@@ -66,4 +118,7 @@ public static class RoomDeliveryParser
 
     private static string? Str(JsonElement? obj, string key) =>
         obj is { } o && o.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString()) ? v.GetString() : null;
+
+    private static long? Number(JsonElement obj, string key) =>
+        obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) ? number : null;
 }

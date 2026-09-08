@@ -170,7 +170,7 @@ public class RoomNarrativeTests
     [Fact]
     public void A_delivery_card_is_emitted_from_the_facts()
     {
-        var facts = new RoomTurnFacts { Delivery = new RoomDelivery { Title = "Rename run agent", Reference = "#128", BranchHead = "feat/run-agent", BranchBase = "main", Url = "https://x/pr/128" } };
+        var facts = new RoomTurnFacts { Deliveries = [new RoomDelivery { Title = "Rename run agent", Reference = "#128", BranchHead = "feat/run-agent", BranchBase = "main", Url = "https://x/pr/128" }] };
 
         var d = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<DeliveryBlock>().ShouldHaveSingleItem();
         d.Title.ShouldBe("Rename run agent");
@@ -178,6 +178,29 @@ public class RoomNarrativeTests
         d.BranchHead.ShouldBe("feat/run-agent");
         d.BranchBase.ShouldBe("main");
         d.Url.ShouldBe("https://x/pr/128");
+    }
+
+    [Fact]
+    public void Multi_repo_delivery_cards_keep_each_repository_outcome()
+    {
+        var facts = new RoomTurnFacts
+        {
+            Deliveries =
+            [
+                new RoomDelivery { Title = "Ship repositories", RepositoryAlias = "api", Disposition = RoomPullRequestDisposition.Opened, Reference = "#7", Url = "https://x/api/pull/7" },
+                new RoomDelivery { Title = "Ship repositories", RepositoryAlias = "web", Disposition = RoomPullRequestDisposition.Failed, Error = "credential cannot create pull requests" },
+            ],
+        };
+
+        var deliveries = Build(new[] { Tape("plan", 1) }, facts: facts).Blocks.OfType<DeliveryBlock>().ToList();
+
+        deliveries.Count.ShouldBe(2);
+        deliveries.Select(delivery => delivery.Id).ShouldBe(new[] { "turn-1:delivery:0", "turn-1:delivery:1" });
+        deliveries[0].RepositoryAlias.ShouldBe("api");
+        deliveries[0].Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+        deliveries[1].RepositoryAlias.ShouldBe("web");
+        deliveries[1].Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
+        deliveries[1].Error.ShouldBe("credential cannot create pull requests");
     }
 
     [Fact]
@@ -434,7 +457,7 @@ public class RoomNarrativeTests
     {
         "changed-files" => new RoomTurnFacts { CompletionParked = true, ChangedFiles = new[] { "src/Program.cs" } },
         "deliverable" => new RoomTurnFacts { CompletionParked = true, Deliverables = new[] { new DeliverableFile { Path = "report.md", Kind = "document", SizeBytes = 12, ContentType = "text/markdown", ArtifactId = Guid.NewGuid(), AgentRunId = Guid.NewGuid() } } },
-        "pull-request" => new RoomTurnFacts { CompletionParked = true, Delivery = new RoomDelivery { Title = "Pull request #7" } },
+        "pull-request" => new RoomTurnFacts { CompletionParked = true, Deliveries = [new RoomDelivery { Title = "Pull request #7" }] },
         _ => new RoomTurnFacts { CompletionParked = true },
     };
 

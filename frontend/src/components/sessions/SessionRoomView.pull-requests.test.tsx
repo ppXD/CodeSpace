@@ -3,9 +3,9 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AssistantTurnBlock, RoomAction } from "@/api/sessions";
+import type { AssistantTurnBlock, DeliveryBlock, RoomAction } from "@/api/sessions";
 import { DialogProvider } from "@/components/dialog/dialog-context";
-import { TurnActions } from "./SessionRoomView";
+import { PrCard, TurnActions } from "./SessionRoomView";
 
 const openPullRequest = vi.hoisted(() => vi.fn());
 
@@ -70,5 +70,20 @@ describe("multi-repository pull request outcomes", () => {
     expect(screen.getByRole("link", { name: /api.*View PR/ })).toHaveAttribute("href", "https://example.test/api/pull/7");
     expect(screen.getByText("Skipped")).toBeInTheDocument();
     expect(screen.getByText("no published source branch")).toBeInTheDocument();
+  });
+
+  it("renders persisted success and failure cards after the operation result is reloaded", () => {
+    const deliveries: DeliveryBlock[] = [
+      { id: "delivery-api", seq: 7, type: "delivery", title: "Ship repositories", repositoryId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", repositoryAlias: "api", disposition: "Opened", reference: "#42", branchHead: "codespace/api", branchBase: "main", url: "https://example.test/api/pull/42" },
+      { id: "delivery-web", seq: 7, type: "delivery", title: "Ship repositories", repositoryId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", repositoryAlias: "web", disposition: "Failed", error: "credential cannot create pull requests" },
+    ];
+
+    render(<>{deliveries.map(delivery => <PrCard key={delivery.id} delivery={delivery} />)}</>);
+
+    expect(screen.getByText("api")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View PR" })).toHaveAttribute("href", "https://example.test/api/pull/42");
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("credential cannot create pull requests")).toBeInTheDocument();
   });
 });

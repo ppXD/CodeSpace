@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
@@ -831,7 +832,7 @@ public class SupervisorDeliveryGateTests
 
         await db.SaveChangesAsync();
 
-        var opener = new SupervisorPullRequestOpener(db, manifests, new FakeSupervisorPublishedBranchResolver(), new UnreachableChangeSetService());
+        var opener = new SupervisorPullRequestOpener(db, manifests, new FakeSupervisorPublishedBranchResolver(), new UnreachableChangeSetService(), new RunRecordLogger(db));
 
         var result = await opener.OpenAsync(workflowRunId, teamId, new[] { plan }, ids[0], targetBranchOverride: null, currentTurnStopSummary: null, actorUserId: null, CancellationToken.None);
 

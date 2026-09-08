@@ -2254,6 +2254,49 @@ public class RoomProjectorFlowTests
         delivery.BranchBase.ShouldBe("main", "the repository's own default branch — only ever populated via the resolver's join, never the manifest row directly");
     }
 
+    [Fact]
+    public async Task A_persisted_multi_repo_PR_result_projects_every_success_and_failure_after_reload()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship the repository set");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the repository set", resultSummary: "attempted every destination");
+        var apiId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunRecord.Add(new WorkflowRunRecord
+            {
+                Id = Guid.NewGuid(), RunId = run, RecordType = WorkflowRunRecordTypes.DeliveryPullRequests, OccurredAt = DateTimeOffset.UtcNow,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    pullRequests = new object[]
+                    {
+                        new { repositoryId = apiId, alias = "api", disposition = "Opened", number = 42, url = "https://example.test/api/pull/42", error = (string?)null },
+                        new { repositoryId = webId, alias = "web", disposition = "Failed", number = (int?)null, url = (string?)null, error = "credential cannot create pull requests" },
+                    },
+                }, AgentJson.Options),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var deliveries = room!.Blocks.OfType<AssistantTurnBlock>().Single().Blocks.OfType<DeliveryBlock>().ToList();
+
+        deliveries.Count.ShouldBe(2, "the append-only operation result must survive a Room reload without collapsing to the first successful repository");
+        deliveries[0].RepositoryId.ShouldBe(apiId);
+        deliveries[0].RepositoryAlias.ShouldBe("api");
+        deliveries[0].Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+        deliveries[0].Reference.ShouldBe("#42");
+        deliveries[0].Url.ShouldBe("https://example.test/api/pull/42");
+        deliveries[1].RepositoryId.ShouldBe(webId);
+        deliveries[1].RepositoryAlias.ShouldBe("web");
+        deliveries[1].Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
+        deliveries[1].Url.ShouldBeNull();
+        deliveries[1].Error.ShouldBe("credential cannot create pull requests");
+    }
+
     private async Task SeedIntegrationMergeAsync(Guid teamId, Guid runId, string integratedBranch)
     {
         using var scope = _fixture.BeginScope();

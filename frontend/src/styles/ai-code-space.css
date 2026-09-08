@@ -6471,8 +6471,15 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-pr-av { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-soft); border: 1px solid var(--rm-accent-line); color: var(--accent); flex: none; }
 .room-pr-main { min-width: 0; flex: 1; }
 .room-pr-title { display: flex; align-items: center; gap: 8px; }
+.room-pr-alias { flex: none; padding: 1px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: 10.5px; font-weight: 650; }
 .room-pr-name { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .room-pr-ref { flex: none; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.room-pr-state { flex: none; font-size: 10.5px; font-weight: 600; }
+.room-pr-state-ok { color: var(--rm-good); }
+.room-pr-state-warn { color: var(--rm-warn); }
+.room-pr-state-err { color: var(--rm-danger); }
+.room-pr-err { border-color: color-mix(in srgb, var(--rm-danger) 35%, var(--line)); }
+.room-pr-warn { border-color: color-mix(in srgb, var(--rm-warn) 35%, var(--line)); }
 .room-pr-sub { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 11px; color: var(--muted); }
 .room-pr-branch { display: inline-flex; align-items: center; gap: 4px; }
 .room-pr-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 31px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 500; cursor: pointer; box-shadow: 0 1px 2px rgba(217,119,87,.22); text-decoration: none; }

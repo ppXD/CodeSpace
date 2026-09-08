@@ -1,9 +1,13 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -37,13 +41,15 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
     private readonly IPublishManifestStore _manifests;
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly IChangeSetService _changeSets;
+    private readonly IRunRecordLogger _records;
 
-    public SupervisorPullRequestOpener(CodeSpaceDbContext db, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IChangeSetService changeSets)
+    public SupervisorPullRequestOpener(CodeSpaceDbContext db, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, IChangeSetService changeSets, IRunRecordLogger records)
     {
         _db = db;
         _manifests = manifests;
         _publishedBranches = publishedBranches;
         _changeSets = changeSets;
+        _records = records;
     }
 
     public async Task<RoomPullRequestResult> OpenAsync(Guid workflowRunId, Guid teamId, IReadOnlyList<SupervisorPriorDecision> priorDecisions, Guid? primaryRepositoryId, string? targetBranchOverride, string? currentTurnStopSummary, Guid? actorUserId, CancellationToken cancellationToken)
@@ -54,7 +60,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
             ? resolved
             : resolved.Select(t => t with { TargetBranch = targetBranchOverride }).ToList();
 
-        if (targets.Count == 0) return await NothingToOpenAsync(workflowRunId, primaryRepositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        if (targets.Count == 0) return await RecordedAsync(workflowRunId, await NothingToOpenAsync(workflowRunId, primaryRepositoryId, teamId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
         var degraded = targets.Where(t => t.RepositoryId is null)
             .Select(t => new RoomPullRequestOpened { Alias = t.Alias, Disposition = RoomPullRequestDisposition.Failed, Error = "no resolvable repository id for this repo" })
@@ -79,7 +85,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
         var candidates = resolvable.Where(t => !AlreadyOpenForCurrentBranch(t)).ToList();
 
         if (candidates.Count == 0)
-            return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).ToList() };
+            return await RecordedAsync(workflowRunId, new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).ToList() }, cancellationToken).ConfigureAwait(false);
 
         // DC-2b: the repo-level publish policy override (Repository.PublishMode) — the SAME escape hatch
         // RepositoryPolicyPublishGuard enforces at agent-push time, consulted here too so a protected/compliance
@@ -94,7 +100,7 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
         var toOpen = candidates.Where(t => !patchOnlyIds.Contains(t.RepositoryId!.Value)).ToList();
 
         if (toOpen.Count == 0)
-            return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(patchOnlySkipped).ToList() };
+            return await RecordedAsync(workflowRunId, new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(patchOnlySkipped).ToList() }, cancellationToken).ConfigureAwait(false);
 
         var (title, body) = DeriveTitleAndBody(priorDecisions, currentTurnStopSummary);
 
@@ -112,7 +118,16 @@ public sealed class SupervisorPullRequestOpener : ISupervisorPullRequestOpener, 
         for (var i = 0; i < toOpen.Count; i++)
             freshlyOpened.Add(await ProjectAndRecordAsync(workflowRunId, teamId, toOpen[i], result.PullRequests[i], cancellationToken).ConfigureAwait(false));
 
-        return new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(patchOnlySkipped).Concat(freshlyOpened).ToList() };
+        return await RecordedAsync(workflowRunId, new RoomPullRequestResult { PullRequests = degraded.Concat(alreadyOpened).Concat(patchOnlySkipped).Concat(freshlyOpened).ToList() }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RoomPullRequestResult> RecordedAsync(Guid workflowRunId, RoomPullRequestResult result, CancellationToken cancellationToken)
+    {
+        if (result.PullRequests.Count == 0) return result;
+
+        await _records.RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.DeliveryPullRequests, nodeId: null, iterationKey: string.Empty,
+            correlationId: Guid.NewGuid(), parentRecordId: null, JsonSerializer.SerializeToElement(result, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     /// <summary>

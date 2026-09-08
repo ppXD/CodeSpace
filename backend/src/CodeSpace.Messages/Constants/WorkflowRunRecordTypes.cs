@@ -57,6 +57,9 @@ public static class WorkflowRunRecordTypes
     /// </summary>
     public const string SupervisorRunRecovered = "supervisor.run_recovered";
 
+    /// <summary>A server-authored pull-request operation completed. Payload is <c>RoomPullRequestResult</c>: one disposition per repository, including failures and policy skips that have no PR manifest.</summary>
+    public const string DeliveryPullRequests = "delivery.pull_requests";
+
     // ─── Node lifecycle ───────────────────────────────────────────────────────
     // The (run_id, node_id, iteration_key) cell can transition Pending → Running → terminal.
     // The view projects status from the latest record_type for the cell.

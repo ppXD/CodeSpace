@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;
@@ -45,6 +46,30 @@ public class RoomDeliveryParserTests
 
         d.ShouldNotBeNull("the pullRequests[] key is PR-specific — no branch-input check needed");
         d!.Reference.ShouldBe("#7");
+    }
+
+    [Fact]
+    public void A_multi_repo_result_retains_every_disposition_and_repository_branch()
+    {
+        var apiId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+        var deliveries = RoomDeliveryParser.ParseMany(
+            $$"""{"pullRequests":[{"repositoryId":"{{apiId}}","alias":"api","disposition":"Opened","number":7,"url":"https://x/api/pull/7"},{"repositoryId":"{{webId}}","alias":"web","disposition":"Failed","error":"credential cannot create pull requests"}]}""",
+            $$"""{"title":"Ship the repository set","repositories":[{"repositoryId":"{{apiId}}","alias":"api","producedBranch":"codespace/api","baseBranch":"main"},{"repositoryId":"{{webId}}","alias":"web","producedBranch":"codespace/web","baseBranch":"release"}]}""");
+
+        deliveries.Count.ShouldBe(2);
+        deliveries[0].RepositoryId.ShouldBe(apiId);
+        deliveries[0].RepositoryAlias.ShouldBe("api");
+        deliveries[0].Disposition.ShouldBe(RoomPullRequestDisposition.Opened);
+        deliveries[0].Reference.ShouldBe("#7");
+        deliveries[0].BranchHead.ShouldBe("codespace/api");
+        deliveries[0].BranchBase.ShouldBe("main");
+        deliveries[1].RepositoryId.ShouldBe(webId);
+        deliveries[1].RepositoryAlias.ShouldBe("web");
+        deliveries[1].Disposition.ShouldBe(RoomPullRequestDisposition.Failed);
+        deliveries[1].Error.ShouldBe("credential cannot create pull requests");
+        deliveries[1].BranchHead.ShouldBe("codespace/web");
+        deliveries[1].BranchBase.ShouldBe("release");
     }
 
     [Fact]
