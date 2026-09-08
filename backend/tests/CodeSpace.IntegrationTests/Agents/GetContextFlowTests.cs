@@ -307,6 +307,7 @@ public partial class GetContextFlowTests
         text.ShouldContain("does.not.exist");
         text.ShouldContain("session.turns", customMessage: "the error lists the available sources");
         text.ShouldContain("session.summary");
+        text.ShouldContain("session.events");
     }
 
     [Fact]
