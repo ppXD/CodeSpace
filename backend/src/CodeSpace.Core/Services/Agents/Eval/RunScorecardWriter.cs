@@ -113,16 +113,23 @@ public sealed class RunScorecardWriter : IRunScorecardWriter, IScopedDependency
     {
         var records = await _db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == workflowRunId && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted)
+            .OrderBy(r => r.Sequence).ThenBy(r => r.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (records.Count == 0) return new BrainPlaneFacts(null, null);
 
         var priced = records.Select(r => InteractionSpend.From(r)).ToList();
         var summary = BrainPlaneSpendSummary.From(priced);
-        var brainModel = priced.FirstOrDefault(r => r.Kind == SupervisorDecisionCallKind && !string.IsNullOrWhiteSpace(r.Model))?.Model;
+        var brainModel = FirstDecisionModel(records);
 
         return new BrainPlaneFacts(summary.ByKind.Count == 0 ? null : summary.TotalUsd, brainModel);
     }
+
+    /// <summary>Select the earliest durable supervisor decision, independent of EF/materialization order. Sequence is the run-scoped append cursor; Id is a stable tie-break for imported fixtures whose sequence is unset.</summary>
+    internal static string? FirstDecisionModel(IReadOnlyList<WorkflowRunRecord> records) => records
+        .OrderBy(r => r.Sequence).ThenBy(r => r.Id)
+        .Select(r => InteractionSpend.From(r))
+        .FirstOrDefault(r => r.Kind == SupervisorDecisionCallKind && !string.IsNullOrWhiteSpace(r.Model))?.Model;
 
     /// <summary>
     /// Upsert the run's ONE row. A concurrent writer that inserted first loses nothing — the unique index rejects

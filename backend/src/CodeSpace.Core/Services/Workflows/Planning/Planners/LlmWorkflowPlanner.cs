@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Planning.Planners;
 
@@ -24,16 +25,18 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly Learning.ILessonReader _lessons;
+    private readonly ILogger<LlmWorkflowPlanner>? _logger;
 
     /// <summary>Lessons shown per plan — the freshest few beat an exhaustive dump (prompt budget + recency bias are both deliberate). The SHARED window, so the supervisor lane's treatment is the same slice of the ledger.</summary>
     public const int LessonTopK = Learning.LessonArms.TopK;
 
-    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.ILessonReader lessons)
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.ILessonReader lessons, ILogger<LlmWorkflowPlanner>? logger = null)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
         _lessons = lessons;
+        _logger = logger;
     }
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
@@ -44,7 +47,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         // ALL one provider (e.g. all Custom-gateway models) plans on THAT provider's client, not a provider-blind pick.
         var resolved = request.BrainModelId is { } brainModelId
             ? await InProcessStructuredModel.ResolveByRowIdAsync(_clientRegistry, _modelSelector, request.TeamId, brainModelId, cancellationToken).ConfigureAwait(false)
-            : await InProcessStructuredModel.ResolveAsync(_clientRegistry, _modelSelector, request.TeamId, cancellationToken).ConfigureAwait(false);
+            : await InProcessStructuredModel.ResolveAsync(_clientRegistry, _modelSelector, new InProcessStructuredModelOptions(request.TeamId) { Logger = _logger }, cancellationToken).ConfigureAwait(false);
 
         if (resolved is not { } pickedBrain)
             throw new InvalidOperationException(request.BrainModelId is null

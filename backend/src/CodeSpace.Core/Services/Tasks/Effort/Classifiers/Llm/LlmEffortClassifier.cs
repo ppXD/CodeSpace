@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Tasks.Effort;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Tasks.Effort.Classifiers.Llm;
 
@@ -34,13 +35,15 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
     private readonly IModelPoolSelector _models;
     private readonly ITaskRecipeRegistry _recipes;
     private readonly HeuristicEffortClassifier _heuristic;
+    private readonly ILogger<LlmEffortClassifier>? _logger;
 
-    public LlmEffortClassifier(ILLMClientRegistry clients, IModelPoolSelector models, ITaskRecipeRegistry recipes, HeuristicEffortClassifier heuristic)
+    public LlmEffortClassifier(ILLMClientRegistry clients, IModelPoolSelector models, ITaskRecipeRegistry recipes, HeuristicEffortClassifier heuristic, ILogger<LlmEffortClassifier>? logger = null)
     {
         _clients = clients;
         _models = models;
         _recipes = recipes;
         _heuristic = heuristic;
+        _logger = logger;
     }
 
     public string Kind => ClassifierKind;
@@ -72,7 +75,8 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
     {
         try
         {
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, request.Seed.TeamId, ct, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false) is not { } resolved)
+            var options = new InProcessStructuredModelOptions(request.Seed.TeamId) { TierCeiling = InProcessStructuredModel.CheapBrainCeiling, Logger = _logger };
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, options, ct).ConfigureAwait(false) is not { } resolved)
                 return null;
 
             var (structured, pick) = resolved;

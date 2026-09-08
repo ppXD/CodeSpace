@@ -1,7 +1,18 @@
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
+
+/// <summary>One caller's intent for automatic structured-model resolution. Keeping team, tier policy and diagnostics together prevents optional selection concerns from turning into loose positional parameters as the model plane evolves.</summary>
+public sealed record InProcessStructuredModelOptions(Guid TeamId)
+{
+    /// <summary>Optional capability ceiling applied independently to every provider candidate.</summary>
+    public ModelCapabilityTier? TierCeiling { get; init; }
+
+    /// <summary>The caller's production logger. When the pool hops providers, the shared failover client announces the skipped candidate through this category.</summary>
+    public ILogger? Logger { get; init; }
+}
 
 /// <summary>
 /// Resolves a (structured-LLM client, pool model) pair that MATCH for a team — the shared in-process-plane resolution
@@ -48,19 +59,19 @@ public static class InProcessStructuredModel
     /// model rides <see cref="StructuredLLMCompletion.Model"/> (callers stamp provenance from THAT, never the pick).
     /// The operator-pinned row path (<see cref="ResolveByRowIdAsync"/>) never fails over: an explicit pin resolves verbatim.
     ///
-    /// <para>D2: <paramref name="tierCeiling"/> (null = the unceilinged "strongest available" ladder, so every existing
+    /// <para>D2: <see cref="InProcessStructuredModelOptions.TierCeiling"/> (null = the unceilinged "strongest available" ladder, so every existing
     /// caller is byte-identical) is applied PER CANDIDATE PROVIDER, which is how the ceiling composes with pool failover
     /// — each provider contributes its own cheapest-satisfying row, and a provider whose pool has nothing under the
     /// ceiling still contributes its unceilinged pick rather than dropping out of the failover chain. So a ceiling can
     /// never shorten the chain, and a hop lands on a ceilinged row wherever one exists.</para>
     /// </summary>
-    public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveAsync(ILLMClientRegistry clients, IModelPoolSelector models, Guid teamId, CancellationToken cancellationToken, ModelCapabilityTier? tierCeiling = null)
+    public static async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveAsync(ILLMClientRegistry clients, IModelPoolSelector models, InProcessStructuredModelOptions options, CancellationToken cancellationToken)
     {
         var candidates = new List<(IStructuredLLMClient Client, ModelPoolPick Pick)>();
 
         foreach (var client in clients.All.OfType<IStructuredLLMClient>())
         {
-            var pick = await models.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, tierCeiling, cancellationToken).ConfigureAwait(false);
+            var pick = await models.SelectAsync(options.TeamId, client.Provider, allowedModels: null, pinnedModel: null, options.TierCeiling, cancellationToken).ConfigureAwait(false);
 
             if (pick != null) candidates.Add((client, pick));
         }
@@ -69,7 +80,7 @@ public static class InProcessStructuredModel
         {
             0 => null,
             1 => candidates[0],
-            _ => (new FailoverStructuredClient(candidates), candidates[0].Pick),
+            _ => (new FailoverStructuredClient(candidates, options.Logger), candidates[0].Pick),
         };
     }
 

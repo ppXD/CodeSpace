@@ -24,7 +24,7 @@ public class InProcessStructuredModelTests
         var clients = new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Custom"));
         var models = new ProviderAwareSelector(hasModelFor: "Custom");
 
-        var resolved = await InProcessStructuredModel.ResolveAsync(clients, models, Guid.NewGuid(), CancellationToken.None);
+        var resolved = await InProcessStructuredModel.ResolveAsync(clients, models, new InProcessStructuredModelOptions(Guid.NewGuid()), CancellationToken.None);
 
         resolved.ShouldNotBeNull();
         resolved!.Value.Client.Provider.ShouldBe("Custom", "an all-Custom pool resolves the Custom client, not the first-registered OpenAI one");
@@ -37,7 +37,7 @@ public class InProcessStructuredModelTests
         var clients = new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Anthropic"));
         var models = new ProviderAwareSelector(hasModelFor: "Custom");   // team only has Custom, but no Custom client registered
 
-        (await InProcessStructuredModel.ResolveAsync(clients, models, Guid.NewGuid(), CancellationToken.None))
+        (await InProcessStructuredModel.ResolveAsync(clients, models, new InProcessStructuredModelOptions(Guid.NewGuid()), CancellationToken.None))
             .ShouldBeNull("no registered structured provider has a team model → the caller degrades / fails cleanly");
     }
 
@@ -50,7 +50,7 @@ public class InProcessStructuredModelTests
         // else a hop onto the second provider would silently spend its Frontier model.
         var ceilings = new CeilingCapturingSelector();
 
-        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Custom")), ceilings, Guid.NewGuid(), CancellationToken.None, ModelCapabilityTier.Strong);
+        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI"), new FakeStructured("Custom")), ceilings, new InProcessStructuredModelOptions(Guid.NewGuid()) { TierCeiling = ModelCapabilityTier.Strong }, CancellationToken.None);
 
         ceilings.Seen.Count.ShouldBe(2, "both registered providers had a model, so both are failover candidates");
         ceilings.Seen.ShouldAllBe(c => c == ModelCapabilityTier.Strong, "a ceiling can never shorten the failover chain — every candidate provider is asked for its own ceilinged row");
@@ -61,7 +61,7 @@ public class InProcessStructuredModelTests
     {
         var ceilings = new CeilingCapturingSelector();
 
-        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI")), ceilings, Guid.NewGuid(), CancellationToken.None);
+        await InProcessStructuredModel.ResolveAsync(new FakeRegistry(new FakeStructured("OpenAI")), ceilings, new InProcessStructuredModelOptions(Guid.NewGuid()), CancellationToken.None);
 
         ceilings.Seen.Count.ShouldBe(1);
         ceilings.Seen[0].ShouldBeNull("the planner / decider / critics / judges keep the unceilinged 'strongest available' ladder — byte-identical to before D2");

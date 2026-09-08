@@ -55,7 +55,7 @@ public sealed class ModelCapabilityTieringService : IModelCapabilityTieringServi
             // capability tiering a producer of selection ground truth, not a consumer of it, and it keeps the team's
             // strongest model. The other cheap callers each consume a verdict a human reviews or that only degrades
             // their own single answer; this one silently degrades everyone else's.
-            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, new InProcessStructuredModelOptions(teamId) { Logger = _logger }, cancellationToken).ConfigureAwait(false) is not { } resolved)
                 return;   // no structured provider with a team model → nothing to tier with; leave un-tiered (fail-closed)
 
             var (structured, pick) = resolved;

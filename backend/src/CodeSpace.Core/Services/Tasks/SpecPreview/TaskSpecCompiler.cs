@@ -77,7 +77,7 @@ public sealed class TaskSpecCompiler : ITaskSpecCompiler, IScopedDependency
 
     private async Task<(IStructuredLLMClient Client, ModelPoolPick Pick)?> ResolveModelAsync(Guid teamId, CancellationToken cancellationToken)
     {
-        try { return await InProcessStructuredModel.ResolveAsync(_clients, _models, teamId, cancellationToken, InProcessStructuredModel.CheapBrainCeiling).ConfigureAwait(false); }
+        try { return await InProcessStructuredModel.ResolveAsync(_clients, _models, new InProcessStructuredModelOptions(teamId) { TierCeiling = InProcessStructuredModel.CheapBrainCeiling, Logger = _logger }, cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Spec preview model resolution failed for team {TeamId}", teamId);
