@@ -179,6 +179,40 @@ public class SupervisorResolverTests
     }
 
     [Fact]
+    public void Contributor_integrity_failure_is_named_as_the_publish_barrier_and_offers_a_fresh_resolve()
+    {
+        var outcome = SupervisorOutcome.AppendResolveContributorIntegrity(
+            ResolveOutcomeWithBranch("Succeeded", $"done {SupervisorResolverRecipe.TestsPassedMarker}", "codespace/resolve/untrusted"),
+            new SupervisorResolveContributorIntegrity { AgentRunId = Guid.NewGuid(), Kind = SupervisorResolveContributorIssueKind.CompactResultMismatch });
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve) with { MaxResolveAttempts = 2 });
+
+        prompt.ShouldContain("contributor integrity FAILED", Case.Sensitive);
+        prompt.ShouldContain(nameof(SupervisorResolveContributorIssueKind.CompactResultMismatch), Case.Sensitive);
+        prompt.ShouldContain("publish blocked", Case.Insensitive);
+        prompt.ShouldContain("Issue another 'resolve'", Case.Sensitive);
+        prompt.ShouldNotContain("safe to accept", Case.Insensitive);
+    }
+
+    [Fact]
+    public void Contributor_integrity_failure_past_the_resolve_cap_routes_to_human_without_offering_an_impossible_resolve()
+    {
+        var outcome = SupervisorOutcome.AppendResolveContributorIntegrity(
+            ResolveOutcomeWithBranch("Succeeded", $"done {SupervisorResolverRecipe.TestsPassedMarker}", "codespace/resolve/untrusted"),
+            new SupervisorResolveContributorIntegrity { AgentRunId = Guid.NewGuid(), Kind = SupervisorResolveContributorIssueKind.CrossTeam });
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve) with { MaxResolveAttempts = 1 });
+
+        prompt.ShouldContain("contributor integrity FAILED", Case.Sensitive);
+        prompt.ShouldContain(nameof(SupervisorResolveContributorIssueKind.CrossTeam), Case.Sensitive);
+        prompt.ShouldContain("ask_human", Case.Sensitive);
+        prompt.ShouldNotContain("Issue another 'resolve'", Case.Sensitive);
+        prompt.ShouldNotContain("safe to accept", Case.Insensitive);
+    }
+
+    [Fact]
     public void An_unverified_resolution_past_the_cap_stops_offering_a_resolve_it_would_die_on()
     {
         // The contradiction this pins actually shipped: the action mask told the model a further resolve would

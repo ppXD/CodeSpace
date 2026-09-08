@@ -1510,6 +1510,17 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// </summary>
     private static void AppendResolutionVerdict(StringBuilder builder, SupervisorPriorDecision prior, bool resolveExhausted)
     {
+        if (SupervisorOutcome.HasResolveContributorIntegrity(prior.OutcomeJson))
+        {
+            var integrity = SupervisorOutcome.ReadResolveContributorIntegrity(prior.OutcomeJson);
+            var issue = integrity?.Kind.ToString() ?? "MalformedIntegrityFact";
+            var next = resolveExhausted
+                ? "The resolve cap is SPENT: 'ask_human' to review the integrity break, or 'stop' and leave the result unpublished."
+                : "Issue another 'resolve' to rebuild the reconciliation from durable contributors, or 'ask_human' to review the integrity break.";
+            builder.AppendLine($"    resolution is NOT publishable — contributor integrity FAILED ({issue}); publish blocked even if the resolver reported green build/tests. {next}");
+            return;
+        }
+
         var verdict = SupervisorOutcome.ReadResolutionVerdict(prior.OutcomeJson);
 
         builder.AppendLine(verdict switch
