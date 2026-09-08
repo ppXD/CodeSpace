@@ -50,7 +50,7 @@ describe("route snapshot references", () => {
     // Same invalidate-on-control-change / never-revive-from-stale shape as acceptanceCompatibility above — posture
     // is just as input-dependent (arc3 item 3.2), so a changed control must drop it rather than show a posture the
     // NEW input never asked about.
-    const onPosture: TaskRoutePreviewResult = { ...reply("on"), posture: { autonomy: "Trusted", networkOn: true, network: "Network: on (Trusted)", completionMode: "Shadow" } };
+    const onPosture: TaskRoutePreviewResult = { ...reply("on"), posture: { autonomy: "Trusted", networkOn: true, network: "Network: on (Trusted)", write: "Write scope: workspace (Trusted)", approval: "Risky tools: require human approval (Trusted); tools marked irreversible cannot auto-run", completionMode: "Shadow", completion: "Completion: Shadow — evidence is assessed without overriding the legacy terminal result" } };
     let resolveStale!: (value: TaskRoutePreviewResult) => void;
     vi.mocked(tasksApi.routePreview).mockResolvedValueOnce(onPosture).mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve; })).mockResolvedValueOnce(reply("current-unknown"));
     const hook = renderHook(({ value }) => useRoutePreview(value), { initialProps: { value: input } });
