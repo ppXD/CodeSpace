@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -18,11 +19,12 @@ using System.Text.Json;
 namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
-/// 🟢 High fidelity, REPORT-ONLY (dispatch-only lane): the hidden-suite qualification rehearsal drives the deployed
-/// <see cref="IQualificationRunner"/> receipt chain and the paired TaskLaunch chain against the operator-staged suite
-/// under live gateway credentials. It reports bounds, health, digest, exact revision and redacted observed-model
+/// 🟢 High fidelity, REPORT-ONLY (dispatch-only lane): the qualification rehearsal drives the deployed
+/// <see cref="IQualificationRunner"/> receipt chain and paired TaskLaunch chain under live gateway credentials.
+/// The shipped development corpus always exercises the physical model/CLI path; an operator-staged hidden suite
+/// adds holdout evidence when present. It reports bounds, health, digest, exact revision and redacted observed-model
 /// identities. Every receipt and paired cell lands only in the job-local database; the rehearsal never mints a
-/// deployment claim. It self-skips loudly when the suite or live credential is absent (skip ≠ pass).
+/// deployment claim. Missing live credentials self-skip loudly (skip ≠ pass).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -87,21 +89,46 @@ public sealed class RealModelQualificationRehearsalE2ETests
     [SkippableFact]
     public async Task The_hidden_suite_paired_rehearsal_drives_balanced_budgeted_TaskLaunch_cells()
     {
-        var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
-        var apiKey = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
-        var candidateModel = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
-        var present = new[] { baseUrl, apiKey, candidateModel }.Count(value => value is not null);
-        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
-        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none.");
+        var connection = LiveConnection();
         var suite = HiddenSuiteLoader.LoadFromDefaultLocation() ?? throw RealModelGate.ReportSkipped(Provider, $"no hidden suite at '{HiddenSuiteLoader.DefaultSuiteDirectory}' — skip ≠ pass");
-        if (OperatingSystem.IsWindows()) return;
+        await RunLivePairedRehearsalAsync(new LivePairedRehearsalRequest
+        {
+            Suite = suite, SuiteKind = "hidden-holdout", Connection = connection,
+            MinimumIndependentClusters = 40, MinimumStrata = 8, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 0.98,
+        });
+    }
 
-        var baselineModel = Environment.GetEnvironmentVariable(BaselineModelEnvVar);
-        var usedFallbackBaseline = string.IsNullOrWhiteSpace(baselineModel);
-        baselineModel = usedFallbackBaseline ? candidateModel : baselineModel;
+    [SkippableFact]
+    public async Task The_shipped_development_suite_drives_a_real_paired_TaskLaunch_model_and_CLI_path()
+    {
+        var tasks = SeedBenchmarkCorpus.Tasks.Select(task => task with
+        {
+            Modes = Array.AsReadOnly(new[] { BenchmarkMode.TaskLaunchQuick }),
+            Stratum = "development",
+            IndependenceCluster = task.Id,
+            RequiresCompleteExecution = true,
+        }).ToList().AsReadOnly();
+        tasks.ShouldNotBeEmpty();
+        tasks.ShouldAllBe(task => task.Modes.SequenceEqual(new[] { BenchmarkMode.TaskLaunchQuick }) && task.IndependenceCluster == task.Id && task.RequiresCompleteExecution);
+        var corpusDigest = EvalSuite.ManifestFor(tasks).Version;
+        var suite = new HiddenSuite(tasks, $"development:{corpusDigest}", new SeedFixtureStager());
+        await RunLivePairedRehearsalAsync(new LivePairedRehearsalRequest
+        {
+            Suite = suite, SuiteKind = "development-protocol", Connection = LiveConnection(),
+            MinimumIndependentClusters = tasks.Count, MinimumStrata = 1, MinimumRequiredExecutionClusters = tasks.Count, MinimumEvaluatorHealth = 0.9,
+        });
+    }
+
+    private async Task RunLivePairedRehearsalAsync(LivePairedRehearsalRequest input)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var (baseUrl, apiKey, candidateModel) = input.Connection;
+        var configuredBaseline = Environment.GetEnvironmentVariable(BaselineModelEnvVar);
+        var usedFallbackBaseline = string.IsNullOrWhiteSpace(configuredBaseline);
+        var baselineModel = usedFallbackBaseline ? candidateModel : configuredBaseline;
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
-        var (controlCredentialId, controlRowId) = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!, baselineModel!);
-        var (candidateCredentialId, candidateRowId) = await SeedAgentCredentialAsync(teamId, baseUrl.TrimEnd('/'), apiKey, candidateModel!);
+        var (controlCredentialId, controlRowId) = await SeedAgentCredentialAsync(teamId, baseUrl.TrimEnd('/'), apiKey, baselineModel!);
+        var (candidateCredentialId, candidateRowId) = await SeedAgentCredentialAsync(teamId, baseUrl.TrimEnd('/'), apiKey, candidateModel);
 
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
@@ -114,17 +141,22 @@ public sealed class RealModelQualificationRehearsalE2ETests
                 CodeRevision = CurrentRevision(),
                 Spec = new PairedQualificationSpec
                 {
-                    SessionsPerCell = 1, MinimumIndependentClusters = 40, MinimumStrata = 8, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 0.98,
+                    SessionsPerCell = 1, MinimumIndependentClusters = input.MinimumIndependentClusters, MinimumStrata = input.MinimumStrata,
+                    MinimumRequiredExecutionClusters = input.MinimumRequiredExecutionClusters, MinimumEvaluatorHealth = input.MinimumEvaluatorHealth,
                     MaxCostUsdPerLaunch = 5m, Criterion = PairedQualificationCriterion.Quality,
-                    MinimumQualityLift = 0.05, OrderingSeed = "paired-tasklaunch-q1-v1",
+                    MinimumQualityLift = 0.05, OrderingSeed = $"paired-tasklaunch-{input.SuiteKind}-v1",
                 },
             };
 
             PairedQualificationOutcome outcome;
-            using (var scope = _fixture.BeginScope()) outcome = await scope.Resolve<IPairedTaskLaunchQualificationRunner>().RunAsync(request, CancellationToken.None);
+            using (var scope = _fixture.BeginScope())
+            {
+                var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>());
+                outcome = await runner.RunAsync(request, CancellationToken.None);
+            }
 
-            outcome.SuiteDigest.ShouldBe(suite.SuiteContentHash);
-            outcome.PairedCells.ShouldBe(suite.Tasks.Sum(task => task.Modes.Count));
+            outcome.SuiteDigest.ShouldBe(input.Suite.SuiteContentHash);
+            outcome.PairedCells.ShouldBe(input.Suite.Tasks.Sum(task => task.Modes.Count));
             using (var scope = _fixture.BeginScope())
             {
                 var durable = await scope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().Where(row => row.ObservationGroupId == outcome.ObservationGroupId).ToListAsync();
@@ -142,6 +174,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
             var evidence = new
             {
                 schema = PairedQualificationOutcome.StatisticsVersion,
+                suiteKind = input.SuiteKind,
                 outcome.ObservationGroupId,
                 outcome.CodeRevision,
                 outcome.SuiteDigest,
@@ -163,13 +196,40 @@ public sealed class RealModelQualificationRehearsalE2ETests
                     && string.Equals(outcome.Control.ObservedModels[0], outcome.Candidate.ObservedModels[0], StringComparison.OrdinalIgnoreCase),
             };
             Directory.CreateDirectory("backend/TestResults");
-            await File.WriteAllTextAsync("backend/TestResults/paired-tasklaunch-qualification.json", JsonSerializer.Serialize(evidence, AgentJson.Options));
-            var report = $"paired suite {outcome.SuiteDigest} at {outcome.CodeRevision}: {outcome.PairedCells} cell pairs / {outcome.IndependentClusters} independent clusters, "
+            await File.WriteAllTextAsync($"backend/TestResults/paired-tasklaunch-{input.SuiteKind}.json", JsonSerializer.Serialize(evidence, AgentJson.Options));
+            var report = $"{input.SuiteKind} paired suite {outcome.SuiteDigest} at {outcome.CodeRevision}: {outcome.PairedCells} cell pairs / {outcome.IndependentClusters} independent clusters, "
                        + $"budget-admissible solves control {outcome.Control.BudgetAdmissibleSolved}/{outcome.Control.Total}, candidate {outcome.Candidate.BudgetAdmissibleSolved}/{outcome.Candidate.Total}, "
                        + $"paired difference {outcome.QualityDifference:P1}, cluster-bootstrap lower 95% {outcome.QualityDifferenceLower95:P1}, qualified {outcome.QualifiedForCapabilityClaim}; blockers [{string.Join(',', outcome.BlockingReasons)}].";
             Console.WriteLine($"[paired-qualification-rehearsal] {report}");
             return (RealModelOutcome.Drove, report);
         });
+    }
+
+    private static (string BaseUrl, string ApiKey, string CandidateModel) LiveConnection()
+    {
+        var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var candidateModel = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+        var present = new[] { baseUrl, apiKey, candidateModel }.Count(value => value is not null);
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none.");
+        return (baseUrl!, apiKey!, candidateModel!);
+    }
+
+    private sealed record LivePairedRehearsalRequest
+    {
+        public required HiddenSuite Suite { get; init; }
+        public required string SuiteKind { get; init; }
+        public required (string BaseUrl, string ApiKey, string CandidateModel) Connection { get; init; }
+        public required int MinimumIndependentClusters { get; init; }
+        public required int MinimumStrata { get; init; }
+        public required int MinimumRequiredExecutionClusters { get; init; }
+        public required double MinimumEvaluatorHealth { get; init; }
+    }
+
+    private sealed record FixedHiddenSuiteSource(HiddenSuite Suite) : IHiddenSuiteSource
+    {
+        public HiddenSuite? Load() => Suite;
     }
 
     private static object Redacted(PairedArmQualificationSummary arm) => new
