@@ -11,5 +11,11 @@ public sealed class AddCredentialedModelCommandHandler : IRequestHandler<AddCred
     public AddCredentialedModelCommandHandler(IModelCredentialService service) { _service = service; }
 
     public async Task<Guid> Handle(AddCredentialedModelCommand request, CancellationToken cancellationToken) =>
-        await _service.AddModelAsync(request.ModelCredentialId, request.ModelId, request.DisplayName, CodeSpace.Messages.Agents.ModelPrice.FromNullable(request.InputUsdPerMillion, request.OutputUsdPerMillion), cancellationToken).ConfigureAwait(false);
+        await _service.AddModelAsync(request.ModelCredentialId, new CredentialedModelConfiguration
+        {
+            ModelId = request.ModelId,
+            DisplayName = request.DisplayName,
+            Price = CodeSpace.Messages.Agents.ModelPrice.FromNullable(request.InputUsdPerMillion, request.OutputUsdPerMillion),
+            ContextWindowTokens = request.ContextWindowTokens,
+        }, cancellationToken).ConfigureAwait(false);
 }

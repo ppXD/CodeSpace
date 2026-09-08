@@ -42,6 +42,25 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task It_carries_the_exact_rows_context_capacity_into_the_pick()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Custom", key: "sk");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.Add(new ModelCredentialModel
+            {
+                Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = "opaque-house-model", Source = ModelSource.Manual,
+                Enabled = true, ContextWindowTokens = 262_144,
+            });
+            await scope.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+
+        (await SelectAsync(teamId, "Custom"))!.ContextWindowTokens.ShouldBe(262_144);
+    }
+
+    [Fact]
     public async Task An_unpinned_pick_is_deterministic_by_model_id_order()
     {
         var teamId = await SeedTeamAsync();

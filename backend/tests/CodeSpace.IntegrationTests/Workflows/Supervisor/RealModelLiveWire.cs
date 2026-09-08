@@ -31,7 +31,7 @@ internal static class RealModelLiveWire
         new() { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
 
     /// <summary>A model-pool selector stubbed to the configured live model + credential (the in-process pool, for a decider/arbiter-only real call — no DB).</summary>
-    public static IModelPoolSelector Selector(string model, ResolvedModelCredential credential) => new FixedCredentialSelector(model, credential);
+    public static IModelPoolSelector Selector(string model, ResolvedModelCredential credential, int? contextWindowTokens = null) => new FixedCredentialSelector(model, credential, contextWindowTokens);
 
     /// <summary>An empty persona library (the decider lists it to render the persona pool into the catalog) — the real-model decision gates don't exercise per-agent personas, so an empty list keeps the catalog persona section absent.</summary>
     public static CodeSpace.Core.Services.Agents.IAgentDefinitionService Personas() => new EmptyPersonaLibrary();
@@ -59,20 +59,24 @@ internal static class RealModelLiveWire
     {
         private readonly string _model;
         private readonly ResolvedModelCredential _credential;
-        public FixedCredentialSelector(string model, ResolvedModelCredential credential) { _model = model; _credential = credential; }
+        private readonly int? _contextWindowTokens;
+
+        public FixedCredentialSelector(string model, ResolvedModelCredential credential, int? contextWindowTokens) { _model = model; _credential = credential; _contextWindowTokens = contextWindowTokens; }
 
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) =>
-            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = _model, Credential = _credential });
+            Task.FromResult<ModelPoolPick?>(Pick());
 
         // The effort classifier resolves its model via SelectAsync (by provider) — return the same configured live pick
         // so the shared selector serves both the decider (ResolveByRowIdAsync) and the classifier (SelectAsync).
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) =>
-            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = _model, Credential = _credential });
+            Task.FromResult<ModelPoolPick?>(Pick());
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>>(System.Array.Empty<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>());
         public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
         public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
         public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+
+        private ModelPoolPick Pick() => new() { ModelId = _model, Credential = _credential, ContextWindowTokens = _contextWindowTokens };
     }
 
     /// <summary>An empty persona library — <c>ListAsync</c> returns no personas; the CRUD methods are never called by the decider.</summary>
@@ -95,6 +99,8 @@ internal static class RealModelLiveWire
 public sealed class InMemoryTapeSummaryStore : CodeSpace.Core.Services.Supervisor.ISupervisorTapeSummaryStore
 {
     private CodeSpace.Messages.Agents.SupervisorTapeSummary? _summary;
+
+    internal CodeSpace.Messages.Agents.SupervisorTapeSummary? Current => _summary;
 
     public Task<CodeSpace.Messages.Agents.SupervisorTapeSummary?> GetAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(_summary);
 

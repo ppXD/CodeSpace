@@ -61,7 +61,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // PURPOSE: it is locale-INDEPENDENT, so the pick is identical in CI and locally (the prior DB-collation tie-break
         // could differ across environments — see LlmCompleteUsageFlowTests). Advisory ordering only — never a filter.
         var candidates = await query
-            .Select(m => new { m.ModelId, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Available, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
+            .Select(m => new { m.ModelId, m.ContextWindowTokens, m.IsDefault, m.CapabilityTier, m.ProbedCapabilityTier, m.Available, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl, m.Id })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // Availability soft-filter (anti-strand) — ONLY on the UNPINNED auto path (a pin honours explicit intent verbatim,
@@ -94,7 +94,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         if (row == null) return null;
 
-        return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
+        return ToPick(row.ModelId, row.ContextWindowTokens, row.Provider, row.EncryptedApiKey, row.BaseUrl);
     }
 
     public async Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken)
@@ -105,12 +105,12 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         var row = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Id == modelCredentialModelId && m.Enabled
                 && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
-            .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
+            .Select(m => new { m.ModelId, m.ContextWindowTokens, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (row == null) return null;
 
-        return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
+        return ToPick(row.ModelId, row.ContextWindowTokens, row.Provider, row.EncryptedApiKey, row.BaseUrl);
     }
 
     public async Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
@@ -304,9 +304,10 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .FirstOrDefault();
     }
 
-    private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
+    private ModelPoolPick ToPick(string modelId, int? contextWindowTokens, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {
         ModelId = modelId,
+        ContextWindowTokens = contextWindowTokens,
         Credential = new ResolvedModelCredential
         {
             Provider = provider,

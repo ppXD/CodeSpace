@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
-import { useAddModelCredential, useUpdateModelCredential } from "@/hooks/use-model-credentials";
+import { completePrice, contextWindowFieldIssue, parseContextWindow, useAddModelCredential, useUpdateModelCredential } from "@/hooks/use-model-credentials";
 import { PROVIDER_FORMS, providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -56,6 +56,8 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
 
   const submit = () => {
     if (!requiredOk || pending) return;
+    const invalidContext = models.map(m => contextWindowFieldIssue(m.contextWindowTokens)).find(Boolean);
+    if (invalidContext) { setError(invalidContext); return; }
     setError(null);
 
     const onError = (e: unknown) => setError(e instanceof ApiError ? e.message : "Could not save the credential.");
@@ -69,7 +71,7 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
       );
     } else {
       const seedModels = models
-        .map(m => ({ modelId: m.modelId.trim(), displayName: m.displayName.trim() || null }))
+        .map(m => ({ modelId: m.modelId.trim(), displayName: m.displayName.trim() || null, ...completePrice(m), contextWindowTokens: parseContextWindow(m.contextWindowTokens) }))
         .filter(m => m.modelId !== "");
       add.mutate(
         { provider, displayName: displayName.trim(), apiKey: keyless ? null : trimmedKey, baseUrl: trimmedBaseUrl, models: seedModels },

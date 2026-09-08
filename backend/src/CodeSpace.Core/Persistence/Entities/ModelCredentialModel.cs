@@ -59,5 +59,8 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>USD charged per 1,000,000 OUTPUT (completion) tokens on this model. Null = unpriced (see <see cref="InputUsdPerMillion"/>). BOTH must be set for the row to price a call — a half-filled row is not a price.</summary>
     public decimal? OutputUsdPerMillion { get; set; }
 
+    /// <summary>The total input-plus-output context capacity the operator declares for this exact model endpoint. Null = unknown; model callers retain reactive overflow handling. Kept on the row because opaque gateway aliases cannot be inferred safely from names.</summary>
+    public int? ContextWindowTokens { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }

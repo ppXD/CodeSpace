@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { MAX_PRICE_PER_MILLION_USD } from "@/api/modelCredentials";
 
-import { completePrice, parsePrice, priceFieldIssue } from "./use-model-credentials";
+import { completePrice, contextWindowFieldIssue, parseContextWindow, parsePrice, priceFieldIssue } from "./use-model-credentials";
 
 /**
  * The pure price helpers behind the model manager. They decide what reaches the API, and the API rejects a
@@ -70,5 +70,16 @@ describe("model price helpers", () => {
     it("names the OUTPUT field when that is the bad one", () => {
       expect(priceFieldIssue({ inputUsdPerMillion: "2", outputUsdPerMillion: "nope" })).toMatch(/\$\/M out/);
     });
+  });
+});
+
+describe("model context window helpers", () => {
+  it.each([["", null], ["   ", null], [undefined, null], ["128000", 128000]])("reads %o as %o", (raw, expected) => {
+    expect(parseContextWindow(raw as string | undefined)).toBe(expected);
+  });
+
+  it.each(["0", "-1", "1.5", "many", "2147483648"])("rejects %o instead of guessing a capacity", raw => {
+    expect(contextWindowFieldIssue(raw)).not.toBeNull();
+    expect(parseContextWindow(raw)).toBeNull();
   });
 });

@@ -25,7 +25,7 @@ public interface IModelCredentialService
     Task<IReadOnlyList<CredentialedModelSummary>> ListModelsAsync(Guid credentialId, CancellationToken cancellationToken);
 
     /// <summary>Manually add a model to a credential's list (<c>Source = Manual</c>). Throws when the id isn't an active credential of the current team, the model id is blank, or it is already on the credential. Returns the new row id.</summary>
-    Task<Guid> AddModelAsync(Guid credentialId, string modelId, string? displayName, Messages.Agents.ModelPrice? price, CancellationToken cancellationToken);
+    Task<Guid> AddModelAsync(Guid credentialId, CredentialedModelConfiguration model, CancellationToken cancellationToken);
 
     /// <summary>Remove a model row from a credential's list. Throws when the credential isn't the current team's or the row isn't under it. Returns the removed row id.</summary>
     Task<Guid> RemoveModelAsync(Guid credentialId, Guid modelRowId, CancellationToken cancellationToken);
@@ -35,6 +35,9 @@ public interface IModelCredentialService
 
     /// <summary>D1 — price ONE model row (USD per million input/output tokens), or CLEAR its price with a null. This is what makes a run's cost cap enforceable for a model the built-in table never heard of. Throws when the credential isn't the current team's or the row isn't under it. Returns the priced row id.</summary>
     Task<Guid> SetModelPriceAsync(Guid credentialId, Guid modelRowId, Messages.Agents.ModelPrice? price, CancellationToken cancellationToken);
+
+    /// <summary>Set the exact row's total context capacity, or clear it to unknown. A specified value must be positive.</summary>
+    Task<Guid> SetModelContextWindowAsync(Guid credentialId, Guid modelRowId, int? contextWindowTokens, CancellationToken cancellationToken);
 
     /// <summary>Reflect the credential's provider endpoint (when reflectable) and UPSERT the discovered models onto its list — reflected rows refreshed + re-enabled, manual rows untouched, vanished reflected rows disabled. A non-reflectable (manual-only) credential is a no-op returning 0. Throws when the id isn't an active credential of the current team. Returns the count reflected.</summary>
     Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken);

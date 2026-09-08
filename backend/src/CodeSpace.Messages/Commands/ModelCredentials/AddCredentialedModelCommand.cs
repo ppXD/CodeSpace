@@ -23,4 +23,7 @@ public sealed record AddCredentialedModelCommand : ICommand<Guid>, IRequireTeamP
 
     /// <summary>D1 — optional USD per 1,000,000 output tokens (see <see cref="InputUsdPerMillion"/>).</summary>
     public decimal? OutputUsdPerMillion { get; init; }
+
+    /// <summary>Optional total input-plus-output context capacity for this exact model endpoint. Null = unknown.</summary>
+    public int? ContextWindowTokens { get; init; }
 }

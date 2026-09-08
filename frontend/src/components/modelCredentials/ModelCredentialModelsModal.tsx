@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
-import { parsePrice, priceFieldIssue, useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetCredentialedModelPrice, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
+import { contextWindowFieldIssue, parseContextWindow, parsePrice, priceFieldIssue, useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetCredentialedModelContextWindow, useSetCredentialedModelPrice, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -25,6 +25,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const save = useSaveCredentialedModels(credential.id);
   const setDefault = useSetDefaultCredentialedModel(credential.id);
   const setPrice = useSetCredentialedModelPrice(credential.id);
+  const setContextWindow = useSetCredentialedModelContextWindow(credential.id);
 
   const [rows, setRows] = useState<ModelRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +43,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
         isDefault: m.isDefault,
         inputUsdPerMillion: m.inputUsdPerMillion?.toString() ?? "",
         outputUsdPerMillion: m.outputUsdPerMillion?.toString() ?? "",
+        contextWindowTokens: m.contextWindowTokens?.toString() ?? "",
       }))
       : null);
   }
@@ -57,7 +59,12 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const count = (rows ?? []).filter(r => r.modelId.trim()).length;
 
   const doRefresh = () => { setError(null); refresh.mutate(undefined, { onError }); };
-  const doSave = () => { setError(null); save.mutate({ original: list.data ?? [], rows: rows ?? [] }, { onSuccess: onClose, onError }); };
+  const doSave = () => {
+    const invalidContext = (rows ?? []).map(r => contextWindowFieldIssue(r.contextWindowTokens)).find(Boolean);
+    if (invalidContext) { setError(invalidContext); return; }
+    setError(null);
+    save.mutate({ original: list.data ?? [], rows: rows ?? [] }, { onSuccess: onClose, onError });
+  };
   const doSetDefault = (rowId: string) => {
     setError(null);
     setRows(rs => rs?.map(r => ({ ...r, isDefault: r.id === rowId })) ?? rs);   // optimistic: flip the star without a refetch that would wipe unsaved edits
@@ -80,6 +87,13 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
 
     setError(null);
     setPrice.mutate({ modelRowId: rowId, input: { inputUsdPerMillion: input, outputUsdPerMillion: output } }, { onError });
+  };
+  const doSetContextWindow = (rowId: string, row: ModelRow) => {
+    const invalid = contextWindowFieldIssue(row.contextWindowTokens);
+    if (invalid) { setError(invalid); return; }
+
+    setError(null);
+    setContextWindow.mutate({ modelRowId: rowId, contextWindowTokens: parseContextWindow(row.contextWindowTokens) }, { onError });
   };
 
   return createPortal(
@@ -104,7 +118,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
 
           {list.isLoading && rows === null && <div className="mc-models-empty">Loading…</div>}
           {list.error instanceof ApiError && <div className="mc-models-empty">Couldn't load models — {list.error.message}</div>}
-          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} onSetDefault={doSetDefault} onSetPrice={doSetPrice} />}
+          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} onSetDefault={doSetDefault} onSetPrice={doSetPrice} onSetContextWindow={doSetContextWindow} />}
 
           {error && <div className="mc-models-err">{error}</div>}
         </div>

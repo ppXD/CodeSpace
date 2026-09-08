@@ -11,6 +11,8 @@ export interface ModelRow {
   inputUsdPerMillion?: string;
   /** USD per 1M output tokens, as typed. Blank = unpriced. */
   outputUsdPerMillion?: string;
+  /** Total input-plus-output model capacity. Blank = unknown, preserving reactive overflow recovery. */
+  contextWindowTokens?: string;
 }
 
 /**
@@ -23,7 +25,7 @@ export interface ModelRow {
  * knows a handful of vendor ids, and a capped run refuses to spend on a model nobody can price. An existing row's
  * price is committed on blur (like the star); a brand-new row's rides along with its Save.
  */
-export function ModelRowsEditor({ rows, onChange, onSetDefault, onSetPrice }: { rows: ModelRow[]; onChange: (rows: ModelRow[]) => void; onSetDefault?: (rowId: string) => void; onSetPrice?: (rowId: string, row: ModelRow) => void }) {
+export function ModelRowsEditor({ rows, onChange, onSetDefault, onSetPrice, onSetContextWindow }: { rows: ModelRow[]; onChange: (rows: ModelRow[]) => void; onSetDefault?: (rowId: string) => void; onSetPrice?: (rowId: string, row: ModelRow) => void; onSetContextWindow?: (rowId: string, row: ModelRow) => void }) {
   const setRow = (i: number, patch: Partial<ModelRow>) => onChange(rows.map((r, idx) => idx === i ? { ...r, ...patch } : r));
   const addRow = () => onChange([...rows, { modelId: "", displayName: "" }]);
   const removeRow = (i: number) => onChange(rows.filter((_, idx) => idx !== i));
@@ -47,6 +49,16 @@ export function ModelRowsEditor({ rows, onChange, onSetDefault, onSetPrice }: { 
             )}
             <input className="wf-form-input mc-modelrow-id" value={r.modelId} onChange={e => setRow(i, { modelId: e.target.value })} placeholder="model-id" />
             <input className="wf-form-input" value={r.displayName} onChange={e => setRow(i, { displayName: e.target.value })} placeholder="Display name" />
+            <input
+              className="wf-form-input mc-modelrow-context"
+              value={r.contextWindowTokens ?? ""}
+              onChange={e => setRow(i, { contextWindowTokens: e.target.value })}
+              onBlur={() => r.id && onSetContextWindow?.(r.id, rows[i])}
+              inputMode="numeric"
+              placeholder="Context tokens"
+              aria-label={`Context window tokens for ${r.modelId || "this model"}`}
+              title="Total input plus output token capacity; blank means unknown"
+            />
             <input
               className={`wf-form-input mc-modelrow-price${unpriced ? " is-unpriced" : ""}`}
               value={r.inputUsdPerMillion ?? ""}

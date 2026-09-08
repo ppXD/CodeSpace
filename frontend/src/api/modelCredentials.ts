@@ -75,6 +75,10 @@ export const modelCredentialsApi = {
    *  spend on a model nobody can price, so this is what makes a cap enforceable for a model outside the built-in table. */
   setModelPrice: (credentialId: string, modelRowId: string, input: ModelPriceInput) =>
     fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}/price`, { method: "PUT", body: JSON.stringify(input) }),
+
+  /** Set the exact endpoint's total input-plus-output context capacity, or clear it to unknown. */
+  setModelContextWindow: (credentialId: string, modelRowId: string, contextWindowTokens: number | null) =>
+    fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}/context-window`, { method: "PUT", body: JSON.stringify({ contextWindowTokens }) }),
 };
 
 /** Body for pricing a model row. Both null clears the price; exactly one set is rejected by the backend. */
@@ -86,6 +90,7 @@ export interface ModelPriceInput {
 /** Mirrors backend `ModelPrice.MaxPerMillionUsd`. Above it the backend rejects the edit, so validate here first
  *  and tell the operator, rather than letting the save fail with a raw 400. */
 export const MAX_PRICE_PER_MILLION_USD = 100_000;
+export const MAX_CONTEXT_WINDOW_TOKENS = 2_147_483_647;
 
 /** Body for adding a model to a credential (mirror of backend AddCredentialedModelCommand). */
 export interface AddCredentialedModelInput {
@@ -95,6 +100,8 @@ export interface AddCredentialedModelInput {
   inputUsdPerMillion?: number | null;
   /** USD per 1M output tokens. */
   outputUsdPerMillion?: number | null;
+  /** Total input-plus-output capacity for this exact endpoint. Null = unknown. */
+  contextWindowTokens?: number | null;
 }
 
 /** One model a credential can authenticate (mirror of backend CredentialedModelSummary). */
@@ -116,4 +123,6 @@ export interface CredentialedModelSummary {
   inputUsdPerMillion?: number | null;
   /** USD per 1M output tokens. Null = unpriced. */
   outputUsdPerMillion?: number | null;
+  /** Total input-plus-output capacity for this exact endpoint. Null = unknown. */
+  contextWindowTokens?: number | null;
 }

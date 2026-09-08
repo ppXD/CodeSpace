@@ -160,5 +160,8 @@ public sealed record ModelPoolPick
 {
     public required string ModelId { get; init; }
 
+    /// <summary>The operator-declared total context capacity for this exact model row. Null means unknown; callers must preserve their provider-error fallback rather than guess from the model id.</summary>
+    public int? ContextWindowTokens { get; init; }
+
     public required ResolvedModelCredential Credential { get; init; }
 }

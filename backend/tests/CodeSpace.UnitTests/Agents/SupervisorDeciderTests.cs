@@ -3038,8 +3038,8 @@ public class SupervisorDeciderTests
         private readonly IReadOnlyList<Guid> _brainRows;
         private FakeSelector(ModelPoolPick? pick, IReadOnlyList<PoolModelInfo>? pool = null, IReadOnlyList<Guid>? brainRows = null) { _pick = pick; _pool = pool ?? Array.Empty<PoolModelInfo>(); _brainRows = brainRows ?? Array.Empty<Guid>(); }
 
-        public static FakeSelector WithModel(string modelId = "claude-sonnet-4-5") =>
-            new(new ModelPoolPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
+        public static FakeSelector WithModel(string modelId = "claude-sonnet-4-5", int? contextWindowTokens = null) =>
+            new(new ModelPoolPick { ModelId = modelId, ContextWindowTokens = contextWindowTokens, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
 
         public static FakeSelector WithModelAndPool(string modelId, params PoolModelInfo[] pool) =>
             new(new ModelPoolPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } }, pool);
@@ -3146,6 +3146,24 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public async Task A_known_tight_model_window_compacts_before_spending_a_doomed_provider_call()
+    {
+        var store = new FakeTapeStore();
+        var client = new CompactionScriptClient("DIGEST: proactive fold", new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan, Plan = OnePlannedSubtask() }) { FirstDecisionSucceeds = true };
+        var logger = new CapturingLogger<LlmSupervisorDecider>();
+        var decider = new LlmSupervisorDecider(new FakeRegistry(client), FakeSelector.WithModel(contextWindowTokens: 1), new FakeHarnesses(), FakePersonas.Empty(), store, new NullRepoGrounding(), logger);
+
+        var decision = await decider.DecideAsync(Context(turnNumber: 12, Tape(12)), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
+        store.Stored.ShouldNotBeNull();
+        client.Requests.Count.ShouldBe(2, "summarizer -> decision; no knowingly over-budget decision call is sent first");
+        client.Requests[0].SystemPrompt.ShouldStartWith("You compact");
+        client.Requests[1].UserPrompt.ShouldContain("DIGEST: proactive fold");
+        logger.Entries.ShouldContain(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Information && e.Message.Contains("compacting before the provider call", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task The_summarizer_never_bakes_an_evidence_tail_into_the_digest()
     {
         // P5-2: the foldable head excludes the newest CompactTailKeep decisions, so any tail the summarizer could
@@ -3224,6 +3242,7 @@ public class SupervisorDeciderTests
         public CompactionScriptClient(string digest, SupervisorModelDecision final) { _digest = digest; _final = final; }
 
         public bool AlwaysOverflow { get; init; }
+        public bool FirstDecisionSucceeds { get; init; }
 
         public readonly List<StructuredLLMCompletionRequest> Requests = new();
 
@@ -3241,7 +3260,7 @@ public class SupervisorDeciderTests
 
             _decides++;
 
-            if (AlwaysOverflow || _decides == 1)
+            if (AlwaysOverflow || (_decides == 1 && !FirstDecisionSucceeds))
                 throw new LlmApiException("TestSupervisor", null, LlmErrorCategory.ContextLengthExceeded, "window exceeded");
 
             return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_final, SupervisorDecisionSchema.Options), Model = request.Model });
