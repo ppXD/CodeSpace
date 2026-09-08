@@ -125,4 +125,52 @@ public class RunActionCapabilityResolverTests
         action.Enabled.ShouldBeTrue();
         action.Label.ShouldBe("View PR");
     }
+
+    [Fact]
+    public void One_opened_PR_does_not_hide_another_published_repository_that_still_needs_one()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState
+        {
+            HasPublishedBranch = true,
+            PublishedBranchCount = 2,
+            HasUnopenedPublishedBranch = true,
+            OpenedPullRequestUrls = ["https://github.com/o/api/pull/1"],
+        });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeTrue();
+        action.Label.ShouldBe("Open remaining PRs");
+        action.Url.ShouldBeNull("a direct link to the first PR would make the unopened repository unreachable");
+    }
+
+    [Fact]
+    public void Multiple_opened_PRs_stay_a_multi_result_action_instead_of_collapsing_to_one_link()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState
+        {
+            HasPublishedBranch = true,
+            PublishedBranchCount = 2,
+            OpenedPullRequestUrls = ["https://github.com/o/api/pull/1", "https://github.com/o/web/pull/2"],
+        });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Enabled.ShouldBeTrue();
+        action.Label.ShouldBe("View PRs");
+        action.Url.ShouldBeNull("the existing action contract can deep-link only one destination; the result button renders every repository");
+    }
+
+    [Fact]
+    public void Multiple_unopened_repositories_are_labelled_as_a_set_before_the_first_request()
+    {
+        var actions = new RunActionCapabilityResolver().ResolveTurnActions(Guid.NewGuid(), WorkflowRunStatus.Success, new RoomPublishState
+        {
+            HasPublishedBranch = true,
+            PublishedBranchCount = 2,
+            HasUnopenedPublishedBranch = true,
+        });
+
+        var action = actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+        action.Label.ShouldBe("Open PRs");
+        action.Url.ShouldBeNull();
+    }
 }

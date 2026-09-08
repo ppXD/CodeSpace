@@ -63,17 +63,33 @@ public sealed class RunActionCapabilityResolver : IRunActionCapabilityResolver, 
         // the extra ledger + manifest reads needed to compute it (PR-6). A focused turn always supplies it.
         if (publish is not null)
         {
-            var hasPr = !string.IsNullOrEmpty(publish.OpenedPullRequestUrl);
+            var urls = publish.OpenedPullRequestUrls
+                .Append(publish.OpenedPullRequestUrl)
+                .Where(url => !string.IsNullOrWhiteSpace(url))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            var hasPr = urls.Count > 0;
             var canOpen = hasPr || publish.HasPublishedBranch;
+            var publishedCount = publish.PublishedBranchCount > 0 ? publish.PublishedBranchCount : (publish.HasPublishedBranch ? 1 : 0);
+            var multiple = publishedCount > 1 || urls.Count > 1;
+            var directUrl = !publish.HasUnopenedPublishedBranch && publishedCount == 1 && urls.Count == 1 ? urls[0] : null;
+            var label = (publish.HasUnopenedPublishedBranch, hasPr, multiple) switch
+            {
+                (true, true, _) => "Open remaining PRs",
+                (_, true, true) => "View PRs",
+                (_, true, false) => "View PR",
+                (_, false, true) => "Open PRs",
+                _ => "Open PR",
+            };
 
             actions.Add(new RoomAction
             {
                 Kind = RoomActionKind.OpenPullRequest,
-                Label = hasPr ? "View PR" : "Open PR",
+                Label = label,
                 Enabled = canOpen,
                 DisabledReason = canOpen ? null : "This run has no published branch to open a pull request from.",
                 Target = target,
-                Url = publish.OpenedPullRequestUrl,
+                Url = directUrl,
             });
         }
 

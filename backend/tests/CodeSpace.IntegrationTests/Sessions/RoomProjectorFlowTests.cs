@@ -2119,6 +2119,46 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task One_opened_repository_never_hides_a_second_published_repository_that_still_needs_a_PR()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship both repositories");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship both repositories", resultSummary: "shipped the set");
+        var apiId = await SeedRepositoryAsync(teamId);
+        var webId = await SeedRepositoryAsync(teamId);
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnDecisionAsync(teamId, run, (agentRunId, new[] { "api.txt", "web.txt" }));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var manifests = scope.Resolve<IPublishManifestStore>();
+            await manifests.UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "api", RepositoryId = apiId,
+                Branch = "codespace/api", ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+            }, CancellationToken.None);
+            await manifests.UpsertForAgentRunAsync(agentRunId, new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "web", RepositoryId = webId,
+                Branch = "codespace/web", ChangedFileCount = 1, PublishStateValue = PublishState.Pushed,
+            }, CancellationToken.None);
+            await manifests.UpsertForIntegrationAsync(new PublishManifestUpsert
+            {
+                TeamId = teamId, WorkflowRunId = run, RepositoryAlias = "api", RepositoryId = apiId,
+                Branch = "codespace/api", PublishStateValue = PublishState.Pushed,
+                PullRequestNumber = 42, PullRequestUrl = "https://example.test/api/pull/42",
+            }, CancellationToken.None);
+        }
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var action = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Actions.Single(a => a.Kind == RoomActionKind.OpenPullRequest);
+
+        action.Enabled.ShouldBeTrue();
+        action.Label.ShouldBe("Open remaining PRs");
+        action.Url.ShouldBeNull("deep-linking the api PR would make the still-unopened web repository invisible and unreachable");
+    }
+
+    [Fact]
     public async Task A_non_terminal_run_never_offers_the_OpenPullRequest_action_even_with_a_published_branch()
     {
         // RoomProjector.PublishStateAsync short-circuits on WorkflowRunState.IsTerminal BEFORE reading the ledger or

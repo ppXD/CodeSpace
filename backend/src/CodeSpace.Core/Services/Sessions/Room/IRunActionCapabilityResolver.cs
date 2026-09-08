@@ -38,6 +38,15 @@ public sealed record RoomPublishState
     /// <summary>True once the run's decision tape has a clean integrated branch (single- or multi-repo) — the SAME signal <c>SupervisorPublishGate</c>/<c>IRoomPullRequestService</c> read, never a second notion of "published".</summary>
     public required bool HasPublishedBranch { get; init; }
 
-    /// <summary>An already-opened PR's link, when at least one published repository already has one recorded on its <c>PublishManifest</c> row. Null otherwise (button reads "Open PR", not "View PR").</summary>
+    /// <summary>How many repository branches the shared resolver returned. Zero keeps legacy callers on the boolean fallback.</summary>
+    public int PublishedBranchCount { get; init; }
+
+    /// <summary>Legacy-compatible direct link. Populated only when exactly one PR represents the whole published set.</summary>
     public string? OpenedPullRequestUrl { get; init; }
+
+    /// <summary>Every distinct current PR URL in the published set. Multiple links stay behind the result action because <see cref="RoomAction"/> has only one URL slot.</summary>
+    public IReadOnlyList<string> OpenedPullRequestUrls { get; init; } = Array.Empty<string>();
+
+    /// <summary>True when at least one resolved published repository has no current PR manifest.</summary>
+    public bool HasUnopenedPublishedBranch { get; init; }
 }
