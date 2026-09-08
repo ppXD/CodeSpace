@@ -833,13 +833,14 @@ jobs:
           retention-days: 30
 
   real-model-qualification-rehearsal:
-    name: real model (hidden-suite qualification rehearsal — report only)
+    name: real model (paired TaskLaunch qualification rehearsal — report only)
     needs: real-model-benchmark-extended
     runs-on: ubuntu-latest
-    # Q-ops — the qualification REHEARSAL, dispatch-only like the extended corpus: stages the operator-held hidden
-    # suite from a secret URL (absent ⇒ the tests self-skip loudly), runs both the deployed IQualificationRunner
-    # receipt path and the paired TaskLaunch qualification path, and prints their bound/health/digest reports. The
-    # paired path persists every graded and infra cell with exact arm/model/session/revision provenance in the
+    # Q-ops — the qualification REHEARSAL, dispatch-only like the extended corpus: always drives a shipped development
+    # corpus through paired TaskLaunch + the real coding-agent CLI, and also stages the operator-held hidden suite
+    # from a secret URL when configured. It runs the deployed IQualificationRunner receipt path and paired path and
+    # prints their bound/health/digest reports. Development evidence proves the protocol only; it cannot stand in for
+    # a holdout qualification. The paired path persists every graded and infra cell with exact arm/model/session/revision provenance in the
     # job-local throwaway db, then rejects incomplete or identical observed-model evidence. Nothing here mints a
     # deployment claim. Dispatch via
     # `gh workflow run real-model.yml --ref <branch>`.
@@ -922,7 +923,7 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
-      - name: Test (the hidden-suite qualification rehearsal — report only)
+      - name: Test (the paired TaskLaunch qualification rehearsal — development always, hidden holdout when staged)
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
