@@ -1005,6 +1005,27 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Read the bounded typed integrity fact used by the publication barrier. Malformed values remain a barrier via
+    /// <see cref="HasResolveContributorIntegrity"/> but return null here, so prompt rendering can fail closed without
+    /// copying untrusted outcome bytes into the model context.
+    /// </summary>
+    public static SupervisorResolveContributorIntegrity? ReadResolveContributorIntegrity(string? resolveOutcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(resolveOutcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(resolveOutcomeJson).RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("resolveContributorIntegrity", out var integrity)) return null;
+            return integrity.Deserialize<SupervisorResolveContributorIntegrity>(AgentJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Whether the run's latest staging frontier is an integrity-failed resolve. This is the shared publication
     /// barrier that prevents the published-branch resolver from falling through to an older contributor manifest after
     /// the accepted-resolution readers correctly withheld the resolver branch. Plan-less legacy tapes are unchanged.
