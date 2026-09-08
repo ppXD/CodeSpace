@@ -194,6 +194,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
             WorkspaceDirectory = workspaceDirectory,
             Model = selection?.Model,
             ModelCredentialId = selection?.ModelCredentialId,
+            ModelCredentialModelId = selection?.ModelCredentialModelId,
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             TimeoutSeconds = task.TimeoutSeconds,

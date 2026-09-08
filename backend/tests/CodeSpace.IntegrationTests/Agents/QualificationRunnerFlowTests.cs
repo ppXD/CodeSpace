@@ -1,11 +1,14 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Completion;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -144,6 +147,122 @@ public class QualificationRunnerFlowTests
     }
 
     [Fact]
+    public async Task A_TaskLaunch_round_binds_the_exact_team_model_row_to_provider_observation_and_immutable_statistics()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (credentialId, modelRowId) = await SeedModelAsync(teamId, "Custom", "qualified-model");
+        var cells = new[]
+        {
+            new CorpusCellOutcome { TaskId = "t1", Mode = BenchmarkMode.TaskLaunchQuick, State = CorpusCellState.Solved },
+            new CorpusCellOutcome { TaskId = "t1", Mode = BenchmarkMode.TaskLaunchDeep, State = CorpusCellState.Unsolved },
+        };
+        var results = new[]
+        {
+            Result(BenchmarkMode.TaskLaunchQuick, passed: true, observedModel: "provider-model-v7"),
+            Result(BenchmarkMode.TaskLaunchDeep, passed: false, observedModel: " PROVIDER-MODEL-V7 "),
+        };
+        var corpus = new FakeCorpusRunner(cells, BenchmarkExecutionPath.TaskLaunch, results);
+
+        using var scope = _fixture.BeginScope();
+        var runner = Runner(scope, corpus);
+        var selection = new BenchmarkAgentSelection
+        {
+            Harness = "codex-cli", Model = "caller-cannot-forge-this", ModelCredentialId = Guid.NewGuid(), ModelCredentialModelId = modelRowId,
+        };
+
+        var outcome = await runner.QualifyAsync("supervisor", "model-attribution", Spec(0.1), teamId, selection, CancellationToken.None);
+
+        corpus.LastRequest.ShouldNotBeNull();
+        corpus.LastRequest.Selection!.Model.ShouldBe("qualified-model");
+        corpus.LastRequest.Selection.ModelCredentialId.ShouldBe(credentialId);
+        corpus.LastRequest.Selection.ModelCredentialModelId.ShouldBe(modelRowId);
+        outcome.ModelEvidence.ShouldNotBeNull();
+        outcome.ModelEvidence.Attribution.ShouldBe(ModelQualificationAttribution.Bound);
+        outcome.ModelEvidence.ObservedModel.ShouldBe("provider-model-v7");
+        outcome.ModelEvidence.SampleSize.ShouldBe(2);
+        outcome.ModelEvidence.ObservedCellCount.ShouldBe(2);
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().QualificationReceipt.AsNoTracking().SingleAsync(receipt => receipt.Id == outcome.ReceiptId);
+        row.ModelEvidenceVersion.ShouldBe(ModelQualificationEvidence.CurrentVersion);
+        row.CandidateModelRowId.ShouldBe(modelRowId);
+        row.ObservedModel.ShouldBe("provider-model-v7");
+        row.ModelAttribution.ShouldBe(ModelQualificationAttribution.Bound);
+        row.ModelSampleSize.ShouldBe(2);
+        row.ModelObservedCellCount.ShouldBe(2);
+        row.ModelSolveRateLowerBound.ShouldBe(outcome.SolveRateLowerBound);
+        row.ModelEvaluatorHealth.ShouldBe(1);
+
+        var verifier = JsonDocument.Parse(row.VerifierBundleJson).RootElement;
+        verifier.GetProperty("model").GetString().ShouldBe("qualified-model");
+        verifier.GetProperty("modelCredentialId").GetGuid().ShouldBe(credentialId);
+        verifier.GetProperty("modelCredentialModelId").GetGuid().ShouldBe(modelRowId);
+        verifier.GetProperty("observedModel").GetString().ShouldBe("provider-model-v7");
+        verifier.GetProperty("modelAttribution").GetString().ShouldBe("Bound");
+        verifier.GetProperty("modelEvidenceVersion").GetString().ShouldBe(ModelQualificationEvidence.CurrentVersion);
+    }
+
+    [Fact]
+    public async Task Qualification_rejects_disabled_or_foreign_model_rows_before_running_or_minting()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, disabledRowId) = await SeedModelAsync(teamId, "Custom", "disabled-model", enabled: false);
+        var (_, foreignRowId) = await SeedModelAsync(foreignTeamId, "Custom", "foreign-model");
+        var corpus = new FakeCorpusRunner(Cells(1, 0, 0), BenchmarkExecutionPath.TaskLaunch);
+
+        using var scope = _fixture.BeginScope();
+        var runner = Runner(scope, corpus);
+        foreach (var rowId in new[] { disabledRowId, foreignRowId })
+        {
+            var selection = Selection() with { ModelCredentialModelId = rowId };
+            var ex = await Should.ThrowAsync<InvalidOperationException>(() => runner.QualifyAsync("supervisor", "model-row-admission", Spec(0.1), teamId, selection, CancellationToken.None));
+            ex.Message.ShouldContain("not active and enabled");
+        }
+
+        corpus.RunCount.ShouldBe(0, "an inadmissible row must fail before any expensive model work");
+        (await scope.Resolve<CodeSpaceDbContext>().QualificationReceipt.CountAsync(receipt => receipt.CapabilityKey == "model-row-admission")).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task PostgreSQL_rejects_rewriting_model_evidence_and_a_bound_row_without_observation()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, modelRowId) = await SeedModelAsync(teamId, "Custom", "immutable-model");
+        var cell = new CorpusCellOutcome { TaskId = "t1", Mode = BenchmarkMode.TaskLaunchQuick, State = CorpusCellState.Solved };
+        var corpus = new FakeCorpusRunner(new[] { cell }, BenchmarkExecutionPath.TaskLaunch, new[] { Result(BenchmarkMode.TaskLaunchQuick, true, "observed-model") });
+        Guid receiptId;
+
+        using (var mintScope = _fixture.BeginScope())
+        {
+            var outcome = await Runner(mintScope, corpus).QualifyAsync("supervisor", "immutable-model-evidence", Spec(0.1), teamId, Selection() with { ModelCredentialModelId = modelRowId }, CancellationToken.None);
+            receiptId = outcome.ReceiptId;
+        }
+
+        using (var mutationScope = _fixture.BeginScope())
+        {
+            var db = mutationScope.Resolve<CodeSpaceDbContext>();
+            (await db.QualificationReceipt.SingleAsync(receipt => receipt.Id == receiptId)).ObservedModel = "rewritten";
+            var rejected = await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            rejected.GetBaseException().Message.ShouldContain("immutable");
+        }
+
+        using (var invalidScope = _fixture.BeginScope())
+        {
+            var db = invalidScope.Resolve<CodeSpaceDbContext>();
+            db.QualificationReceipt.Add(new QualificationReceipt
+            {
+                Id = Guid.NewGuid(), Mode = "supervisor", CapabilityKey = "invalid-bound", SuiteDigest = "sha256:test",
+                VerifierBundleJson = "{}", CohortJson = "{}", GrantedPerformance = PerformanceQualification.Shadow,
+                ModelEvidenceVersion = ModelQualificationEvidence.CurrentVersion, CandidateModelRowId = modelRowId,
+                ModelAttribution = ModelQualificationAttribution.Bound, ModelSampleSize = 1, ModelObservedCellCount = 1,
+                ModelSolveRateLowerBound = 0.1, ModelEvaluatorHealth = 1, EffectiveFrom = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddDays(1),
+            });
+            var rejected = await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            rejected.GetBaseException().Message.ShouldContain("ck_qualification_receipt_model_evidence");
+        }
+    }
+
+    [Fact]
     public async Task An_unknown_fixture_is_an_explicit_infra_fault_for_a_TaskLaunch_arm_never_a_silent_skip()
     {
         // P19: the real fixture stager throws for an unknown FixtureRef — the SAME production stager the direct
@@ -169,7 +288,7 @@ public class QualificationRunnerFlowTests
 
         using var scope = _fixture.BeginScope();
         var runner = new QualificationRunner(new FakeSuiteSource(null), new FakeCorpusRunner(Array.Empty<CorpusCellOutcome>()),
-            scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
+            scope.Resolve<IQualificationReceiptStore>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<QualificationRunner>.Instance);
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
             runner.QualifyAsync("supervisor", "git-branch", Spec(0.5), teamId, Selection(), CancellationToken.None));
@@ -197,11 +316,21 @@ public class QualificationRunnerFlowTests
 
     private static QualificationRunner Runner(ILifetimeScope scope, IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness, IReadOnlyList<BenchmarkResult>? results = null) =>
         new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), new FakeCorpusRunner(cells, executionPath, results),
-            scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
+            scope.Resolve<IQualificationReceiptStore>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<QualificationRunner>.Instance);
+
+    private static QualificationRunner Runner(ILifetimeScope scope, FakeCorpusRunner corpus) =>
+        new(new FakeSuiteSource(new HiddenSuite(new[] { Task_() }, "sha256:fake-suite", new CodeSpace.Core.Services.Agents.Eval.Benchmark.Stagers.SeedFixtureStager())), corpus,
+            scope.Resolve<IQualificationReceiptStore>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<QualificationRunner>.Instance);
 
     private static QualificationSpec Spec(double minLowerBound) => new() { MinSolveRateLowerBound = minLowerBound, MinEvaluatorHealth = 0.9, ValidityDays = 30 };
 
     private static BenchmarkAgentSelection Selection() => new() { Harness = "codex-cli", Model = "test-model" };
+
+    private static BenchmarkResult Result(BenchmarkMode mode, bool passed, string observedModel) => new()
+    {
+        TaskId = "t1", Mode = mode, RunStatus = AgentRunStatus.Succeeded, Grade = new BenchmarkGrade { Passed = passed, Detail = passed ? "solved" : "unsolved" },
+        McpFullCatalog = false, ObservedModel = observedModel,
+    };
 
     private static BenchmarkTask Task_() => new() { Id = "t1", Description = "d", Goal = "g", FixtureRef = "f1", Harness = "codex-cli", Modes = new[] { BenchmarkMode.HarnessCli }, Grading = BenchmarkGradingKind.TestsPass, TestCommand = new[] { "sh", "check.sh" } };
 
@@ -212,6 +341,25 @@ public class QualificationRunnerFlowTests
         for (var i = 0; i < unsolved; i++) cells.Add(new CorpusCellOutcome { TaskId = $"u{i}", Mode = BenchmarkMode.HarnessCli, State = CorpusCellState.Unsolved });
         for (var i = 0; i < infra; i++) cells.Add(new CorpusCellOutcome { TaskId = $"i{i}", Mode = BenchmarkMode.HarnessCli, State = CorpusCellState.InfraUnknown });
         return cells;
+    }
+
+    private async Task<(Guid CredentialId, Guid ModelRowId)> SeedModelAsync(Guid teamId, string provider, string modelId, bool enabled = true)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var credentialId = Guid.NewGuid();
+        var modelRowId = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = credentialId, TeamId = teamId, Provider = provider, DisplayName = provider + " qualification",
+            EncryptedApiKey = scope.Resolve<IPayloadEncryptor>().Encrypt("qualification-key"), Status = CredentialStatus.Active,
+        });
+        db.ModelCredentialModel.Add(new ModelCredentialModel
+        {
+            Id = modelRowId, ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = enabled,
+        });
+        await db.SaveChangesAsync();
+        return (credentialId, modelRowId);
     }
 
     private sealed class FakeSuiteSource : IHiddenSuiteSource
@@ -226,13 +374,18 @@ public class QualificationRunnerFlowTests
         private readonly IReadOnlyList<CorpusCellOutcome> _cells;
         private readonly BenchmarkExecutionPath _executionPath;
         private readonly IReadOnlyList<BenchmarkResult> _results;
+        public CorpusBenchmarkRequest? LastRequest { get; private set; }
+        public int RunCount { get; private set; }
         public FakeCorpusRunner(IReadOnlyList<CorpusCellOutcome> cells, BenchmarkExecutionPath executionPath = BenchmarkExecutionPath.DirectAgentHarness, IReadOnlyList<BenchmarkResult>? results = null)
         {
             _cells = cells; _executionPath = executionPath; _results = results ?? Array.Empty<BenchmarkResult>();
         }
 
-        public Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new CorpusBenchmarkRun
+        public Task<CorpusBenchmarkRun> RunAsync(CorpusBenchmarkRequest request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            RunCount++;
+            return Task.FromResult(new CorpusBenchmarkRun
             {
                 Results = _results,
                 Errored = Array.Empty<CorpusBenchmarkError>(),
@@ -240,5 +393,6 @@ public class QualificationRunnerFlowTests
                 Cells = _cells,
                 ExecutionPath = _executionPath,
             });
+        }
     }
 }

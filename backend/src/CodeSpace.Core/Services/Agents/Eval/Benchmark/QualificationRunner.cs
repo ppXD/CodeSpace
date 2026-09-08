@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Completion;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
 using Microsoft.Extensions.Logging;
+using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
@@ -21,7 +22,10 @@ public sealed record QualificationSpec
 }
 
 /// <summary>One qualification round's outcome: the frozen-denominator score, the one-sided lower bound, the tier granted, the immutable receipt minted for it, the gateway-health tally, and the production boundary actually exercised.</summary>
-public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest, FormatFaultTally FormatFaults, BenchmarkExecutionPath ExecutionPath);
+public sealed record QualificationOutcome(CorpusCellScore Score, double SolveRateLowerBound, PerformanceQualification Granted, Guid ReceiptId, string SuiteDigest, FormatFaultTally FormatFaults, BenchmarkExecutionPath ExecutionPath)
+{
+    public ModelQualificationEvidence? ModelEvidence { get; init; }
+}
 
 /// <summary>The sealed-suite source seam — production reads THE conventional owner-held location; a test injects its own directory. Never an env toggle: pointing production elsewhere is a code change.</summary>
 public interface IHiddenSuiteSource
@@ -56,13 +60,15 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
     private readonly IHiddenSuiteSource _suite;
     private readonly ICorpusBenchmarkRunner _corpus;
     private readonly IQualificationReceiptStore _receipts;
+    private readonly Persistence.Db.CodeSpaceDbContext _db;
     private readonly ILogger<QualificationRunner> _logger;
 
-    public QualificationRunner(IHiddenSuiteSource suite, ICorpusBenchmarkRunner corpus, IQualificationReceiptStore receipts, ILogger<QualificationRunner> logger)
+    public QualificationRunner(IHiddenSuiteSource suite, ICorpusBenchmarkRunner corpus, IQualificationReceiptStore receipts, Persistence.Db.CodeSpaceDbContext db, ILogger<QualificationRunner> logger)
     {
         _suite = suite;
         _corpus = corpus;
         _receipts = receipts;
+        _db = db;
         _logger = logger;
     }
 
@@ -71,17 +77,29 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         var suite = _suite.Load()
             ?? throw new InvalidOperationException($"No hidden suite at '{HiddenSuiteLoader.DefaultSuiteDirectory}' — a qualification round without the owner-held sealed suite is a misconfiguration, never a silent pass");
 
+        selection = await CanonicalizeSelectionAsync(teamId, selection, cancellationToken).ConfigureAwait(false);
         var request = new CorpusBenchmarkRequest { Tasks = suite.Tasks, TeamId = teamId, Selection = selection, FixtureStager = suite.FixtureStager, SuiteContentHash = suite.SuiteContentHash };
         var run = await _corpus.RunAsync(request, cancellationToken).ConfigureAwait(false);
 
         var score = EvalSuite.Score(run.Cells ?? Array.Empty<CorpusCellOutcome>());
         var lowerBound = QualificationStatistics.WilsonLowerBound(score.Solved, score.Total);
         var granted = Grant(spec, score, lowerBound, run.ExecutionPath);
+        var modelEvidence = BuildModelEvidence(selection, run, score, lowerBound);
 
         // Q5: the round's identity is minted as the TYPED nouns — the cohort it covers (launch-knowable facts
         // only) and the verifier bundle that judged it — never ad-hoc json a reader has to guess at.
         var cohort = new LaunchCohortDescriptor { TeamId = teamId, Mode = mode, Tier = LaunchCohortDescriptor.InternalQualificationTier, CompletionPolicyVersion = Completion.CompletionPolicy.CurrentVersion };
-        var verifier = new VerifierBundle { Harness = selection.Harness, Model = selection.Model, ModelCredentialId = selection.ModelCredentialId, ExecutionPath = run.ExecutionPath };
+        var verifier = new VerifierBundle
+        {
+            Harness = selection.Harness,
+            Model = selection.Model,
+            ModelCredentialId = selection.ModelCredentialId,
+            ModelCredentialModelId = selection.ModelCredentialModelId,
+            ObservedModel = modelEvidence.ObservedModel,
+            ModelAttribution = modelEvidence.Attribution,
+            ModelEvidenceVersion = modelEvidence.Version,
+            ExecutionPath = run.ExecutionPath,
+        };
 
         var receipt = new QualificationReceipt
         {
@@ -98,6 +116,14 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
                 total = score.Total, solveRate = score.SolveRateOverSuite, solveRateLowerBound = lowerBound, evaluatorHealth = score.EvaluatorHealth, executionPath = run.ExecutionPath,
                 census = BuildCensus(run),
             }, Agents.AgentJson.Options),
+            ModelEvidenceVersion = modelEvidence.Version,
+            CandidateModelRowId = modelEvidence.ModelCredentialModelId,
+            ObservedModel = modelEvidence.ObservedModel,
+            ModelAttribution = modelEvidence.Attribution,
+            ModelSampleSize = modelEvidence.SampleSize,
+            ModelObservedCellCount = modelEvidence.ObservedCellCount,
+            ModelSolveRateLowerBound = modelEvidence.SolveRateLowerBound,
+            ModelEvaluatorHealth = modelEvidence.EvaluatorHealth,
             EffectiveFrom = DateTimeOffset.UtcNow,
             ExpiresAt = DateTimeOffset.UtcNow.AddDays(spec.ValidityDays),
         };
@@ -107,7 +133,21 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
         _logger.LogInformation("Qualification round for ({Mode}, {Capability}): {Granted} — path {ExecutionPath}, solved {Solved}/{Total}, lower bound {Bound:F3}, evaluator health {Health:F3}, suite {Digest}",
             mode, capabilityKey, granted, run.ExecutionPath, score.Solved, score.Total, lowerBound, score.EvaluatorHealth, suite.SuiteContentHash);
 
-        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash, run.FormatFaults, run.ExecutionPath);
+        return new QualificationOutcome(score, lowerBound, granted, receipt.Id, suite.SuiteContentHash, run.FormatFaults, run.ExecutionPath) { ModelEvidence = modelEvidence };
+    }
+
+    private async Task<BenchmarkAgentSelection> CanonicalizeSelectionAsync(Guid teamId, BenchmarkAgentSelection selection, CancellationToken cancellationToken)
+    {
+        if (selection.ModelCredentialModelId is not { } rowId) return selection;
+
+        var row = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(model => model.Id == rowId && model.Enabled && model.Credential.TeamId == teamId && model.Credential.DeletedDate == null && model.Credential.Status == Messages.Enums.CredentialStatus.Active)
+            .Select(model => new { model.ModelId, model.ModelCredentialId })
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Credentialed model {rowId} is not active and enabled for qualification team {teamId}.");
+
+        return selection with { Model = row.ModelId, ModelCredentialId = row.ModelCredentialId };
     }
 
     /// <summary>The grant fold: Sealed only when the official TaskLaunch boundary ran, the LOWER BOUND clears the bar, and the evaluator itself was healthy. Direct harness data remains useful Shadow evidence but cannot substantiate a product mode claim.</summary>
@@ -146,6 +186,33 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
                 completionMode = result?.CompletionMode,
             };
         }).ToList();
+    }
+
+    internal static ModelQualificationEvidence BuildModelEvidence(BenchmarkAgentSelection selection, CorpusBenchmarkRun run, CorpusCellScore score, double lowerBound)
+    {
+        var verdictCells = (run.Cells ?? Array.Empty<CorpusCellOutcome>()).Where(cell => cell.State != CorpusCellState.InfraUnknown).ToList();
+        var results = run.Results.GroupBy(result => (result.TaskId, result.Mode)).ToDictionary(group => group.Key, group => group.Last());
+        var observedVerdicts = verdictCells.Select(cell => results.GetValueOrDefault((cell.TaskId, cell.Mode))?.ObservedModel?.Trim()).ToList();
+        var distinctObserved = run.Results.Select(result => result.ObservedModel?.Trim()).Where(model => !string.IsNullOrWhiteSpace(model)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var observedCellCount = observedVerdicts.Count(model => !string.IsNullOrWhiteSpace(model));
+
+        var attribution = run.ExecutionPath != BenchmarkExecutionPath.TaskLaunch ? ModelQualificationAttribution.NonLaunchPath
+            : selection.ModelCredentialModelId is null ? ModelQualificationAttribution.UnboundSelection
+            : verdictCells.Count == 0 || observedCellCount != verdictCells.Count ? ModelQualificationAttribution.MissingObservation
+            : distinctObserved.Count != 1 ? ModelQualificationAttribution.InconsistentObservation
+            : ModelQualificationAttribution.Bound;
+
+        return new ModelQualificationEvidence
+        {
+            ModelCredentialModelId = selection.ModelCredentialModelId,
+            RequestedModel = selection.Model,
+            ObservedModel = attribution == ModelQualificationAttribution.Bound ? distinctObserved[0] : null,
+            Attribution = attribution,
+            SampleSize = score.Total,
+            ObservedCellCount = observedCellCount,
+            SolveRateLowerBound = lowerBound,
+            EvaluatorHealth = score.EvaluatorHealth,
+        };
     }
 }
 

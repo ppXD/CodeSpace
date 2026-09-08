@@ -34,6 +34,9 @@ public sealed record RunQualificationRoundCommand : ICommand<RunQualificationRou
 
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>The exact team-scoped credentialed-model row to qualify. When set, its model and credential are authoritative over the loose fields above.</summary>
+    public Guid? ModelCredentialModelId { get; init; }
+
     public AgentAutonomyLevel? Autonomy { get; init; }
 }
 
@@ -48,4 +51,7 @@ public sealed record RunQualificationRoundResponse
     public required int Total { get; init; }
     public required Guid ReceiptId { get; init; }
     public required string SuiteDigest { get; init; }
+
+    /// <summary>Whether the measured round was safely attributable to the requested credentialed-model row, including uncertainty and evaluator health.</summary>
+    public ModelQualificationEvidence? ModelEvidence { get; init; }
 }

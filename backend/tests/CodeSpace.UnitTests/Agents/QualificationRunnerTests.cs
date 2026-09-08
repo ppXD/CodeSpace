@@ -132,6 +132,66 @@ public class QualificationRunnerTests
         row.GetProperty("observedModel").ValueKind.ShouldBe(JsonValueKind.Null);
     }
 
+    [Fact]
+    public void Complete_single_identity_TaskLaunch_evidence_binds_to_the_selected_model_row()
+    {
+        var rowId = Guid.NewGuid();
+        var run = Run(BenchmarkExecutionPath.TaskLaunch,
+            Result("a", "gateway-model-v2"), Result("b", " GATEWAY-MODEL-V2 "),
+            Cell("a", CorpusCellState.Solved), Cell("b", CorpusCellState.Unsolved));
+
+        var evidence = QualificationRunner.BuildModelEvidence(new BenchmarkAgentSelection { ModelCredentialModelId = rowId, Model = "configured-alias" }, run, Score(1, 1, 0), 0.17);
+
+        evidence.Attribution.ShouldBe(ModelQualificationAttribution.Bound);
+        evidence.ModelCredentialModelId.ShouldBe(rowId);
+        evidence.RequestedModel.ShouldBe("configured-alias");
+        evidence.ObservedModel.ShouldBe("gateway-model-v2");
+        evidence.ObservedCellCount.ShouldBe(2);
+        evidence.SampleSize.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Missing_or_inconsistent_observed_identity_never_gets_bound_to_a_model_row()
+    {
+        var selection = new BenchmarkAgentSelection { ModelCredentialModelId = Guid.NewGuid(), Model = "configured-alias" };
+        var missing = Run(BenchmarkExecutionPath.TaskLaunch,
+            Result("a", "gateway-model"), Result("b", null),
+            Cell("a", CorpusCellState.Solved), Cell("b", CorpusCellState.Unsolved));
+        var inconsistent = Run(BenchmarkExecutionPath.TaskLaunch,
+            Result("a", "gateway-model-a"), Result("b", "gateway-model-b"),
+            Cell("a", CorpusCellState.Solved), Cell("b", CorpusCellState.Unsolved));
+
+        QualificationRunner.BuildModelEvidence(selection, missing, Score(1, 1, 0), 0.17).Attribution.ShouldBe(ModelQualificationAttribution.MissingObservation);
+        QualificationRunner.BuildModelEvidence(selection, inconsistent, Score(1, 1, 0), 0.17).Attribution.ShouldBe(ModelQualificationAttribution.InconsistentObservation);
+    }
+
+    [Fact]
+    public void Direct_harness_or_unbound_selection_is_measured_but_never_model_attributed()
+    {
+        var taskLaunch = Run(BenchmarkExecutionPath.TaskLaunch, Result("a", "model"), Cell("a", CorpusCellState.Solved));
+        var direct = taskLaunch with { ExecutionPath = BenchmarkExecutionPath.DirectAgentHarness };
+
+        QualificationRunner.BuildModelEvidence(new BenchmarkAgentSelection(), taskLaunch, Score(1, 0, 0), 0.4).Attribution.ShouldBe(ModelQualificationAttribution.UnboundSelection);
+        QualificationRunner.BuildModelEvidence(new BenchmarkAgentSelection { ModelCredentialModelId = Guid.NewGuid() }, direct, Score(1, 0, 0), 0.4).Attribution.ShouldBe(ModelQualificationAttribution.NonLaunchPath);
+    }
+
+    private static CorpusBenchmarkRun Run(BenchmarkExecutionPath path, params object[] rows) => new()
+    {
+        ExecutionPath = path,
+        Results = rows.OfType<BenchmarkResult>().ToList(),
+        Cells = rows.OfType<CorpusCellOutcome>().ToList(),
+        Errored = Array.Empty<CorpusBenchmarkError>(),
+        Scorecard = new AgentRunScorecard { Harnesses = Array.Empty<HarnessScore>(), Overall = new HarnessScore { Harness = "overall", Total = 0, Succeeded = 0, SuccessRate = 0 } },
+    };
+
+    private static BenchmarkResult Result(string taskId, string? observedModel) => new()
+    {
+        TaskId = taskId, Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+        Grade = new BenchmarkGrade { Passed = true, Detail = "measured" }, McpFullCatalog = false, ObservedModel = observedModel,
+    };
+
+    private static CorpusCellOutcome Cell(string taskId, CorpusCellState state) => new() { TaskId = taskId, Mode = BenchmarkMode.TaskLaunchQuick, State = state };
+
     private static CorpusCellScore Score(int solved, int unsolved, int infra) =>
         new() { Solved = solved, Unsolved = unsolved, Abstained = 0, InfraUnknown = infra };
 }

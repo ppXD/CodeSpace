@@ -58,13 +58,15 @@ public class BenchmarkRunnerBuildTaskTests
     public void A_real_selection_overrides_harness_model_credential_and_autonomy()
     {
         var credId = Guid.NewGuid();
-        var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "gw-model", ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted };
+        var modelRowId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "gw-model", ModelCredentialId = credId, ModelCredentialModelId = modelRowId, Autonomy = AgentAutonomyLevel.Trusted };
 
         var agentTask = BenchmarkRunner.BuildAgentTask(Task(harness: "codex-cli"), BenchmarkMode.HarnessCli, Workspace, selection);
 
         agentTask.Harness.ShouldBe("claude-code", "the selection's harness wins over the task's");
         agentTask.Model.ShouldBe("gw-model");
         agentTask.ModelCredentialId.ShouldBe(credId, "the seeded gateway credential the executor resolves + projects");
+        agentTask.ModelCredentialModelId.ShouldBe(modelRowId, "the exact credentialed-model identity survives dispatch for durable attribution");
         agentTask.Autonomy.ShouldBe(AgentAutonomyLevel.Trusted, "a real coding agent that must reach the gateway + edit to solve");
 
         // The load-bearing assertion: Trusted must DERIVE Network=On, else a confined live agent can never reach the

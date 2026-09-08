@@ -81,6 +81,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
                 Harness = selection?.Harness ?? task.Harness,
                 Model = selection?.Model,
                 ModelCredentialId = selection?.ModelCredentialId,
+                ModelCredentialModelId = selection?.ModelCredentialModelId,
                 RunnerKind = Sandbox.SandboxKinds.Local,
                 TimeoutSeconds = task.TimeoutSeconds,
                 OutputReviewMode = selection?.OutputReviewMode ?? ReviewMode.None,

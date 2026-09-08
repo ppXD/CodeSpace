@@ -55,22 +55,25 @@ public sealed class RealModelQualificationRehearsalE2ETests
 
         if (OperatingSystem.IsWindows()) return;
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
-        var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
+        var (credId, modelRowId) = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!, model!);
 
         await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
-            var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = model, ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted };
+            var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = model, ModelCredentialId = credId, ModelCredentialModelId = modelRowId, Autonomy = AgentAutonomyLevel.Trusted };
             var spec = new QualificationSpec { MinSolveRateLowerBound = RehearsalBar, MinEvaluatorHealth = 0.9, ValidityDays = 1 };
 
             QualificationOutcome outcome;
             using (var scope = _fixture.BeginScope())
                 outcome = await scope.Resolve<IQualificationRunner>().QualifyAsync("supervisor", "git-branch", spec, teamId, selection, CancellationToken.None);
 
+            outcome.ModelEvidence.ShouldNotBeNull().ModelCredentialModelId.ShouldBe(modelRowId, "the live round must name the exact credentialed-model row it dispatched");
+
             // The gateway-health disclosure the corpus lanes carry, on the round a real claim would be minted from:
             // the mitigation disables extended thinking, so a bound leaning on respawned solves was measured under a
             // different configuration than the receipt names — read it before minting against this bar.
             var report = $"suite {outcome.SuiteDigest} ({suite.Tasks.Count} task(s)), execution path {outcome.ExecutionPath}: solved {outcome.Score.Solved}/{outcome.Score.Total}, "
-                       + $"one-sided 95% lower bound {outcome.SolveRateLowerBound:P1}, evaluator health {outcome.Score.EvaluatorHealth:P1}, {outcome.FormatFaults} "
+                       + $"one-sided 95% lower bound {outcome.SolveRateLowerBound:P1}, evaluator health {outcome.Score.EvaluatorHealth:P1}, model attribution {outcome.ModelEvidence.Attribution} "
+                       + $"({outcome.ModelEvidence.ObservedCellCount}/{outcome.ModelEvidence.SampleSize} observed), {outcome.FormatFaults} "
                        + $"→ at the {RehearsalBar:P0} rehearsal bar this round would grant {outcome.Granted}. "
                        + "Compare the BOUND to the bar you intend to mint with — the rehearsal receipt lives in the job-local db and dies with it.";
             Console.WriteLine($"[qualification-rehearsal] {report}");
@@ -80,18 +83,20 @@ public sealed class RealModelQualificationRehearsalE2ETests
     }
 
     /// <summary>Same encrypted-credential seed shape as the benchmark corpus lane — the live key is read from the db by the executor, never in-process.</summary>
-    private async Task<Guid> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey)
+    private async Task<(Guid CredentialId, Guid ModelRowId)> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey, string model)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var encryptor = scope.Resolve<IPayloadEncryptor>();
         var id = Guid.NewGuid();
+        var modelRowId = Guid.NewGuid();
         db.ModelCredential.Add(new ModelCredential
         {
             Id = id, TeamId = teamId, Provider = Provider, DisplayName = "qualification rehearsal cred",
             BaseUrl = baseUrl, EncryptedApiKey = encryptor.Encrypt(apiKey), Status = CredentialStatus.Active,
         });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = modelRowId, ModelCredentialId = id, ModelId = model, Source = ModelSource.Manual, Enabled = true });
         await db.SaveChangesAsync();
-        return id;
+        return (id, modelRowId);
     }
 }

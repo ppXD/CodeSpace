@@ -28,6 +28,9 @@ public sealed record BenchmarkAgentSelection
     /// <summary>The seeded gateway <c>ModelCredential</c> the agent authenticates with — the executor resolves + projects it onto the harness env. Null ⇒ no credential (the fake CLI needs none).</summary>
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>The exact credentialed-model row being qualified. When set, it is the authoritative model+credential pair and is validated team-scoped before the round starts.</summary>
+    public Guid? ModelCredentialModelId { get; init; }
+
     /// <summary>How trusted the agent runs. Null ⇒ <see cref="AgentAutonomyLevel.Standard"/> (workspace-write, the corpus default). A real coding agent that must reach the gateway + edit to solve uses <see cref="AgentAutonomyLevel.Trusted"/>.</summary>
     public AgentAutonomyLevel? Autonomy { get; init; }
 

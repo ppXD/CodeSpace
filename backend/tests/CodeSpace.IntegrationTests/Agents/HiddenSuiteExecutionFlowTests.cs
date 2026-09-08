@@ -48,7 +48,7 @@ public sealed class HiddenSuiteExecutionFlowTests
             var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
             using var scope = _fixture.BeginScopeAs(userId, teamId);
             var suite = HiddenSuiteLoader.Load(directory);
-            var runner = new QualificationRunner(new SuiteSource(suite), scope.Resolve<ICorpusBenchmarkRunner>(), scope.Resolve<IQualificationReceiptStore>(), NullLogger<QualificationRunner>.Instance);
+            var runner = new QualificationRunner(new SuiteSource(suite), scope.Resolve<ICorpusBenchmarkRunner>(), scope.Resolve<IQualificationReceiptStore>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<QualificationRunner>.Instance);
 
             var outcome = await runner.QualifyAsync("fixture-source-plumbing", "fixture-binding", new QualificationSpec { MinEvaluatorHealth = 1, MinSolveRateLowerBound = 0.99, ValidityDays = 1 }, teamId, new BenchmarkAgentSelection { Harness = "codex-cli", Autonomy = AgentAutonomyLevel.Trusted }, CancellationToken.None);
 
