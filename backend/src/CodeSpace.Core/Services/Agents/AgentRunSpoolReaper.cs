@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -42,6 +43,8 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     public const string RetentionEnvVar = "CODESPACE_AGENT_RUN_SPOOL_RETENTION";
 
     private static readonly TimeSpan DefaultRetention = TimeSpan.FromHours(24);
+    private static readonly TimeSpan BaseRetryDelay = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromHours(6);
 
     /// <summary>Per-sweep cap so a large backlog can't run one tick forever; the next tick continues.</summary>
     public const int BatchSize = 200;
@@ -71,16 +74,19 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
             SELECT agent_run.*, xmin FROM agent_run
             WHERE lower(runner_handle ->> 'launchHost') = lower({host})
             """).AsNoTracking()
-            .Where(r => r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running && r.CompletedAt != null && r.CompletedAt < cutoff && r.RunnerHandleJson != null)
-            .OrderBy(r => r.CompletedAt).ThenBy(r => r.Id)
+            .Where(r => r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running && r.CompletedAt != null && r.CompletedAt < cutoff && r.RunnerHandleJson != null
+                && (r.SpoolCleanupNextAttemptAt == null || r.SpoolCleanupNextAttemptAt <= now))
+            // Least-attempted eligible work first: a permanently bad oldest batch cannot regain the front of the
+            // hourly queue as soon as its backoff expires. Completion time and id keep each attempt tier stable.
+            .OrderBy(r => r.SpoolCleanupAttempts).ThenBy(r => r.SpoolCleanupNextAttemptAt).ThenBy(r => r.CompletedAt).ThenBy(r => r.Id)
             .Take(BatchSize)
-            .Select(r => new CleanupCandidate(r.Id, r.RunnerHandleJson!, r.FenceEpoch, r.CompletedAt!.Value))
+            .Select(r => new CleanupCandidate(r.Id, r.RunnerHandleJson!, r.FenceEpoch, r.CompletedAt!.Value, r.SpoolCleanupAttempts))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var reaped = 0;
 
         foreach (var c in candidates)
-            if (await ReapOneAsync(c, cancellationToken).ConfigureAwait(false))
+            if (await ReapOneAsync(c, now, cancellationToken).ConfigureAwait(false))
                 reaped++;
 
         if (reaped > 0)
@@ -89,30 +95,33 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         return reaped;
     }
 
-    private async Task<bool> ReapOneAsync(CleanupCandidate candidate, CancellationToken cancellationToken)
+    private async Task<bool> ReapOneAsync(CleanupCandidate candidate, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var handle = TryDeserialize(candidate.HandleJson);
-        if (string.IsNullOrWhiteSpace(handle?.LaunchHost) || !string.Equals(handle.LaunchHost, LocalProcessRunner.CurrentHost, StringComparison.OrdinalIgnoreCase)) return false;
-        if (!IsUnderSpoolRoot(handle.SpoolDirectory)) return false;
-
         // Recheck and lock before filesystem side effects. A candidate read is not authority to delete after a
-        // handle replacement or lifecycle change. Concurrent reapers serialize on this row, not filesystem age.
+        // handle replacement, retry-state advance, or lifecycle change. Concurrent reapers serialize on this row.
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var current = await _db.AgentRun.FromSqlInterpolated($"""
             SELECT agent_run.*, xmin FROM agent_run
             WHERE id = {candidate.Id} AND runner_handle = CAST({candidate.HandleJson} AS jsonb)
                 AND fence_epoch = {candidate.FenceEpoch} AND completed_at = {candidate.CompletedAt}
-                AND status NOT IN ('Queued', 'Running')
+                AND spool_cleanup_attempts = {candidate.Attempts} AND status NOT IN ('Queued', 'Running')
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         if (current == null) return false;
+
+        var handle = TryDeserialize(candidate.HandleJson);
+        if (string.IsNullOrWhiteSpace(handle?.LaunchHost) || !string.Equals(handle.LaunchHost, LocalProcessRunner.CurrentHost, StringComparison.OrdinalIgnoreCase))
+            return await ScheduleRetryAsync(candidate, now, "invalid-runner-handle", transaction, cancellationToken).ConfigureAwait(false);
+        if (!IsUnderSpoolRoot(handle.SpoolDirectory))
+            return await ScheduleRetryAsync(candidate, now, "invalid-spool-path", transaction, cancellationToken).ConfigureAwait(false);
 
         // Enumerate the entire family before deleting anything. A refused directory listing cannot prove earlier
         // rounds are absent. Keep the handle through partial deletion so the next sweep can finish the remainder.
         try
         {
             var directories = RoundSpoolFamily(candidate.Id).Append(handle.SpoolDirectory).Distinct(StringComparer.Ordinal).ToArray();
-            if (directories.Any(dir => !IsUnderSpoolRoot(dir))) return false;
+            if (directories.Any(dir => !IsUnderSpoolRoot(dir)))
+                return await ScheduleRetryAsync(candidate, now, "invalid-spool-path", transaction, cancellationToken).ConfigureAwait(false);
             foreach (var directory in directories)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -123,7 +132,8 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _logger.LogWarning(exception, "AgentRunSpoolReaper: retaining cleanup handle for run {RunId} after filesystem cleanup failed", candidate.Id);
-            return false;
+            var errorCode = exception is UnauthorizedAccessException ? "filesystem-access" : "filesystem-io";
+            return await ScheduleRetryAsync(candidate, now, errorCode, transaction, cancellationToken).ConfigureAwait(false);
         }
 
         // Backstop the durable runner's per-terminal-path filtered-egress netns teardown (B3.2b): a run that reached
@@ -145,11 +155,41 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         // missing directories and can finish. Never clear a replacement handle or a newly active lifecycle.
         var cleared = await _db.AgentRun
             .Where(r => r.Id == candidate.Id && r.RunnerHandleJson == candidate.HandleJson && r.FenceEpoch == candidate.FenceEpoch && r.CompletedAt == candidate.CompletedAt
-                && r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, (string?)null), cancellationToken).ConfigureAwait(false);
+                && r.SpoolCleanupAttempts == candidate.Attempts && r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, (string?)null)
+                .SetProperty(r => r.SpoolCleanupAttempts, 0)
+                .SetProperty(r => r.SpoolCleanupLastAttemptAt, (DateTimeOffset?)null)
+                .SetProperty(r => r.SpoolCleanupNextAttemptAt, (DateTimeOffset?)null)
+                .SetProperty(r => r.SpoolCleanupLastErrorCode, (string?)null), cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
         return cleared == 1;
+    }
+
+    private async Task<bool> ScheduleRetryAsync(CleanupCandidate candidate, DateTimeOffset now, string errorCode, IDbContextTransaction transaction, CancellationToken cancellationToken)
+    {
+        var nextAttempts = candidate.Attempts == int.MaxValue ? int.MaxValue : candidate.Attempts + 1;
+        var nextAttemptAt = now + RetryDelay(candidate.Id, nextAttempts);
+        var changed = await _db.AgentRun
+            .Where(r => r.Id == candidate.Id && r.RunnerHandleJson == candidate.HandleJson && r.FenceEpoch == candidate.FenceEpoch && r.CompletedAt == candidate.CompletedAt
+                && r.SpoolCleanupAttempts == candidate.Attempts && r.Status != AgentRunStatus.Queued && r.Status != AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.SpoolCleanupAttempts, nextAttempts)
+                .SetProperty(r => r.SpoolCleanupLastAttemptAt, now)
+                .SetProperty(r => r.SpoolCleanupNextAttemptAt, nextAttemptAt)
+                .SetProperty(r => r.SpoolCleanupLastErrorCode, errorCode), cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        if (changed == 1)
+            _logger.LogWarning("AgentRunSpoolReaper: deferred cleanup for run {RunId} after {ErrorCode}; attempt {Attempt} is due at {NextAttemptAt}", candidate.Id, errorCode, nextAttempts, nextAttemptAt);
+        return false;
+    }
+
+    /// <summary>Stable per-run jitter spreads retry storms while preserving monotonic exponential backoff and a hard cap.</summary>
+    internal static TimeSpan RetryDelay(Guid runId, int attempt)
+    {
+        var exponent = Math.Clamp((long)attempt - 1, 0, 9);
+        var unjitteredSeconds = BaseRetryDelay.TotalSeconds * (1L << (int)exponent);
+        var jitter = 1d + runId.ToByteArray()[0] / 255d * 0.2d;
+        return TimeSpan.FromSeconds(Math.Min(MaxRetryDelay.TotalSeconds, unjitteredSeconds * jitter));
     }
 
     private static SandboxHandle? TryDeserialize(string handleJson)
@@ -184,5 +224,5 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         catch (ArgumentException) { return false; }
     }
 
-    private sealed record CleanupCandidate(Guid Id, string HandleJson, long FenceEpoch, DateTimeOffset CompletedAt);
+    private sealed record CleanupCandidate(Guid Id, string HandleJson, long FenceEpoch, DateTimeOffset CompletedAt, int Attempts);
 }
