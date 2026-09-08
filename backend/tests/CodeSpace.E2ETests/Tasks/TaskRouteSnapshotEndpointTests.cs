@@ -10,6 +10,7 @@ using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
@@ -55,11 +56,10 @@ public sealed class TaskRouteSnapshotEndpointTests : IClassFixture<TaskRouteSnap
     }
 
     [Fact]
-    public async Task Auto_preview_launch_and_retry_use_one_router_decision_and_one_run()
+    public async Task Explicit_preview_launch_and_retry_use_one_router_decision_and_one_run()
     {
         var actor = await SeedAsync();
         var input = Input();
-        input["effort"] = "auto";
         var before = _factory.Calls.Routes;
         var preview = await PreviewAsync(actor, input);
         _factory.Calls.Routes.ShouldBe(before + 1);
@@ -73,6 +73,39 @@ public sealed class TaskRouteSnapshotEndpointTests : IClassFixture<TaskRouteSnap
         JsonEqual(await retry.Content.ReadFromJsonAsync<JsonElement>(), result);
         _factory.Calls.Routes.ShouldBe(before + 1, "launch and retry must not re-enter the classifier/router");
         await AssertOneRunAsync(actor.TeamId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_auto_route_that_requires_confirmation_cannot_stage_a_run(bool previewFirst)
+    {
+        var actor = await SeedAsync();
+        var input = Input();
+        input["effort"] = "auto";
+        Guid? snapshotId = null;
+
+        if (previewFirst)
+        {
+            var preview = await PreviewAsync(actor, input);
+            preview.GetProperty("route").GetProperty("needsConfirmCard").GetBoolean().ShouldBeTrue();
+            snapshotId = preview.GetProperty("routeSnapshotId").GetGuid();
+            input["routeSnapshotId"] = snapshotId;
+        }
+
+        using var response = await PostAsync(actor, "/api/workflows/runs", input);
+        response.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity, await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("code").GetString().ShouldBe(FailureCodes.TaskRouteConfirmationRequired);
+        body.GetProperty("route").GetProperty("needsConfirmCard").GetBoolean().ShouldBeTrue();
+        body.GetProperty("route").GetProperty("confirm").GetProperty("options").GetArrayLength().ShouldBeGreaterThan(0, "the refusal must carry the generic choices the caller can act on");
+        await AssertNoRunAsync(actor.TeamId);
+
+        if (snapshotId is { } id)
+        {
+            using var scope = _factory.Services.CreateScope();
+            (await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().TaskRouteSnapshot.AsNoTracking().SingleAsync(s => s.Id == id)).ConsumedRunId.ShouldBeNull("routing advice is not execution consent");
+        }
     }
 
     [Theory]

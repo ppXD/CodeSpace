@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -1371,7 +1372,11 @@ public class TaskLaunchFlowTests
 
     // ── B2: the deliverable SHAPE reaches the projected node — a question is no longer launched as a coding run ──
 
-    /// <summary>An AUTO-effort launch of <paramref name="taskText"/> with no repository — the classifier decides the shape, and the frozen snapshot records what the projection made of it.</summary>
+    /// <summary>
+    /// Preview an AUTO-effort launch with no repository, then make the router's proposed effort explicit while carrying
+    /// its classified deliverable shape — the same confirmation transition the UI performs. The classifier decides the
+    /// shape; routing advice alone never authorizes execution.
+    /// </summary>
     private async Task<JsonElement> LaunchAndReadAgentConfigAsync(string taskText, IReadOnlyList<string>? acceptanceChecks = null)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1380,7 +1385,7 @@ public class TaskLaunchFlowTests
         jobClient.Clear();
         jobClient.AutoExecute = false;   // inspect the frozen snapshot; the run itself is pinned by the quick-tier E2E above
 
-        var result = await LaunchAsync(new TaskLaunchRequest
+        var auto = new TaskLaunchRequest
         {
             TeamId = teamId,
             ActorUserId = userId,
@@ -1389,7 +1394,13 @@ public class TaskLaunchFlowTests
             RequestedEffort = TaskEffortModes.Auto,
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
             AcceptanceChecks = acceptanceChecks,
-        });
+        };
+
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(auto, CancellationToken.None);
+        preview.Route.NeedsConfirmCard.ShouldBeTrue("the fallback classifier's proposal requires an operator choice before execution");
+
+        var result = await LaunchAsync(auto with { RequestedEffort = preview.Route.EffortMode, DeliverableShape = preview.Route.DeliverableShape });
 
         result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "these seeds all classify to the quick tier — the shape axis must not move the tier");
 

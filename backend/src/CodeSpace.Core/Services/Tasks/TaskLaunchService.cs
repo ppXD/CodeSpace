@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
+using CodeSpace.Core.Services.Tasks.RoutePreview.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Enums;
@@ -77,6 +78,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         if (preview?.PreviousResult is { } previous) return previous;
         var route = preview?.Route ?? await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
+        EnsureRouteConfirmed(route);
+
         EnsureAcceptanceMandate(request, route);
 
         await EnsureSessionCanContinueAsync(request, cancellationToken).ConfigureAwait(false);
@@ -113,6 +116,17 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         return request.RouteSnapshotId is not null
             ? await _routeSnapshots.ConsumeAsync(new TaskRouteSnapshotConsumption(request, seed, () => StageAsync(request, context, cancellationToken)), cancellationToken).ConfigureAwait(false)
             : await StageAsync(request, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A low-confidence or risky auto route is a question, not authorization to execute. The router owns the generic
+    /// decision and its registry-derived choices; this single launch chokepoint enforces it for HTTP, jobs and future
+    /// callers alike. An explicit effort routes with <c>NeedsConfirmCard=false</c>, so the operator's choice re-enters
+    /// through the ordinary route contract without a task-name rule or a separate consent toggle.
+    /// </summary>
+    private static void EnsureRouteConfirmed(RoutePlan route)
+    {
+        if (route.NeedsConfirmCard) throw new TaskRouteConfirmationRequiredException(route);
     }
 
     private async Task EnsureSessionCanContinueAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
