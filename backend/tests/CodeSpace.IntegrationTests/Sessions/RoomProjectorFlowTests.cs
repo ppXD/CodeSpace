@@ -1385,6 +1385,60 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_successful_turn_keeps_a_failed_log_capture_visible_from_postgres()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Keep log failures visible");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: null);
+        var agentId = await SeedAgentNodeAsync(teamId, run, summary: "Shipped.", changedFiles: Array.Empty<string>(), acceptancePassed: true);
+        var focusRun = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Next turn", resultSummary: "Done.");
+        var now = DateTimeOffset.UtcNow;
+        var mutableStreamId = Guid.NewGuid();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var agent = await db.AgentRun.SingleAsync(value => value.Id == agentId);
+            agent.FenceEpoch = 1;
+            db.AgentRunLogStream.AddRange(
+                new AgentRunLogStream
+                {
+                    Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentId, StreamKind = "stdout/v1", CaptureSource = "sandbox-spool/v1",
+                    WorkerFenceEpoch = 1, CaptureSessionId = Guid.NewGuid(), State = AgentRunLogStreamState.Open, Revision = 1, SchemaVersion = 3, CreatedAt = now, LastModifiedAt = now,
+                },
+                new AgentRunLogStream
+                {
+                    Id = mutableStreamId, TeamId = teamId, AgentRunId = agentId, StreamKind = "stderr/v1", CaptureSource = "sandbox-spool/v1",
+                    WorkerFenceEpoch = 1, CaptureSessionId = Guid.NewGuid(), State = AgentRunLogStreamState.Open, Revision = 1, SchemaVersion = 3, CreatedAt = now, LastModifiedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var before = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        before.Blocks.OfType<StatBlock>().Single(block => block.Kind == "logs").Detail.ShouldBe("2 streams · finalizing");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var stream = await db.AgentRunLogStream.SingleAsync(value => value.Id == mutableStreamId);
+            stream.State = AgentRunLogStreamState.CaptureFailed;
+            stream.ErrorCode = "source-lost";
+            stream.CompletedAt = DateTimeOffset.UtcNow;
+            stream.LastModifiedAt = stream.CompletedAt.Value;
+            stream.Revision++;
+            await db.SaveChangesAsync();
+        }
+
+        var turn = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        var logs = turn.Blocks.OfType<StatBlock>().Single(block => block.Kind == "logs");
+
+        logs.Detail.ShouldBe("2 streams · incomplete");
+        logs.Items.ShouldHaveSingleItem().Detail.ShouldBe("2 streams · 1 capture failed · 1 finalizing");
+        logs.Items.Single().Tone.ShouldBe(NarrativeTone.Error);
+        turn.Blocks.OfType<FinalAnswerBlock>().Single().Degraded.ShouldBeFalse("the independently verified deliverable remains successful while the log capture failure stays visible");
+    }
+
+    [Fact]
     public async Task Tool_histogram_hydrates_a_bounded_offloaded_payload_and_tolerates_an_unavailable_one()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

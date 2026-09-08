@@ -54,6 +54,9 @@ public sealed record RoomTurnFacts
     /// <summary>Each agent's exact changed-file identities. Multi-repo equal paths remain separate; empty on legacy facts.</summary>
     public IReadOnlyDictionary<Guid, IReadOnlyList<RoomFileIdentity>> AgentFileIdentities { get; init; } = new Dictionary<Guid, IReadOnlyList<RoomFileIdentity>>();
 
+    /// <summary>Each agent's durable log-stream health. An absent agent has no declared/captured stream and remains unsaid; a present summary never changes the task verdict.</summary>
+    public IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs { get; init; } = new Dictionary<Guid, RoomAgentLogSummary>();
+
     /// <summary>How many reasoning entries the turn produced — the "Reasoning" row's count.</summary>
     public int ReasoningCount { get; init; }
 
@@ -153,4 +156,15 @@ public sealed record RoomDelivery
     public bool? ChecksOk { get; init; }
     public string? Url { get; init; }
     public string? Error { get; init; }
+}
+
+/// <summary>Turn-facing reduction of one agent's durable log streams. Detail is backend-authored from persisted stream state and integrity evidence.</summary>
+public sealed record RoomAgentLogSummary(RoomAgentLogStatus Status, int StreamCount, string Detail);
+
+public enum RoomAgentLogStatus
+{
+    Verified,
+    Captured,
+    Finalizing,
+    Incomplete,
 }

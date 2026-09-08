@@ -1589,7 +1589,7 @@ function DetailRow({ icon, iconTone, label, detail, children, defaultOpen }: { i
 }
 
 /** A stat row — Plan / Files changed / Tools / Reasoning, each with kind-specific expanded content. */
-function StatRow({ stat }: { stat: StatBlock }) {
+export function StatRow({ stat }: { stat: StatBlock }) {
   const items = stat.items ?? [];
   const kind = stat.kind;
   const icon = statIcon(kind);
@@ -2378,6 +2378,7 @@ function statIcon(kind: string): SymName {
   if (kind === "subtasks") return "list";
   if (kind === "files") return "file";
   if (kind === "tools") return "terminal";
+  if (kind === "logs") return "terminal";
   if (kind === "reasoning") return "sparkle";
   if (kind === "launch") return "lock";   // the run's launch posture (network access) — a permission fact, not a metric
   return "list";
