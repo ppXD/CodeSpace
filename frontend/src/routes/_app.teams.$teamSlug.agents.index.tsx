@@ -5,6 +5,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { AgentEditorModal } from "@/components/agents/AgentEditor";
 import { AgentRosterRow } from "@/components/agents/AgentRosterRow";
+import { AgentLearningTrendPanel } from "@/components/agents/AgentLearningTrendPanel";
 import { ImportPackModal } from "@/components/agents/ImportPackModal";
 import { NewAgentModal } from "@/components/agents/NewAgentModal";
 import { filterAgents, type OriginFilter } from "@/components/agents/agentFilter";
@@ -130,6 +131,8 @@ function AgentsListPage() {
       </div>
 
       <div className="ct-body">
+        <AgentLearningTrendPanel days={windowSel === "all" ? 365 : Number(windowSel)} />
+
         {agents.isLoading && (
           <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>
         )}

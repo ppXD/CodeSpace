@@ -5941,6 +5941,26 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .sc-rate { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
 .acs-root .sc-rate-n { color: var(--muted-2); font-size: 11.5px; }
 
+/* Durable north-star history and lesson A/B evidence on the Agents roster. */
+.acs-root .lt-panel { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: 16px; margin: 0 0 18px; box-shadow: var(--shadow-1); }
+.acs-root .lt-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.acs-root .lt-head { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.acs-root .lt-head svg { color: var(--accent); }
+.acs-root .lt-denominator, .acs-root .lt-note, .acs-root .lt-empty { color: var(--muted); font-size: 11.5px; }
+.acs-root .lt-days { display: flex; gap: 8px; min-height: 112px; margin: 16px 0; overflow-x: auto; padding-bottom: 4px; }
+.acs-root .lt-day { flex: 1 0 72px; display: grid; grid-template-rows: 58px auto auto auto; align-items: end; gap: 3px; text-align: center; }
+.acs-root .lt-bar-track { align-self: stretch; display: flex; align-items: flex-end; justify-content: center; border-radius: 6px; background: var(--panel-2); overflow: hidden; }
+.acs-root .lt-bar { width: 100%; min-height: 2px; background: var(--accent); opacity: .72; }
+.acs-root .lt-day-rate { color: var(--ink); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.acs-root .lt-day-label, .acs-root .lt-day-gap { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.acs-root .lt-day-gap { color: #9A5B3E; }
+.acs-root .lt-arm-title { color: var(--ink-2); font-size: 12px; font-weight: 600; margin-top: 8px; }
+.acs-root .lt-table { margin-top: 8px; }
+.acs-root .lt-table tbody tr { cursor: default; }
+.acs-root .lt-arm { color: var(--ink); font-weight: 500; }
+.acs-root .lt-fraction { color: var(--muted-2); font-size: 11.5px; }
+.acs-root .lt-note { margin: 10px 0 0; }
+
 /* ── Launch-a-task modal — two-pane AI task composer (portal'd to body) ───────── */
 .mdl.lt2 { width: 680px; }
 .lt2 select, .lt2 input, .lt2 textarea { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; width: 100%; box-sizing: border-box; outline: none; }

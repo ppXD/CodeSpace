@@ -362,6 +362,38 @@ export interface ScorecardFilters {
   harness?: string;
 }
 
+/** One persisted UTC-day point in the unattended solve-with-delivery trend. A null rate means the day had activity but no scored terminal run. */
+export interface RunScorecardTrendBucket {
+  day: string;
+  runs: number;
+  solvedRuns: number;
+  deliveredRuns: number;
+  unattendedSolvedWithDeliveryRuns: number;
+  unattendedSolveWithDeliveryRate: number | null;
+  suspendedRuns: number;
+  legacyRuns: number;
+  costUsd: number | null;
+  brainPlaneUsd: number | null;
+}
+
+/** The north-star outcome sliced by the durable lesson experiment arm. */
+export interface LessonArmSlice {
+  arm: string;
+  runs: number;
+  solvedRuns: number;
+  deliveredRuns: number;
+  unattendedSolvedWithDeliveryRuns: number;
+  unattendedSolveWithDeliveryRate: number;
+}
+
+/** Mirrors backend `RunScorecardTrend`: durable daily measurements plus lesson A/B slices for one bounded horizon. */
+export interface RunScorecardTrend {
+  since: string;
+  scoredRuns: number;
+  buckets: RunScorecardTrendBucket[];
+  byLessonArm: LessonArmSlice[];
+}
+
 /**
  * Mirrors backend `TeamCostRollup` — the team's token + estimated-USD spend over its agent runs. `estimatedCostUsd`
  * is null when nothing in the window could be priced (distinct from 0 = priced but free); `unknownCostRuns` is the
@@ -541,6 +573,7 @@ export const agentsApi = {
     const qs = params.toString();
     return fetchJson<AgentRunScorecard>(`/api/agents/scorecard${qs ? `?${qs}` : ""}`);
   },
+  getScorecardTrend: (days = 28) => fetchJson<RunScorecardTrend>(`/api/agents/scorecard-trend?days=${Math.min(Math.max(Math.trunc(days), 1), 365)}`),
   getCost: () => fetchJson<TeamCostRollup>("/api/agents/cost"),
   // Per-agent run stats for the roster rows — grouped by persona, optionally windowed. Mirrors getScorecard's
   // since-passing (the window the roster's time control finally feeds).
