@@ -570,6 +570,16 @@ export function useAgentScorecard(filters: ScorecardFilters = {}) {
   });
 }
 
+/** Durable north-star history and lesson A/B slices for the selected bounded horizon. */
+export function useAgentScorecardTrend(days = 28) {
+  return useQuery({
+    queryKey: ["agent-scorecard-trend", days],
+    queryFn: () => agentsApi.getScorecardTrend(days),
+    staleTime: 30 * 1000,
+    placeholderData: keepPreviousData,
+  });
+}
+
 /**
  * The team's token + estimated-USD spend roll-up — the cost half of the library measurement strip (success +
  * latency come from {@link useAgentScorecard}). Team-scoped at the source; short staleTime like the scorecard.
