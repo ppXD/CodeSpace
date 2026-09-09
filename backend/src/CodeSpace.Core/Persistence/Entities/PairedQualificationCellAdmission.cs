@@ -1,6 +1,6 @@
 namespace CodeSpace.Core.Persistence.Entities;
 
-/// <summary>Immutable authorization for one paid paired cell. Its existence means execution may have crossed the external-call boundary, so absence of the matching observation is indeterminate and must never be replayed automatically.</summary>
+/// <summary>Immutable identity and single-assignment terminal result for one paid paired cell. An unsettled row means execution may have crossed the external-call boundary and must never be replayed automatically; a settled row can repair a missing observation without another provider call.</summary>
 public sealed class PairedQualificationCellAdmission : IEntity<Guid>, IAuditable
 {
     public Guid Id { get; set; }
@@ -10,6 +10,8 @@ public sealed class PairedQualificationCellAdmission : IEntity<Guid>, IAuditable
     public string TaskId { get; set; } = string.Empty;
     public string Mode { get; set; } = string.Empty;
     public Guid ModelCredentialModelId { get; set; }
+    public string? ResultJson { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

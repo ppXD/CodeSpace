@@ -8,6 +8,12 @@ public sealed record BenchmarkExecutionContext
     public required Guid TeamId { get; init; }
     public BenchmarkAgentSelection? Selection { get; init; }
     public IBenchmarkFixtureStager? FixtureStager { get; init; }
+    public IBenchmarkCellCompletionSink? Completion { get; init; }
+}
+
+public interface IBenchmarkCellCompletionSink
+{
+    Task CompleteAsync(BenchmarkResult result, CancellationToken cancellationToken);
 }
 
 public sealed record CorpusBenchmarkRequest

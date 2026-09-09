@@ -172,10 +172,14 @@ public sealed class PairedQualificationRunnerFlowTests
             }, CancellationToken.None));
             unadmitted.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("no matching durable cell admission");
         }
+        PairedQualificationCellAdmissionOutcome admitted;
         using (var admitScope = _fixture.BeginScope())
-            (await admitScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None)).ShouldBe(PairedQualificationCellAdmissionDecision.Admitted);
+        {
+            admitted = await admitScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None);
+            admitted.Decision.ShouldBe(PairedQualificationCellAdmissionDecision.Admitted);
+        }
         using (var duplicateScope = _fixture.BeginScope())
-            (await duplicateScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None)).ShouldBe(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
+            (await duplicateScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None)).Decision.ShouldBe(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
 
         using (var wiredScope = _fixture.BeginScope())
         {
@@ -188,6 +192,49 @@ public sealed class PairedQualificationRunnerFlowTests
                 SelectedCells = new[] { new PairedCorpusBenchmarkCell { TaskId = "generic-task", Mode = BenchmarkMode.TaskLaunchQuick, Arm = "control" } },
             }, CancellationToken.None));
             replay.Message.ShouldContain("execution-indeterminate", customMessage: "the production Autofac graph must select the admission-aware corpus constructor and refuse before TaskLaunch");
+        }
+
+        var terminal = FakePairedCorpus.Result(false, "control-model");
+        using (var unsettledScope = _fixture.BeginScope())
+        {
+            var unsettled = await Should.ThrowAsync<DbUpdateException>(() => unsettledScope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden").Version, Result = terminal,
+                Selection = Selection(controlRow) with { Model = "control-model", MaxCostUsd = 3m }, ObservationGroupId = groupId,
+                ObservationArm = "control", ObservationSession = 0, CodeRevision = new string('f', 40),
+            }, CancellationToken.None));
+            unsettled.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("no sealed admission result");
+        }
+        using (var completionScopeA = _fixture.BeginScope())
+        using (var completionScopeB = _fixture.BeginScope())
+        {
+            await Task.WhenAll(
+                completionScopeA.Resolve<IPairedQualificationCellAdmissionStore>().CompleteAsync(admitted.AdmissionId, terminal, CancellationToken.None),
+                completionScopeB.Resolve<IPairedQualificationCellAdmissionStore>().CompleteAsync(admitted.AdmissionId, terminal, CancellationToken.None));
+        }
+        using (var idempotentScope = _fixture.BeginScope())
+        {
+            var completions = idempotentScope.Resolve<IPairedQualificationCellAdmissionStore>();
+            await completions.CompleteAsync(admitted.AdmissionId, terminal, CancellationToken.None);
+            await Should.ThrowAsync<InvalidOperationException>(() => completions.CompleteAsync(admitted.AdmissionId, terminal with { ObservedModel = "different" }, CancellationToken.None));
+        }
+        using (var falseInfraScope = _fixture.BeginScope())
+        {
+            var falseInfra = await Should.ThrowAsync<DbUpdateException>(() => falseInfraScope.Resolve<IBenchmarkResultStore>().RecordInfraAsync(new BenchmarkInfraObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden").Version,
+                Error = new CorpusBenchmarkError { TaskId = terminal.TaskId, Mode = terminal.Mode, Error = "cleanup failed after completion" },
+                Selection = Selection(controlRow) with { Model = "control-model", MaxCostUsd = 3m }, ObservationGroupId = groupId,
+                ObservationArm = "control", ObservationSession = 0, CodeRevision = new string('f', 40),
+            }, CancellationToken.None));
+            falseInfra.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("terminal result cannot be replaced");
+        }
+        using (var recoveredScope = _fixture.BeginScope())
+        {
+            var recovered = await recoveredScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None);
+            recovered.Decision.ShouldBe(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
+            recovered.CompletedResult.ShouldNotBeNull().TaskId.ShouldBe(terminal.TaskId);
+            recovered.CompletedResult.ObservedModel.ShouldBe(terminal.ObservedModel);
         }
 
         using (var mismatchScope = _fixture.BeginScope())
@@ -254,12 +301,12 @@ public sealed class PairedQualificationRunnerFlowTests
     }
 
     [Fact]
-    public async Task A_partial_campaign_with_an_ambiguous_admitted_cell_parks_without_paid_replay()
+    public async Task A_terminal_result_lost_before_observation_is_replayed_without_another_paid_call()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
         var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
-        var instrument = new InterruptingBenchmarkRunner(4);
+        var instrument = new SettlingInterruptingBenchmarkRunner(4);
         Guid groupId;
         using (var runScope = _fixture.BeginScope())
         {
@@ -289,13 +336,13 @@ public sealed class PairedQualificationRunnerFlowTests
         using var resumeScopeA = _fixture.BeginScope();
         using var resumeScopeB = _fixture.BeginScope();
         var attempts = await Task.WhenAll(TryResumeAsync(Resumer(resumeScopeA, instrument), groupId), TryResumeAsync(Resumer(resumeScopeB, instrument), groupId));
-        attempts.ShouldAllBe(attempt => attempt.Outcome == null);
-        attempts.Select(attempt => attempt.Error).ShouldAllBe(error => error!.GetType() == typeof(DurableBenchmarkObservationException));
-        attempts.ShouldAllBe(attempt => attempt.Error!.Message.Contains("execution-indeterminate", StringComparison.Ordinal));
-        instrument.Calls.Count.ShouldBe(4, "an admitted cell with no observation may already have crossed the provider boundary and cannot be paid again");
-        using var parkedScope = _fixture.BeginScope();
-        (await parkedScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
-        (await parkedScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.AsNoTracking().CountAsync(value => value.ObservationGroupId == groupId)).ShouldBe(4);
+        var outcome = attempts.Single(attempt => attempt.Outcome is not null).Outcome!;
+        attempts.Single(attempt => attempt.Error is not null).Error.ShouldBeOfType<DurableQualificationResultException>().Message.ShouldContain("result-already-sealed");
+        instrument.Calls.Count.ShouldBe(4, "the fourth result was sealed before the process vanished and must become evidence without a fifth model call");
+        using var recoveredScope = _fixture.BeginScope();
+        (await recoveredScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(value => value.ObservationGroupId == groupId)).ShouldBe(4);
+        (await recoveredScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.AsNoTracking().CountAsync(value => value.ObservationGroupId == groupId && value.ResultJson != null)).ShouldBe(4);
+        outcome.QualifiedForCapabilityClaim.ShouldBeTrue();
     }
 
     [Fact]
@@ -437,11 +484,12 @@ public sealed class PairedQualificationRunnerFlowTests
             ("candidate", request.Candidate, run.Candidate.Results.Single()),
         })
         {
-            await scope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(new PairedQualificationCellAdmissionRequest
+            var admission = await scope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(new PairedQualificationCellAdmissionRequest
             {
                 ObservationGroupId = request.ObservationGroupId, ObservationSession = request.ObservationSession, ObservationArm = arm,
                 TaskId = result.TaskId, Mode = result.Mode, ModelCredentialModelId = selection.ModelCredentialModelId!.Value,
             }, CancellationToken.None);
+            await scope.Resolve<IPairedQualificationCellAdmissionStore>().CompleteAsync(admission.AdmissionId, result, CancellationToken.None);
             await store.RecordAsync(new BenchmarkObservationWrite
             {
                 TeamId = request.TeamId, SuiteVersion = run.Control.SuiteVersion!, Result = result, Selection = selection,
@@ -585,6 +633,25 @@ public sealed class PairedQualificationRunnerFlowTests
 
             var candidate = context.Selection!.Model == "candidate-model";
             return Task.FromResult(FakePairedCorpus.Result(candidate, context.Selection.Model!));
+        }
+    }
+
+    private sealed class SettlingInterruptingBenchmarkRunner : IBenchmarkRunner
+    {
+        private readonly IReadOnlySet<int> _interruptAt;
+        public List<(string TaskId, BenchmarkMode Mode, BenchmarkAgentSelection? Selection)> Calls { get; } = new();
+        public SettlingInterruptingBenchmarkRunner(params int[] interruptAt) => _interruptAt = interruptAt.ToHashSet();
+        public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
+        {
+            Calls.Add((task.Id, mode, context.Selection));
+            var candidate = context.Selection!.Model == "candidate-model";
+            var result = FakePairedCorpus.Result(candidate, context.Selection.Model!);
+            if (_interruptAt.Contains(Calls.Count))
+            {
+                await context.Completion!.CompleteAsync(result, cancellationToken);
+                throw new OperationCanceledException("simulated process loss after terminal result settlement");
+            }
+            return result;
         }
     }
 }

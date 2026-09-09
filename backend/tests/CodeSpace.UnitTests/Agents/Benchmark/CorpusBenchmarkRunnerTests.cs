@@ -420,6 +420,62 @@ public class CorpusBenchmarkRunnerTests
         admissions.Requests.ShouldHaveSingleItem().ModelCredentialModelId.ShouldBe(request.Control.ModelCredentialModelId!.Value);
     }
 
+    [Fact]
+    public async Task A_completed_admission_replays_its_result_into_evidence_without_model_execution()
+    {
+        var recovered = new BenchmarkResult
+        {
+            TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false, DurationSeconds = 1,
+        };
+        var runner = new StubRunner((_, _) => throw new InvalidOperationException("model replayed"));
+        var store = new RecordingPairedStore();
+        var admissions = new RecoverableAdmissionStore(recovered);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, admissions);
+
+        var run = await sut.RunPairedAsync(new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+            SelectedCells = new[] { new PairedCorpusBenchmarkCell { TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, Arm = "control" } },
+        }, CancellationToken.None);
+
+        runner.Calls.ShouldBeEmpty();
+        admissions.Completed.ShouldBeEmpty("a previously completed result is immutable and does not need a second settlement");
+        store.Writes.ShouldHaveSingleItem().Result.ShouldBeSameAs(recovered);
+        run.Control.Results.ShouldHaveSingleItem().ShouldBeSameAs(recovered);
+    }
+
+    [Fact]
+    public async Task A_result_sealed_before_a_post_run_fault_is_persisted_as_evidence_not_infrastructure()
+    {
+        var recovered = new BenchmarkResult
+        {
+            TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false, DurationSeconds = 1,
+        };
+        var runner = new CompletingThenThrowingRunner(recovered);
+        var store = new RecordingPairedStore();
+        var admissions = new RecoverableAdmissionStore(null);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, admissions);
+
+        var run = await sut.RunPairedAsync(new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+            SelectedCells = new[] { new PairedCorpusBenchmarkCell { TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, Arm = "control" } },
+        }, CancellationToken.None);
+
+        store.Writes.ShouldHaveSingleItem().Result.ShouldBeSameAs(recovered);
+        store.InfraWrites.ShouldBeEmpty("a cleanup/transport fault after durable terminal settlement cannot overwrite truthful evidence with InfraUnknown");
+        run.Control.Results.ShouldHaveSingleItem().ShouldBeSameAs(recovered);
+        run.Control.Errored.ShouldBeEmpty();
+    }
+
     // ─── stubs ───
 
     private static BenchmarkTask MakeTask(string id, IReadOnlyList<BenchmarkMode> modes) => new()
@@ -513,8 +569,10 @@ public class CorpusBenchmarkRunnerTests
     private sealed class RecordingPairedStore : IBenchmarkResultStore
     {
         public List<BenchmarkObservationWrite> Writes { get; } = new();
+        public List<BenchmarkInfraObservationWrite> InfraWrites { get; } = new();
         public Task RecordAsync(Guid teamId, string suiteVersion, BenchmarkResult result, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) => throw new InvalidOperationException("paired runner must use the typed observation write");
         public Task RecordAsync(BenchmarkObservationWrite request, CancellationToken cancellationToken) { Writes.Add(request); return Task.CompletedTask; }
+        public Task RecordInfraAsync(BenchmarkInfraObservationWrite request, CancellationToken cancellationToken) { InfraWrites.Add(request); return Task.CompletedTask; }
     }
 
     private sealed class RecordingStager : IBenchmarkFixtureStager
@@ -533,10 +591,29 @@ public class CorpusBenchmarkRunnerTests
         private readonly PairedQualificationCellAdmissionDecision _decision;
         public List<PairedQualificationCellAdmissionRequest> Requests { get; } = new();
         public FixedAdmissionStore(PairedQualificationCellAdmissionDecision decision) => _decision = decision;
-        public Task<PairedQualificationCellAdmissionDecision> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken)
+        public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
-            return Task.FromResult(_decision);
+            return Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _decision, null));
+        }
+        public Task CompleteAsync(Guid admissionId, BenchmarkResult result, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class RecoverableAdmissionStore : IPairedQualificationCellAdmissionStore
+    {
+        private readonly BenchmarkResult? _result;
+        public List<BenchmarkResult> Completed { get; } = new();
+        public RecoverableAdmissionStore(BenchmarkResult? result) => _result = result;
+        public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _result is null ? PairedQualificationCellAdmissionDecision.Admitted : PairedQualificationCellAdmissionDecision.AlreadyAdmitted, _result));
+        public Task CompleteAsync(Guid admissionId, BenchmarkResult result, CancellationToken cancellationToken) { Completed.Add(result); return Task.CompletedTask; }
+    }
+
+    private sealed class CompletingThenThrowingRunner(BenchmarkResult result) : IBenchmarkRunner
+    {
+        public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
+        {
+            await context.Completion!.CompleteAsync(result, cancellationToken);
+            throw new InvalidOperationException("simulated cleanup failure after terminal settlement");
         }
     }
 }
