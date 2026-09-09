@@ -20,6 +20,7 @@ public sealed record LessonReadRequest(Guid TeamId, string Mode, Guid? Repositor
 public sealed class LessonReader : ILessonReader, IScopedDependency
 {
     public const int MaxTake = 20;
+    public const int MaxCandidateTake = 1;
 
     private readonly CodeSpaceDbContext _db;
 
@@ -30,16 +31,31 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
         var take = Math.Clamp(request.Take, 0, MaxTake);
         if (take == 0 || string.IsNullOrWhiteSpace(request.Mode)) return [];
 
-        return await _db.Lesson.AsNoTracking()
+        var scoped = _db.Lesson.AsNoTracking()
             .Where(lesson => lesson.TeamId == request.TeamId && lesson.Mode == request.Mode)
             .Where(lesson => lesson.ValidFrom <= request.AsOf && lesson.ExpiresAt > request.AsOf && (lesson.InvalidatedAt == null || lesson.InvalidatedAt > request.AsOf))
+            .Where(lesson => lesson.QualificationSuppressedAt == null)
             .Where(lesson => lesson.SourceRunIds.Count > 0 && lesson.DistilledByModel != "")
-            .Where(lesson => request.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.RepositoryId)
+            .Where(lesson => request.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.RepositoryId);
+
+        var qualified = await scoped.Where(lesson => lesson.QualifiedAt != null)
             .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)
             .ThenByDescending(lesson => lesson.ValidFrom)
             .ThenBy(lesson => lesson.Id)
             .Take(take)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var candidateTake = Math.Min(MaxCandidateTake, take - qualified.Count);
+        if (candidateTake == 0) return qualified;
+
+        var candidates = await scoped.Where(lesson => lesson.QualifiedAt == null)
+            .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)
+            .ThenByDescending(lesson => lesson.ValidFrom)
+            .ThenBy(lesson => lesson.Id)
+            .Take(candidateTake)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return qualified.Concat(candidates).ToList();
     }
 }
 

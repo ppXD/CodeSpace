@@ -8,7 +8,7 @@ namespace CodeSpace.UnitTests.Learning;
 /// 🟢 Unit: D1's consolidation fold — the anti-confabulation law. Pins: an add citing only shown runs mints a
 /// lesson carrying mode/repo/citations; a citation outside the shown set is REFUSED whole (never partially
 /// honored); an uncited lesson is refused; update/invalidate must name a CURRENT lesson id verbatim (a
-/// hallucinated id mints nothing); update merges texts and unions citations; invalidation is one-way; the op
+/// hallucinated id mints nothing); update versions text and unions citations without rewriting evidence history; invalidation is one-way; the op
 /// vocabulary is closed. Plus the prompt pin: lesson ids and run ids appear verbatim (they are the only lawful
 /// reference space the brain may cite from).
 /// </summary>
@@ -32,6 +32,9 @@ public class LessonConsolidationTests
         lesson.TeamId.ShouldBe(Team);
         lesson.DistilledByModel.ShouldBe("test-model");
         lesson.InvalidatedAt.ShouldBeNull();
+        lesson.QualifiedAt.ShouldBeNull("failed-run distillation creates an experimental candidate, never an already-qualified rule");
+        lesson.SuccessfulExposureRunIds.ShouldBeEmpty();
+        lesson.NegativeExposureRunIds.ShouldBeEmpty();
         lesson.ExpiresAt.ShouldBeGreaterThan(lesson.ValidFrom);
     }
 
@@ -65,14 +68,26 @@ public class LessonConsolidationTests
     }
 
     [Fact]
-    public void An_update_merges_texts_and_unions_citations()
+    public void An_update_versions_text_and_evidence_instead_of_rewriting_qualified_history()
     {
         var existing = ExistingLesson();
+        existing.QualifiedAt = DateTimeOffset.UtcNow.AddDays(-1);
+        existing.SuccessfulExposureRunIds = [Guid.NewGuid(), Guid.NewGuid()];
+        existing.NegativeExposureRunIds = [Guid.NewGuid()];
+        existing.QualificationSuppressedAt = DateTimeOffset.UtcNow.AddHours(-1);
         var fold = Apply(Proposal("update", existingLessonId: existing.Id.ToString(), howToApply: "new advice", sourceRunIds: [RunA.ToString()]), existing);
 
         fold.Updates.ShouldBe(1);
-        existing.HowToApply.ShouldBe("new advice");
-        existing.SourceRunIds.ShouldBe(new[] { RunB, RunA }, ignoreOrder: true, customMessage: "citations UNION — provenance only ever grows");
+        existing.HowToApply.ShouldBe("old advice", "the text that earned historical evidence remains immutable");
+        existing.QualifiedAt.ShouldNotBeNull();
+        existing.SuccessfulExposureRunIds.Count.ShouldBe(2);
+        existing.InvalidatedAt.ShouldNotBeNull("the prior version leaves the current prompt view without being erased");
+        var replacement = fold.Inserts.ShouldHaveSingleItem();
+        replacement.HowToApply.ShouldBe("new advice");
+        replacement.SourceRunIds.ShouldBe(new[] { RunB, RunA }, ignoreOrder: true, customMessage: "the candidate version keeps the full source lineage");
+        replacement.QualifiedAt.ShouldBeNull("new text must earn its own success evidence");
+        replacement.SuccessfulExposureRunIds.ShouldBeEmpty();
+        replacement.NegativeExposureRunIds.ShouldBeEmpty();
     }
 
     [Fact]
@@ -85,8 +100,9 @@ public class LessonConsolidationTests
 
         var existing = ExistingLesson();
         existing.ExpiresAt = now.AddHours(1);
-        LessonConsolidation.Apply([existing], new LessonProposals { Lessons = [Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now);
-        existing.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime, "fresh evidence renews the lesson for one bounded lifetime");
+        var replacement = LessonConsolidation.Apply([existing], new LessonProposals { Lessons = [Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now).Inserts.ShouldHaveSingleItem();
+        replacement.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime, "fresh evidence creates one bounded candidate version");
+        existing.ExpiresAt.ShouldNotBe(now + LessonConsolidation.Lifetime, "historical validity is not rewritten");
     }
 
     [Fact]

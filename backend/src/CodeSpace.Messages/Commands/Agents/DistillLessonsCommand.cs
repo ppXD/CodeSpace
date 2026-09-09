@@ -3,7 +3,7 @@ using CodeSpace.Messages.Mediation;
 namespace CodeSpace.Messages.Commands.Agents;
 
 /// <summary>
-/// Run one nightly lesson-distillation round over every team with fresh failed/parked runs — fired by the
+/// Run one nightly lesson lifecycle round: first reconcile exact success/negative exposure evidence, then distill fresh failed/parked runs — fired by the
 /// recurring learning job; can also be sent ad-hoc from a test. NOT tenant-scoped: a system-wide enrichment that
 /// runs without an actor context (mirrors <c>TierStaleModelCapabilitiesCommand</c>). Returns the number of teams
 /// distilled for log surfacing.

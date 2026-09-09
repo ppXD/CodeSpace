@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Learning;
 /// <summary>One candidate run as shown to the brain — the closed set a proposal may cite from.</summary>
 public sealed record CandidateRun(Guid RunId, string Mode, Guid? RepositoryId, string Status, string? Error, IReadOnlyList<string> DecisionLines);
 
-/// <summary>The fold's effects: rows to insert, tracked rows mutated in place, and the proposals refused with reasons (logged loudly — a rejection is a signal, never silence).</summary>
+/// <summary>The fold's effects: rows to insert, version updates, invalidations, and proposals refused with reasons (logged loudly — a rejection is a signal, never silence).</summary>
 public sealed record LessonFold(IReadOnlyList<Lesson> Inserts, int Updates, int Invalidations, IReadOnlyList<string> Rejections);
 
 /// <summary>
@@ -37,12 +37,14 @@ public static class LessonConsolidation
                     break;
 
                 case "update" when TryResolveCurrent(proposal, current, rejections) is { } target && TryResolveCitations(proposal, candidates, rejections) is { } freshCitations:
-                    Merge(target, proposal, freshCitations, now);
+                    target.InvalidatedAt = now;
+                    inserts.Add(Replace(target, proposal, freshCitations, distilledByModel, now));
                     updates++;
                     break;
 
                 case "invalidate" when TryResolveCurrent(proposal, current, rejections) is { } retired:
                     retired.InvalidatedAt = now;
+                    retired.QualifiedAt = null;
                     invalidations++;
                     break;
 
@@ -109,14 +111,22 @@ public static class LessonConsolidation
         };
     }
 
-    private static void Merge(Lesson target, LessonProposal proposal, IReadOnlyList<Guid> freshCitations, DateTimeOffset now)
+    private static Lesson Replace(Lesson target, LessonProposal proposal, IReadOnlyList<Guid> freshCitations, string distilledByModel, DateTimeOffset now)
     {
-        target.FailureClass = proposal.FailureClass ?? target.FailureClass;
-        target.WhatFailed = proposal.WhatFailed ?? target.WhatFailed;
-        target.Why = proposal.Why ?? target.Why;
-        target.HowToApply = proposal.HowToApply ?? target.HowToApply;
-        target.SourceRunIds = target.SourceRunIds.Union(freshCitations).ToList();
-        target.ExpiresAt = now + Lifetime;
-        target.LastModifiedDate = now;
+        return new Lesson
+        {
+            Id = Guid.NewGuid(),
+            TeamId = target.TeamId,
+            Mode = target.Mode,
+            RepositoryId = target.RepositoryId,
+            FailureClass = proposal.FailureClass ?? target.FailureClass,
+            WhatFailed = proposal.WhatFailed ?? target.WhatFailed,
+            Why = proposal.Why ?? target.Why,
+            HowToApply = proposal.HowToApply ?? target.HowToApply,
+            SourceRunIds = target.SourceRunIds.Union(freshCitations).ToList(),
+            DistilledByModel = distilledByModel,
+            ValidFrom = now,
+            ExpiresAt = now + Lifetime,
+        };
     }
 }
