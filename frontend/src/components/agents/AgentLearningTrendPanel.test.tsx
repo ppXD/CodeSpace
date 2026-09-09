@@ -12,9 +12,9 @@ const trend: RunScorecardTrend = {
     { day: "2026-09-07T00:00:00Z", runs: 0, solvedRuns: 0, deliveredRuns: 0, unattendedSolvedWithDeliveryRuns: 0, unattendedSolveWithDeliveryRate: null, suspendedRuns: 2, legacyRuns: 1, costUsd: null, brainPlaneUsd: null },
   ],
   byLessonArm: [
-    { arm: "injected", runs: 5, solvedRuns: 4, deliveredRuns: 4, unattendedSolvedWithDeliveryRuns: 3, unattendedSolveWithDeliveryRate: 0.6 },
-    { arm: "withheld", runs: 4, solvedRuns: 2, deliveredRuns: 2, unattendedSolvedWithDeliveryRuns: 1, unattendedSolveWithDeliveryRate: 0.25 },
-    { arm: "unmeasured", runs: 3, solvedRuns: 1, deliveredRuns: 1, unattendedSolvedWithDeliveryRuns: 0, unattendedSolveWithDeliveryRate: 0 },
+    { arm: "injected", runs: 5, solvedRuns: 4, deliveredRuns: 4, unattendedSolvedWithDeliveryRuns: 3, unattendedSolveWithDeliveryRate: 0.6, humanTouchedRuns: 2, humanInterventionRate: 0.4, avgHumanTouches: 0.6, totalCostUsd: 4.5, unknownCostRuns: 1, avgCostPerPricedRunUsd: 1.125, brainPlaneUsd: 1.2, unknownBrainCostRuns: 2, avgBrainPlaneCostPerPricedRunUsd: 0.4 },
+    { arm: "withheld", runs: 4, solvedRuns: 2, deliveredRuns: 2, unattendedSolvedWithDeliveryRuns: 1, unattendedSolveWithDeliveryRate: 0.25, humanTouchedRuns: 0, humanInterventionRate: 0, avgHumanTouches: 0, totalCostUsd: null, unknownCostRuns: 4, avgCostPerPricedRunUsd: null, brainPlaneUsd: null, unknownBrainCostRuns: 4, avgBrainPlaneCostPerPricedRunUsd: null },
+    { arm: "unmeasured", runs: 3, solvedRuns: 1, deliveredRuns: 1, unattendedSolvedWithDeliveryRuns: 0, unattendedSolveWithDeliveryRate: 0, humanTouchedRuns: 1, humanInterventionRate: 1 / 3, avgHumanTouches: 1 / 3, totalCostUsd: 0, unknownCostRuns: 0, avgCostPerPricedRunUsd: 0, brainPlaneUsd: 0, unknownBrainCostRuns: 0, avgBrainPlaneCostPerPricedRunUsd: 0 },
   ],
 };
 
@@ -31,8 +31,22 @@ describe("AgentLearningTrendView", () => {
     expect(injected).not.toBeNull();
     expect(within(injected!).getByText("60%")).toBeInTheDocument();
     expect(within(injected!).getByText("3/5")).toBeInTheDocument();
-    expect(screen.getByText("Lessons withheld")).toBeInTheDocument();
-    expect(screen.getByText("Outside experiment")).toBeInTheDocument();
+    expect(within(injected!).getByText("40%")).toBeInTheDocument();
+    expect(within(injected!).getByText("0.6/run")).toBeInTheDocument();
+    expect(within(injected!).getByText("$1.13")).toBeInTheDocument();
+    expect(within(injected!).getByText("1 unknown")).toBeInTheDocument();
+    expect(within(injected!).getByText("$0.40")).toBeInTheDocument();
+    expect(within(injected!).getByText("2 unknown")).toBeInTheDocument();
+
+    const withheld = screen.getByText("Lessons withheld").closest("tr");
+    expect(withheld).not.toBeNull();
+    expect(within(withheld!).getAllByText("Not priced")).toHaveLength(2);
+    expect(within(withheld!).getAllByText("4 unknown")).toHaveLength(2);
+
+    const unmeasured = screen.getByText("Outside experiment").closest("tr");
+    expect(unmeasured).not.toBeNull();
+    expect(within(unmeasured!).getAllByText("$0.00")).toHaveLength(2);
+    expect(within(unmeasured!).queryByText(/unknown/)).not.toBeInTheDocument();
     expect(screen.getByText(/observational/i)).toBeInTheDocument();
   });
 

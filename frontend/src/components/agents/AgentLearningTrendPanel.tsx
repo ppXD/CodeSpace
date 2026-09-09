@@ -57,12 +57,14 @@ export function AgentLearningTrendView({ trend }: { trend: RunScorecardTrend | u
       {trend.byLessonArm.length === 0 ? (
         <div className="lt-empty">No run in this window carried a lesson experiment arm.</div>
       ) : (
-        <table className="tbl lt-table">
-          <thead><tr><th>Arm</th><th className="col-right">Unattended delivery</th><th className="col-right">Solved</th><th className="col-right">Delivered</th><th className="col-right">Runs</th></tr></thead>
-          <tbody>{trend.byLessonArm.map((slice) => <LessonArmRow key={slice.arm} slice={slice} />)}</tbody>
-        </table>
+        <div className="lt-table-wrap">
+          <table className="tbl lt-table">
+            <thead><tr><th>Arm</th><th className="col-right">Unattended delivery</th><th className="col-right">Human touch</th><th className="col-right">Agent avg (priced)</th><th className="col-right">Brain avg (priced)</th><th className="col-right">Solved</th><th className="col-right">Delivered</th><th className="col-right">Runs</th></tr></thead>
+            <tbody>{trend.byLessonArm.map((slice) => <LessonArmRow key={slice.arm} slice={slice} />)}</tbody>
+          </table>
+        </div>
       )}
-      <p className="lt-note">Arm rates are observational. They report measured outcomes and do not change launch policy.</p>
+      <p className="lt-note">Arm rates are observational. Cost averages use priced runs only; unknown runs are shown rather than counted as free. These measurements do not change launch policy.</p>
     </section>
   );
 }
@@ -76,10 +78,22 @@ function LessonArmRow({ slice }: { slice: LessonArmSlice }) {
     <tr>
       <td><span className="lt-arm">{armLabel(slice.arm)}</span></td>
       <td className="col-right"><strong>{formatRate(slice.unattendedSolveWithDeliveryRate)}</strong> <span className="lt-fraction">{slice.unattendedSolvedWithDeliveryRuns}/{slice.runs}</span></td>
+      <td className="col-right"><strong>{formatRate(slice.humanInterventionRate)}</strong> <span className="lt-fraction">{formatTouches(slice.avgHumanTouches)}/run</span></td>
+      <CostCell average={slice.avgCostPerPricedRunUsd} total={slice.totalCostUsd} unknown={slice.unknownCostRuns} />
+      <CostCell average={slice.avgBrainPlaneCostPerPricedRunUsd} total={slice.brainPlaneUsd} unknown={slice.unknownBrainCostRuns} />
       <td className="col-right">{slice.solvedRuns}/{slice.runs}</td>
       <td className="col-right">{slice.deliveredRuns}/{slice.runs}</td>
       <td className="col-right">{slice.runs}</td>
     </tr>
+  );
+}
+
+function CostCell({ average, total, unknown }: { average: number | null; total: number | null; unknown: number }) {
+  return (
+    <td className="col-right lt-cost" title={total === null ? "No run in this arm had a known price" : `${formatUsd(total)} known total`}>
+      <span>{average === null ? "Not priced" : formatUsd(average)}</span>
+      {unknown > 0 && <span className="lt-unknown">{unknown} unknown</span>}
+    </td>
   );
 }
 
@@ -93,6 +107,14 @@ function armLabel(arm: string): string {
 
 function formatRate(rate: number | null): string {
   return rate === null ? "Not measured" : `${Math.round(rate * 100)}%`;
+}
+
+function formatTouches(value: number): string {
+  return value.toLocaleString("en", { maximumFractionDigits: 2 });
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
 }
 
 function formatDay(value: string): string {
