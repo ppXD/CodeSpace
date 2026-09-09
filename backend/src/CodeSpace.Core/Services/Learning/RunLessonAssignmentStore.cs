@@ -4,10 +4,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Learning;
 
-/// <summary>The immutable, run-wide treatment receipt shared by every agent dispatch in an arbitrary workflow graph.</summary>
+/// <summary>The immutable run-wide arm plus any planner/supervisor receipt inherited during rollout. Agent-specific receipts have their own store.</summary>
 public sealed record RunLessonAssignment(Guid WorkflowRunId, Guid TeamId, string Arm, IReadOnlyList<Guid> LessonIds);
 
-/// <summary>A proposed first assignment. Concurrent proposals race at the database unique key; every caller reads the winner.</summary>
+/// <summary>A proposed first run-wide assignment. Concurrent proposals race at the database unique key; every caller reads the winner.</summary>
 public sealed record RunLessonAssignmentProposal(Guid WorkflowRunId, Guid TeamId, string Arm, IReadOnlyList<Guid> LessonIds);
 
 public interface IRunLessonAssignmentStore

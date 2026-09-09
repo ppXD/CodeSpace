@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -40,6 +41,8 @@ public sealed class AgentLessonInjectionFlowTests
         first.SystemPrompt!.ShouldContain(LessonArms.Line(lesson));
         first.Goal.ShouldBe(decoratedGoal, "prompt decoration stays intact while assignment hashes the launch's operator goal");
 
+        await SeedAgentRunAsync(teamId, workflowRunId, first);
+
         using (var receiptScope = _fixture.BeginScope())
         {
             var receiptDb = receiptScope.Resolve<CodeSpaceDbContext>();
@@ -48,8 +51,6 @@ public sealed class AgentLessonInjectionFlowTests
             arms[workflowRunId].ShouldBe(LessonArms.Injected);
             exposures[workflowRunId].ShouldBe([lesson.Id]);
         }
-
-        await SeedAgentRunAsync(teamId, workflowRunId, first);
 
         await InvalidateAsync(lesson.Id);
         var retry = await InjectAsync(first with { Goal = decoratedGoal + "\nretry feedback" }, teamId, workflowRunId);
@@ -99,7 +100,7 @@ public sealed class AgentLessonInjectionFlowTests
 
         var task = await InjectAsync(new AgentTask { Goal = "tenant-isolated", Harness = "claude-code" }, teamA, workflowRunId);
         task.LessonArm.ShouldBe(LessonArms.Injected);
-        task.LessonIds.ShouldBe([foreignLesson.Id], "the immutable receipt remains honest about unavailable history");
+        task.LessonIds.ShouldBeEmpty("an upstream foreign id remains auditable on its assignment but cannot become a prompt exposure receipt");
         task.SystemPrompt.ShouldBeNull("a lesson owned by another tenant can never be rendered");
     }
 
@@ -120,6 +121,27 @@ public sealed class AgentLessonInjectionFlowTests
         persisted.SystemPrompt.ShouldNotBeNull();
         persisted.SystemPrompt!.ShouldContain(LessonArms.Line(lesson));
         persisted.Goal.ShouldBe(goal);
+    }
+
+    [Fact]
+    public async Task Real_map_agent_creation_keys_receipts_by_cell_and_runtime()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var workflowRunId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(WorkflowsTestSeed.MinimalDefinition(), teamId, userId, "{}", [], TaskProjectionKinds.PlanMapSynth, null, CancellationToken.None);
+        var lessonA = await SeedLessonAsync(teamId, RunModeKeys.PlanMap, "map model-a", new LessonRuntimeSeed { Models = ["model-a"] });
+        var lessonB = await SeedLessonAsync(teamId, RunModeKeys.PlanMap, "map model-b", new LessonRuntimeSeed { Models = ["model-b"] });
+        var goal = TaskTextFor(teamId, LessonArms.Injected);
+
+        var runA = await scope.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = goal, Harness = "claude-code", Model = "model-a" }, teamId, workflowRunId, "map", "cell-a", CancellationToken.None);
+        var runB = await scope.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = goal, Harness = "claude-code", Model = "model-b" }, teamId, workflowRunId, "map", "cell-b", CancellationToken.None);
+        var taskA = JsonSerializer.Deserialize<AgentTask>(runA.TaskJson, AgentJson.Options)!;
+        var taskB = JsonSerializer.Deserialize<AgentTask>(runB.TaskJson, AgentJson.Options)!;
+
+        taskA.LessonArm.ShouldBe(LessonArms.Injected);
+        taskB.LessonArm.ShouldBe(taskA.LessonArm);
+        taskA.LessonIds.ShouldBe([lessonA.Id]);
+        taskB.LessonIds.ShouldBe([lessonB.Id]);
     }
 
     [Fact]
@@ -203,15 +225,94 @@ public sealed class AgentLessonInjectionFlowTests
 
         matching.LessonIds.ShouldBe([lesson.Id]);
         matching.SystemPrompt.ShouldContain(LessonArms.Line(lesson));
-        unknown.LessonArm.ShouldBe(LessonArms.None);
+        unknown.LessonArm.ShouldBe(LessonArms.Injected, "the run-wide arm is assigned because its scope has a lesson, while this prompt gets no inapplicable ids");
         unknown.LessonIds.ShouldBeEmpty();
         unknown.SystemPrompt.ShouldBeNull("missing model/tool facts cannot authorize a runtime-specific lesson");
+    }
+
+    [Fact]
+    public async Task Heterogeneous_fanout_shares_the_arm_but_freezes_applicable_lessons_per_agent_runtime()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.Supervisor, TaskTextFor(teamId, LessonArms.Injected));
+        var lessonA = await SeedLessonAsync(teamId, "supervisor", "model-a lesson", new LessonRuntimeSeed { Models = ["model-a"] });
+        var lessonB = await SeedLessonAsync(teamId, "supervisor", "model-b lesson", new LessonRuntimeSeed { Models = ["model-b"] });
+
+        var agentA = await InjectAsync(new AgentTask { Goal = "unit a", SubtaskId = "unit-a", Harness = "claude-code", Model = "model-a" }, teamId, workflowRunId);
+        var agentB = await InjectAsync(new AgentTask { Goal = "unit b", SubtaskId = "unit-b", Harness = "claude-code", Model = "model-b" }, teamId, workflowRunId);
+
+        agentA.LessonArm.ShouldBe(LessonArms.Injected);
+        agentB.LessonArm.ShouldBe(agentA.LessonArm, "one workflow is one treatment assignment");
+        agentA.LessonIds.ShouldBe([lessonA.Id]);
+        agentB.LessonIds.ShouldBe([lessonB.Id], "a first agent's model-specific receipt cannot leak into a heterogeneous sibling");
+        agentA.SystemPrompt.ShouldContain("model-a lesson");
+        agentA.SystemPrompt.ShouldNotContain("model-b lesson");
+        agentB.SystemPrompt.ShouldContain("model-b lesson");
+        agentB.SystemPrompt.ShouldNotContain("model-a lesson");
+    }
+
+    [Fact]
+    public async Task A_first_runtime_with_no_match_does_not_hide_a_later_siblings_applicable_lesson()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.Supervisor, TaskTextFor(teamId, LessonArms.Injected));
+        var lessonB = await SeedLessonAsync(teamId, "supervisor", "model-b lesson", new LessonRuntimeSeed { Models = ["model-b"] });
+
+        var agentA = await InjectAsync(new AgentTask { Goal = "unit a", SubtaskId = "unit-a", Harness = "claude-code", Model = "model-a" }, teamId, workflowRunId);
+        var agentB = await InjectAsync(new AgentTask { Goal = "unit b", SubtaskId = "unit-b", Harness = "claude-code", Model = "model-b" }, teamId, workflowRunId);
+
+        agentA.LessonArm.ShouldBe(LessonArms.Injected, "the run has a structurally eligible lesson even though this runtime does not match it");
+        agentA.LessonIds.ShouldBeEmpty();
+        agentB.LessonArm.ShouldBe(agentA.LessonArm);
+        agentB.LessonIds.ShouldBe([lessonB.Id]);
+    }
+
+    [Fact]
+    public async Task Legacy_run_assignment_ids_are_revalidated_for_each_new_runtime()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.Supervisor);
+        var lessonA = await SeedLessonAsync(teamId, "supervisor", "model-a lesson", new LessonRuntimeSeed { Models = ["model-a"] });
+        var lessonB = await SeedLessonAsync(teamId, "supervisor", "model-b lesson", new LessonRuntimeSeed { Models = ["model-b"] });
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IRunLessonAssignmentStore>().GetOrCreateAsync(new(workflowRunId, teamId, LessonArms.Injected, [lessonA.Id]), CancellationToken.None);
+
+        var agentB = await InjectAsync(new AgentTask { Goal = "unit b", SubtaskId = "unit-b", Harness = "claude-code", Model = "model-b" }, teamId, workflowRunId);
+
+        agentB.LessonIds.ShouldBe([lessonB.Id]);
+        agentB.SystemPrompt.ShouldNotContain("model-a lesson", customMessage: "a pre-0215 first-agent receipt cannot leak across a heterogeneous rollout sibling");
+    }
+
+    [Fact]
+    public async Task Concurrent_prompt_receipt_proposals_converge_on_one_immutable_tenant_bound_winner()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.SingleAgent);
+        var promptKey = new string('a', 64);
+        var lessonA = Guid.NewGuid();
+        var lessonB = Guid.NewGuid();
+
+        var receipts = await Task.WhenAll(Enumerable.Range(0, 12).Select(async index =>
+        {
+            using var scope = _fixture.BeginScope();
+            return await scope.Resolve<IAgentLessonPromptReceiptStore>().GetOrCreateAsync(new(workflowRunId, teamId, promptKey, [index % 2 == 0 ? lessonA : lessonB]), CancellationToken.None);
+        }));
+
+        receipts.Select(receipt => string.Join(',', receipt.LessonIds)).Distinct().Count().ShouldBe(1);
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.Database.SqlQuery<int>($"SELECT COUNT(*)::int AS \"Value\" FROM agent_lesson_prompt_receipt WHERE workflow_run_id = {workflowRunId}").SingleAsync()).ShouldBe(1);
+        await Should.ThrowAsync<Exception>(() => db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_lesson_prompt_receipt SET lesson_ids = ARRAY[]::uuid[] WHERE workflow_run_id = {workflowRunId}"));
+        var capped = await verify.Resolve<IAgentLessonPromptReceiptStore>().GetOrCreateAsync(new(workflowRunId, teamId, new string('c', 64), Enumerable.Range(0, 12).Select(_ => Guid.NewGuid()).ToList()), CancellationToken.None);
+        capped.LessonIds.Count.ShouldBe(AgentLessonPromptReceiptStore.MaxLessons);
+        await Should.ThrowAsync<InvalidOperationException>(() => verify.Resolve<IAgentLessonPromptReceiptStore>().GetOrCreateAsync(new(workflowRunId, foreignTeamId, new string('b', 64), []), CancellationToken.None));
     }
 
     private async Task<AgentTask> InjectAsync(AgentTask task, Guid teamId, Guid workflowRunId)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IAgentLessonInjector>().InjectAsync(task, teamId, workflowRunId, CancellationToken.None);
+        return await scope.Resolve<IAgentLessonInjector>().InjectAsync(new(task, teamId, workflowRunId, null, ""), CancellationToken.None);
     }
 
     private static string TaskTextFor(Guid teamId, string arm)
