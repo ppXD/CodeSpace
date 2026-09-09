@@ -153,7 +153,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
             List<BenchmarkResultRecord> durable;
             using (var scope = _fixture.BeginScope())
             {
-                var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>());
+                var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>());
                 outcome = await runner.RunAsync(request, CancellationToken.None);
             }
             using (var scope = _fixture.BeginScope())
@@ -167,6 +167,8 @@ public sealed class RealModelQualificationRehearsalE2ETests
 
             outcome.SuiteDigest.ShouldBe(input.Suite.SuiteContentHash);
             outcome.ProtocolDigest.ShouldNotBeNull().Length.ShouldBe(64, "the paid paired run must expose its durable pre-outcome protocol identity");
+            outcome.EvidenceDigest.ShouldNotBeNull().Length.ShouldBe(64, "the paired result must bind the exact immutable observation set");
+            outcome.ResultDigest.ShouldNotBeNull().Length.ShouldBe(64, "the paired result must carry its immutable terminal seal");
             outcome.PairedCells.ShouldBe(input.Suite.Tasks.Sum(task => task.Modes.Count));
             if (usedFallbackBaseline)
             {
@@ -181,6 +183,8 @@ public sealed class RealModelQualificationRehearsalE2ETests
                 suiteKind = input.SuiteKind,
                 outcome.ObservationGroupId,
                 outcome.ProtocolDigest,
+                outcome.EvidenceDigest,
+                outcome.ResultDigest,
                 outcome.CodeRevision,
                 outcome.SuiteDigest,
                 outcome.SuiteVersion,
