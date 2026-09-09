@@ -9,6 +9,15 @@ public sealed record BenchmarkExecutionContext
     public BenchmarkAgentSelection? Selection { get; init; }
     public IBenchmarkFixtureStager? FixtureStager { get; init; }
     public IBenchmarkCellCompletionSink? Completion { get; init; }
+    public IReadOnlyDictionary<string, BenchmarkExecutionCheckpoint> Checkpoints { get; init; } = new Dictionary<string, BenchmarkExecutionCheckpoint>();
+    public IBenchmarkCellCheckpointSink? CheckpointSink { get; init; }
+}
+
+public sealed record BenchmarkExecutionCheckpoint(string Kind, string PayloadJson, DateTimeOffset CreatedAt);
+
+public interface IBenchmarkCellCheckpointSink
+{
+    Task PutAsync(string kind, string payloadJson, CancellationToken cancellationToken);
 }
 
 public interface IBenchmarkCellCompletionSink

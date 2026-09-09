@@ -476,6 +476,29 @@ public class CorpusBenchmarkRunnerTests
         run.Control.Errored.ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task A_checkpointed_admission_reenters_the_existing_instrument_instead_of_parking_or_replaying_blindly()
+    {
+        var checkpoint = new BenchmarkExecutionCheckpoint("tasklaunch.launch-started.v1", "{\"fixture\":\"bound\"}", DateTimeOffset.UtcNow);
+        var runner = new CheckpointCapturingRunner();
+        var store = new RecordingPairedStore();
+        var admissions = new CheckpointAdmissionStore(checkpoint);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, admissions);
+
+        await sut.RunPairedAsync(new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+            SelectedCells = new[] { new PairedCorpusBenchmarkCell { TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, Arm = "control" } },
+        }, CancellationToken.None);
+
+        runner.Checkpoints.Count.ShouldBe(1);
+        runner.Checkpoints.ContainsKey(checkpoint.Kind).ShouldBeTrue();
+        runner.CheckpointSink.ShouldNotBeNull("a recovering instrument must be able to append its next durable checkpoint");
+    }
+
     // ─── stubs ───
 
     private static BenchmarkTask MakeTask(string id, IReadOnlyList<BenchmarkMode> modes) => new()
@@ -594,8 +617,9 @@ public class CorpusBenchmarkRunnerTests
         public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
-            return Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _decision, null));
+            return Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _decision, null, new Dictionary<string, BenchmarkExecutionCheckpoint>()));
         }
+        public Task PutCheckpointAsync(Guid admissionId, string kind, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task CompleteAsync(Guid admissionId, BenchmarkResult result, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
@@ -604,7 +628,8 @@ public class CorpusBenchmarkRunnerTests
         private readonly BenchmarkResult? _result;
         public List<BenchmarkResult> Completed { get; } = new();
         public RecoverableAdmissionStore(BenchmarkResult? result) => _result = result;
-        public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _result is null ? PairedQualificationCellAdmissionDecision.Admitted : PairedQualificationCellAdmissionDecision.AlreadyAdmitted, _result));
+        public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), _result is null ? PairedQualificationCellAdmissionDecision.Admitted : PairedQualificationCellAdmissionDecision.AlreadyAdmitted, _result, new Dictionary<string, BenchmarkExecutionCheckpoint>()));
+        public Task PutCheckpointAsync(Guid admissionId, string kind, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task CompleteAsync(Guid admissionId, BenchmarkResult result, CancellationToken cancellationToken) { Completed.Add(result); return Task.CompletedTask; }
     }
 
@@ -615,5 +640,24 @@ public class CorpusBenchmarkRunnerTests
             await context.Completion!.CompleteAsync(result, cancellationToken);
             throw new InvalidOperationException("simulated cleanup failure after terminal settlement");
         }
+    }
+
+    private sealed class CheckpointCapturingRunner : IBenchmarkRunner
+    {
+        public IReadOnlyDictionary<string, BenchmarkExecutionCheckpoint> Checkpoints { get; private set; } = new Dictionary<string, BenchmarkExecutionCheckpoint>();
+        public IBenchmarkCellCheckpointSink? CheckpointSink { get; private set; }
+        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
+        {
+            Checkpoints = context.Checkpoints;
+            CheckpointSink = context.CheckpointSink;
+            return Task.FromResult(new BenchmarkResult { TaskId = task.Id, Mode = mode, RunStatus = AgentRunStatus.Succeeded, Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed" }, McpFullCatalog = false });
+        }
+    }
+
+    private sealed class CheckpointAdmissionStore(BenchmarkExecutionCheckpoint checkpoint) : IPairedQualificationCellAdmissionStore
+    {
+        public Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken) => Task.FromResult(new PairedQualificationCellAdmissionOutcome(Guid.NewGuid(), PairedQualificationCellAdmissionDecision.AlreadyAdmitted, null, new Dictionary<string, BenchmarkExecutionCheckpoint> { [checkpoint.Kind] = checkpoint }));
+        public Task PutCheckpointAsync(Guid admissionId, string kind, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CompleteAsync(Guid admissionId, BenchmarkResult result, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

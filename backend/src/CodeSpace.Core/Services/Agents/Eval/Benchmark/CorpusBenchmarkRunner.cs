@@ -177,7 +177,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
             }
 
             completion = admission is null ? null : new AdmissionCompletionSink(_admissions, admission.AdmissionId);
-            var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, Selection = request.Selection, FixtureStager = stager, Completion = completion };
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, Selection = request.Selection, FixtureStager = stager, Completion = completion, Checkpoints = admission?.Checkpoints ?? new Dictionary<string, BenchmarkExecutionCheckpoint>(), CheckpointSink = completion };
             var result = await _runner.RunAsync(task, mode, context, cancellationToken).ConfigureAwait(false);
             if (completion is not null) await completion.CompleteAsync(result, CancellationToken.None).ConfigureAwait(false);
 
@@ -229,7 +229,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
         {
             throw new DurableBenchmarkObservationException($"Durable paired benchmark admission {task.Id}/{mode} could not be committed.", exception);
         }
-        if (outcome.Decision == PairedQualificationCellAdmissionDecision.AlreadyAdmitted && outcome.CompletedResult is null)
+        if (outcome.Decision == PairedQualificationCellAdmissionDecision.AlreadyAdmitted && outcome.CompletedResult is null && outcome.Checkpoints.Count == 0)
             throw new DurableBenchmarkObservationException($"Paired benchmark cell {task.Id}/{mode} execution-indeterminate: a durable admission exists without the required observation, so automatic paid replay is forbidden.");
         return outcome;
     }
@@ -276,12 +276,13 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
         }
     }
 
-    private sealed class AdmissionCompletionSink : IBenchmarkCellCompletionSink
+    private sealed class AdmissionCompletionSink : IBenchmarkCellCompletionSink, IBenchmarkCellCheckpointSink
     {
         private readonly IPairedQualificationCellAdmissionStore _store;
         private readonly Guid _admissionId;
         public BenchmarkResult? CompletedResult { get; private set; }
         public AdmissionCompletionSink(IPairedQualificationCellAdmissionStore store, Guid admissionId) { _store = store; _admissionId = admissionId; }
+        public Task PutAsync(string kind, string payloadJson, CancellationToken cancellationToken) => _store.PutCheckpointAsync(_admissionId, kind, payloadJson, cancellationToken);
         public async Task CompleteAsync(BenchmarkResult result, CancellationToken cancellationToken)
         {
             await _store.CompleteAsync(_admissionId, result, cancellationToken).ConfigureAwait(false);

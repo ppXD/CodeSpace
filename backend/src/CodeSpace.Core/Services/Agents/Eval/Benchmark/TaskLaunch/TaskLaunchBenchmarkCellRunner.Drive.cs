@@ -1,7 +1,9 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Core.Services.Tasks;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
@@ -11,15 +13,23 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 
 public sealed partial class TaskLaunchBenchmarkCellRunner
 {
     private const int DrivePollIntervalMs = 200;
+    internal const string LaunchStartedCheckpointKind = "tasklaunch.launch-started.v1";
+    internal const string LaunchCheckpointKind = "tasklaunch.launch.v1";
+    private sealed record TaskLaunchStartIdentity(Guid RepositoryId);
+    private sealed record TaskLaunchIdentity(Guid RunId, Guid SessionId);
 
     /// <summary>
-    /// <see cref="LaunchAsync"/>, guarded against the ONE known way it can leave an orphan behind: the launch's
+    /// <see cref="LaunchAsync"/> behind an append-only intent/binding protocol. A recovered cell adopts the one
+    /// WorkflowRun attributable to its durable fixture; an intent with zero or multiple candidates parks. The
+    /// direct, non-durable instrument retains its legacy best-effort orphan cleanup for the ONE known way launch can
+    /// leave an orphan behind: the launch's
     /// <c>WorkSession</c> + <c>WorkflowRun</c> commit in a SINGLE <c>SaveChangesAsync</c>
     /// (<c>RunFromSnapshotStarter.StageAsync</c>) with NO ambient transaction — this runner calls
     /// <see cref="ITaskLaunchService"/> directly, never through the Mediator <c>ICommand</c> pipeline that
@@ -32,18 +42,72 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     /// </summary>
     private async Task<LaunchTaskResult> LaunchOrRecoverAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, StagedFixture fixture, CancellationToken cancellationToken)
     {
+        if (context.CheckpointSink is not null)
+        {
+            if (context.Checkpoints.TryGetValue(LaunchCheckpointKind, out var launchCheckpoint))
+            {
+                var identity = DeserializeCheckpoint<TaskLaunchIdentity>(launchCheckpoint, LaunchCheckpointKind);
+                return await LoadRecoverableLaunchAsync(context.TeamId, fixture, identity.RunId, identity.SessionId, cancellationToken).ConfigureAwait(false);
+            }
+            if (context.Checkpoints.TryGetValue(LaunchStartedCheckpointKind, out var launchStartedCheckpoint))
+            {
+                var identity = DeserializeCheckpoint<TaskLaunchStartIdentity>(launchStartedCheckpoint, LaunchStartedCheckpointKind);
+                if (identity.RepositoryId != fixture.RepositoryId) throw new DurableBenchmarkObservationException("TaskLaunch launch-started checkpoint does not match its fixture identity.");
+                var recovered = await FindRecoverableLaunchAsync(context.TeamId, fixture, cancellationToken).ConfigureAwait(false);
+                if (recovered is null) throw new DurableBenchmarkObservationException("TaskLaunch execution-indeterminate: launch started but no durable WorkflowRun can be attributed; automatic replay is forbidden.");
+                await PutCheckpointAsync(context, LaunchCheckpointKind, new TaskLaunchIdentity(recovered.RunId, recovered.SessionId), CancellationToken.None).ConfigureAwait(false);
+                return recovered;
+            }
+
+            await PutCheckpointAsync(context, LaunchStartedCheckpointKind, new TaskLaunchStartIdentity(fixture.RepositoryId), CancellationToken.None).ConfigureAwait(false);
+        }
+
         var attemptStartedAt = DateTimeOffset.UtcNow;
 
         try
         {
-            return await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
+            var launched = await LaunchAsync(task, mode, context, fixture, cancellationToken).ConfigureAwait(false);
+            if (context.CheckpointSink is not null) await PutCheckpointAsync(context, LaunchCheckpointKind, new TaskLaunchIdentity(launched.RunId, launched.SessionId), CancellationToken.None).ConfigureAwait(false);
+            return launched;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (context.CheckpointSink is not null)
+            {
+                var recovered = await FindRecoverableLaunchAsync(context.TeamId, fixture, cancellationToken).ConfigureAwait(false);
+                if (recovered is not null)
+                {
+                    await PutCheckpointAsync(context, LaunchCheckpointKind, new TaskLaunchIdentity(recovered.RunId, recovered.SessionId), CancellationToken.None).ConfigureAwait(false);
+                    return recovered;
+                }
+                throw new DurableBenchmarkObservationException("TaskLaunch execution-indeterminate: launch failed after its durable start checkpoint and no WorkflowRun can be attributed; automatic replay is forbidden.", ex);
+            }
             await RecoverOrphanedLaunchAsync(context.TeamId, fixture.ActorUserId, fixture.RepositoryId, attemptStartedAt, cancellationToken).ConfigureAwait(false);
             throw;
         }
     }
+
+    private async Task<LaunchTaskResult?> FindRecoverableLaunchAsync(Guid teamId, StagedFixture fixture, CancellationToken cancellationToken)
+    {
+        var ids = await InFreshScopeAsync(scope => scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking()
+            .Where(value => value.TeamId == teamId && value.ActorId == fixture.ActorUserId && value.SourceType == WorkflowRunSourceTypes.Snapshot && value.ScopeRepositoryIds.Contains(fixture.RepositoryId))
+            .Select(value => value.Id).ToListAsync(cancellationToken)).ConfigureAwait(false);
+        if (ids.Count > 1) throw new DurableBenchmarkObservationException("TaskLaunch fixture is bound to more than one WorkflowRun.");
+        return ids.Count == 0 ? null : await LoadRecoverableLaunchAsync(teamId, fixture, ids[0], null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task<LaunchTaskResult> LoadRecoverableLaunchAsync(Guid teamId, StagedFixture fixture, Guid runId, Guid? expectedSessionId, CancellationToken cancellationToken) => InFreshScopeAsync(async scope =>
+    {
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleOrDefaultAsync(value => value.Id == runId && value.TeamId == teamId, cancellationToken).ConfigureAwait(false)
+            ?? throw new DurableBenchmarkObservationException($"TaskLaunch recovery WorkflowRun {runId} was not found.");
+        if (run.ActorId != fixture.ActorUserId || run.SourceType != WorkflowRunSourceTypes.Snapshot || run.ScopeRepositoryIds.Count != 1 || !run.ScopeRepositoryIds.Contains(fixture.RepositoryId) || run.SessionId is not { } sessionId || expectedSessionId is { } expected && sessionId != expected || string.IsNullOrWhiteSpace(run.RoutePlanJson) || string.IsNullOrWhiteSpace(run.ProjectionKind) || run.Purpose is not (null or WorkflowRunPurposes.Qualification))
+            throw new DurableBenchmarkObservationException($"TaskLaunch recovery WorkflowRun {runId} does not match its fixture checkpoint.");
+        var route = JsonSerializer.Deserialize<RoutePlan>(run.RoutePlanJson, WorkflowJson.Options) ?? throw new DurableBenchmarkObservationException($"TaskLaunch recovery WorkflowRun {runId} has no readable route.");
+        if (route.ProjectionKind != run.ProjectionKind) throw new DurableBenchmarkObservationException($"TaskLaunch recovery WorkflowRun {runId} has inconsistent route provenance.");
+        if (run.Purpose is null) await db.WorkflowRun.Where(value => value.Id == runId).ExecuteUpdateAsync(update => update.SetProperty(value => value.Purpose, WorkflowRunPurposes.Qualification), cancellationToken).ConfigureAwait(false);
+        return new LaunchTaskResult { RunId = run.Id, SessionId = sessionId, ProjectionKind = run.ProjectionKind, Route = route, SurfaceKind = TaskLaunchSurfaceKinds.Repo, LinkedEntity = null };
+    });
 
     /// <summary>
     /// Build the launch request from the cell's task + arm + selection and enter through the REAL

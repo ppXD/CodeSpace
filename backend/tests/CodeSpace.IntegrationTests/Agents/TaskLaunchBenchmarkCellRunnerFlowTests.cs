@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Sessions;
@@ -109,6 +110,84 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         result.RouteEffortMode.ShouldBe(TaskEffortModes.Quick, "only the real Launch dispatch stamps a resolved route — the direct path leaves this null");
         result.RouteProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
         result.Grade.Passed.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_process_lost_after_Launch_commit_adopts_the_same_WorkflowRun_and_never_launches_a_second_run()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli();
+        using var firstWorkspace = Fixture.Stage(checkExitCode: 0);
+        using var recoveryWorkspace = Fixture.Stage(checkExitCode: 0);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var durability = new InterruptingDurableCellSink { BlockLaunchBinding = true };
+
+        Exception firstFailure;
+        using (var firstScope = _fixture.BeginScope())
+        {
+            var first = firstScope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = firstWorkspace.Directory, TeamId = teamId, Selection = null, CheckpointSink = durability, Completion = durability };
+            firstFailure = await Should.ThrowAsync<InvalidOperationException>(() => first.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+        }
+
+        durability.Checkpoints.ContainsKey(TaskLaunchBenchmarkCellRunner.FixtureCheckpointKind).ShouldBeTrue();
+        durability.Checkpoints.ContainsKey(TaskLaunchBenchmarkCellRunner.LaunchStartedCheckpointKind).ShouldBeTrue(firstFailure.ToString());
+        durability.Checkpoints.ContainsKey(TaskLaunchBenchmarkCellRunner.LaunchCheckpointKind).ShouldBeFalse("the simulated process vanished before acknowledging the committed run");
+        durability.BlockLaunchBinding = false;
+        firstWorkspace.Dispose();
+        Directory.Exists(firstWorkspace.Directory).ShouldBeFalse("a real corpus process reclaims its temporary fixture before a later process recovers");
+
+        BenchmarkResult result;
+        using (var recoveryScope = _fixture.BeginScope())
+        {
+            var recovery = recoveryScope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = recoveryWorkspace.Directory, TeamId = teamId, Selection = null, Checkpoints = durability.Checkpoints, CheckpointSink = durability, Completion = durability };
+            result = await recovery.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None);
+        }
+
+        result.Grade.Passed.ShouldBeTrue();
+        durability.Result.ShouldBe(result);
+        durability.Checkpoints.ContainsKey(TaskLaunchBenchmarkCellRunner.LaunchCheckpointKind).ShouldBeTrue("recovery must bind the run it found before driving it");
+        using var readScope = _fixture.BeginScope();
+        var runs = await readScope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(value => value.TeamId == teamId && value.Purpose == Messages.Constants.WorkflowRunPurposes.Qualification).ToListAsync();
+        runs.Count.ShouldBe(1, "recovery must adopt the committed launch rather than create a second WorkflowRun");
+        result.AgentRunId.ShouldNotBeNull();
+        var agentRun = await readScope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(value => value.Id == result.AgentRunId);
+        agentRun.WorkflowRunId.ShouldBe(runs.Single().Id);
+    }
+
+    [Fact]
+    public async Task A_durable_launch_intent_without_an_attributable_run_parks_instead_of_replaying_the_launch()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var firstWorkspace = Fixture.Stage(checkExitCode: 0);
+        using var recoveryWorkspace = Fixture.Stage(checkExitCode: 0);
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var durability = new InterruptingDurableCellSink { BlockAfterLaunchStarted = true };
+
+        using (var firstScope = _fixture.BeginScope())
+        {
+            var first = firstScope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = firstWorkspace.Directory, TeamId = teamId, Selection = null, CheckpointSink = durability, Completion = durability };
+            await Should.ThrowAsync<InvalidOperationException>(() => first.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+        }
+
+        durability.Checkpoints.ContainsKey(TaskLaunchBenchmarkCellRunner.LaunchStartedCheckpointKind).ShouldBeTrue("intent must commit before entering the irreversible launch boundary");
+        firstWorkspace.Dispose();
+        durability.BlockAfterLaunchStarted = false;
+
+        using (var recoveryScope = _fixture.BeginScope())
+        {
+            var recovery = recoveryScope.Resolve<ITaskLaunchBenchmarkCellRunner>();
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = recoveryWorkspace.Directory, TeamId = teamId, Selection = null, Checkpoints = durability.Checkpoints, CheckpointSink = durability, Completion = durability };
+            var failure = await Should.ThrowAsync<DurableBenchmarkObservationException>(() => recovery.RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+            failure.Message.ShouldContain("execution-indeterminate");
+        }
+
+        using var readScope = _fixture.BeginScope();
+        (await readScope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().CountAsync(value => value.TeamId == teamId)).ShouldBe(0, "recovery cannot know whether the provider charged before local commit, so it must never replay automatically");
     }
 
     [Fact]
@@ -620,6 +699,26 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
             CancellationToken = cancellationToken;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class InterruptingDurableCellSink : IBenchmarkCellCheckpointSink, IBenchmarkCellCompletionSink
+    {
+        private readonly Dictionary<string, BenchmarkExecutionCheckpoint> _checkpoints = new(StringComparer.Ordinal);
+        public bool BlockLaunchBinding { get; set; }
+        public bool BlockAfterLaunchStarted { get; set; }
+        public BenchmarkResult? Result { get; private set; }
+        public IReadOnlyDictionary<string, BenchmarkExecutionCheckpoint> Checkpoints => _checkpoints;
+
+        public Task PutAsync(string kind, string payloadJson, CancellationToken cancellationToken)
+        {
+            if (kind == TaskLaunchBenchmarkCellRunner.LaunchCheckpointKind && BlockLaunchBinding) throw new InvalidOperationException("simulated process loss after WorkflowRun commit");
+            if (_checkpoints.TryGetValue(kind, out var existing) && existing.PayloadJson != payloadJson) throw new InvalidOperationException($"checkpoint {kind} changed");
+            _checkpoints[kind] = new BenchmarkExecutionCheckpoint(kind, payloadJson, DateTimeOffset.UtcNow);
+            if (kind == TaskLaunchBenchmarkCellRunner.LaunchStartedCheckpointKind && BlockAfterLaunchStarted) throw new InvalidOperationException("simulated process loss after durable launch intent");
+            return Task.CompletedTask;
+        }
+
+        public Task CompleteAsync(BenchmarkResult result, CancellationToken cancellationToken) { Result = result; return Task.CompletedTask; }
     }
 
     /// <summary>The cell's AgentRun is a real node of a real snapshot WorkflowRun — never a repository-less standalone AgentRun the direct instrument creates — with the route decision stamped on it exactly like every other Launch.</summary>
