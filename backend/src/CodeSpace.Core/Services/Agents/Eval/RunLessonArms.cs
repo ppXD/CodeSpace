@@ -1,4 +1,5 @@
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Learning;
 using CodeSpace.Messages.Constants;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,8 +18,9 @@ namespace CodeSpace.Core.Services.Agents.Eval;
 /// supervisor ledger reported a TREATED planner run as unmeasured — the arm was assigned, the lessons were
 /// injected into the plan prompt, and the rollup counted it outside the experiment.</para>
 ///
-/// <para>A run absent from the result was in neither lane — a single-agent run, which is UNMEASURED, not the
-/// <c>none</c> control.</para>
+/// <para>The shared assignment lane is the atomic run-wide receipt consumed by single-agent, map-worker, and
+/// supervisor-spawned executions. Legacy AgentTask receipts remain a rollout fallback. Supervisor and planner tapes
+/// stay authoritative for runs where their model prompts assigned the experiment before an agent was dispatched.</para>
 /// </summary>
 public static class RunLessonArms
 {
@@ -36,12 +38,20 @@ public static class RunLessonArms
 
         var arms = await SupervisorArmsAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
         var planner = await PlannerArmsAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var assignments = await AssignmentArmsAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var agents = await AgentArmsAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
 
         // The supervisor's frozen arm WINS where a run has both: it is the arm the run's own decisions were taken
         // under, whereas a plan.author node inside that run records the arm its PLAN was authored under. The two
         // agree by construction (both hash team + the undecorated goal — LessonArmAgreementTests pins that), so
         // this only decides the tie-break, never a disagreement.
         foreach (var (runId, arm) in planner)
+            if (!arms.ContainsKey(runId)) arms[runId] = arm;
+
+        foreach (var (runId, arm) in assignments)
+            if (!arms.ContainsKey(runId)) arms[runId] = arm;
+
+        foreach (var (runId, arm) in agents)
             if (!arms.ContainsKey(runId)) arms[runId] = arm;
 
         return arms;
@@ -95,6 +105,42 @@ public static class RunLessonArms
 
     /// <summary>One run's plan-authored arm as projected by the jsonb path query above.</summary>
     private sealed record PlannerArmRow(Guid RunId, long Sequence, string Arm);
+
+    private static async Task<Dictionary<Guid, string>> AssignmentArmsAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = runIds.ToArray();
+        var rows = await db.Database.SqlQuery<AssignmentArmRow>($"""
+            SELECT workflow_run_id AS run_id, arm
+            FROM workflow_run_lesson_assignment
+            WHERE team_id = {teamId} AND workflow_run_id = ANY({ids})
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Where(row => LessonArms.IsKnown(row.Arm)).ToDictionary(row => row.RunId, row => row.Arm);
+    }
+
+    private sealed record AssignmentArmRow(Guid RunId, string Arm);
+
+    /// <summary>The first persisted agent envelope wins, so retry feedback and later fan-out cannot reroll a run.</summary>
+    private static async Task<Dictionary<Guid, string>> AgentArmsAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = runIds.ToArray();
+        var rows = await db.Database.SqlQuery<AgentArmRow>($"""
+            SELECT a.workflow_run_id AS run_id,
+                   a.created_date AS created_at,
+                   a.id AS agent_run_id,
+                   a.task_jsonb ->> 'lessonArm' AS arm
+            FROM agent_run a
+            JOIN workflow_run w ON w.id = a.workflow_run_id
+            WHERE a.team_id = {teamId}
+              AND w.team_id = {teamId}
+              AND a.workflow_run_id = ANY({ids})
+              AND a.task_jsonb ->> 'lessonArm' IN ('injected', 'withheld', 'none')
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => group.OrderBy(row => row.CreatedAt).ThenBy(row => row.AgentRunId).First().Arm);
+    }
+
+    private sealed record AgentArmRow(Guid RunId, DateTimeOffset CreatedAt, Guid AgentRunId, string Arm);
 
     private static readonly IReadOnlyDictionary<Guid, string> Empty = new Dictionary<Guid, string>();
 }

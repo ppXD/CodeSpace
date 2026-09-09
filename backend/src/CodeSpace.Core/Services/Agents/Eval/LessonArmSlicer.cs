@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Agents.Eval;
 /// running an A/B — does injecting the team's own distilled lessons move the north-star — had never been answered.
 ///
 /// <para>Pure + DB-free, so it unit-tests exhaustively. Arms are NEVER merged: <see cref="Unmeasured"/> (a run with
-/// no decision ledger at all — single-agent, plan-map) is a different claim from <c>none</c> (a run that WAS in the
+/// no experiment receipt, such as a legacy or non-agent run) is a different claim from <c>none</c> (a run that WAS in the
 /// experiment and drew the empty-lesson control). Ordering is fixed so two windows are readable side by side.</para>
 /// </summary>
 public static class LessonArmSlicer
