@@ -100,7 +100,7 @@ public sealed class LessonInjectionFlowTests
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = RunModeKeys.PlanMap, FailureClass = "broken-acceptance-command",
             WhatFailed = "check.sh exits 2 on a clean tree", Why = "unrestored solution", HowToApply = howToApply,
-            SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow,
+            SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.Add(LessonConsolidation.Lifetime),
         };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();

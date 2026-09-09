@@ -8,7 +8,7 @@ public class LessonConfiguration : IEntityTypeConfiguration<Lesson>
 {
     public void Configure(EntityTypeBuilder<Lesson> builder)
     {
-        builder.ToTable("lesson");
+        builder.ToTable("lesson", table => table.HasCheckConstraint("ck_lesson_expiry", "expires_at > valid_from"));
         builder.HasKey(l => l.Id);
         builder.Property(l => l.Mode).IsRequired();
         builder.Property(l => l.FailureClass).IsRequired();
@@ -17,6 +17,7 @@ public class LessonConfiguration : IEntityTypeConfiguration<Lesson>
         builder.Property(l => l.HowToApply).IsRequired();
         builder.Property(l => l.SourceRunIds).IsRequired();
         builder.Property(l => l.DistilledByModel).IsRequired();
+        builder.Property(l => l.ExpiresAt).IsRequired();
         builder.HasIndex(l => new { l.TeamId, l.Mode });
     }
 }

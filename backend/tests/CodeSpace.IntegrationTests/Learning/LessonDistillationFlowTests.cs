@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Supervisor;
@@ -90,6 +91,36 @@ public sealed class LessonDistillationFlowTests
         (await scope.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().CountAsync(lesson => lesson.TeamId == teamId)).ShouldBe(0);
     }
 
+    [Fact]
+    public async Task Expired_lessons_remain_auditable_but_never_reenter_the_distillation_prompt()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        var runId = await SeedFailedRunAsync(teamId, userId, "fresh failure");
+        var expiredId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            db.Lesson.Add(new Lesson
+            {
+                Id = expiredId, TeamId = teamId, Mode = "generic", FailureClass = "expired-marker", WhatFailed = "expired-marker",
+                Why = "old evidence", HowToApply = "expired-marker", SourceRunIds = [Guid.NewGuid()], DistilledByModel = "old-model",
+                ValidFrom = now.AddDays(-31), ExpiresAt = now.AddMinutes(-1),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var canned = new CannedClient(Proposals(runId));
+        await DistillTeamAsync(teamId, canned);
+
+        canned.LastRequest.ShouldNotBeNull().UserPrompt.ShouldNotContain(expiredId.ToString());
+        canned.LastRequest.UserPrompt.ShouldNotContain("expired-marker");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().CountAsync(lesson => lesson.Id == expiredId)).ShouldBe(1);
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private async Task DistillTeamAsync(Guid teamId, IStructuredLLMClient client)
@@ -173,10 +204,12 @@ public sealed class LessonDistillationFlowTests
         public CannedClient(JsonElement json) { _json = json; }
         public string Provider => "Anthropic";
         public int Calls { get; private set; }
+        public StructuredLLMCompletionRequest? LastRequest { get; private set; }
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
         {
             Calls++;
+            LastRequest = request;
             return Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
         }
     }

@@ -35,6 +35,9 @@ public class Lesson : IEntity<Guid>, IAuditable
 
     public DateTimeOffset ValidFrom { get; set; }
 
+    /// <summary>Server-owned upper bound for prompt eligibility. Fresh cited evidence may renew it; elapsed lessons remain in the ledger but readers and distillation omit them.</summary>
+    public DateTimeOffset ExpiresAt { get; set; }
+
     /// <summary>One-way temporal invalidation — set once when consolidation retires the lesson; never cleared.</summary>
     public DateTimeOffset? InvalidatedAt { get; set; }
 
