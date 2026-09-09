@@ -58,7 +58,11 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
     {
         var since = DateTimeOffset.UtcNow - Window;
 
+        // Internal qualification/benchmark runs are measurement, never training input. Keeping them out of both
+        // discovery and the team-local candidate query prevents a hidden oracle or evaluator failure from becoming
+        // a prompt lesson in a later round.
         var teamIds = await _db.WorkflowRun.AsNoTracking()
+            .Where(run => run.Purpose == null)
             .Where(r => (r.Status == WorkflowRunStatus.Failure && r.CompletedAt >= since) || (r.CompletionParkedAt != null && r.CompletionParkedAt >= since))
             .Select(r => r.TeamId).Distinct()
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -116,8 +120,9 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
     {
         var since = DateTimeOffset.UtcNow - Window;
 
+        // Repeat the purpose guard here because callers can deliberately distill one team without using the sweep.
         var rows = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.TeamId == teamId)
+            .Where(r => r.TeamId == teamId && r.Purpose == null)
             .Where(r => (r.Status == WorkflowRunStatus.Failure && r.CompletedAt >= since) || (r.CompletionParkedAt != null && r.CompletionParkedAt >= since))
             .OrderByDescending(r => r.CompletionParkedAt ?? r.CompletedAt)
             .Select(r => new { r.Id, r.Status, r.Error, r.ScopeRepositoryIds, r.CompletionParkedAt })
