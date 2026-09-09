@@ -209,7 +209,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         var agentRunId = Guid.NewGuid();
         task = await _authority.AdmitAgentAsync(new AgentAuthorityAdmission(task, teamId, agentRunId, workflowRunId), cancellationToken).ConfigureAwait(false);
-        task = await _lessonInjector.InjectAsync(task, teamId, workflowRunId, cancellationToken).ConfigureAwait(false);
+        task = await _lessonInjector.InjectAsync(new Learning.AgentLessonInjectionRequest(task, teamId, workflowRunId, nodeId, iterationKey), cancellationToken).ConfigureAwait(false);
         return await PersistCreatedAsync(new AgentRunCreation { Task = task, TeamId = teamId, RunId = agentRunId, WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey }, cancellationToken).ConfigureAwait(false);
     }
 
