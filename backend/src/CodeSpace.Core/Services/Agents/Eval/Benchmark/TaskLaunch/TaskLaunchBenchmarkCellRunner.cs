@@ -61,7 +61,9 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
             var completionMode = await LoadCompletionEnforcementModeAsync(launched.RunId, cancellationToken).ConfigureAwait(false);
 
-            return BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts), completionMode);
+            var result = BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts), completionMode);
+            if (context.Completion is not null) await context.Completion.CompleteAsync(result, CancellationToken.None).ConfigureAwait(false);
+            return result;
         }
         finally
         {

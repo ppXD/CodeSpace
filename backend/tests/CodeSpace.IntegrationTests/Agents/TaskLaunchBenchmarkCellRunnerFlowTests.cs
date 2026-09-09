@@ -51,8 +51,9 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         using var workspace = Fixture.Stage(checkExitCode: 0);
 
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var completion = new RecordingCompletionSink();
 
-        var result = await RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, workspace.Directory, teamId);
+        var result = await RunAsync(TestsPassTask(), BenchmarkMode.TaskLaunchQuick, workspace.Directory, teamId, completion);
 
         result.Grade.Passed.ShouldBeTrue($"the fixture's own check.sh already exits 0 and the no-op CLI never touches it — grade detail: {result.Grade.Detail}");
         result.RunStatus.ShouldBe(Messages.Enums.AgentRunStatus.Succeeded);
@@ -63,6 +64,8 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
         // lowercase wire string (that's the DEFINITION's opt-in vocabulary; this is what actually landed on the run).
         result.CompletionMode.ShouldBe(nameof(Messages.Contracts.CompletionEnforcementMode.Shadow), "read off the ACTUAL persisted WorkflowRun, not assumed — proves the Shadow override this cell always requests really did take");
         result.AgentRunId.ShouldNotBeNull();
+        completion.Result.ShouldBe(result, "the real TaskLaunch cell must seal the exact terminal result before returning it to the corpus loop");
+        completion.CancellationToken.CanBeCanceled.ShouldBeFalse("terminal settlement must survive cancellation of the outer long-running campaign");
 
         await AssertRealLaunchedRunAsync(result.AgentRunId!.Value, teamId);
     }
@@ -596,14 +599,27 @@ public sealed class TaskLaunchBenchmarkCellRunnerFlowTests
 
     // ─── plumbing ────────────────────────────────────────────────────────────────
 
-    private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId)
+    private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, IBenchmarkCellCompletionSink? completion = null)
     {
         using var scope = _fixture.BeginScope();
         var sut = scope.Resolve<ITaskLaunchBenchmarkCellRunner>();
 
-        var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspaceDirectory, TeamId = teamId, Selection = null };
+        var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspaceDirectory, TeamId = teamId, Selection = null, Completion = completion };
 
         return await sut.RunAsync(task, mode, context, CancellationToken.None);
+    }
+
+    private sealed class RecordingCompletionSink : IBenchmarkCellCompletionSink
+    {
+        public BenchmarkResult? Result { get; private set; }
+        public CancellationToken CancellationToken { get; private set; }
+
+        public Task CompleteAsync(BenchmarkResult result, CancellationToken cancellationToken)
+        {
+            Result = result;
+            CancellationToken = cancellationToken;
+            return Task.CompletedTask;
+        }
     }
 
     /// <summary>The cell's AgentRun is a real node of a real snapshot WorkflowRun — never a repository-less standalone AgentRun the direct instrument creates — with the route decision stamped on it exactly like every other Launch.</summary>
