@@ -128,6 +128,38 @@ public sealed class BenchmarkGradeEvidenceExportTests : IDisposable
         job.ShouldContain("if: always()");
     }
 
+    [Fact]
+    public void Paired_TaskLaunch_exports_cell_diagnostics_to_the_uploaded_absolute_directory()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, ".github", "workflows", "real-model.yml"))) root = root.Parent;
+        root.ShouldNotBeNull();
+        var source = File.ReadAllText(Path.Combine(root.FullName, "backend", "tests", "CodeSpace.E2ETests", "Workflows", "RealModelQualificationRehearsalE2ETests.cs"));
+        source.ShouldContain("CODESPACE_QUALIFICATION_EVIDENCE_DIRECTORY");
+        source.ShouldContain("cellOrdinal");
+        source.ShouldContain("outcome.Control.Solved");
+        source.ShouldContain("outcome.Control.CostKnownCells");
+
+        var workflow = File.ReadAllText(Path.Combine(root.FullName, ".github", "workflows", "real-model.yml"));
+        var start = workflow.IndexOf("  real-model-qualification-rehearsal:", StringComparison.Ordinal);
+        var end = workflow.IndexOf("\n  real-model-", start + 1, StringComparison.Ordinal);
+        var job = end < 0 ? workflow[start..] : workflow[start..end];
+        job.ShouldContain("CODESPACE_QUALIFICATION_EVIDENCE_DIRECTORY: ${{ github.workspace }}/backend/TestResults/qualification-evidence");
+        job.ShouldContain("test -s backend/TestResults/qualification-evidence/paired-tasklaunch-development-protocol.json");
+        job.ShouldContain("path: backend/TestResults/");
+    }
+
+    [Theory]
+    [InlineData("development-protocol", "development-protocol")]
+    [InlineData("../../hidden suite", "------hidden-suite")]
+    [InlineData("", "suite")]
+    public void Paired_evidence_file_names_cannot_escape_the_artifact_directory(string input, string expected) =>
+        RealModelQualificationRehearsalE2ETests.SafeEvidenceFilePart(input).ShouldBe(expected);
+
+    [Fact]
+    public void Paired_evidence_uses_an_absolute_operator_configured_directory() =>
+        RealModelQualificationRehearsalE2ETests.QualificationEvidenceDirectory("relative-evidence").ShouldBe(Path.GetFullPath("relative-evidence"));
+
     private Task<GradeEvidenceProjection> ExportAsync(IArtifactRangeReader reader, IReadOnlyList<string> secrets) => BenchmarkGradeEvidenceExport.ReadAsync(reader, new BenchmarkGrade { Passed = false, Detail = "failed", EvidenceArtifactId = Guid.NewGuid() }, new GradeEvidenceRequest(Guid.NewGuid(), _directory, "grade.txt", secrets), CancellationToken.None);
     public void Dispose() { if (Directory.Exists(_directory)) Directory.Delete(_directory, recursive: true); else if (File.Exists(_directory)) File.Delete(_directory); }
 

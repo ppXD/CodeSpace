@@ -147,16 +147,15 @@ mask_completion_models() {
 cat "$summaries"/step_summary_* > "$scratch" 2>/dev/null || true
 redact < "$scratch" > "$results/step-summary.md" || : > "$results/step-summary.md"
 
-# The trx files, redacted in place. A failing blessed wire puts its verdict in the assertion message, and xUnit
-# captures the test process's console into <StdOut>, so the same values land here too.
-for trx in "$results"/*.trx; do
-  [ -f "$trx" ] || continue
-
-  if redact < "$trx" > "$scratch"; then
-    cat "$scratch" > "$trx"
+# Machine-readable evaluation artifacts, redacted in place. A failing blessed wire puts its verdict in the TRX
+# assertion/StdOut, while per-cell qualification diagnostics live in nested JSON files. Both are uploaded.
+while IFS= read -r -d '' artifact; do
+  if redact < "$artifact" > "$scratch"; then
+    cat "$scratch" > "$artifact"
   else
-    echo "::warning::could not redact ${trx} — it may still carry a gateway secret"
+    : > "$artifact"
+    echo "::warning::could not redact ${artifact} — emptied it rather than publishing a possible gateway secret"
   fi
-done
+done < <(find "$results" -type f \( -name '*.trx' -o -name '*.json' \) -print0)
 
 exit 0

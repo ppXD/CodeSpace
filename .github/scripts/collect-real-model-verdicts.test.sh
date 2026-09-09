@@ -159,6 +159,8 @@ printf "[realmodel] key=%s suite=%s\n" "$API_KEY" "$SUITE_URL" > "${root}/summar
   printf '<Message>REQUIRED wire - Anthropic model %s missed [key %s]</Message>\n' "$MODEL_ID" "$API_KEY"
   printf '<Message>paired baseline %s remains private</Message>\n' "$BASELINE_MODEL_ID"
 } > "${root}/results/real-model.trx"
+mkdir -p "${root}/results/qualification-evidence"
+printf '{"detail":"baseline %s failed through %s with %s"}\n' "$BASELINE_MODEL_ID" "$BASE_URL" "$API_KEY" > "${root}/results/qualification-evidence/cells.json"
 printf '%s\n' "$OBSERVED" > "${root}/summaries/codespace_observed_models"
 run_collect "${root}/results" "${root}/summaries" >/dev/null
 
@@ -180,6 +182,10 @@ check has   "Start processing HTTP request POST ***" "${root}/results/real-model
 check lacks "$MODEL_ID" "${root}/results/real-model.trx" "redacts the configured model id out of the trx assertion message"
 check lacks "$BASELINE_MODEL_ID" "${root}/results/real-model.trx" "redacts the configured baseline model id out of the trx"
 check lacks "$API_KEY"  "${root}/results/real-model.trx" "redacts the API key out of the trx"
+check lacks "$BASELINE_MODEL_ID" "${root}/results/qualification-evidence/cells.json" "redacts the baseline model id out of nested JSON evidence"
+check lacks "$BASE_URL" "${root}/results/qualification-evidence/cells.json" "redacts the gateway URL out of nested JSON evidence"
+check lacks "$API_KEY" "${root}/results/qualification-evidence/cells.json" "redacts the API key out of nested JSON evidence"
+check has '"detail":"baseline *** failed through *** with ***"' "${root}/results/qualification-evidence/cells.json" "keeps the diagnostic JSON structurally useful after redaction"
 check has   "REQUIRED wire" "${root}/results/real-model.trx" "leaves the verdict itself in the trx"
 check has   "scored 12/14" "${root}/results/step-summary.md" "keeps the verdict itself — the artifact is still the record of what the model did"
 check has   "fp=deadbeef"  "${root}/results/step-summary.md" "keeps the fingerprint, which is what actually travels"

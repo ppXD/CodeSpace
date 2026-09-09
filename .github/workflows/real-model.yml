@@ -138,11 +138,9 @@ jobs:
             RealModelSampling \
             RealModelSession \
             RealModelSupervisor
-
-
-      # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
-      # points it scored, which wire skipped, which model answered. They were written to the runner and thrown away
-      # with it, so a red streak could not be diagnosed against the previous run's numbers. Keep them.
+      # The TRX, step-summary verdicts and redacted per-cell JSON are the record of WHAT the live model actually did —
+      # how many cells solved, which wire skipped, and whether cost/evaluator evidence was complete. They were written
+      # to the runner and thrown away with it, so a red streak could not be diagnosed against the previous run. Keep them.
       #
       # A step summary is a per-STEP file, so this later step cannot read the test step's `$GITHUB_STEP_SUMMARY`
       # directly — the script concatenates every step_summary_* file in that directory instead, and REDACTS the
@@ -869,6 +867,7 @@ jobs:
       # Optional second arm. When absent, the E2E deliberately runs the same model twice to prove the physical
       # paired path and must report identical-observed-model rather than claiming a comparison.
       CODESPACE_LLM_BASELINE_MODEL_ID: ${{ secrets.CODESPACE_LLM_BASELINE_MODEL_ID }}
+      CODESPACE_QUALIFICATION_EVIDENCE_DIRECTORY: ${{ github.workspace }}/backend/TestResults/qualification-evidence
       # Same rationale as the corpus lanes: a suite round is many live coding-agent runs; 45m per attempt bounds a
       # genuine hang while fitting a real suite inside the job's 180-minute cap.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS: "2700"
@@ -939,6 +938,9 @@ jobs:
           # the token never reaches the environment of the steps that run live agent code.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/assert-every-filter-clause-ran.sh backend/TestResults/real-model-qualification-rehearsal.trx RealModelQualificationRehearsal
+
+      - name: Assert the development paired evidence was exported
+        run: test -s backend/TestResults/qualification-evidence/paired-tasklaunch-development-protocol.json
 
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden
