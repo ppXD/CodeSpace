@@ -59,7 +59,7 @@ public sealed class RealModelPlanAuthorE2ETests
                 RealModelLiveWire.Registry(),
                 RealModelLiveWire.Selector(model, RealModelLiveWire.Credential(Custom, baseUrl, apiKey)),
                 scope.Resolve<IAgentHarnessRegistry>(),
-                scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>());
+                scope.Resolve<CodeSpace.Core.Services.Learning.IPlannerLessonMemory>());
 
             PlannedWorkflow plan;
             try

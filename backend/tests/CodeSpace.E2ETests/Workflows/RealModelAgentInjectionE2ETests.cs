@@ -114,7 +114,7 @@ public sealed class RealModelAgentInjectionE2ETests
         {
             var marker = "LESSON-APPLIED-" + Guid.NewGuid().ToString("N")[..10];
             var unrelatedMarker = "UNRELATED-LESSON-" + Guid.NewGuid().ToString("N")[..10];
-            var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
+            var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting that follows this team's previously learned greeting response convention. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
             var lesson = await SeedLessonAsync(live.TeamId, marker);
             var unrelated = await SeedLessonAsync(live.TeamId, unrelatedMarker, relevant: false);
             var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
@@ -359,9 +359,9 @@ public sealed class RealModelAgentInjectionE2ETests
         var lesson = new Lesson
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = TaskProjectionKinds.SingleAgent, FailureClass = relevant ? "response-format" : "database-migration",
-            WhatFailed = relevant ? "A prior greeting agent omitted the learned response marker" : "A prior sharded time-series database migration used an unsafe retention window",
-            Why = relevant ? "the greeting instruction was missed" : "the partition retention policy was not validated",
-            HowToApply = relevant ? $"Begin the short greeting reply with the exact marker {marker}" : $"During a sharded time-series database migration, include the audit marker {marker} in the retention manifest",
+            WhatFailed = relevant ? "A prior greeting violated the team's learned greeting response convention" : "A prior sharded time-series database migration used an unsafe retention window",
+            Why = relevant ? "the reusable team greeting convention was not applied" : "the partition retention policy was not validated",
+            HowToApply = relevant ? $"The team's greeting response convention is to begin the short greeting with the exact marker {marker}" : $"During a sharded time-series database migration, include the audit marker {marker} in the retention manifest",
             SourceRunIds = [Guid.NewGuid()],
             SuccessfulExposureRunIds = [Guid.NewGuid(), Guid.NewGuid()], QualifiedAt = now,
             DistilledByModel = "real-model-lesson-probe", ValidFrom = now, ExpiresAt = now.AddHours(1),
