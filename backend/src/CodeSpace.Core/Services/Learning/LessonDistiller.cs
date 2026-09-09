@@ -100,22 +100,60 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
 
         var (structured, pick) = resolved;
         var currentAt = DateTimeOffset.UtcNow;
-        var current = await _db.Lesson.Where(l => l.TeamId == teamId && l.InvalidatedAt == null && l.ValidFrom <= currentAt && l.ExpiresAt > currentAt).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var touched = new List<Lesson>();
+        var added = 0;
+        var updated = 0;
+        var invalidated = 0;
+        var refused = 0;
+        var scopes = 0;
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(pick, current, candidates.Values), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var group in ScopeGroups(candidates.Values))
+            {
+                var scope = group.Key;
+                var scopedCandidates = group.ToDictionary(candidate => candidate.RunId);
+                var current = await _db.Lesson
+                    .Where(lesson => lesson.TeamId == teamId && lesson.Mode == scope.Mode && lesson.RepositoryId == scope.RepositoryId)
+                    .Where(lesson => lesson.InvalidatedAt == null && lesson.ValidFrom <= currentAt && lesson.ExpiresAt > currentAt)
+                    .OrderByDescending(lesson => lesson.ValidFrom).ThenBy(lesson => lesson.Id)
+                    .Take(LessonReader.MaxTake)
+                    .ToListAsync(cancellationToken).ConfigureAwait(false);
+                touched.AddRange(current);
 
-        var proposals = completion.Json.Deserialize<LessonProposals>(LessonDistillationSchema.Options) ?? new LessonProposals();
-        var fold = LessonConsolidation.Apply(current, proposals, candidates, teamId, completion.Model, DateTimeOffset.UtcNow);
+                var completion = await structured.CompleteStructuredAsync(BuildRequest(pick, current, scopedCandidates.Values), cancellationToken).ConfigureAwait(false);
+                var proposals = completion.Json.Deserialize<LessonProposals>(LessonDistillationSchema.Options) ?? new LessonProposals();
+                var fold = LessonConsolidation.Apply(current, proposals, scopedCandidates, teamId, completion.Model, DateTimeOffset.UtcNow);
 
-        foreach (var rejection in fold.Rejections)
-            _logger.LogWarning("Lesson proposal refused for team {TeamId}: {Reason}", teamId, rejection);
+                foreach (var rejection in fold.Rejections)
+                    _logger.LogWarning("Lesson proposal refused for team {TeamId}, mode {Mode}, repository {RepositoryId}: {Reason}", teamId, scope.Mode, scope.RepositoryId, rejection);
 
-        _db.Lesson.AddRange(fold.Inserts);
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                touched.AddRange(fold.Inserts);
+                _db.Lesson.AddRange(fold.Inserts);
+                added += fold.Inserts.Count;
+                updated += fold.Updates;
+                invalidated += fold.Invalidations;
+                refused += fold.Rejections.Count;
+                scopes++;
+            }
 
-        _logger.LogInformation("Lesson distillation for team {TeamId}: {Added} added, {Updated} updated, {Invalidated} invalidated, {Refused} refused over {Runs} run(s) by {Model}",
-            teamId, fold.Inserts.Count, fold.Updates, fold.Invalidations, fold.Rejections.Count, candidates.Count, completion.Model);
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            foreach (var lesson in touched)
+                if (_db.Entry(lesson).State != EntityState.Detached) _db.Entry(lesson).State = EntityState.Detached;
+            throw;
+        }
+
+        _logger.LogInformation("Lesson distillation for team {TeamId}: {Added} added, {Updated} updated, {Invalidated} invalidated, {Refused} refused over {Runs} run(s) in {Scopes} scope(s)",
+            teamId, added, updated, invalidated, refused, candidates.Count, scopes);
     }
+
+    private static IEnumerable<IGrouping<LessonScope, CandidateRun>> ScopeGroups(IEnumerable<CandidateRun> candidates) =>
+        candidates.GroupBy(candidate => new LessonScope(candidate.Mode, candidate.RepositoryId))
+            .OrderBy(group => group.Key.Mode, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.RepositoryId);
 
     private async Task<IReadOnlyDictionary<Guid, CandidateRun>> LoadCandidatesAsync(Guid teamId, CancellationToken cancellationToken)
     {
@@ -192,4 +230,6 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
     }
 
     private static string? Trim(string? text, int max) => text is null ? null : text.Length <= max ? text : text[..max] + "…";
+
+    private sealed record LessonScope(string Mode, Guid? RepositoryId);
 }
