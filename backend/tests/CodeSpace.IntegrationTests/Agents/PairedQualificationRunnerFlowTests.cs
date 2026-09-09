@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -11,6 +12,9 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
 using System.Data;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace CodeSpace.IntegrationTests.Agents;
 
@@ -38,9 +42,10 @@ public sealed class PairedQualificationRunnerFlowTests
                 else digest.ShouldBe(persistedProtocolDigest);
                 protocolChecks++;
             },
+            AfterRun = PersistFakePairAsync,
         };
         using var scope = _fixture.BeginScope();
-        var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>());
+        var runner = Runner(scope, corpus);
 
         var outcome = await runner.RunAsync(new PairedQualificationRequest
         {
@@ -64,6 +69,7 @@ public sealed class PairedQualificationRunnerFlowTests
         corpus.Requests.ShouldAllBe(request => request.Candidate.Model == "candidate-model" && request.Candidate.ModelCredentialId == candidateCredential && request.Candidate.MaxCostUsd == 3m);
         corpus.Requests.Select(request => request.ObservationGroupId).Distinct().ShouldHaveSingleItem().ShouldBe(outcome.ObservationGroupId);
         await AssertProtocolImmutableAsync(outcome.ObservationGroupId);
+        await AssertResultSealedAndImmutableAsync(outcome);
     }
 
     [Fact]
@@ -75,7 +81,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var (_, foreignRow) = await SeedModelAsync(foreignTeamId, "foreign-model");
         var corpus = new FakePairedCorpus();
         using var scope = _fixture.BeginScope();
-        var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>());
+        var runner = Runner(scope, corpus);
 
         await Should.ThrowAsync<InvalidOperationException>(() => runner.RunAsync(new PairedQualificationRequest
         {
@@ -94,7 +100,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
         var corpus = new FakePairedCorpus();
         using var scope = _fixture.BeginScope();
-        var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>());
+        var runner = Runner(scope, corpus);
 
         await Should.ThrowAsync<ArgumentException>(() => runner.RunAsync(new PairedQualificationRequest
         {
@@ -103,6 +109,27 @@ public sealed class PairedQualificationRunnerFlowTests
         }, CancellationToken.None));
 
         corpus.Requests.ShouldBeEmpty("revision provenance must be frozen before any paid cell can start");
+    }
+
+    [Fact]
+    public async Task A_complete_in_memory_report_cannot_seal_when_one_or_more_durable_observations_are_missing()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var corpus = new FakePairedCorpus();
+        using var scope = _fixture.BeginScope();
+        var runner = Runner(scope, corpus);
+
+        var failure = await Should.ThrowAsync<DurableQualificationResultException>(() => runner.RunAsync(new PairedQualificationRequest
+        {
+            TeamId = teamId, CodeRevision = new string('b', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+            Spec = new PairedQualificationSpec { SessionsPerCell = 1, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, OrderingSeed = "frozen-order" },
+        }, CancellationToken.None));
+
+        failure.Message.ShouldContain("observation-census-mismatch");
+        var groupId = corpus.Requests.Single().ObservationGroupId;
+        (await scope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
     }
 
     private async Task<(Guid CredentialId, Guid RowId)> SeedModelAsync(Guid teamId, string model)
@@ -176,7 +203,70 @@ public sealed class PairedQualificationRunnerFlowTests
         delete.MessageText.ShouldContain("paired qualification protocol is immutable");
     }
 
+    private async Task PersistFakePairAsync(PairedCorpusBenchmarkRequest request, PairedCorpusBenchmarkRun run)
+    {
+        using var scope = _fixture.BeginScope();
+        var store = scope.Resolve<IBenchmarkResultStore>();
+        foreach (var (arm, selection, result) in new[]
+        {
+            ("control", request.Control, run.Control.Results.Single()),
+            ("candidate", request.Candidate, run.Candidate.Results.Single()),
+        })
+        {
+            await store.RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = request.TeamId, SuiteVersion = run.Control.SuiteVersion!, Result = result, Selection = selection,
+                ObservationGroupId = request.ObservationGroupId, ObservationArm = arm, ObservationSession = request.ObservationSession,
+                CodeRevision = request.CodeRevision,
+            }, CancellationToken.None);
+        }
+    }
+
+    private async Task AssertResultSealedAndImmutableAsync(PairedQualificationOutcome outcome)
+    {
+        outcome.EvidenceDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        outcome.ResultDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        using (var readScope = _fixture.BeginScope())
+        {
+            var row = await readScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().SingleAsync(value => value.ObservationGroupId == outcome.ObservationGroupId);
+            row.ProtocolDigest.ShouldBe(outcome.ProtocolDigest);
+            row.EvidenceDigest.ShouldBe(outcome.EvidenceDigest);
+            row.ResultDigest.ShouldBe(outcome.ResultDigest);
+            row.StatisticsVersion.ShouldBe(PairedQualificationOutcome.StatisticsVersion);
+            row.ExpectedObservationCount.ShouldBe(4);
+            row.ObservationCount.ShouldBe(4);
+            row.QualifiedForCapabilityClaim.ShouldBeTrue();
+            row.OutcomeJson.ShouldContain("\"qualityDifferenceLower95\"");
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] { row.ProtocolDigest, row.EvidenceDigest, row.StatisticsVersion, row.OutcomeJson }, CodeSpace.Core.Services.Agents.AgentJson.Options)))).ShouldBe(row.ResultDigest);
+        }
+
+        using var updateScope = _fixture.BeginScope();
+        var update = await Should.ThrowAsync<PostgresException>(() => updateScope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE paired_qualification_result SET qualified_for_capability_claim = FALSE WHERE observation_group_id = {outcome.ObservationGroupId}"));
+        update.SqlState.ShouldBe(PostgresErrorCodes.RaiseException);
+        update.MessageText.ShouldContain("paired qualification result is immutable");
+
+        using var deleteScope = _fixture.BeginScope();
+        var delete = await Should.ThrowAsync<PostgresException>(() => deleteScope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"DELETE FROM paired_qualification_result WHERE observation_group_id = {outcome.ObservationGroupId}"));
+        delete.SqlState.ShouldBe(PostgresErrorCodes.RaiseException);
+        delete.MessageText.ShouldContain("paired qualification result is immutable");
+
+        using var appendScope = _fixture.BeginScope();
+        var db = appendScope.Resolve<CodeSpaceDbContext>();
+        var protocol = await db.PairedQualificationProtocol.AsNoTracking().SingleAsync(value => value.ObservationGroupId == outcome.ObservationGroupId);
+        var append = await Should.ThrowAsync<DbUpdateException>(() => appendScope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+        {
+            TeamId = protocol.TeamId, SuiteVersion = protocol.SuiteVersion,
+            Result = FakePairedCorpus.Result(false, "control-observed"),
+            Selection = Selection(protocol.ControlModelRowId) with { MaxCostUsd = protocol.MaxCostUsdPerLaunch },
+            ObservationGroupId = protocol.ObservationGroupId, ObservationArm = "control", ObservationSession = protocol.SessionsPerCell,
+            CodeRevision = protocol.CodeRevision,
+        }, CancellationToken.None));
+        append.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("paired qualification result is sealed");
+    }
+
     private static BenchmarkAgentSelection Selection(Guid rowId) => new() { Harness = "claude-code", Model = "caller-forged", ModelCredentialId = Guid.NewGuid(), ModelCredentialModelId = rowId };
+
+    private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>());
 
     private static HiddenSuite Suite()
     {
@@ -196,28 +286,33 @@ public sealed class PairedQualificationRunnerFlowTests
     {
         public List<PairedCorpusBenchmarkRequest> Requests { get; } = new();
         public Func<PairedCorpusBenchmarkRequest, Task>? BeforeRun { get; init; }
+        public Func<PairedCorpusBenchmarkRequest, PairedCorpusBenchmarkRun, Task>? AfterRun { get; init; }
         public async Task<PairedCorpusBenchmarkRun> RunPairedAsync(PairedCorpusBenchmarkRequest request, CancellationToken cancellationToken)
         {
             if (BeforeRun is not null) await BeforeRun(request);
             Requests.Add(request);
-            return new PairedCorpusBenchmarkRun
+            var run = new PairedCorpusBenchmarkRun
             {
                 Control = Run(false, "control-observed"),
                 Candidate = Run(true, "candidate-observed"),
             };
+            if (AfterRun is not null) await AfterRun(request, run);
+            return run;
         }
 
         private static CorpusBenchmarkRun Run(bool solved, string observed)
         {
-            var result = new BenchmarkResult
-            {
-                TaskId = "generic-task", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
-                Grade = new BenchmarkGrade { Passed = solved, Detail = solved ? "passed" : "failed" }, McpFullCatalog = false,
-                ObservedModel = observed, CostUsd = 1m,
-            };
+            var result = Result(solved, observed);
             var cell = new CorpusCellOutcome { TaskId = result.TaskId, Mode = result.Mode, State = solved ? CorpusCellState.Solved : CorpusCellState.Unsolved };
             var task = Suite().Tasks;
             return new CorpusBenchmarkRun { ExecutionPath = BenchmarkExecutionPath.TaskLaunch, Results = new[] { result }, Errored = Array.Empty<CorpusBenchmarkError>(), Scorecard = BenchmarkScorecard.Compute(new[] { result }), Cells = new[] { cell }, SuiteVersion = EvalSuite.ManifestFor(task, "sha256:hidden").Version };
         }
+
+        public static BenchmarkResult Result(bool solved, string observed) => new()
+        {
+            TaskId = "generic-task", Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = solved, Detail = solved ? "passed" : "failed" }, McpFullCatalog = false,
+            ObservedModel = observed, CostUsd = 1m,
+        };
     }
 }

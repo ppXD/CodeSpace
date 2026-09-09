@@ -88,6 +88,8 @@ public sealed record PairedQualificationOutcome
 
     public required Guid ObservationGroupId { get; init; }
     public string? ProtocolDigest { get; init; }
+    public string? EvidenceDigest { get; init; }
+    public string? ResultDigest { get; init; }
     public required string CodeRevision { get; init; }
     public required string SuiteDigest { get; init; }
     public required string SuiteVersion { get; init; }
@@ -129,12 +131,14 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
     private readonly IHiddenSuiteSource _suite;
     private readonly IPairedCorpusBenchmarkRunner _corpus;
     private readonly CodeSpaceDbContext _db;
+    private readonly IPairedQualificationResultStore _results;
 
-    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db)
+    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, IPairedQualificationResultStore results)
     {
         _suite = suite;
         _corpus = corpus;
         _db = db;
+        _results = results;
     }
 
     public async Task<PairedQualificationOutcome> RunAsync(PairedQualificationRequest request, CancellationToken cancellationToken)
@@ -163,11 +167,12 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
             }, cancellationToken).ConfigureAwait(false));
         }
 
-        return PairedQualificationStatistics.Analyze(new PairedQualificationAnalysisRequest
+        var outcome = PairedQualificationStatistics.Analyze(new PairedQualificationAnalysisRequest
         {
             ObservationGroupId = groupId, CodeRevision = request.CodeRevision, Suite = suite, Manifest = manifest,
             Spec = request.Spec, Control = control, Candidate = candidate, Sessions = sessions,
         }) with { ProtocolDigest = protocol.ProtocolDigest };
+        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = protocol.ObservationGroupId, Manifest = manifest, Outcome = outcome }, cancellationToken).ConfigureAwait(false);
     }
 
     private static PairedQualificationProtocol BuildProtocol(Guid groupId, PairedQualificationRequest request, EvalSuiteManifest manifest, HiddenSuite suite, BenchmarkAgentSelection control, BenchmarkAgentSelection candidate)
