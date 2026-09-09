@@ -384,6 +384,15 @@ export interface LessonArmSlice {
   deliveredRuns: number;
   unattendedSolvedWithDeliveryRuns: number;
   unattendedSolveWithDeliveryRate: number;
+  humanTouchedRuns: number;
+  humanInterventionRate: number;
+  avgHumanTouches: number;
+  totalCostUsd: number | null;
+  unknownCostRuns: number;
+  avgCostPerPricedRunUsd: number | null;
+  brainPlaneUsd: number | null;
+  unknownBrainCostRuns: number;
+  avgBrainPlaneCostPerPricedRunUsd: number | null;
 }
 
 /** Mirrors backend `RunScorecardTrend`: durable daily measurements plus lesson A/B slices for one bounded horizon. */
