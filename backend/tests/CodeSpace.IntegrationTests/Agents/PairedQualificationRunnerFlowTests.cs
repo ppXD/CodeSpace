@@ -194,6 +194,26 @@ public sealed class PairedQualificationRunnerFlowTests
             replay.Message.ShouldContain("execution-indeterminate", customMessage: "the production Autofac graph must select the admission-aware corpus constructor and refuse before TaskLaunch");
         }
 
+        const string checkpointKind = "test.runner-bound.v1";
+        const string checkpointPayload = "{\"runId\":\"11111111-1111-1111-1111-111111111111\"}";
+        using (var checkpointScopeA = _fixture.BeginScope())
+        using (var checkpointScopeB = _fixture.BeginScope())
+            await Task.WhenAll(
+                checkpointScopeA.Resolve<IPairedQualificationCellAdmissionStore>().PutCheckpointAsync(admitted.AdmissionId, checkpointKind, checkpointPayload, CancellationToken.None),
+                checkpointScopeB.Resolve<IPairedQualificationCellAdmissionStore>().PutCheckpointAsync(admitted.AdmissionId, checkpointKind, checkpointPayload, CancellationToken.None));
+        using (var conflictingCheckpointScope = _fixture.BeginScope())
+            await Should.ThrowAsync<InvalidOperationException>(() => conflictingCheckpointScope.Resolve<IPairedQualificationCellAdmissionStore>().PutCheckpointAsync(admitted.AdmissionId, checkpointKind, "{\"runId\":\"22222222-2222-2222-2222-222222222222\"}", CancellationToken.None));
+        using (var checkpointUpdateScope = _fixture.BeginScope())
+        {
+            var update = await Should.ThrowAsync<PostgresException>(() => checkpointUpdateScope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE paired_qualification_cell_checkpoint SET payload_json = '{{\"changed\":true}}'::jsonb WHERE admission_id = {admitted.AdmissionId}"));
+            update.MessageText.ShouldContain("checkpoint is append-only");
+        }
+        using (var checkpointDeleteScope = _fixture.BeginScope())
+        {
+            var delete = await Should.ThrowAsync<PostgresException>(() => checkpointDeleteScope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"DELETE FROM paired_qualification_cell_checkpoint WHERE admission_id = {admitted.AdmissionId}"));
+            delete.MessageText.ShouldContain("checkpoint is append-only");
+        }
+
         var terminal = FakePairedCorpus.Result(false, "control-model");
         using (var unsettledScope = _fixture.BeginScope())
         {
@@ -235,6 +255,8 @@ public sealed class PairedQualificationRunnerFlowTests
             recovered.Decision.ShouldBe(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
             recovered.CompletedResult.ShouldNotBeNull().TaskId.ShouldBe(terminal.TaskId);
             recovered.CompletedResult.ObservedModel.ShouldBe(terminal.ObservedModel);
+            recovered.Checkpoints.ShouldHaveSingleItem().Key.ShouldBe(checkpointKind);
+            recovered.Checkpoints[checkpointKind].PayloadJson.ShouldContain("11111111-1111-1111-1111-111111111111");
         }
 
         using (var mismatchScope = _fixture.BeginScope())
@@ -249,6 +271,7 @@ public sealed class PairedQualificationRunnerFlowTests
         }
         using var readScope = _fixture.BeginScope();
         (await readScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.AsNoTracking().CountAsync(value => value.ObservationGroupId == groupId)).ShouldBe(1);
+        (await readScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellCheckpoint.AsNoTracking().CountAsync(value => value.AdmissionId == admitted.AdmissionId)).ShouldBe(1);
     }
 
     [Fact]

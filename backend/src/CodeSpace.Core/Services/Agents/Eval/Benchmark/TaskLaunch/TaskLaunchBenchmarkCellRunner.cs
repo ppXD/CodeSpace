@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
 using Microsoft.Extensions.Logging;
@@ -41,8 +42,11 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
     public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
     {
+        var durable = context.CheckpointSink is not null || context.Checkpoints.Count > 0;
+        if (durable && (context.CheckpointSink is null || context.Completion is null)) throw new DurableBenchmarkObservationException("TaskLaunch durable recovery requires checkpoint and completion sinks.");
         var fixture = await StageFixtureRepositoryAsync(task, context, cancellationToken).ConfigureAwait(false);
         LaunchTaskResult? launched = null;
+        var resultSettled = false;
 
         try
         {
@@ -63,11 +67,16 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
             var result = BuildResult(task, mode, launched, attempts, grade, ObservedModelOf(attempts), completionMode);
             if (context.Completion is not null) await context.Completion.CompleteAsync(result, CancellationToken.None).ConfigureAwait(false);
+            resultSettled = true;
             return result;
+        }
+        catch (Exception exception) when (durable && exception is not OperationCanceledException and not DurableBenchmarkObservationException)
+        {
+            throw new DurableBenchmarkObservationException($"TaskLaunch run {launched?.RunId} has durable recovery identity but did not reach terminal settlement; resume must adopt it instead of recording infra or launching again.", exception);
         }
         finally
         {
-            await RetireFixtureResourcesAsync(fixture, launched?.SessionId, cancellationToken).ConfigureAwait(false);
+            if (!durable || resultSettled) await RetireFixtureResourcesAsync(fixture, launched?.SessionId, cancellationToken).ConfigureAwait(false);
         }
     }
 
