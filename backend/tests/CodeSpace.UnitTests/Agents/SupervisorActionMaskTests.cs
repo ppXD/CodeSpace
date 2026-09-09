@@ -31,6 +31,13 @@ public class SupervisorActionMaskTests
         integration = new { status = "Conflicted", conflictedFiles = new[] { "src/Foo.cs" }, preservedBranches = new[] { "codespace/agent/a" }, outcomes = Array.Empty<object>() },
     }, AgentJson.Options);
 
+    private static string CleanOutcome() => JsonSerializer.Serialize(new
+    {
+        integration = new { status = "Clean", integratedBranch = "codespace/integration/run", outcomes = Array.Empty<object>() },
+    }, AgentJson.Options);
+
+    private static string StagedOutcome() => JsonSerializer.Serialize(new { agentRunIds = new[] { Guid.NewGuid() }, agentCount = 1 }, AgentJson.Options);
+
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship it", TurnNumber = prior.Length, PriorDecisions = prior };
 
@@ -71,6 +78,42 @@ public class SupervisorActionMaskTests
 
         SupervisorActionMask.Render(Context(Decision(1, SupervisorDecisionKinds.Merge, clean)))
             .ShouldNotBeNull("a clean integration leaves nothing to resolve");
+    }
+
+    [Fact]
+    public void A_clean_merge_with_no_later_staged_work_masks_a_remerge_that_cannot_advance()
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldNotBeNull();
+        SupervisorActionMask.Render(context)!.ShouldContain("- merge — ", Case.Sensitive);
+    }
+
+    [Fact]
+    public void Planning_alone_after_a_clean_merge_does_not_invent_new_work_to_merge()
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()), Decision(2, SupervisorDecisionKinds.Plan));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldNotBeNull();
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    [InlineData(SupervisorDecisionKinds.Resolve)]
+    public void Real_staged_work_after_a_clean_merge_makes_merge_available_again(string kind)
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()), Decision(2, kind, StagedOutcome()));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBeNull("new agent work must still be folded, including a verified resolver's work");
+    }
+
+    [Fact]
+    public void A_rejected_staging_decision_after_a_clean_merge_does_not_make_the_old_work_mergeable_again()
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()), Decision(2, SupervisorDecisionKinds.Retry));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldNotBeNull("a staging verb that produced zero agent runs created no work frontier");
     }
 
     // ── The available arm: nothing is masked, so nothing renders ─────────────────────
@@ -190,14 +233,13 @@ public class SupervisorActionMaskTests
     // ── The never-mask floor ─────────────────────────────────────────────────────────
 
     [Fact]
-    public void The_mask_never_names_an_escape_hatch_or_a_judgement_call_verb()
+    public void The_mask_never_names_an_escape_hatch_or_an_agent_staging_verb()
     {
-        // plan / ask_human / stop are the way out of every dead end; merge and spawn/retry futility is a judgement,
-        // not a structural fact (the merge set excludes a resolve's own agent run, so "nothing folded" reads futile
-        // exactly where merging a VERIFIED resolution is correct).
+        // plan / ask_human / stop are the way out of every dead end. Agent-staging verbs remain model judgements;
+        // merge is masked only from the durable clean-integration frontier, never from a guessed empty fold.
         var mask = SupervisorActionMask.Render(Context(Decision(1, SupervisorDecisionKinds.Plan)))!;
 
-        foreach (var verb in new[] { "plan", "ask_human", "stop", "merge", "spawn", "retry" })
+        foreach (var verb in new[] { "plan", "ask_human", "stop", "spawn", "retry" })
             mask.ShouldNotContain($"- {verb} —", Case.Sensitive, $"{verb} must never be masked");
     }
 

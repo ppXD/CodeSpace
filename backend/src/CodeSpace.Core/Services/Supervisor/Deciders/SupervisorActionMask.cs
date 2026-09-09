@@ -10,8 +10,8 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// state-dependent; the mask is prompt-level guidance beside the run-bounds and budget recitations, and the turn's
 /// roster (<see cref="SupervisorActionRoster"/>) renders it as its withheld half.
 ///
-/// <para><b>It covers exactly the two verbs whose availability is a server-decided FACT</b> rather than a
-/// judgement call — the two the server refuses (or kills the run over) no matter how well the model argued for
+/// <para><b>It covers exactly the three verbs whose availability is a server-decided FACT</b> rather than a
+/// judgement call — actions the durable tape proves cannot advance no matter how well the model argued for
 /// them. <c>resolve</c>'s two unavailable states are materially different — one wastes a turn, the other ENDS THE
 /// RUN:
 /// <list type="bullet">
@@ -24,12 +24,14 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// <c>amend_acceptance</c> joined it once <see cref="SupervisorAmendPrecondition"/> (B4) made eligibility a
 /// server verdict: with no unit whose latest check is an INFRA-classed failure, the proposal is rejected
 /// synchronously — no card posted, no human spent, the turn gone — so it belongs beside <c>resolve</c> rather
-/// than in the model's judgement.</para>
+/// than in the model's judgement. <c>merge</c> is withheld only after an executed clean integration when no later
+/// staging decision actually produced an agent run: the current frontier is already folded, so repeating the same
+/// fold cannot advance it.</para>
 ///
 /// <para>Deliberately masks NOTHING else. <c>plan</c>, <c>ask_human</c> and <c>stop</c> are the escape hatches out
-/// of every dead end and must always be offerable. <c>merge</c> is never masked on "nothing folded": the merge set
-/// excludes a resolve's own agent run, so that predicate reads futile in exactly the state where merging a
-/// VERIFIED resolution is correct. <c>spawn</c>/<c>retry</c> against an empty plan are not masked either — a
+/// of every dead end and must always be offerable. <c>merge</c> is never masked from a guessed "nothing folded"
+/// predicate: a later resolver/spawn/retry that really staged an agent reopens it, including the state where merging
+/// a VERIFIED resolution is correct. <c>spawn</c>/<c>retry</c> against an empty plan are not masked either — a
 /// plan-less run keeps its goal-driven semantics, so their futility is a judgement, not a structural fact.</para>
 /// </summary>
 public static class SupervisorActionMask
@@ -38,7 +40,7 @@ public static class SupervisorActionMask
     public const string Header = "UNAVAILABLE THIS TURN (choosing one of these cannot advance the run):";
 
     /// <summary>The verbs this mask can withhold, in render order — the ONE table <see cref="Render"/> and <see cref="SupervisorActionRoster"/> both partition the vocabulary by, so a verb cannot be offered on the menu and forbidden underneath it.</summary>
-    private static readonly string[] Maskable = [SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.AmendAcceptance];
+    private static readonly string[] Maskable = [SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.AmendAcceptance];
 
     /// <summary>Render the mask, or null when every action is available — the turn's roster carries this as its withheld half, so a verb named here is never on the menu above it.</summary>
     public static string? Render(SupervisorTurnContext context)
@@ -57,10 +59,34 @@ public static class SupervisorActionMask
     /// <summary>Why <paramref name="verb"/> cannot advance the run this turn, else null (it is genuinely available). The SINGLE per-verb availability authority — the roster's menu and this block's withheld half both read it, so the two partition the vocabulary by construction instead of by agreement.</summary>
     internal static string? UnavailableReasonFor(string verb, SupervisorTurnContext context) => verb switch
     {
+        SupervisorDecisionKinds.Merge => MergeUnavailableReason(context),
         SupervisorDecisionKinds.Resolve => ResolveUnavailableReason(context),
         SupervisorDecisionKinds.AmendAcceptance => AmendUnavailableReason(context),
         _ => null,
     };
+
+    /// <summary>
+    /// The non-null reason another merge cannot advance the durable frontier, else null. A reverse walk asks one
+    /// narrow question: has a REAL agent run been staged since the latest clean integration? Plan/ask/stop do not
+    /// manufacture work. Spawn/retry/resolve reopen merge only when their recorded outcome says they actually staged
+    /// at least one run, preserving the required merge after a verified resolver while keeping rejected/no-op staging
+    /// from resurrecting an already-folded frontier.
+    /// </summary>
+    internal static string? MergeUnavailableReason(SupervisorTurnContext context)
+    {
+        foreach (var decision in context.PriorDecisions.OrderByDescending(d => d.Sequence))
+        {
+            if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
+                && decision.Status == SupervisorDecisionStatus.Succeeded
+                && SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0)
+                return null;
+
+            if (SupervisorOutcome.MergeIntegratedABranch(decision))
+                return "the latest integration is already clean and no later agent or resolver produced new work — another merge would fold the same frontier and cannot advance the run; stop if the goal is met";
+        }
+
+        return null;
+    }
 
     /// <summary>The non-null reason an amend proposal cannot advance the run this turn, else null. Reads <see cref="SupervisorAmendPrecondition"/> — the SAME gate the executor applies before any card is posted — so the mask and the refusal can never disagree about which units are amendable. What to do instead is NOT steered here: an outstanding co-sign already has its own banner, and a work-classed failure already has its own verdict line; a third steer authored here could only disagree with one of them.</summary>
     internal static string? AmendUnavailableReason(SupervisorTurnContext context) =>

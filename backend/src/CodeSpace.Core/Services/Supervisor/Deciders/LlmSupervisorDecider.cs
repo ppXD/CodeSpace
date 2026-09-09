@@ -1006,6 +1006,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>The closing move once a conflict is recorded and the resolve cap is spent: there is no landing left, so the sentence must not keep asking for one.</summary>
     internal const string ClosingCannotLand = "then stop with outcome 'gave_up' or ask_human; do not merge again — the merge already conflicted.";
 
+    /// <summary>The closing move once the current frontier is already cleanly integrated and nothing later produced work: finish instead of folding the same frontier again.</summary>
+    internal const string ClosingAlreadyIntegrated = "then stop if the clean integrated result meets the goal; do not merge it again unless later agent work is recorded.";
+
     /// <summary>
     /// How the prompt's LAST sentence ends — the recency slot, immediately under the turn's verb roster. It was
     /// unconditional, so on a tape with a conflicted integration and the resolve cap spent it stood as a standing
@@ -1017,10 +1020,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// stopped-now steer use — so the last line the model reads cannot disagree with the block three lines above it.
     /// No new state source, and the default arm stays byte-identical for every other tape.</para>
     /// </summary>
-    private static string ClosingMoveFor(SupervisorTurnContext context) =>
-        SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts) == SupervisorLandingReach.NoLandingReachable
-            ? ClosingCannotLand
-            : ClosingLandsWithAMerge;
+    private static string ClosingMoveFor(SupervisorTurnContext context)
+    {
+        if (SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts) == SupervisorLandingReach.NoLandingReachable)
+            return ClosingCannotLand;
+
+        return SupervisorActionMask.MergeUnavailableReason(context) is null ? ClosingLandsWithAMerge : ClosingAlreadyIntegrated;
+    }
 
     /// <summary>
     /// Render the plan's dependency FRONTIER (loopability — the server enforces <c>DependsOn</c> ordering at spawn): the
@@ -1696,7 +1702,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// named is the server's ruling, not this method's: <see cref="SupervisorReplanStanding.ExitFor"/> resolves it
     /// through the amend gate the turn's roster also reads, so this never names a verb the menu one screen away
     /// withholds. <c>spawn</c> is never masked at all (<see cref="SupervisorActionMask"/> masks exactly
-    /// <c>resolve</c> and <c>amend_acceptance</c>), so the staging arm is always offerable.</para>
+    /// <c>merge</c>, <c>resolve</c> and <c>amend_acceptance</c>), so the staging arm is always offerable.</para>
     ///
     /// <para>Each sentence is true of the UNIT, never of the row it renders under — which is what lets the exit be
     /// resolved once, from the unit's LATEST attempt, and stamped on every attempt of it the prompt shows. The
