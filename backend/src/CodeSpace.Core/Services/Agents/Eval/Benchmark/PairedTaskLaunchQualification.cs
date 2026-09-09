@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -132,13 +133,15 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
     private readonly IPairedCorpusBenchmarkRunner _corpus;
     private readonly CodeSpaceDbContext _db;
     private readonly IPairedQualificationResultStore _results;
+    private readonly IPairedQualificationCampaignLock _campaignLock;
 
-    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, IPairedQualificationResultStore results)
+    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, IPairedQualificationResultStore results, IPairedQualificationCampaignLock campaignLock)
     {
         _suite = suite;
         _corpus = corpus;
         _db = db;
         _results = results;
+        _campaignLock = campaignLock;
     }
 
     public async Task<PairedQualificationOutcome> RunAsync(PairedQualificationRequest request, CancellationToken cancellationToken)
@@ -153,6 +156,7 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         var control = await CanonicalizeAsync(request.TeamId, request.Control, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
         var candidate = await CanonicalizeAsync(request.TeamId, request.Candidate, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
         var protocol = BuildProtocol(groupId, request, manifest, suite, control, candidate);
+        await using var claim = await _campaignLock.AcquireAsync(groupId, cancellationToken).ConfigureAwait(false);
         _db.PairedQualificationProtocol.Add(protocol);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         var sessions = new List<PairedCorpusBenchmarkRun>();
@@ -182,6 +186,7 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         {
             ObservationGroupId = groupId, TeamId = request.TeamId, SuiteDigest = suite.SuiteContentHash, SuiteVersion = manifest.Version,
             CodeRevision = request.CodeRevision, ControlModelRowId = control.ModelCredentialModelId!.Value, CandidateModelRowId = candidate.ModelCredentialModelId!.Value,
+            ControlSelectionJson = JsonSerializer.Serialize(control, Agents.AgentJson.Options), CandidateSelectionJson = JsonSerializer.Serialize(candidate, Agents.AgentJson.Options),
             StatisticsVersion = PairedQualificationOutcome.StatisticsVersion, Criterion = spec.Criterion.ToString(), SessionsPerCell = spec.SessionsPerCell,
             MinimumIndependentClusters = spec.MinimumIndependentClusters, MinimumStrata = spec.MinimumStrata,
             MinimumRequiredExecutionClusters = spec.MinimumRequiredExecutionClusters, MinimumEvaluatorHealth = spec.MinimumEvaluatorHealth,
@@ -194,10 +199,11 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
 
     private static string ProtocolDigest(PairedQualificationProtocol protocol)
     {
-        var fields = new object[]
+        var fields = new object?[]
         {
             protocol.ObservationGroupId, protocol.TeamId, protocol.SuiteDigest, protocol.SuiteVersion, protocol.CodeRevision,
             protocol.ControlModelRowId, protocol.CandidateModelRowId, protocol.StatisticsVersion, protocol.Criterion,
+            protocol.ControlSelectionJson, protocol.CandidateSelectionJson,
             protocol.SessionsPerCell, protocol.MinimumIndependentClusters, protocol.MinimumStrata, protocol.MinimumRequiredExecutionClusters,
             protocol.MinimumEvaluatorHealth, protocol.MaxCostUsdPerLaunch, protocol.MinimumQualityLift, protocol.NonInferiorityMargin,
             protocol.MinimumCostReduction, protocol.RequireDistinctObservedModels, protocol.OrderingSeed,

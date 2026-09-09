@@ -305,6 +305,82 @@ public class CorpusBenchmarkRunnerTests
     }
 
     [Fact]
+    public async Task A_selected_paired_keyset_executes_only_its_exact_task_mode_arms()
+    {
+        var runner = new StubRunner((_, _) => true);
+        var store = new RecordingPairedStore();
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var controlRow = Guid.NewGuid();
+        var candidateRow = Guid.NewGuid();
+
+        var run = await sut.RunPairedAsync(new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", Model = "control", ModelCredentialModelId = controlRow, MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", Model = "candidate", ModelCredentialModelId = candidateRow, MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 1, OrderingSeed = "frozen-order", CodeRevision = new string('b', 40),
+            SelectedCells = new[]
+            {
+                new PairedCorpusBenchmarkCell { TaskId = "task-a", Mode = BenchmarkMode.HarnessCli, Arm = "control" },
+                new PairedCorpusBenchmarkCell { TaskId = "task-b", Mode = BenchmarkMode.HarnessCliWithMcp, Arm = "control" },
+                new PairedCorpusBenchmarkCell { TaskId = "task-b", Mode = BenchmarkMode.HarnessCliWithMcp, Arm = "candidate" },
+            },
+        }, CancellationToken.None);
+
+        runner.Calls.Count.ShouldBe(3);
+        runner.Calls.ShouldContain(call => call.TaskId == "task-a" && call.Mode == BenchmarkMode.HarnessCli && call.Selection!.ModelCredentialModelId == controlRow);
+        runner.Calls.Count(call => call.TaskId == "task-b" && call.Mode == BenchmarkMode.HarnessCliWithMcp).ShouldBe(2);
+        runner.Calls.ShouldNotContain(call => call.TaskId == "task-a" && call.Mode == BenchmarkMode.HarnessCliWithMcp);
+        runner.Calls.ShouldNotContain(call => call.TaskId == "task-b" && call.Mode == BenchmarkMode.HarnessCli);
+        store.Writes.Count.ShouldBe(3, "only explicitly authorized missing observations may append");
+        store.Writes.Select(write => (write.Result.TaskId, write.Result.Mode, ObservationArm: write.ObservationArm!)).ToHashSet().SetEquals(new[]
+        {
+            ("task-a", BenchmarkMode.HarnessCli, "control"),
+            ("task-b", BenchmarkMode.HarnessCliWithMcp, "control"),
+            ("task-b", BenchmarkMode.HarnessCliWithMcp, "candidate"),
+        }).ShouldBeTrue();
+        run.Control.Results.Count.ShouldBe(2);
+        run.Candidate.Results.ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public async Task Invalid_selected_paired_keysets_refuse_before_staging_or_model_execution()
+    {
+        var invalidSelections = new IReadOnlyList<PairedCorpusBenchmarkCell>[]
+        {
+            Array.Empty<PairedCorpusBenchmarkCell>(),
+            new[]
+            {
+                new PairedCorpusBenchmarkCell { TaskId = "task-a", Mode = BenchmarkMode.HarnessCli, Arm = "control" },
+                new PairedCorpusBenchmarkCell { TaskId = "task-a", Mode = BenchmarkMode.HarnessCli, Arm = "control" },
+            },
+            new[] { new PairedCorpusBenchmarkCell { TaskId = "unknown", Mode = BenchmarkMode.HarnessCli, Arm = "control" } },
+            new[] { new PairedCorpusBenchmarkCell { TaskId = "task-a", Mode = BenchmarkMode.TaskLaunchDeep, Arm = "control" } },
+            new[] { new PairedCorpusBenchmarkCell { TaskId = "task-a", Mode = BenchmarkMode.HarnessCli, Arm = "challenger" } },
+        };
+
+        foreach (var selected in invalidSelections)
+        {
+            var runner = new StubRunner((_, _) => true);
+            var stager = new RecordingStager();
+            var store = new RecordingPairedStore();
+            var sut = new CorpusBenchmarkRunner(runner, stager, store, NullLogger<CorpusBenchmarkRunner>.Instance);
+            var request = new PairedCorpusBenchmarkRequest
+            {
+                Tasks = new[] { MakeTask("task-a", TwoModes) }, TeamId = Guid.NewGuid(),
+                Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+                Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+                ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('c', 40), SelectedCells = selected,
+            };
+
+            await Should.ThrowAsync<ArgumentException>(() => sut.RunPairedAsync(request, CancellationToken.None));
+            stager.Staged.ShouldBeEmpty();
+            runner.Calls.ShouldBeEmpty();
+            store.Writes.ShouldBeEmpty();
+        }
+    }
+
+    [Fact]
     public async Task Paired_qualification_stops_when_its_durable_observation_cannot_be_appended()
     {
         var sut = new CorpusBenchmarkRunner(new StubRunner((_, _) => true), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);

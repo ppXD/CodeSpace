@@ -9,6 +9,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Shouldly;
 using System.Data;
@@ -131,7 +132,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var groupId = corpus.Requests.Single().ObservationGroupId;
         (await scope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
         using var recoveryScope = _fixture.BeginScope();
-        var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>());
+        var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>(), recoveryScope.Resolve<IPairedQualificationCampaignLock>());
         var recoveryFailure = await Should.ThrowAsync<DurableQualificationResultException>(() => recovery.RecoverAsync(groupId, CancellationToken.None));
         recoveryFailure.Message.ShouldContain("observation-census-mismatch");
         corpus.Requests.Count.ShouldBe(1, "an incomplete campaign cannot dispatch replacement paid work during recovery");
@@ -147,7 +148,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var crash = new CrashBeforeSeal();
         using (var runScope = _fixture.BeginScope())
         {
-            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash);
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash, runScope.Resolve<IPairedQualificationCampaignLock>());
             await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
             {
                 TeamId = teamId, CodeRevision = new string('c', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
@@ -159,7 +160,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var groupId = corpus.Requests.Select(request => request.ObservationGroupId).Distinct().Single();
         using (var driftScope = _fixture.BeginScope())
         {
-            var drift = new PairedQualificationRecoveryService(new SuiteSource(Suite() with { SuiteContentHash = "sha256:drift" }), driftScope.Resolve<CodeSpaceDbContext>(), driftScope.Resolve<IPairedQualificationResultStore>());
+            var drift = new PairedQualificationRecoveryService(new SuiteSource(Suite() with { SuiteContentHash = "sha256:drift" }), driftScope.Resolve<CodeSpaceDbContext>(), driftScope.Resolve<IPairedQualificationResultStore>(), driftScope.Resolve<IPairedQualificationCampaignLock>());
             var mismatch = await Should.ThrowAsync<DurableQualificationResultException>(() => drift.RecoverAsync(groupId, CancellationToken.None));
             mismatch.Message.ShouldContain("sealed-suite-mismatch");
             (await driftScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
@@ -167,7 +168,7 @@ public sealed class PairedQualificationRunnerFlowTests
         PairedQualificationOutcome recovered;
         using (var recoveryScope = _fixture.BeginScope())
         {
-            var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>());
+            var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>(), recoveryScope.Resolve<IPairedQualificationCampaignLock>());
             recovered = await recovery.RecoverAsync(groupId, CancellationToken.None);
             var alreadySealed = await Should.ThrowAsync<DurableQualificationResultException>(() => recovery.RecoverAsync(groupId, CancellationToken.None));
             alreadySealed.Message.ShouldContain("result-already-sealed");
@@ -184,6 +185,102 @@ public sealed class PairedQualificationRunnerFlowTests
         AssertArmEquivalent(recovered.Candidate, crash.Attempted.Candidate);
         recovered.BlockingReasons.ShouldBe(crash.Attempted.BlockingReasons);
         await AssertResultSealedAndImmutableAsync(recovered);
+    }
+
+    [Fact]
+    public async Task A_partial_campaign_resumes_only_the_missing_cell_under_the_frozen_protocol()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var instrument = new InterruptingBenchmarkRunner(4);
+        Guid groupId;
+        using (var runScope = _fixture.BeginScope())
+        {
+            var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), runScope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance);
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>());
+            await Should.ThrowAsync<OperationCanceledException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('d', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+            groupId = await runScope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking().Where(row => row.CodeRevision == new string('d', 40)).Select(row => row.ObservationGroupId).SingleAsync();
+        }
+
+        instrument.Calls.Count.ShouldBe(4, "the fourth paid cell was interrupted before it could append evidence");
+        using (var evidenceScope = _fixture.BeginScope())
+            (await evidenceScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(3);
+
+        using (var driftScope = _fixture.BeginScope())
+        {
+            await driftScope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.Where(row => row.Id == candidateRow).ExecuteUpdateAsync(update => update.SetProperty(row => row.ModelId, "drifted-model"));
+            var drift = await Should.ThrowAsync<DurableQualificationResultException>(() => Resumer(driftScope, instrument).ResumeAsync(groupId, CancellationToken.None));
+            drift.Message.ShouldContain("selection-drift");
+            instrument.Calls.Count.ShouldBe(4, "selection drift must refuse before another paid cell starts");
+            await driftScope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.Where(row => row.Id == candidateRow).ExecuteUpdateAsync(update => update.SetProperty(row => row.ModelId, "candidate-model"));
+        }
+
+        using var resumeScopeA = _fixture.BeginScope();
+        using var resumeScopeB = _fixture.BeginScope();
+        var attempts = await Task.WhenAll(TryResumeAsync(Resumer(resumeScopeA, instrument), groupId), TryResumeAsync(Resumer(resumeScopeB, instrument), groupId));
+        var outcome = attempts.Single(attempt => attempt.Outcome is not null).Outcome!;
+        attempts.Single(attempt => attempt.Error is not null).Error.ShouldBeOfType<DurableQualificationResultException>().Message.ShouldContain("result-already-sealed");
+
+        instrument.Calls.Count.ShouldBe(5, "three durable paid cells must not be re-executed");
+        instrument.Calls[^1].Selection!.ModelCredentialModelId.ShouldBe(candidateRow);
+        outcome.QualifiedForCapabilityClaim.ShouldBeTrue();
+        await AssertResultSealedAndImmutableAsync(outcome);
+    }
+
+    [Fact]
+    public async Task Repeated_process_loss_advances_the_same_campaign_without_replaying_committed_paid_cells()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var instrument = new InterruptingBenchmarkRunner(2, 4);
+        Guid groupId;
+        using (var runScope = _fixture.BeginScope())
+        {
+            var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), runScope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance);
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>());
+            await Should.ThrowAsync<OperationCanceledException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('e', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+            groupId = await runScope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking().Where(row => row.CodeRevision == new string('e', 40)).Select(row => row.ObservationGroupId).SingleAsync();
+        }
+
+        using (var firstResumeScope = _fixture.BeginScope())
+            await Should.ThrowAsync<OperationCanceledException>(() => Resumer(firstResumeScope, instrument).ResumeAsync(groupId, CancellationToken.None));
+
+        using (var evidenceScope = _fixture.BeginScope())
+            (await evidenceScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(2, "each interrupted attempt advances exactly to its last durable append");
+
+        PairedQualificationOutcome outcome;
+        using (var finalResumeScope = _fixture.BeginScope())
+            outcome = await Resumer(finalResumeScope, instrument).ResumeAsync(groupId, CancellationToken.None);
+
+        instrument.Calls.Count.ShouldBe(6, "four required observations plus two interrupted calls; no durable observation was paid for twice");
+        using (var finalScope = _fixture.BeginScope())
+            (await finalScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(4);
+        outcome.QualifiedForCapabilityClaim.ShouldBeTrue();
+        await AssertResultSealedAndImmutableAsync(outcome);
+    }
+
+    private static PairedQualificationCampaignResumeService Resumer(ILifetimeScope scope, IBenchmarkRunner instrument)
+    {
+        var suite = new SuiteSource(Suite());
+        var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), scope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var recovery = new PairedQualificationRecoveryService(suite, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>());
+        return new PairedQualificationCampaignResumeService(suite, corpus, scope.Resolve<CodeSpaceDbContext>(), recovery, scope.Resolve<IPairedQualificationCampaignLock>());
+    }
+
+    private static async Task<ResumeAttempt> TryResumeAsync(PairedQualificationCampaignResumeService resumer, Guid groupId)
+    {
+        try { return new ResumeAttempt(await resumer.ResumeAsync(groupId, CancellationToken.None), null); }
+        catch (Exception ex) { return new ResumeAttempt(null, ex); }
     }
 
     private async Task<(Guid CredentialId, Guid RowId)> SeedModelAsync(Guid teamId, string model)
@@ -209,7 +306,7 @@ public sealed class PairedQualificationRunnerFlowTests
                    statistics_version, criterion, sessions_per_cell, minimum_independent_clusters, minimum_strata,
                    minimum_required_execution_clusters, minimum_evaluator_health, max_cost_usd_per_launch,
                    minimum_quality_lift, non_inferiority_margin, minimum_cost_reduction, require_distinct_observed_models,
-                   ordering_seed, protocol_digest
+                   ordering_seed, protocol_digest, control_selection_json::text, candidate_selection_json::text
             FROM paired_qualification_protocol
             WHERE observation_group_id = @group_id
             """;
@@ -240,6 +337,14 @@ public sealed class PairedQualificationRunnerFlowTests
         reader.GetString(18).ShouldBe("frozen-order");
         var digest = reader.GetString(19);
         digest.Length.ShouldBe(64);
+        var control = JsonSerializer.Deserialize<BenchmarkAgentSelection>(reader.GetString(20), CodeSpace.Core.Services.Agents.AgentJson.Options)!;
+        var candidate = JsonSerializer.Deserialize<BenchmarkAgentSelection>(reader.GetString(21), CodeSpace.Core.Services.Agents.AgentJson.Options)!;
+        control.ModelCredentialModelId.ShouldBe(controlRow);
+        control.Model.ShouldBe("control-model");
+        control.MaxCostUsd.ShouldBe(3m);
+        candidate.ModelCredentialModelId.ShouldBe(candidateRow);
+        candidate.Model.ShouldBe("candidate-model");
+        candidate.MaxCostUsd.ShouldBe(3m);
         (await reader.ReadAsync()).ShouldBeFalse();
         return digest;
     }
@@ -335,7 +440,7 @@ public sealed class PairedQualificationRunnerFlowTests
 
     private static BenchmarkAgentSelection Selection(Guid rowId) => new() { Harness = "claude-code", Model = "caller-forged", ModelCredentialId = Guid.NewGuid(), ModelCredentialModelId = rowId };
 
-    private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>());
+    private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>());
 
     private static HiddenSuite Suite()
     {
@@ -396,4 +501,20 @@ public sealed class PairedQualificationRunnerFlowTests
     }
 
     private sealed class SimulatedCrashException : Exception;
+    private sealed record ResumeAttempt(PairedQualificationOutcome? Outcome, Exception? Error);
+
+    private sealed class InterruptingBenchmarkRunner : IBenchmarkRunner
+    {
+        private readonly IReadOnlySet<int> _interruptAt;
+        public List<(string TaskId, BenchmarkMode Mode, BenchmarkAgentSelection? Selection)> Calls { get; } = new();
+        public InterruptingBenchmarkRunner(params int[] interruptAt) => _interruptAt = interruptAt.ToHashSet();
+        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, BenchmarkExecutionContext context, CancellationToken cancellationToken)
+        {
+            Calls.Add((task.Id, mode, context.Selection));
+            if (_interruptAt.Contains(Calls.Count)) throw new OperationCanceledException("simulated process loss");
+
+            var candidate = context.Selection!.Model == "candidate-model";
+            return Task.FromResult(FakePairedCorpus.Result(candidate, context.Selection.Model!));
+        }
+    }
 }

@@ -14,6 +14,8 @@ public sealed class PairedQualificationProtocolConfiguration : IEntityTypeConfig
         builder.Property(protocol => protocol.CodeRevision).HasMaxLength(64);
         builder.Property(protocol => protocol.StatisticsVersion).HasMaxLength(80);
         builder.Property(protocol => protocol.Criterion).HasMaxLength(20);
+        builder.Property(protocol => protocol.ControlSelectionJson).HasColumnType("jsonb");
+        builder.Property(protocol => protocol.CandidateSelectionJson).HasColumnType("jsonb");
         builder.Property(protocol => protocol.ProtocolDigest).HasMaxLength(64);
         builder.Property(protocol => protocol.MaxCostUsdPerLaunch).HasPrecision(18, 6);
         builder.HasIndex(protocol => new { protocol.TeamId, protocol.CreatedDate });
