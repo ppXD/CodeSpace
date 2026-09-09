@@ -160,8 +160,12 @@ public sealed partial class SupervisorTurnService
         var agentExecutionSpend = FoldRunSpendUsd(priorDecisions, modelPrices);
         var brainPlaneSpend = await FoldBrainPlaneSpendAsync(supervisorRunId, modelPrices, cancellationToken).ConfigureAwait(false);
 
-        // D2 — the run's lesson arm (frozen on the tape after turn 1) + the lines this turn's prompt carries.
-        var lessons = await ResolveLessonInjectionAsync(goal, goalConfig, rows, teamId, cancellationToken).ConfigureAwait(false);
+        // D2 — the run's lesson arm (frozen on the tape after turn 1) + the lines this turn's prompt carries. A first
+        // turn's semantic selector is a real brain-plane call, so it uses the same durable call/cost scope as every
+        // other in-process model invocation. Rehydrating an existing receipt makes no model call inside this scope.
+        (string Arm, IReadOnlyList<string> Lines, IReadOnlyList<Guid> Ids) lessons;
+        using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", Learning.LlmLessonRelevanceEvaluator.CallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd, modelPrices)))
+            lessons = await ResolveLessonInjectionAsync(goal, goalConfig, rows, teamId, cancellationToken).ConfigureAwait(false);
 
         return new SupervisorTurnContext
         {
@@ -1829,23 +1833,41 @@ public sealed partial class SupervisorTurnService
     /// The run's lesson arm + the lesson lines THIS turn's prompt carries. The arm is the RUN's unit of assignment:
     /// once any decision row recorded one it is read back off the tape and reused verbatim, so a run that began
     /// outside the experiment (<c>none</c> — no lesson existed yet) can never be promoted into the treatment by a
-    /// lesson the distiller landed mid-run, and a treated run cannot fall out of it. Only the assignment is frozen:
-    /// the injected LINES are re-read every turn, because the intervention under test is "the prompt carries the
-    /// team's CURRENT lessons" — recorded per turn in the prompt itself, not pinned at turn 1.
+    /// lesson the distiller landed mid-run, and a treated run cannot fall out of it. The first injected turn applies
+    /// the shared evidence-bound semantic judge to the bounded structural set. Its exact selected ids are frozen on
+    /// the immutable decision row; every later turn reloads those historical rows instead of re-sampling relevance.
     /// <para>A frozen withheld/none arm skips the ledger read entirely (the control arm costs no query).</para>
     /// </summary>
     private async Task<(string Arm, IReadOnlyList<string> Lines, IReadOnlyList<Guid> Ids)> ResolveLessonInjectionAsync(string goal, SupervisorGoalConfig? goalConfig, IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
     {
-        var frozen = rows.Select(r => r.LessonArm).FirstOrDefault(arm => !string.IsNullOrWhiteSpace(arm));
+        var receipt = rows.FirstOrDefault(row => Learning.LessonArms.IsKnown(row.LessonArm));
+        var frozen = receipt?.LessonArm;
 
         if (frozen is Learning.LessonArms.Withheld or Learning.LessonArms.None) return (frozen, [], []);
 
-        var runtime = Learning.LessonRuntimeContext.General(goalConfig?.AgentProfile?.RepositoryId);
-        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(teamId, RunModeKeys.Supervisor, runtime, DateTimeOffset.UtcNow, Learning.LessonArms.TopK), cancellationToken).ConfigureAwait(false);
-        var arm = frozen ?? Learning.LessonArms.For(teamId, LessonAssignmentGoal(goal, goalConfig), current.Count);
+        if (frozen == Learning.LessonArms.Injected)
+        {
+            var ids = receipt!.LessonIds.Distinct().Take(Learning.LessonArms.TopK).ToList();
+            var historical = await HistoricalLessonsAsync(ids, teamId, cancellationToken).ConfigureAwait(false);
+            if (historical.Count != ids.Count) _logger.LogWarning("A frozen supervisor lesson receipt references unavailable history. SupervisorRunId={SupervisorRunId} Expected={Expected} Found={Found}", receipt.SupervisorRunId, ids.Count, historical.Count);
+            return (frozen, historical.Select(Learning.LessonArms.Line).ToList(), ids);
+        }
 
-        return arm == Learning.LessonArms.Injected
-            ? (arm, current.Select(Learning.LessonArms.Line).ToList(), current.Select(lesson => lesson.Id).ToList())
-            : (arm, [], []);
+        var runtime = Learning.LessonRuntimeContext.General(goalConfig?.AgentProfile?.RepositoryId);
+        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(teamId, RunModeKeys.Supervisor, runtime, DateTimeOffset.UtcNow, Learning.LessonReader.MaxTake), cancellationToken).ConfigureAwait(false);
+        var taskNeed = LessonAssignmentGoal(goal, goalConfig);
+        var arm = Learning.LessonArms.For(teamId, taskNeed, current.Count);
+        if (arm != Learning.LessonArms.Injected) return (arm, [], []);
+
+        var selection = await _lessons.SelectAsync(new Learning.LessonRelevanceRequest(teamId, taskNeed, current, Learning.LessonArms.TopK), cancellationToken).ConfigureAwait(false);
+        return (arm, selection.Lessons.Select(Learning.LessonArms.Line).ToList(), selection.Lessons.Select(lesson => lesson.Id).ToList());
+    }
+
+    private async Task<IReadOnlyList<Persistence.Entities.Lesson>> HistoricalLessonsAsync(IReadOnlyList<Guid> ids, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (ids.Count == 0) return [];
+        var rows = await _db.Lesson.AsNoTracking().Where(lesson => lesson.TeamId == teamId && ids.Contains(lesson.Id)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var byId = rows.ToDictionary(lesson => lesson.Id);
+        return ids.Where(byId.ContainsKey).Select(id => byId[id]).ToList();
     }
 }

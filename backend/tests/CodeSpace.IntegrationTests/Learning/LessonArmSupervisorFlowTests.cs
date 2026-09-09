@@ -4,8 +4,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -109,6 +111,31 @@ public sealed class LessonArmSupervisorFlowTests
         ex.ToString().ShouldContain("frozen at insert", customMessage: "the DB must reject the rewrite — an assignment that can be edited afterwards is not evidence");
     }
 
+    [Fact]
+    public async Task First_turn_semantic_selection_is_reused_from_the_immutable_decision_receipt()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var selected = Lesson(teamId, "selected lesson");
+        var unrelated = Lesson(teamId, "unrelated lesson");
+        using (var seed = _fixture.BeginScope())
+        {
+            seed.Resolve<CodeSpaceDbContext>().Lesson.AddRange(selected, unrelated);
+            await seed.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+        var reader = new SemanticReceiptReader([selected, unrelated], [selected]);
+        var goal = GoalFor(teamId, LessonArms.Injected);
+        var runId = Guid.NewGuid();
+
+        var context = await RunTurnAsync(runId, teamId, new SupervisorGoalConfig { Goal = goal, DisplayTitle = goal }, reader);
+
+        context.LessonIds.ShouldBe([selected.Id]);
+        context.LessonLines.ShouldHaveSingleItem().ShouldContain("selected lesson");
+        context.LessonLines.ShouldAllBe(line => !line.Contains("unrelated lesson", StringComparison.Ordinal));
+        reader.SemanticCalls.ShouldBe(1, "rehydration must reuse the first decision's exact receipt instead of re-sampling model relevance");
+        reader.ObservedCallKind.ShouldBe(LlmLessonRelevanceEvaluator.CallKind, "the first semantic decision must enter the durable brain-plane cost/call scope");
+        (await RecordedLessonIdsAsync(runId, teamId)).ShouldAllBe(ids => ids.SequenceEqual(new[] { selected.Id }));
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     /// <summary>The arm is a pure hash of (team, undecorated goal) — walk goals until one lands on the wanted arm (deterministic, so the test stays stable).</summary>
@@ -120,14 +147,15 @@ public sealed class LessonArmSupervisorFlowTests
         throw new InvalidOperationException("256 candidates never hit the arm — the hash is broken");
     }
 
-    private async Task<SupervisorTurnContext> RunTurnAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig)
+    private async Task<SupervisorTurnContext> RunTurnAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, ILessonReader? lessons = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var root = _fixture.BeginScope();
+        using var scope = root.BeginLifetimeScope(builder => builder.RegisterInstance(AllRelevantEvaluator.Instance).As<ILessonRelevanceEvaluator>());
 
-        await NewTurnService(scope).RunTurnAsync(runId, teamId, NodeId, goalConfig.Goal!, conversationId: null, goalConfig, CancellationToken.None);
+        await NewTurnService(scope, lessons).RunTurnAsync(runId, teamId, NodeId, goalConfig.Goal!, conversationId: null, goalConfig, CancellationToken.None);
 
         // Re-read through the real rehydrate so the assertions see what the NEXT turn would see off the durable tape.
-        return await NewTurnService(scope).RehydrateFromDecisionLogAsync(runId, teamId, NodeId, goalConfig.Goal!, goalConfig, CancellationToken.None);
+        return await NewTurnService(scope, lessons).RehydrateFromDecisionLogAsync(runId, teamId, NodeId, goalConfig.Goal!, goalConfig, CancellationToken.None);
     }
 
     private async Task<IReadOnlyList<string?>> RecordedArmsAsync(Guid runId, Guid teamId)
@@ -174,7 +202,7 @@ public sealed class LessonArmSupervisorFlowTests
         return lesson.Id;
     }
 
-    private static SupervisorTurnService NewTurnService(ILifetimeScope scope) => new(
+    private static SupervisorTurnService NewTurnService(ILifetimeScope scope, ILessonReader? lessons = null) => new(
         scope.Resolve<ISupervisorDecisionLog>(),
         new AlwaysStopDecider(),
         scope.Resolve<ISupervisorActionExecutor>(),
@@ -190,8 +218,37 @@ public sealed class LessonArmSupervisorFlowTests
         scope.Resolve<ISupervisorPublishedBranchResolver>(),
         scope.Resolve<Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<Core.Services.Workflows.Budget.IBudgetLedger>(),
-        scope.Resolve<ILessonReader>(),
+        lessons ?? scope.Resolve<ILessonReader>(),
         scope.Resolve<ILogger<SupervisorTurnService>>());
+
+    private static Lesson Lesson(Guid teamId, string howToApply) => new()
+    {
+        Id = Guid.NewGuid(), TeamId = teamId, Mode = RunModeKeys.Supervisor, FailureClass = "prior-failure", WhatFailed = "prior attempt failed", Why = "missing context", HowToApply = howToApply,
+        SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow.AddMinutes(-1), ExpiresAt = DateTimeOffset.UtcNow.AddDays(1),
+    };
+
+    private sealed class SemanticReceiptReader(IReadOnlyList<Lesson> candidates, IReadOnlyList<Lesson> selected) : ILessonReader
+    {
+        public int SemanticCalls { get; private set; }
+        public string? ObservedCallKind { get; private set; }
+        public Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken) => Task.FromResult(candidates);
+        public Task<LessonRelevanceResult> SelectAsync(LessonRelevanceRequest request, CancellationToken cancellationToken)
+        {
+            SemanticCalls++;
+            ObservedCallKind = LlmCallContext.Current?.Kind;
+            return Task.FromResult(new LessonRelevanceResult(selected, request.Candidates.Select(lesson => lesson.Id).ToList(), LessonRelevanceStatuses.Selected, "observed-model", new string('a', 64)));
+        }
+    }
+
+    private sealed class AllRelevantEvaluator : ILessonRelevanceEvaluator
+    {
+        public static readonly AllRelevantEvaluator Instance = new();
+        public Task<LessonRelevanceResult> EvaluateAsync(LessonRelevanceRequest request, CancellationToken cancellationToken)
+        {
+            var selected = request.Candidates.Take(request.Take).ToList();
+            return Task.FromResult(new LessonRelevanceResult(selected, request.Candidates.Select(lesson => lesson.Id).ToList(), selected.Count == 0 ? LessonRelevanceStatuses.NoCandidates : LessonRelevanceStatuses.Selected, "test-observed-model", selected.Count == 0 ? null : new string('d', 64)));
+        }
+    }
 
     private sealed class AlwaysStopDecider : ISupervisorDecider
     {
