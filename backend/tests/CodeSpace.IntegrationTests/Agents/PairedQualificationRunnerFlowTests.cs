@@ -130,6 +130,60 @@ public sealed class PairedQualificationRunnerFlowTests
         failure.Message.ShouldContain("observation-census-mismatch");
         var groupId = corpus.Requests.Single().ObservationGroupId;
         (await scope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
+        using var recoveryScope = _fixture.BeginScope();
+        var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>());
+        var recoveryFailure = await Should.ThrowAsync<DurableQualificationResultException>(() => recovery.RecoverAsync(groupId, CancellationToken.None));
+        recoveryFailure.Message.ShouldContain("observation-census-mismatch");
+        corpus.Requests.Count.ShouldBe(1, "an incomplete campaign cannot dispatch replacement paid work during recovery");
+    }
+
+    [Fact]
+    public async Task A_complete_campaign_crashing_before_seal_recovers_from_durable_evidence_without_new_paid_calls()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var corpus = new FakePairedCorpus { AfterRun = PersistFakePairAsync };
+        var crash = new CrashBeforeSeal();
+        using (var runScope = _fixture.BeginScope())
+        {
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash);
+            await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('c', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+        }
+
+        corpus.Requests.Count.ShouldBe(2);
+        var groupId = corpus.Requests.Select(request => request.ObservationGroupId).Distinct().Single();
+        using (var driftScope = _fixture.BeginScope())
+        {
+            var drift = new PairedQualificationRecoveryService(new SuiteSource(Suite() with { SuiteContentHash = "sha256:drift" }), driftScope.Resolve<CodeSpaceDbContext>(), driftScope.Resolve<IPairedQualificationResultStore>());
+            var mismatch = await Should.ThrowAsync<DurableQualificationResultException>(() => drift.RecoverAsync(groupId, CancellationToken.None));
+            mismatch.Message.ShouldContain("sealed-suite-mismatch");
+            (await driftScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(value => value.ObservationGroupId == groupId)).ShouldBeFalse();
+        }
+        PairedQualificationOutcome recovered;
+        using (var recoveryScope = _fixture.BeginScope())
+        {
+            var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), recoveryScope.Resolve<CodeSpaceDbContext>(), recoveryScope.Resolve<IPairedQualificationResultStore>());
+            recovered = await recovery.RecoverAsync(groupId, CancellationToken.None);
+            var alreadySealed = await Should.ThrowAsync<DurableQualificationResultException>(() => recovery.RecoverAsync(groupId, CancellationToken.None));
+            alreadySealed.Message.ShouldContain("result-already-sealed");
+        }
+
+        corpus.Requests.Count.ShouldBe(2, "recovery may read already-paid rows but must never call the corpus/model again");
+        recovered.QualifiedForCapabilityClaim.ShouldBeTrue();
+        recovered.ProtocolDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        recovered.EvidenceDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        recovered.ResultDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        recovered.QualityDifference.ShouldBe(crash.Attempted!.QualityDifference);
+        recovered.QualityDifferenceLower95.ShouldBe(crash.Attempted.QualityDifferenceLower95);
+        AssertArmEquivalent(recovered.Control, crash.Attempted.Control);
+        AssertArmEquivalent(recovered.Candidate, crash.Attempted.Candidate);
+        recovered.BlockingReasons.ShouldBe(crash.Attempted.BlockingReasons);
+        await AssertResultSealedAndImmutableAsync(recovered);
     }
 
     private async Task<(Guid CredentialId, Guid RowId)> SeedModelAsync(Guid teamId, string model)
@@ -264,6 +318,21 @@ public sealed class PairedQualificationRunnerFlowTests
         append.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("paired qualification result is sealed");
     }
 
+    private static void AssertArmEquivalent(PairedArmQualificationSummary actual, PairedArmQualificationSummary expected)
+    {
+        actual.Solved.ShouldBe(expected.Solved);
+        actual.BudgetAdmissibleSolved.ShouldBe(expected.BudgetAdmissibleSolved);
+        actual.Total.ShouldBe(expected.Total);
+        actual.InfraUnknown.ShouldBe(expected.InfraUnknown);
+        actual.CostKnownCells.ShouldBe(expected.CostKnownCells);
+        actual.CapabilityVerdictCells.ShouldBe(expected.CapabilityVerdictCells);
+        actual.ObservedModelCells.ShouldBe(expected.ObservedModelCells);
+        actual.EvaluatorHealth.ShouldBe(expected.EvaluatorHealth);
+        actual.ObservedModels.ShouldBe(expected.ObservedModels);
+        actual.TotalCostUsd.ShouldBe(expected.TotalCostUsd);
+        actual.CostPerBudgetAdmissibleSolveUsd.ShouldBe(expected.CostPerBudgetAdmissibleSolveUsd);
+    }
+
     private static BenchmarkAgentSelection Selection(Guid rowId) => new() { Harness = "claude-code", Model = "caller-forged", ModelCredentialId = Guid.NewGuid(), ModelCredentialModelId = rowId };
 
     private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>());
@@ -315,4 +384,16 @@ public sealed class PairedQualificationRunnerFlowTests
             ObservedModel = observed, CostUsd = 1m,
         };
     }
+
+    private sealed class CrashBeforeSeal : IPairedQualificationResultStore
+    {
+        public PairedQualificationOutcome? Attempted { get; private set; }
+        public Task<PairedQualificationOutcome> SealAsync(PairedQualificationSealRequest request, CancellationToken cancellationToken)
+        {
+            Attempted = request.Outcome;
+            throw new SimulatedCrashException();
+        }
+    }
+
+    private sealed class SimulatedCrashException : Exception;
 }
