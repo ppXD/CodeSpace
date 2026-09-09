@@ -28,7 +28,7 @@ set -uo pipefail
 
 # Every secret the real-model workflow puts in a job env. Renaming one here without renaming it in the workflow
 # silently stops redacting it, so the self-test pins this list literally.
-SECRET_VARS="CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY CODESPACE_HIDDEN_SUITE_URL"
+SECRET_VARS="CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASELINE_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY CODESPACE_HIDDEN_SUITE_URL"
 
 # A needle this short is not an identifier, it is a fragment — striking it would shred unrelated text (a numeric
 # knob value like "1" would hit every line). Refuse it loudly instead of mangling the artifact.

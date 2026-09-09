@@ -57,6 +57,7 @@ check_output() {
 # The values the fixtures pretend are secrets. The base URL is the shape that broke a sed-based redaction: it
 # carries `:` and `/`.
 MODEL_ID="pinned-model-4-5"
+BASELINE_MODEL_ID="private-baseline-model-3-7"
 BASE_URL="https://gateway.internal.example.com:8443/v1/openai"
 API_KEY="sk-codespace-0123456789abcdef"
 SUITE_URL="https://hidden-suite.example.com/qualification.json"
@@ -71,6 +72,7 @@ UNOBSERVED="https://models.private-vendor.example:8443/v1/glm-5.3-flash"
 # Run the collect step with every secret present.
 run_collect() {
   CODESPACE_LLM_MODEL_ID="$MODEL_ID" \
+  CODESPACE_LLM_BASELINE_MODEL_ID="$BASELINE_MODEL_ID" \
   CODESPACE_LLM_BASE_URL="$BASE_URL" \
   CODESPACE_LLM_API_KEY="$API_KEY" \
   CODESPACE_HIDDEN_SUITE_URL="$SUITE_URL" \
@@ -82,7 +84,7 @@ run_collect() {
 # A secret renamed in real-model.yml but not here stops being redacted, silently. Pin each name literally so the
 # rename is a visible decision, and cross-check that the workflow passes exactly these.
 
-for var in CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY CODESPACE_HIDDEN_SUITE_URL; do
+for var in CODESPACE_LLM_MODEL_ID CODESPACE_LLM_BASELINE_MODEL_ID CODESPACE_LLM_BASE_URL CODESPACE_LLM_API_KEY CODESPACE_HIDDEN_SUITE_URL; do
   if grep -qF -- "$var" "$collect"; then
     pass "the redaction list names ${var}"
   else
@@ -142,6 +144,7 @@ esac
 
 root="$(stage)"
 printf "✅ real-model INFORMATIONAL wire — OpenAI model '%s' scored 12/14 [model fp=deadbeef (configured)]\n" "$MODEL_ID" > "${root}/summaries/step_summary_1"
+printf "paired baseline '%s' remains redacted while its fingerprint is retained\n" "$BASELINE_MODEL_ID" >> "${root}/summaries/step_summary_1"
 printf "⚠️ real-model gate NON-GATING infra skip — Anthropic: HttpRequestException reaching %s\n" "$BASE_URL" > "${root}/summaries/step_summary_2"
 printf "[realmodel] key=%s suite=%s\n" "$API_KEY" "$SUITE_URL" > "${root}/summaries/step_summary_3"
 # The trx shape that actually leaked on run 33754366815: HttpClient's own Serilog lines, captured as test stdout,
@@ -154,11 +157,13 @@ printf "[realmodel] key=%s suite=%s\n" "$API_KEY" "$SUITE_URL" > "${root}/summar
   printf '<StdOut>[.. INF] LLM completion %s in=0 out=1427 finish=end_turn</StdOut>\n' "$UNOBSERVED"
   printf '<StdOut>LLM completion %s</StdOut>\n' "$UNOBSERVED"
   printf '<Message>REQUIRED wire - Anthropic model %s missed [key %s]</Message>\n' "$MODEL_ID" "$API_KEY"
+  printf '<Message>paired baseline %s remains private</Message>\n' "$BASELINE_MODEL_ID"
 } > "${root}/results/real-model.trx"
 printf '%s\n' "$OBSERVED" > "${root}/summaries/codespace_observed_models"
 run_collect "${root}/results" "${root}/summaries" >/dev/null
 
 check lacks "$MODEL_ID"  "${root}/results/step-summary.md" "redacts the configured model id"
+check lacks "$BASELINE_MODEL_ID" "${root}/results/step-summary.md" "redacts the configured baseline model id from summaries"
 check lacks "$BASE_URL"  "${root}/results/step-summary.md" "redacts the gateway base URL, ':' and '/' and all"
 check lacks "gateway.internal.example.com" "${root}/results/step-summary.md" "redacts the gateway HOST, not just the scheme"
 check lacks "$API_KEY"   "${root}/results/step-summary.md" "redacts the gateway API key"
@@ -173,6 +178,7 @@ check lacks "$BASE_URL"  "${root}/results/real-model.trx" "redacts the gateway U
 check lacks "gateway.internal.example.com" "${root}/results/real-model.trx" "redacts the gateway HOST out of the trx"
 check has   "Start processing HTTP request POST ***" "${root}/results/real-model.trx" "leaves the HttpClient log line readable around the struck URL"
 check lacks "$MODEL_ID" "${root}/results/real-model.trx" "redacts the configured model id out of the trx assertion message"
+check lacks "$BASELINE_MODEL_ID" "${root}/results/real-model.trx" "redacts the configured baseline model id out of the trx"
 check lacks "$API_KEY"  "${root}/results/real-model.trx" "redacts the API key out of the trx"
 check has   "REQUIRED wire" "${root}/results/real-model.trx" "leaves the verdict itself in the trx"
 check has   "scored 12/14" "${root}/results/step-summary.md" "keeps the verdict itself — the artifact is still the record of what the model did"
