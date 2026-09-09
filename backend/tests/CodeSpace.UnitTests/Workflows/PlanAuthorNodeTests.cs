@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Messages.Dtos.Workflows.Planning;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -25,10 +26,22 @@ public class PlanAuthorNodeTests
 
         ConfigKeys(node).ShouldBe(new[] { "plannerModelId", "reviewMode", "reviewerModelId", "flatPlan", "reviewerAgent", "repositoryId", "pinnedSha" }, ignoreOrder: true);
         InputKeys(node).ShouldBe(new[] { "goal", "grounding", "feedback", "criteria" }, ignoreOrder: true);
-        OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "json" }, ignoreOrder: true);
+        OutputKeys(node).ShouldBe(new[] { "planId", "version", "goal", "items", "executionNeeded", "injectedLessonIds", "json" }, ignoreOrder: true);
 
         node.Manifest.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString())
             .ShouldBe(new[] { "goal" }, "only the goal is required — grounding/feedback are optional binds");
+    }
+
+    [Fact]
+    public void Exact_lesson_exposure_is_a_small_top_level_output()
+    {
+        var lessonIds = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var plan = new PlannedWorkflow { Goal = "ship", Subtasks = [], InjectedLessonIds = lessonIds };
+
+        var outputs = PlanAuthorNode.BuildOutputs(Guid.NewGuid(), 1, plan, "[]");
+
+        outputs["injectedLessonIds"].EnumerateArray().Select(value => value.GetGuid()).ShouldBe(lessonIds,
+            "the receipt must survive when the full json output is offloaded");
     }
 
     [Fact]

@@ -87,6 +87,9 @@ public class SupervisorDecisionRecord : IEntity<Guid>, IAuditable
     /// </summary>
     public string? LessonArm { get; set; }
 
+    /// <summary>Exact lesson ids exposed to the model on this turn. A frozen journal field; empty means no lesson text reached the prompt.</summary>
+    public List<Guid> LessonIds { get; set; } = [];
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

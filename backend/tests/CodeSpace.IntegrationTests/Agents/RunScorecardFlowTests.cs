@@ -393,6 +393,31 @@ public class RunScorecardFlowTests
         arms.ShouldBeEmpty("WorkflowRunRecord carries no team of its own — tenancy is a JOIN on the run, not a trusted argument");
     }
 
+    [Fact]
+    public async Task Exact_lesson_exposure_unions_both_lanes_deduplicates_and_enforces_tenancy()
+    {
+        var (ownerTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var ownerRun = await SeedTerminalRunAsync(ownerTeam, WorkflowRunStatus.Success);
+        var foreignRun = await SeedTerminalRunAsync(foreignTeam, WorkflowRunStatus.Success);
+        var supervisorOnly = Guid.NewGuid();
+        var shared = Guid.NewGuid();
+        var plannerOnly = Guid.NewGuid();
+
+        await SeedDecisionAsync(ownerTeam, ownerRun, 1, LessonArms.Injected, [shared, supervisorOnly, shared]);
+        await SeedPlanAuthorNodeCompletedAsync(ownerRun, LessonArms.Injected, [shared, plannerOnly, shared]);
+        await SeedPlanAuthorNodeCompletedAsync(foreignRun, LessonArms.Injected, [Guid.NewGuid()]);
+        await SeedMalformedPlanAuthorExposureAsync(ownerRun);
+
+        using var scope = _fixture.BeginScope();
+        var receipts = await RunLessonExposures.ReadAsync(scope.Resolve<CodeSpaceDbContext>(), [ownerRun, foreignRun], ownerTeam, CancellationToken.None);
+
+        receipts.Keys.ShouldBe([ownerRun]);
+        receipts[ownerRun].ShouldContain(supervisorOnly, "the supervisor ledger contributes its exact receipt");
+        receipts[ownerRun].ShouldContain(plannerOnly, "the plan.author node.completed output contributes its exact receipt");
+        receipts[ownerRun].ShouldBe(new[] { supervisorOnly, shared, plannerOnly }.OrderBy(id => id));
+    }
+
     // ─── Benchmark cells ────────────────────────────────────────────────────────────
 
     [Fact]
@@ -700,7 +725,7 @@ public class RunScorecardFlowTests
     }
 
     /// <summary>A supervisor decision row carrying the frozen lesson arm — the ledger the arm is read back off.</summary>
-    private async Task SeedDecisionAsync(Guid teamId, Guid runId, long sequence, string lessonArm)
+    private async Task SeedDecisionAsync(Guid teamId, Guid runId, long sequence, string lessonArm, IReadOnlyList<Guid>? lessonIds = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -718,6 +743,7 @@ public class RunScorecardFlowTests
             Status = SupervisorDecisionStatus.Succeeded,
             PayloadJson = """{"items":[]}""",
             LessonArm = lessonArm,
+            LessonIds = lessonIds?.ToList() ?? [],
             FenceEpoch = 1,
             CreatedDate = now,
             CreatedBy = Guid.Empty,
@@ -733,7 +759,7 @@ public class RunScorecardFlowTests
     /// planner lane's durable arm carrier. Serialized through the REAL <c>RunRecordLogger.NodeCompletedPayload</c>
     /// shape (outputs + duration_ms) so the reader can only pass against the payload production actually writes.
     /// </summary>
-    private async Task SeedPlanAuthorNodeCompletedAsync(Guid runId, string? lessonArm)
+    private async Task SeedPlanAuthorNodeCompletedAsync(Guid runId, string? lessonArm, IReadOnlyList<Guid>? lessonIds = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -741,6 +767,7 @@ public class RunScorecardFlowTests
         var outputs = new Dictionary<string, object> { ["planId"] = Guid.NewGuid(), ["version"] = 1, ["goal"] = "do the thing" };
 
         if (lessonArm is not null) outputs[RunLessonArms.PlanAuthorArmOutputKey] = lessonArm;
+        if (lessonIds is not null) outputs[RunLessonExposures.PlanAuthorLessonIdsOutputKey] = lessonIds;
 
         db.WorkflowRunRecord.Add(new WorkflowRunRecord
         {
@@ -751,6 +778,18 @@ public class RunScorecardFlowTests
             PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { outputs, duration_ms = 1200L }),
         });
 
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedMalformedPlanAuthorExposureAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = "plan", RecordType = WorkflowRunRecordTypes.NodeCompleted,
+            PayloadJson = """{"outputs":{"injectedLessonIds":["not-a-guid",{"unexpected":true}]}}""",
+        });
         await db.SaveChangesAsync();
     }
 

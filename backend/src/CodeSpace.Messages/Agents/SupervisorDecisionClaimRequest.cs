@@ -35,4 +35,7 @@ public sealed record SupervisorDecisionClaimRequest
     /// instead of re-rolling it. Null/blank ⇒ the column stays NULL (a caller outside the experiment).
     /// </summary>
     public string? LessonArm { get; init; }
+
+    /// <summary>Exact lesson ids exposed to the model for this decision. Empty when no lesson text reached the prompt.</summary>
+    public IReadOnlyList<Guid> LessonIds { get; init; } = [];
 }

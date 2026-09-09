@@ -130,6 +130,7 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             Status = SupervisorDecisionStatus.Pending,
             FenceEpoch = request.FenceEpoch,
             LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm,
+            LessonIds = request.LessonIds.Distinct().OrderBy(id => id).ToList(),
         };
 
         _db.SupervisorDecisionRecord.Add(row);

@@ -664,6 +664,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
             // D2: stamp the run's lesson arm on the row so the experiment is sliceable afterwards — and so the NEXT
             // turn reads the assignment back off the tape instead of re-rolling it against a changed lesson ledger.
             LessonArm = context.LessonArm,
+            LessonIds = context.LessonIds,
         }, cancellationToken).ConfigureAwait(false);
 
         // Duplicate = a TERMINAL row already settled this turn's decision → REPLAY: never re-run the side
