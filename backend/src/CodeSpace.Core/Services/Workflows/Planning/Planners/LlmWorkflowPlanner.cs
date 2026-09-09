@@ -25,18 +25,18 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
-    private readonly Learning.ILessonReader _lessons;
+    private readonly Learning.IPlannerLessonMemory _lessonMemory;
     private readonly ILogger<LlmWorkflowPlanner>? _logger;
 
-    /// <summary>Lessons shown per plan — the freshest few beat an exhaustive dump (prompt budget + recency bias are both deliberate). The SHARED window, so the supervisor lane's treatment is the same slice of the ledger.</summary>
+    /// <summary>Maximum lessons shown per plan after bounded structural retrieval and evidence-bound semantic selection.</summary>
     public const int LessonTopK = Learning.LessonArms.TopK;
 
-    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.ILessonReader lessons, ILogger<LlmWorkflowPlanner>? logger = null)
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, Learning.IPlannerLessonMemory lessonMemory, ILogger<LlmWorkflowPlanner>? logger = null)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
-        _lessons = lessons;
+        _lessonMemory = lessonMemory;
         _logger = logger;
     }
 
@@ -68,10 +68,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         // the flat-plan constraint both move), so the same task lands in the same arm here and on the supervisor lane.
         // The planner brain is not the runtime that will execute a model-authored subtask. Until a concrete AgentTask
         // exists, only runtime-agnostic lessons are safe; the agent injection boundary applies exact selectors later.
-        var runtime = Learning.LessonRuntimeContext.General(request.RepositoryId);
-        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(request.TeamId, RunModeKeys.PlanMap, runtime, DateTimeOffset.UtcNow, LessonTopK), cancellationToken).ConfigureAwait(false);
-        var arm = Learning.LessonArms.For(request.TeamId, request.TaskGoal ?? request.TaskText, current.Count);
-        var injected = arm == Learning.LessonArms.Injected ? current : Array.Empty<Persistence.Entities.Lesson>();
+        var lessonSelection = await _lessonMemory.ResolveAsync(request, cancellationToken).ConfigureAwait(false);
+        var injected = lessonSelection.Lessons;
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog, injected), cancellationToken).ConfigureAwait(false);
 
@@ -81,8 +79,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         {
             AuthoredByModel = completion.Model,
             AuthoredByObservedModel = completion.ObservedModel,
-            LessonArm = arm,
-            InjectedLessonIds = injected.Count > 0 ? injected.Select(l => l.Id).ToList() : null,
+            LessonArm = lessonSelection.Arm,
+            InjectedLessonIds = lessonSelection.LessonIds.Count > 0 ? lessonSelection.LessonIds.ToList() : null,
         };
     }
 

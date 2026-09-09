@@ -406,10 +406,20 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task<SupervisorTurnContext> RehydrateAsync(Guid runId, Guid teamId)
+    private async Task<SupervisorTurnContext> RehydrateAsync(Guid runId, Guid teamId, ILessonRelevanceEvaluator? evaluator = null)
     {
-        using var scope = _fixture.BeginScope();
+        using var scope = evaluator is null ? _fixture.BeginScope() : _fixture.BeginScope(builder => builder.RegisterInstance(evaluator).As<ILessonRelevanceEvaluator>());
         return await scope.Resolve<ISupervisorTurnService>().RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig: null, CancellationToken.None);
+    }
+
+    private sealed class AllRelevantEvaluator : ILessonRelevanceEvaluator
+    {
+        public static readonly AllRelevantEvaluator Instance = new();
+        public Task<LessonRelevanceResult> EvaluateAsync(LessonRelevanceRequest request, CancellationToken cancellationToken)
+        {
+            var selected = request.Candidates.Take(request.Take).ToList();
+            return Task.FromResult(new LessonRelevanceResult(selected, request.Candidates.Select(lesson => lesson.Id).ToList(), LessonRelevanceStatuses.Selected, "test-model", new string('a', 64)));
+        }
     }
 
     private async Task<string?> LedgerOutcomeAsync(Guid runId, Guid teamId, string kind)
@@ -454,7 +464,7 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
             await db.SaveChangesAsync();
         }
 
-        var context = await RehydrateAsync(runId, teamId);
+        var context = await RehydrateAsync(runId, teamId, AllRelevantEvaluator.Instance);
 
         // The arm is the SAME pure hash the planner lane uses — the test recomputes it rather than guessing.
         if (CodeSpace.Core.Services.Learning.LessonArms.Assign(teamId, context.Goal) == CodeSpace.Core.Services.Learning.LessonArms.Injected)
