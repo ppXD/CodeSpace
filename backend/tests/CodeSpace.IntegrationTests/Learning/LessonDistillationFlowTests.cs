@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -74,6 +75,21 @@ public sealed class LessonDistillationFlowTests
         (await scope.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().CountAsync(l => l.TeamId == teamId)).ShouldBe(0, "a faulty round is advisory — the ledger stays unchanged");
     }
 
+    [Fact]
+    public async Task Qualification_runs_never_become_lesson_candidates()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        var runId = await SeedFailedRunAsync(teamId, userId, "hidden oracle detail", WorkflowRunPurposes.Qualification);
+        var canned = new CannedClient(Proposals(runId));
+
+        await DistillTeamAsync(teamId, canned);
+
+        canned.Calls.ShouldBe(0, "an evaluation run is measurement data, never training input for a later evaluation");
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().CountAsync(lesson => lesson.TeamId == teamId)).ShouldBe(0);
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private async Task DistillTeamAsync(Guid teamId, IStructuredLLMClient client)
@@ -117,7 +133,7 @@ public sealed class LessonDistillationFlowTests
         new(new FakeClients(client), scope.Resolve<IModelPoolSelector>(), scope.Resolve<ISupervisorDecisionLog>(), scope.Resolve<CodeSpaceDbContext>(), NullLogger<LessonDistiller>.Instance);
 
     /// <summary>A real run row through the real snapshot starter, then stamped into the distiller's window shape (Failure + error + terminal stamp).</summary>
-    private async Task<Guid> SeedFailedRunAsync(Guid teamId, Guid userId, string error)
+    private async Task<Guid> SeedFailedRunAsync(Guid teamId, Guid userId, string error, string? purpose = null)
     {
         Guid runId;
         using (var scope = _fixture.BeginScope())
@@ -132,6 +148,7 @@ public sealed class LessonDistillationFlowTests
             run.Status = WorkflowRunStatus.Failure;
             run.Error = error;
             run.CompletedAt = DateTimeOffset.UtcNow;
+            run.Purpose = purpose;
             await db.SaveChangesAsync();
         }
 
