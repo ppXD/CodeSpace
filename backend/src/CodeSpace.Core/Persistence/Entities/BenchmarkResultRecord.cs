@@ -33,6 +33,9 @@ public class BenchmarkResultRecord : IEntity<Guid>, IAuditable
 
     public string? ObservedModel { get; set; }
 
+    /// <summary>SHA-256 of the exact terminal BenchmarkResult sealed by the paired cell admission. Null for legacy and non-paired observations.</summary>
+    public string? SourceResultDigest { get; set; }
+
     public Guid? ObservationGroupId { get; set; }
 
     public string? ObservationArm { get; set; }

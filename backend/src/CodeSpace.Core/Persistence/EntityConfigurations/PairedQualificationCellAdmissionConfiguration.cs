@@ -15,6 +15,8 @@ public sealed class PairedQualificationCellAdmissionConfiguration : IEntityTypeC
         builder.Property(value => value.TaskId).HasMaxLength(200);
         builder.Property(value => value.Mode).HasMaxLength(40);
         builder.Property(value => value.ResultJson).HasColumnType("jsonb");
+        builder.Property(value => value.ResultDigest).HasMaxLength(64);
+        builder.Property(value => value.ResultProjectionJson).HasColumnType("jsonb");
         builder.HasIndex(value => new { value.ObservationGroupId, value.ObservationSession, value.ObservationArm, value.TaskId, value.Mode }).IsUnique().HasDatabaseName("uq_paired_qualification_cell_admission_key");
     }
 }

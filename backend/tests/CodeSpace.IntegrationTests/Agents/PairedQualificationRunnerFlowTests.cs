@@ -180,6 +180,19 @@ public sealed class PairedQualificationRunnerFlowTests
         }
         using (var duplicateScope = _fixture.BeginScope())
             (await duplicateScope.Resolve<IPairedQualificationCellAdmissionStore>().AdmitAsync(request, CancellationToken.None)).Decision.ShouldBe(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
+        using (var forgedAdmissionScope = _fixture.BeginScope())
+        {
+            var forged = FakePairedCorpus.Result(false, "candidate-model");
+            forgedAdmissionScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.Add(new PairedQualificationCellAdmission
+            {
+                Id = Guid.NewGuid(), ObservationGroupId = groupId, ObservationSession = 0, ObservationArm = "candidate", TaskId = forged.TaskId,
+                Mode = forged.Mode.ToString(), ModelCredentialModelId = candidateRow, ResultJson = JsonSerializer.Serialize(forged, CodeSpace.Core.Services.Agents.AgentJson.Options),
+                ResultDigest = BenchmarkResultDigest.Compute(forged), ResultProjectionJson = JsonSerializer.Serialize(BenchmarkResultObservationProjection.FromPaired(forged), CodeSpace.Core.Services.Agents.AgentJson.Options),
+                CompletedAt = DateTimeOffset.UtcNow,
+            });
+            var precompleted = await Should.ThrowAsync<DbUpdateException>(() => forgedAdmissionScope.Resolve<CodeSpaceDbContext>().SaveChangesAsync());
+            precompleted.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("must begin open");
+        }
 
         using (var wiredScope = _fixture.BeginScope())
         {
@@ -214,7 +227,11 @@ public sealed class PairedQualificationRunnerFlowTests
             delete.MessageText.ShouldContain("checkpoint is append-only");
         }
 
-        var terminal = FakePairedCorpus.Result(false, "control-model");
+        var terminal = FakePairedCorpus.Result(false, "control-model") with
+        {
+            CostUsd = null,
+            Grade = new BenchmarkGrade { Passed = false, Detail = "grader-unavailable", Class = GradeFailureClass.GraderFault },
+        };
         using (var unsettledScope = _fixture.BeginScope())
         {
             var unsettled = await Should.ThrowAsync<DbUpdateException>(() => unsettledScope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
@@ -238,6 +255,32 @@ public sealed class PairedQualificationRunnerFlowTests
             await completions.CompleteAsync(admitted.AdmissionId, terminal, CancellationToken.None);
             await Should.ThrowAsync<InvalidOperationException>(() => completions.CompleteAsync(admitted.AdmissionId, terminal with { ObservedModel = "different" }, CancellationToken.None));
         }
+        using (var mismatchedObservationScope = _fixture.BeginScope())
+        {
+            var mismatch = await Should.ThrowAsync<DbUpdateException>(() => mismatchedObservationScope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden").Version,
+                Result = terminal with { ObservedModel = "different" }, Selection = Selection(controlRow) with { Model = "control-model", MaxCostUsd = 3m },
+                ObservationGroupId = groupId, ObservationArm = "control", ObservationSession = 0, CodeRevision = new string('f', 40),
+            }, CancellationToken.None));
+            mismatch.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("does not match its sealed admission result");
+        }
+        using (var forgedProjectionScope = _fixture.BeginScope())
+        {
+            var db = forgedProjectionScope.Resolve<CodeSpaceDbContext>();
+            db.BenchmarkResultRecord.Add(new BenchmarkResultRecord
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, SuiteVersion = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden").Version,
+                TaskId = terminal.TaskId, Mode = terminal.Mode.ToString(), Harness = "claude-code", Model = "control-model", ModelCredentialModelId = controlRow,
+                ObservedModel = terminal.ObservedModel, SourceResultDigest = BenchmarkResultDigest.Compute(terminal),
+                ObservationGroupId = groupId, ObservationArm = "control", ObservationSession = 0,
+                OutcomeState = CorpusCellState.Solved.ToString(), OutcomeDetail = terminal.Grade.Detail, Solved = false,
+                RunStatus = terminal.RunStatus.ToString(), McpFullCatalog = terminal.McpFullCatalog, CostUsd = terminal.CostUsd, CostIndeterminate = true,
+                MaxCostUsd = 3m, GitSha = new string('f', 40),
+            });
+            var mismatch = await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            mismatch.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("does not match its sealed admission result");
+        }
         using (var falseInfraScope = _fixture.BeginScope())
         {
             var falseInfra = await Should.ThrowAsync<DbUpdateException>(() => falseInfraScope.Resolve<IBenchmarkResultStore>().RecordInfraAsync(new BenchmarkInfraObservationWrite
@@ -248,6 +291,19 @@ public sealed class PairedQualificationRunnerFlowTests
                 ObservationArm = "control", ObservationSession = 0, CodeRevision = new string('f', 40),
             }, CancellationToken.None));
             falseInfra.InnerException.ShouldBeOfType<PostgresException>().MessageText.ShouldContain("terminal result cannot be replaced");
+        }
+        using (var boundObservationScope = _fixture.BeginScope())
+        {
+            await boundObservationScope.Resolve<IBenchmarkResultStore>().RecordAsync(new BenchmarkObservationWrite
+            {
+                TeamId = teamId, SuiteVersion = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden").Version,
+                Result = terminal, Selection = Selection(controlRow) with { Model = "control-model", MaxCostUsd = 3m },
+                ObservationGroupId = groupId, ObservationArm = "control", ObservationSession = 0, CodeRevision = new string('f', 40),
+            }, CancellationToken.None);
+            var bound = await boundObservationScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().SingleAsync(value => value.ObservationGroupId == groupId);
+            bound.SourceResultDigest.ShouldNotBeNull().Length.ShouldBe(64);
+            bound.OutcomeState.ShouldBe(CorpusCellState.InfraUnknown.ToString(), "a terminal grader fault remains a result-derived InfraUnknown and is distinguishable from an unsealed infrastructure write by its digest");
+            bound.CostIndeterminate.ShouldBeTrue("a paired result with unknown spend must remain unknown in its sealed projection");
         }
         using (var recoveredScope = _fixture.BeginScope())
         {
@@ -440,7 +496,7 @@ public sealed class PairedQualificationRunnerFlowTests
                    minimum_required_execution_clusters, minimum_evaluator_health, max_cost_usd_per_launch,
                    minimum_quality_lift, non_inferiority_margin, minimum_cost_reduction, require_distinct_observed_models,
                    ordering_seed, protocol_digest, control_selection_json::text, candidate_selection_json::text,
-                   requires_cell_admission
+                   requires_cell_admission, requires_result_digest
             FROM paired_qualification_protocol
             WHERE observation_group_id = @group_id
             """;
@@ -480,6 +536,7 @@ public sealed class PairedQualificationRunnerFlowTests
         candidate.Model.ShouldBe("candidate-model");
         candidate.MaxCostUsd.ShouldBe(3m);
         reader.GetBoolean(22).ShouldBeTrue("new protocols must bind pre-execution admission into their immutable policy and digest");
+        reader.GetBoolean(23).ShouldBeTrue("new protocols must bind every observation to its sealed terminal result");
         (await reader.ReadAsync()).ShouldBeFalse();
         return digest;
     }

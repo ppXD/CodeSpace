@@ -73,6 +73,7 @@ public sealed class PairedQualificationRecoveryService : IPairedQualificationRec
                         select (session, arm, cell.TaskId, Mode: cell.Mode.ToString())).ToHashSet();
         var actual = observations.Select(row => (row.ObservationSession ?? -1, row.ObservationArm ?? string.Empty, row.TaskId, row.Mode)).ToHashSet();
         if (observations.Count != expected.Count || actual.Count != observations.Count || !actual.SetEquals(expected)) throw Invalid("observation-census-mismatch");
+        if (protocol.RequiresResultDigest && observations.Any(row => string.IsNullOrWhiteSpace(row.SourceResultDigest))) throw Invalid("observation-result-digest-missing");
     }
 
     private static CorpusBenchmarkRun Rehydrate(EvalSuiteManifest manifest, IEnumerable<BenchmarkResultRecord> source)
