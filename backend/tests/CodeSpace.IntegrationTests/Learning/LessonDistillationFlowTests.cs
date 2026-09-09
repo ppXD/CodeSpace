@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -10,6 +11,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -121,6 +123,63 @@ public sealed class LessonDistillationFlowTests
         (await verify.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().CountAsync(lesson => lesson.Id == expiredId)).ShouldBe(1);
     }
 
+    [Fact]
+    public async Task Different_modes_and_repositories_are_distilled_in_separate_bounded_prompts()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        var repositoryA = Guid.NewGuid();
+        var repositoryB = Guid.NewGuid();
+        var supervisorRun = await SeedFailedRunAsync(teamId, userId, new FailedRunSeed("supervisor-failure") { ProjectionKind = TaskProjectionKinds.Supervisor, RepositoryId = repositoryA });
+        var otherRepositoryRun = await SeedFailedRunAsync(teamId, userId, new FailedRunSeed("other-repository-failure") { ProjectionKind = TaskProjectionKinds.Supervisor, RepositoryId = repositoryB });
+        var mapRun = await SeedFailedRunAsync(teamId, userId, new FailedRunSeed("map-failure") { ProjectionKind = TaskProjectionKinds.PlanMapDynamic, RepositoryId = repositoryA });
+        var now = DateTimeOffset.UtcNow;
+
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            db.Lesson.AddRange(Enumerable.Range(0, LessonReader.MaxTake + 5).Select(index => new Lesson
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, Mode = RunModeKeys.Supervisor, RepositoryId = repositoryA,
+                FailureClass = $"scope-marker-{index}", WhatFailed = "old", Why = "old", HowToApply = "old",
+                SourceRunIds = [Guid.NewGuid()], DistilledByModel = "old-model", ValidFrom = now.AddMinutes(-index - 1), ExpiresAt = now.AddDays(1),
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        var canned = new CannedClient(JsonSerializer.SerializeToElement(new { lessons = Array.Empty<object>() }));
+        await DistillTeamAsync(teamId, canned);
+
+        canned.Calls.ShouldBe(3, "each structural mode/repository scope gets its own model call");
+        var supervisorPrompt = canned.Requests.Single(request => request.UserPrompt.Contains(supervisorRun.ToString(), StringComparison.Ordinal)).UserPrompt;
+        var otherRepositoryPrompt = canned.Requests.Single(request => request.UserPrompt.Contains(otherRepositoryRun.ToString(), StringComparison.Ordinal)).UserPrompt;
+        var mapPrompt = canned.Requests.Single(request => request.UserPrompt.Contains(mapRun.ToString(), StringComparison.Ordinal)).UserPrompt;
+        supervisorPrompt.ShouldNotContain(otherRepositoryRun.ToString());
+        supervisorPrompt.ShouldNotContain(mapRun.ToString());
+        mapPrompt.ShouldNotContain(supervisorRun.ToString());
+        otherRepositoryPrompt.ShouldNotContain("scope-marker-");
+        supervisorPrompt.Split("id=", StringSplitOptions.None).Length.ShouldBe(LessonReader.MaxTake + 1, "current memory is bounded before entering the model context");
+        mapPrompt.ShouldNotContain("scope-marker-");
+    }
+
+    [Fact]
+    public async Task A_later_scope_failure_cannot_leak_an_earlier_scope_fold_into_a_future_save()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        await SeedFailedRunAsync(teamId, userId, new FailedRunSeed("map-failure") { ProjectionKind = TaskProjectionKinds.PlanMapDynamic });
+        await SeedFailedRunAsync(teamId, userId, new FailedRunSeed("supervisor-failure") { ProjectionKind = TaskProjectionKinds.Supervisor });
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var distiller = Distiller(scope, new AddThenThrowClient());
+
+        await Should.ThrowAsync<InvalidOperationException>(() => distiller.DistillTeamAsync(teamId, CancellationToken.None));
+        await db.SaveChangesAsync();
+
+        (await db.Lesson.AsNoTracking().CountAsync(lesson => lesson.TeamId == teamId)).ShouldBe(0, "a caller's later SaveChanges cannot commit an earlier scope from the failed advisory round");
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private async Task DistillTeamAsync(Guid teamId, IStructuredLLMClient client)
@@ -165,21 +224,24 @@ public sealed class LessonDistillationFlowTests
 
     /// <summary>A real run row through the real snapshot starter, then stamped into the distiller's window shape (Failure + error + terminal stamp).</summary>
     private async Task<Guid> SeedFailedRunAsync(Guid teamId, Guid userId, string error, string? purpose = null)
+        => await SeedFailedRunAsync(teamId, userId, new FailedRunSeed(error) { Purpose = purpose });
+
+    private async Task<Guid> SeedFailedRunAsync(Guid teamId, Guid userId, FailedRunSeed seed)
     {
         Guid runId;
         using (var scope = _fixture.BeginScope())
             runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
                 WorkflowsTestSeed.MinimalDefinition(), teamId, userId,
-                launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
+                launchPayloadJson: null, scopeRepositoryIds: seed.RepositoryId is { } repositoryId ? [repositoryId] : null, projectionKind: seed.ProjectionKind, session: null, CancellationToken.None);
 
         using (var stamp = _fixture.BeginScope())
         {
             var db = stamp.Resolve<CodeSpaceDbContext>();
             var run = await db.WorkflowRun.SingleAsync(r => r.Id == runId);
             run.Status = WorkflowRunStatus.Failure;
-            run.Error = error;
+            run.Error = seed.Error;
             run.CompletedAt = DateTimeOffset.UtcNow;
-            run.Purpose = purpose;
+            run.Purpose = seed.Purpose;
             await db.SaveChangesAsync();
         }
 
@@ -204,12 +266,13 @@ public sealed class LessonDistillationFlowTests
         public CannedClient(JsonElement json) { _json = json; }
         public string Provider => "Anthropic";
         public int Calls { get; private set; }
-        public StructuredLLMCompletionRequest? LastRequest { get; private set; }
+        public List<StructuredLLMCompletionRequest> Requests { get; } = [];
+        public StructuredLLMCompletionRequest? LastRequest => Requests.LastOrDefault();
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
         {
             Calls++;
-            LastRequest = request;
+            Requests.Add(request);
             return Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
         }
     }
@@ -219,5 +282,27 @@ public sealed class LessonDistillationFlowTests
         public string Provider => "Anthropic";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw new NotSupportedException();
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => throw new InvalidOperationException("boom");
+    }
+
+    private sealed class AddThenThrowClient : ILLMClient, IStructuredLLMClient
+    {
+        private int _calls;
+        public string Provider => "Anthropic";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => throw new NotSupportedException();
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct)
+        {
+            if (++_calls > 1) throw new InvalidOperationException("second scope failed");
+            var prefix = "### run ";
+            var start = request.UserPrompt.IndexOf(prefix, StringComparison.Ordinal) + prefix.Length;
+            var runId = Guid.Parse(request.UserPrompt.Substring(start, 36));
+            return Task.FromResult(new StructuredLLMCompletion { Json = Proposals(runId), Model = request.Model });
+        }
+    }
+
+    private sealed record FailedRunSeed(string Error)
+    {
+        public string? Purpose { get; init; }
+        public string? ProjectionKind { get; init; }
+        public Guid? RepositoryId { get; init; }
     }
 }
