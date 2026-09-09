@@ -166,6 +166,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
             }
 
             outcome.SuiteDigest.ShouldBe(input.Suite.SuiteContentHash);
+            outcome.ProtocolDigest.ShouldNotBeNull().Length.ShouldBe(64, "the paid paired run must expose its durable pre-outcome protocol identity");
             outcome.PairedCells.ShouldBe(input.Suite.Tasks.Sum(task => task.Modes.Count));
             if (usedFallbackBaseline)
             {
@@ -179,6 +180,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
                 schema = PairedQualificationOutcome.StatisticsVersion,
                 suiteKind = input.SuiteKind,
                 outcome.ObservationGroupId,
+                outcome.ProtocolDigest,
                 outcome.CodeRevision,
                 outcome.SuiteDigest,
                 outcome.SuiteVersion,

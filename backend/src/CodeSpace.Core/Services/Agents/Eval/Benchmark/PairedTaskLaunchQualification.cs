@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents.Benchmark;
 using Microsoft.EntityFrameworkCore;
 
@@ -83,6 +84,7 @@ public sealed record PairedQualificationOutcome
     public const string StatisticsVersion = "paired-cluster-bootstrap/v1";
 
     public required Guid ObservationGroupId { get; init; }
+    public string? ProtocolDigest { get; init; }
     public required string CodeRevision { get; init; }
     public required string SuiteDigest { get; init; }
     public required string SuiteVersion { get; init; }
@@ -143,6 +145,9 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         var groupId = Guid.NewGuid();
         var control = await CanonicalizeAsync(request.TeamId, request.Control, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
         var candidate = await CanonicalizeAsync(request.TeamId, request.Candidate, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
+        var protocol = BuildProtocol(groupId, request, manifest, suite, control, candidate);
+        _db.PairedQualificationProtocol.Add(protocol);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         var sessions = new List<PairedCorpusBenchmarkRun>();
 
         for (var session = 0; session < request.Spec.SessionsPerCell; session++)
@@ -159,7 +164,38 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         {
             ObservationGroupId = groupId, CodeRevision = request.CodeRevision, Suite = suite, Manifest = manifest,
             Spec = request.Spec, Control = control, Candidate = candidate, Sessions = sessions,
-        });
+        }) with { ProtocolDigest = protocol.ProtocolDigest };
+    }
+
+    private static PairedQualificationProtocol BuildProtocol(Guid groupId, PairedQualificationRequest request, EvalSuiteManifest manifest, HiddenSuite suite, BenchmarkAgentSelection control, BenchmarkAgentSelection candidate)
+    {
+        var spec = request.Spec;
+        var protocol = new PairedQualificationProtocol
+        {
+            ObservationGroupId = groupId, TeamId = request.TeamId, SuiteDigest = suite.SuiteContentHash, SuiteVersion = manifest.Version,
+            CodeRevision = request.CodeRevision, ControlModelRowId = control.ModelCredentialModelId!.Value, CandidateModelRowId = candidate.ModelCredentialModelId!.Value,
+            StatisticsVersion = PairedQualificationOutcome.StatisticsVersion, Criterion = spec.Criterion.ToString(), SessionsPerCell = spec.SessionsPerCell,
+            MinimumIndependentClusters = spec.MinimumIndependentClusters, MinimumStrata = spec.MinimumStrata,
+            MinimumRequiredExecutionClusters = spec.MinimumRequiredExecutionClusters, MinimumEvaluatorHealth = spec.MinimumEvaluatorHealth,
+            MaxCostUsdPerLaunch = spec.MaxCostUsdPerLaunch, MinimumQualityLift = spec.MinimumQualityLift, NonInferiorityMargin = spec.NonInferiorityMargin,
+            MinimumCostReduction = spec.MinimumCostReduction, RequireDistinctObservedModels = spec.RequireDistinctObservedModels, OrderingSeed = spec.OrderingSeed,
+        };
+        protocol.ProtocolDigest = ProtocolDigest(protocol);
+        return protocol;
+    }
+
+    private static string ProtocolDigest(PairedQualificationProtocol protocol)
+    {
+        var fields = new object[]
+        {
+            protocol.ObservationGroupId, protocol.TeamId, protocol.SuiteDigest, protocol.SuiteVersion, protocol.CodeRevision,
+            protocol.ControlModelRowId, protocol.CandidateModelRowId, protocol.StatisticsVersion, protocol.Criterion,
+            protocol.SessionsPerCell, protocol.MinimumIndependentClusters, protocol.MinimumStrata, protocol.MinimumRequiredExecutionClusters,
+            protocol.MinimumEvaluatorHealth, protocol.MaxCostUsdPerLaunch, protocol.MinimumQualityLift, protocol.NonInferiorityMargin,
+            protocol.MinimumCostReduction, protocol.RequireDistinctObservedModels, protocol.OrderingSeed,
+        };
+        var canonical = System.Text.Json.JsonSerializer.Serialize(fields, Agents.AgentJson.Options);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     private async Task<BenchmarkAgentSelection> CanonicalizeAsync(Guid teamId, BenchmarkAgentSelection selection, decimal cap, CancellationToken cancellationToken)

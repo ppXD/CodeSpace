@@ -112,6 +112,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<CaptureIntent> CaptureIntent => Set<CaptureIntent>();
     public DbSet<ArtifactManifest> ArtifactManifest => Set<ArtifactManifest>();
     public DbSet<QualificationReceipt> QualificationReceipt => Set<QualificationReceipt>();
+    public DbSet<PairedQualificationProtocol> PairedQualificationProtocol => Set<PairedQualificationProtocol>();
 
     public DbSet<Lesson> Lesson => Set<Lesson>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
