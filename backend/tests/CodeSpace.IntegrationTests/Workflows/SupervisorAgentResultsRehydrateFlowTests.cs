@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -443,11 +444,12 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         using (var seed = _fixture.BeginScope())
         {
             var db = seed.Resolve<CodeSpaceDbContext>();
+            var validFrom = DateTimeOffset.UtcNow;
             db.Lesson.Add(new CodeSpace.Core.Persistence.Entities.Lesson
             {
                 Id = Guid.NewGuid(), TeamId = teamId, Mode = "supervisor", FailureClass = "broken-acceptance-command",
                 WhatFailed = "check.sh exits 2", Why = "unrestored", HowToApply = "run restore before check.sh",
-                SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow,
+                SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = validFrom, ExpiresAt = validFrom.Add(LessonConsolidation.Lifetime),
             });
             await db.SaveChangesAsync();
         }
