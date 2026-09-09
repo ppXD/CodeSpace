@@ -13,6 +13,7 @@ public class PairedQualificationProtocol : IAuditable
     public string? ControlSelectionJson { get; set; }
     public string? CandidateSelectionJson { get; set; }
     public bool RequiresCellAdmission { get; set; }
+    public bool RequiresResultDigest { get; set; }
     public string StatisticsVersion { get; set; } = string.Empty;
     public string Criterion { get; set; } = string.Empty;
     public int SessionsPerCell { get; set; }

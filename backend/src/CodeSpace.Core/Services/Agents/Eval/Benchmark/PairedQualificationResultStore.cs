@@ -65,6 +65,7 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
         if (observations.Count != expectedCount || actual.Count != observations.Count || !actual.SetEquals(expected)) throw Invalid("observation-census-mismatch");
         if (observations.Any(row => row.TeamId != protocol.TeamId || row.SuiteVersion != protocol.SuiteVersion || row.GitSha != protocol.CodeRevision || row.MaxCostUsd != protocol.MaxCostUsdPerLaunch)) throw Invalid("observation-protocol-mismatch");
         if (observations.Any(row => row.ModelCredentialModelId != (row.ObservationArm == "control" ? protocol.ControlModelRowId : protocol.CandidateModelRowId))) throw Invalid("observation-model-row-mismatch");
+        if (protocol.RequiresResultDigest && observations.Any(row => string.IsNullOrWhiteSpace(row.SourceResultDigest))) throw Invalid("observation-result-digest-missing");
         if (outcome.ObservationGroupId != protocol.ObservationGroupId || outcome.ProtocolDigest != protocol.ProtocolDigest || outcome.CodeRevision != protocol.CodeRevision || outcome.SuiteDigest != protocol.SuiteDigest || outcome.SuiteVersion != protocol.SuiteVersion || outcome.PairedCells * 2 != expectedCount) throw Invalid("outcome-protocol-mismatch");
         if (protocol.StatisticsVersion != PairedQualificationOutcome.StatisticsVersion) throw Invalid("statistics-version-mismatch");
     }
@@ -76,6 +77,7 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
         .Select(row => new
         {
             row.Id, row.TeamId, row.SuiteVersion, row.TaskId, row.Mode, row.Harness, row.Model, row.ModelCredentialModelId,
+            row.SourceResultDigest,
             row.ObservedModel, row.ObservationGroupId, row.ObservationArm, row.ObservationSession, row.OutcomeState,
             row.OutcomeDetail, row.AgentRunId, row.Solved, row.RunStatus, row.ReviseRounds, row.McpFullCatalog,
             row.ExitReason, row.CostUsd, row.CostIndeterminate, row.MaxCostUsd, row.DurationSeconds, row.GitSha, row.CiRunId,

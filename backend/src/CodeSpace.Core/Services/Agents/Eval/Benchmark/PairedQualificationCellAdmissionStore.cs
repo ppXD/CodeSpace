@@ -107,12 +107,17 @@ public sealed class PairedQualificationCellAdmissionStore : IPairedQualification
             ?? throw new InvalidOperationException($"Paired qualification cell admission {admissionId} was not found.");
         if (row.TaskId != result.TaskId || row.Mode != result.Mode.ToString()) throw new InvalidOperationException("Paired qualification result identity does not match its admission.");
         var json = JsonSerializer.Serialize(result, Agents.AgentJson.Options);
+        var digest = BenchmarkResultDigest.Compute(result);
+        var projectionJson = JsonSerializer.Serialize(BenchmarkResultObservationProjection.FromPaired(result), Agents.AgentJson.Options);
         if (row.ResultJson is not null)
         {
             if (!Equivalent(row.ResultJson, json)) throw new InvalidOperationException("Paired qualification cell admission already has a different terminal result.");
+            if (row.ResultDigest is not null && row.ResultDigest != digest) throw new InvalidOperationException("Paired qualification cell admission has an invalid terminal result digest.");
             return;
         }
         row.ResultJson = json;
+        row.ResultDigest = digest;
+        row.ResultProjectionJson = projectionJson;
         row.CompletedAt = DateTimeOffset.UtcNow;
         try
         {

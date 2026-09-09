@@ -11,6 +11,8 @@ public sealed class PairedQualificationCellAdmission : IEntity<Guid>, IAuditable
     public string Mode { get; set; } = string.Empty;
     public Guid ModelCredentialModelId { get; set; }
     public string? ResultJson { get; set; }
+    public string? ResultDigest { get; set; }
+    public string? ResultProjectionJson { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }

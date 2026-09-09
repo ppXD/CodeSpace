@@ -97,6 +97,7 @@ public sealed class PairedQualificationCampaignResumeService : IPairedQualificat
         if (actual.Distinct().Count() != actual.Count || actual.Any(key => !expected.Contains(key))) throw Invalid("observation-keyset-invalid");
         if (observations.Any(row => row.TeamId != protocol.TeamId || row.SuiteVersion != protocol.SuiteVersion || row.GitSha != protocol.CodeRevision || row.MaxCostUsd != protocol.MaxCostUsdPerLaunch)) throw Invalid("observation-protocol-mismatch");
         if (observations.Any(row => !Matches(row, row.ObservationArm == "control" ? control : candidate))) throw Invalid("observation-selection-mismatch");
+        if (protocol.RequiresResultDigest && observations.Any(row => string.IsNullOrWhiteSpace(row.SourceResultDigest))) throw Invalid("observation-result-digest-missing");
     }
 
     private static bool Matches(BenchmarkResultRecord row, BenchmarkAgentSelection selection) => row.ModelCredentialModelId == selection.ModelCredentialModelId && row.Harness == selection.Harness && row.Model == selection.Model;

@@ -17,6 +17,7 @@ public class BenchmarkResultRecordConfiguration : IEntityTypeConfiguration<Bench
         builder.Property(r => r.Harness).HasMaxLength(60);
         builder.Property(r => r.Model).HasMaxLength(200);
         builder.Property(r => r.ObservedModel).HasMaxLength(200);
+        builder.Property(r => r.SourceResultDigest).HasMaxLength(64);
         builder.Property(r => r.ObservationArm).HasMaxLength(40);
         builder.Property(r => r.OutcomeState).HasMaxLength(30);
         builder.Property(r => r.OutcomeDetail).HasColumnType("text");

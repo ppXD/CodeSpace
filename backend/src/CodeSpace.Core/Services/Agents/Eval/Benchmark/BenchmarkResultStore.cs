@@ -36,7 +36,8 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
         var result = request.Result;
         var selection = request.Selection;
         var paired = request.ObservationGroupId is not null;
-        var costIndeterminate = result.CostIndeterminate || paired && result.CostUsd is null;
+        var pairedProjection = paired ? BenchmarkResultObservationProjection.FromPaired(result) : null;
+        var costIndeterminate = pairedProjection?.CostIndeterminate ?? result.CostIndeterminate;
         var row = new BenchmarkResultRecord
         {
             Id = Guid.NewGuid(),
@@ -47,22 +48,23 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
             Harness = selection?.Harness,
             Model = selection?.Model,
             ModelCredentialModelId = selection?.ModelCredentialModelId,
-            ObservedModel = result.ObservedModel,
+            ObservedModel = pairedProjection?.ObservedModel ?? result.ObservedModel,
+            SourceResultDigest = paired ? BenchmarkResultDigest.Compute(result) : null,
             ObservationGroupId = request.ObservationGroupId,
             ObservationArm = request.ObservationArm,
             ObservationSession = request.ObservationSession,
-            OutcomeState = EvalSuite.ClassifyResult(result).ToString(),
-            OutcomeDetail = result.Grade.Detail,
-            AgentRunId = result.AgentRunId,
-            Solved = result.Grade.Passed,
-            RunStatus = result.RunStatus.ToString(),
-            ReviseRounds = result.ReviseRounds,
-            McpFullCatalog = result.McpFullCatalog,
-            ExitReason = result.ExitReason,
-            CostUsd = costIndeterminate ? null : paired ? result.CostUsd : result.CostUsd ?? PriceOf(result, selection),
+            OutcomeState = pairedProjection?.OutcomeState ?? EvalSuite.ClassifyResult(result).ToString(),
+            OutcomeDetail = pairedProjection?.OutcomeDetail ?? result.Grade.Detail,
+            AgentRunId = pairedProjection?.AgentRunId ?? result.AgentRunId,
+            Solved = pairedProjection?.Solved ?? result.Grade.Passed,
+            RunStatus = pairedProjection?.RunStatus ?? result.RunStatus.ToString(),
+            ReviseRounds = pairedProjection?.ReviseRounds ?? result.ReviseRounds,
+            McpFullCatalog = pairedProjection?.McpFullCatalog ?? result.McpFullCatalog,
+            ExitReason = pairedProjection?.ExitReason ?? result.ExitReason,
+            CostUsd = paired ? pairedProjection!.CostUsd : result.CostUsd ?? PriceOf(result, selection),
             CostIndeterminate = costIndeterminate,
             MaxCostUsd = selection?.MaxCostUsd,
-            DurationSeconds = result.DurationSeconds,
+            DurationSeconds = pairedProjection?.DurationSeconds ?? result.DurationSeconds,
             GitSha = request.CodeRevision ?? Env(GitShaEnvVar),
             CiRunId = Env(CiRunIdEnvVar),
         };
