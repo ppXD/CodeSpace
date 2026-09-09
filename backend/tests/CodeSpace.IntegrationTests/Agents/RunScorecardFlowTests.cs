@@ -267,6 +267,34 @@ public class RunScorecardFlowTests
     }
 
     [Fact]
+    public async Task The_trend_arm_slice_reads_cost_and_human_interference_from_the_same_durable_rows()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var today = new DateTimeOffset(DateTime.UtcNow.Date, TimeSpan.Zero);
+
+        await SeedRowAsync(teamId, today, headline: false, arm: LessonArms.Injected, humanTouches: 0, cost: 1.20m, brain: 0.30m);
+        await SeedRowAsync(teamId, today, headline: false, arm: LessonArms.Injected, humanTouches: 2, cost: null, brain: 0.50m);
+        await SeedRowAsync(teamId, today, headline: false, arm: LessonArms.Withheld, humanTouches: 1, cost: null, brain: null);
+
+        var trend = await TrendAsync(userId, teamId, days: 7);
+
+        var injected = trend.ByLessonArm.Single(slice => slice.Arm == LessonArms.Injected);
+        injected.HumanInterventionRate.ShouldBe(0.5d);
+        injected.AvgHumanTouches.ShouldBe(1d);
+        injected.TotalCostUsd.ShouldBe(1.20m);
+        injected.UnknownCostRuns.ShouldBe(1);
+        injected.BrainPlaneUsd.ShouldBe(0.80m);
+        injected.UnknownBrainCostRuns.ShouldBe(0);
+
+        var withheld = trend.ByLessonArm.Single(slice => slice.Arm == LessonArms.Withheld);
+        withheld.HumanInterventionRate.ShouldBe(1d);
+        withheld.TotalCostUsd.ShouldBeNull();
+        withheld.UnknownCostRuns.ShouldBe(1);
+        withheld.BrainPlaneUsd.ShouldBeNull();
+        withheld.UnknownBrainCostRuns.ShouldBe(1);
+    }
+
+    [Fact]
     public async Task An_empty_window_reports_no_buckets_rather_than_a_flat_line()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -297,7 +325,11 @@ public class RunScorecardFlowTests
         using (var scope = _fixture.BeginScope())
             card = await scope.Resolve<IUnattendedDeliveryScorecardService>().ComputeAsync(teamId, null, CancellationToken.None);
 
-        card.Rollup.ByLessonArm.Single(s => s.Arm == LessonArms.Injected).UnattendedSolveWithDeliveryRate.ShouldBe(1.0);
+        var injectedSlice = card.Rollup.ByLessonArm.Single(s => s.Arm == LessonArms.Injected);
+        injectedSlice.UnattendedSolveWithDeliveryRate.ShouldBe(1.0);
+        injectedSlice.AvgHumanTouches.ShouldBe(0d);
+        injectedSlice.UnknownCostRuns.ShouldBe(1, "the deterministic run reported no usage and must remain unpriced in its arm");
+        injectedSlice.UnknownBrainCostRuns.ShouldBe(1, "the live scorer does not own brain-plane cost; the durable trend supplies it");
         card.Rollup.ByLessonArm.Single(s => s.Arm == LessonArms.Withheld).UnattendedSolveWithDeliveryRate.ShouldBe(0.0);
         card.Rollup.ByLessonArm.Sum(s => s.Runs).ShouldBe(card.Rollup.TotalRuns, "the slice's denominator must equal the rollup's — a partial population would be a different measurement wearing the same label");
     }
@@ -617,7 +649,7 @@ public class RunScorecardFlowTests
     }
 
     /// <summary>A row seeded DIRECTLY, for the read-side tests — so the trend's bucketing + tenancy are pinned independently of everything the writer has to gather.</summary>
-    private async Task SeedRowAsync(Guid teamId, DateTimeOffset completedAt, bool headline, string? arm = null)
+    private async Task SeedRowAsync(Guid teamId, DateTimeOffset completedAt, bool headline, string? arm = null, int humanTouches = 0, decimal? cost = null, decimal? brain = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -630,8 +662,10 @@ public class RunScorecardFlowTests
             CompletedAt = completedAt,
             Solved = headline,
             Delivered = headline,
-            HumanTouches = 0,
+            HumanTouches = humanTouches,
             UnattendedSolvedWithDelivery = headline,
+            CostUsd = cost,
+            BrainPlaneUsd = brain,
             LessonArm = arm,
             ScorerVersion = UnattendedDeliveryScorer.ScorerVersion,
         });

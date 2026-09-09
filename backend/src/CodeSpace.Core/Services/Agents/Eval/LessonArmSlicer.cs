@@ -36,13 +36,28 @@ public static class LessonArmSlicer
     /// <summary>A row's arm bucket — a blank/absent arm is <see cref="Unmeasured"/>, never silently folded into the <c>none</c> control.</summary>
     private static string Arm(ArmedRunScore row) => string.IsNullOrWhiteSpace(row.LessonArm) ? Unmeasured : row.LessonArm;
 
-    private static LessonArmSlice Fold(string arm, IReadOnlyList<ArmedRunScore> rows) => new()
+    private static LessonArmSlice Fold(string arm, IReadOnlyList<ArmedRunScore> rows)
     {
-        Arm = arm,
-        Runs = rows.Count,
-        SolvedRuns = rows.Count(r => r.Solved),
-        DeliveredRuns = rows.Count(r => r.Delivered),
-        UnattendedSolvedWithDeliveryRuns = rows.Count(r => r.UnattendedSolvedWithDelivery),
-        UnattendedSolveWithDeliveryRate = (double)rows.Count(r => r.UnattendedSolvedWithDelivery) / rows.Count,
-    };
+        var costs = rows.Select(row => row.CostUsd).OfType<decimal>().ToList();
+        var brainCosts = rows.Select(row => row.BrainPlaneUsd).OfType<decimal>().ToList();
+
+        return new LessonArmSlice
+        {
+            Arm = arm,
+            Runs = rows.Count,
+            SolvedRuns = rows.Count(r => r.Solved),
+            DeliveredRuns = rows.Count(r => r.Delivered),
+            UnattendedSolvedWithDeliveryRuns = rows.Count(r => r.UnattendedSolvedWithDelivery),
+            UnattendedSolveWithDeliveryRate = (double)rows.Count(r => r.UnattendedSolvedWithDelivery) / rows.Count,
+            HumanTouchedRuns = rows.Count(r => r.HumanTouches > 0),
+            HumanInterventionRate = (double)rows.Count(r => r.HumanTouches > 0) / rows.Count,
+            AvgHumanTouches = (double)rows.Sum(r => r.HumanTouches) / rows.Count,
+            TotalCostUsd = costs.Count == 0 ? null : costs.Sum(),
+            UnknownCostRuns = rows.Count - costs.Count,
+            AvgCostPerPricedRunUsd = costs.Count == 0 ? null : costs.Average(),
+            BrainPlaneUsd = brainCosts.Count == 0 ? null : brainCosts.Sum(),
+            UnknownBrainCostRuns = rows.Count - brainCosts.Count,
+            AvgBrainPlaneCostPerPricedRunUsd = brainCosts.Count == 0 ? null : brainCosts.Average(),
+        };
+    }
 }

@@ -142,7 +142,8 @@ public sealed class RealModelAgentInjectionE2ETests
             var agent = await db.AgentRun.AsNoTracking().Where(run => run.WorkflowRunId == launch.RunId).OrderBy(run => run.CreatedDate).FirstAsync();
             var task = JsonSerializer.Deserialize<AgentTask>(agent.TaskJson, AgentJson.Options)!;
             task.LessonArm.ShouldBe(LessonArms.Injected);
-            task.LessonIds.ShouldBe([lesson.Id]);
+            task.LessonIds.ShouldNotBeNull();
+            task.LessonIds.ShouldContain(lesson.Id, "a best-of-N retry may leave another valid current lesson in the shared team; the durable receipt must contain this attempt's lesson without pretending it was the only one");
             task.SystemPrompt.ShouldNotBeNull();
             task.SystemPrompt!.ShouldContain(marker);
             task.Goal.ShouldBe(goal);

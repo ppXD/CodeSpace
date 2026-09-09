@@ -29,7 +29,7 @@ public sealed class RunScorecardTrendService : IRunScorecardTrendService, IScope
         var rows = await _db.RunScorecard.AsNoTracking()
             .Where(s => s.TeamId == teamId && s.CompletedAt >= since)
             .OrderBy(s => s.CompletedAt)
-            .Select(s => new TrendRow(s.CompletedAt, s.Solved, s.Delivered, s.UnattendedSolvedWithDelivery, s.CostUsd, s.BrainPlaneUsd, s.LessonArm))
+            .Select(s => new TrendRow(s.CompletedAt, s.Solved, s.Delivered, s.UnattendedSolvedWithDelivery, s.HumanTouches, s.CostUsd, s.BrainPlaneUsd, s.LessonArm))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var unscored = await UnscoredRunsAsync(teamId, since, cancellationToken).ConfigureAwait(false);
@@ -128,9 +128,9 @@ public sealed class RunScorecardTrendService : IRunScorecardTrendService, IScope
     }
 
     /// <summary>One persisted row reduced to what the trend folds over — a data noun kept public so the pure folds are directly unit-testable.</summary>
-    public readonly record struct TrendRow(DateTimeOffset CompletedAt, bool Solved, bool Delivered, bool UnattendedSolvedWithDelivery, decimal? CostUsd, decimal? BrainPlaneUsd, string? LessonArm)
+    public readonly record struct TrendRow(DateTimeOffset CompletedAt, bool Solved, bool Delivered, bool UnattendedSolvedWithDelivery, int HumanTouches, decimal? CostUsd, decimal? BrainPlaneUsd, string? LessonArm)
     {
-        public ArmedRunScore ToArmedScore() => new() { LessonArm = LessonArm, Solved = Solved, Delivered = Delivered, UnattendedSolvedWithDelivery = UnattendedSolvedWithDelivery };
+        public ArmedRunScore ToArmedScore() => new() { LessonArm = LessonArm, Solved = Solved, Delivered = Delivered, UnattendedSolvedWithDelivery = UnattendedSolvedWithDelivery, HumanTouches = HumanTouches, CostUsd = CostUsd, BrainPlaneUsd = BrainPlaneUsd };
     }
 
     /// <summary>A run the rate cannot include: parked (<paramref name="Suspended"/>) or pre-protocol. <paramref name="At"/> is its CreatedDate for a park, its CompletedAt for a legacy terminal.</summary>

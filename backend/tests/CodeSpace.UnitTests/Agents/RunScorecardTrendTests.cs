@@ -24,10 +24,10 @@ public class RunScorecardTrendTests
     private static readonly DateTimeOffset Day1 = new(2026, 9, 1, 0, 0, 0, TimeSpan.Zero);
 
     private static RunScorecardTrendService.TrendRow Row(DateTimeOffset at, bool solved = true, bool delivered = true, bool headline = true, decimal? cost = null, decimal? brain = null, string? arm = null) =>
-        new(at, solved, delivered, headline, cost, brain, arm);
+        new(at, solved, delivered, headline, 0, cost, brain, arm);
 
-    private static ArmedRunScore Armed(string? arm, bool solved = true, bool delivered = true, bool headline = true) =>
-        new() { LessonArm = arm, Solved = solved, Delivered = delivered, UnattendedSolvedWithDelivery = headline };
+    private static ArmedRunScore Armed(string? arm, bool solved = true, bool delivered = true, bool headline = true, int humanTouches = 0, decimal? cost = null, decimal? brain = null) =>
+        new() { LessonArm = arm, Solved = solved, Delivered = delivered, UnattendedSolvedWithDelivery = headline, HumanTouches = humanTouches, CostUsd = cost, BrainPlaneUsd = brain };
 
     /// <summary>Bucket scored rows with no parked/legacy population — the shape most of these cases are about.</summary>
     private static IReadOnlyList<RunScorecardTrendBucket> Bucket(params RunScorecardTrendService.TrendRow[] rows) =>
@@ -220,6 +220,35 @@ public class RunScorecardTrendTests
         injected.DeliveredRuns.ShouldBe(1);
         injected.UnattendedSolvedWithDeliveryRuns.ShouldBe(0, "neither run cleared both gates");
         injected.UnattendedSolveWithDeliveryRate.ShouldBe(0d);
+    }
+
+    [Fact]
+    public void Each_arm_reports_human_interference_and_priced_cost_with_explicit_unknown_denominators()
+    {
+        var slices = LessonArmSlicer.Slice([
+            Armed(LessonArms.Injected, headline: false, humanTouches: 0, cost: 1.25m, brain: 0.25m),
+            Armed(LessonArms.Injected, headline: false, humanTouches: 2, cost: null, brain: 0.50m),
+            Armed(LessonArms.Withheld, headline: false, humanTouches: 1),
+        ]);
+
+        var injected = slices.Single(s => s.Arm == LessonArms.Injected);
+        injected.HumanTouchedRuns.ShouldBe(1);
+        injected.HumanInterventionRate.ShouldBe(0.5d);
+        injected.AvgHumanTouches.ShouldBe(1d);
+        injected.TotalCostUsd.ShouldBe(1.25m);
+        injected.UnknownCostRuns.ShouldBe(1, "an unpriced execution remains in the arm's sample and is never called free");
+        injected.AvgCostPerPricedRunUsd.ShouldBe(1.25m);
+        injected.BrainPlaneUsd.ShouldBe(0.75m);
+        injected.UnknownBrainCostRuns.ShouldBe(0);
+        injected.AvgBrainPlaneCostPerPricedRunUsd.ShouldBe(0.375m);
+
+        var withheld = slices.Single(s => s.Arm == LessonArms.Withheld);
+        withheld.HumanInterventionRate.ShouldBe(1d);
+        withheld.TotalCostUsd.ShouldBeNull("no priceable execution is not a real zero-dollar arm");
+        withheld.UnknownCostRuns.ShouldBe(1);
+        withheld.AvgCostPerPricedRunUsd.ShouldBeNull();
+        withheld.BrainPlaneUsd.ShouldBeNull();
+        withheld.UnknownBrainCostRuns.ShouldBe(1);
     }
 
     // ─── The pinned contracts ─────────────────────────────────────────────────────
