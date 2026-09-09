@@ -1189,7 +1189,7 @@ public class SupervisorTurnServiceTests
 
     private sealed class NoLessonsReader : CodeSpace.Core.Services.Learning.ILessonReader
     {
-        public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.Lesson>> ListCurrentAsync(Guid teamId, Guid? repositoryId, int take, CancellationToken cancellationToken) =>
+        public Task<IReadOnlyList<CodeSpace.Core.Persistence.Entities.Lesson>> ListCurrentAsync(CodeSpace.Core.Services.Learning.LessonReadRequest request, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<CodeSpace.Core.Persistence.Entities.Lesson>>([]);
     }
 }

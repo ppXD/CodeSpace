@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 using Microsoft.Extensions.Logging;
@@ -65,7 +66,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         // D2 (cross-run learning): the distilled lessons ride the plan prompt — under a deterministic, toggle-free
         // A/B arm hashed from team + the UNDECORATED goal (never the prompt text, which a re-plan's feedback fold and
         // the flat-plan constraint both move), so the same task lands in the same arm here and on the supervisor lane.
-        var current = await _lessons.ListCurrentAsync(request.TeamId, request.RepositoryId, LessonTopK, cancellationToken).ConfigureAwait(false);
+        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(request.TeamId, RunModeKeys.PlanMap, request.RepositoryId, DateTimeOffset.UtcNow, LessonTopK), cancellationToken).ConfigureAwait(false);
         var arm = Learning.LessonArms.For(request.TeamId, request.TaskGoal ?? request.TaskText, current.Count);
         var injected = arm == Learning.LessonArms.Injected ? current : Array.Empty<Persistence.Entities.Lesson>();
 
