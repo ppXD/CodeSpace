@@ -79,6 +79,36 @@ public sealed class LessonDistillationFlowTests
     }
 
     [Fact]
+    public async Task Runtime_restrictions_are_grounded_in_cited_agent_envelopes_before_they_are_persisted()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        var runId = await SeedFailedRunAsync(teamId, userId, "tool-specific failure");
+
+        using (var seed = _fixture.BeginScope())
+        {
+            seed.Resolve<CodeSpaceDbContext>().AgentRun.Add(new AgentRun
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = runId, Harness = "Claude-Code", Status = AgentRunStatus.Failed,
+                TaskJson = JsonSerializer.Serialize(new CodeSpace.Messages.Agents.AgentTask { Goal = "inspect", Harness = "Claude-Code", Model = "configured-alias", Tools = ["Git.Status", "git.diff"] }, CodeSpace.Core.Services.Agents.AgentJson.Options),
+                ResultJson = JsonSerializer.Serialize(new CodeSpace.Messages.Agents.AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "failed", Model = "Claude-Opus-4-8" }, CodeSpace.Core.Services.Agents.AgentJson.Options),
+            });
+            await seed.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        }
+
+        var canned = new CannedClient(Proposals(runId, ["claude-opus-4-8"], ["claude-code"], ["git.status"]));
+        await DistillTeamAsync(teamId, canned);
+
+        canned.LastRequest.UserPrompt.ShouldContain("runtime models=[claude-opus-4-8]; harnesses=[claude-code]; tools=[git.diff, git.status]", customMessage: "the CLI-observed model outranks its configured alias");
+        canned.LastRequest.UserPrompt.ShouldNotContain("configured-alias");
+        using var scope = _fixture.BeginScope();
+        var lesson = await scope.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().SingleAsync(row => row.TeamId == teamId);
+        lesson.ApplicableModels.ShouldBe(["claude-opus-4-8"]);
+        lesson.ApplicableHarnesses.ShouldBe(["claude-code"]);
+        lesson.RequiredTools.ShouldBe(["git.status"]);
+    }
+
+    [Fact]
     public async Task Qualification_runs_never_become_lesson_candidates()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -248,9 +278,9 @@ public sealed class LessonDistillationFlowTests
         return runId;
     }
 
-    private static JsonElement Proposals(Guid runId) => JsonSerializer.SerializeToElement(new
+    private static JsonElement Proposals(Guid runId, IReadOnlyList<string>? models = null, IReadOnlyList<string>? harnesses = null, IReadOnlyList<string>? tools = null) => JsonSerializer.SerializeToElement(new
     {
-        lessons = new[] { new { action = "add", existingLessonId = (string?)null, failureClass = "broken-acceptance-command", whatFailed = "the acceptance command exits 2 on a clean tree", why = "check.sh assumes a restored solution", howToApply = "run restore before check.sh in this repo", sourceRunIds = new[] { runId.ToString() } } },
+        lessons = new[] { new { action = "add", existingLessonId = (string?)null, failureClass = "broken-acceptance-command", whatFailed = "the acceptance command exits 2 on a clean tree", why = "check.sh assumes a restored solution", howToApply = "run restore before check.sh in this repo", applicableModels = models ?? [], applicableHarnesses = harnesses ?? [], requiredTools = tools ?? [], sourceRunIds = new[] { runId.ToString() } } },
     });
 
     private sealed class FakeClients : ILLMClientRegistry

@@ -71,6 +71,21 @@ public sealed class LessonInjectionFlowTests
         plan.InjectedLessonIds.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task Planner_fails_closed_on_runtime_specific_lessons_until_a_subtask_runtime_is_resolved()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
+        var general = await SeedLessonAsync(teamId, "general-runtime");
+        await SeedLessonAsync(teamId, "agent-model-specific", ["CLAUDE-OPUS-4-8"]);
+
+        var (plan, client) = await PlanAsync(teamId, TaskTextFor(teamId, LessonArms.Injected));
+
+        plan.InjectedLessonIds.ShouldBe([general]);
+        client.LastUserPrompt.ShouldContain("general-runtime");
+        client.LastUserPrompt.ShouldNotContain("agent-model-specific", customMessage: "the planner brain is not evidence of the future agent runtime");
+    }
+
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     /// <summary>The arm is a pure hash of (team, task text) — walk task texts until one lands on the wanted arm (deterministic, so the test stays stable).</summary>
@@ -92,7 +107,7 @@ public sealed class LessonInjectionFlowTests
         return (plan, client);
     }
 
-    private async Task<Guid> SeedLessonAsync(Guid teamId, string howToApply)
+    private async Task<Guid> SeedLessonAsync(Guid teamId, string howToApply, IReadOnlyList<string>? applicableModels = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -100,6 +115,7 @@ public sealed class LessonInjectionFlowTests
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = RunModeKeys.PlanMap, FailureClass = "broken-acceptance-command",
             WhatFailed = "check.sh exits 2 on a clean tree", Why = "unrestored solution", HowToApply = howToApply,
+            ApplicableModels = applicableModels?.Select(value => value.Trim().ToLowerInvariant()).ToList() ?? [],
             SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.Add(LessonConsolidation.Lifetime),
         };
         db.Lesson.Add(lesson);

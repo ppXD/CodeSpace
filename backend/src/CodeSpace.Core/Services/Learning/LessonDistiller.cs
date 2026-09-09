@@ -3,8 +3,10 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -37,7 +39,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
     /// <summary>How far back a round looks — parked runs gate on their park stamp, failed runs on their terminal stamp.</summary>
     public static readonly TimeSpan Window = TimeSpan.FromHours(24);
 
-    private const string SystemPrompt = "You are the post-mortem analyst for an autonomous coding platform. You are shown yesterday's failed or parked workflow runs (their error text and supervisor decision tape) and the team's CURRENT lessons. Distill durable, actionable lessons a PLANNER can apply before the next run. Consolidate: update or invalidate an existing lesson rather than adding a near-duplicate. Cite only the run ids you were shown. Lessons must be concrete (name commands, files, repos as they appear), never generic advice.";
+    private const string SystemPrompt = "You are the post-mortem analyst for an autonomous coding platform. You are shown yesterday's failed or parked workflow runs (their error text, supervisor decision tape, and observed runtime capabilities) and the team's CURRENT lessons. Distill durable, actionable lessons a PLANNER can apply before the next run. Consolidate: update or invalidate an existing lesson rather than adding a near-duplicate. Cite only the run ids you were shown. Lessons must be concrete (name commands, files, repos as they appear), never generic advice. Applicability arrays are optional restrictions: use only values shown on EVERY cited run; use [] when the lesson is independent of that runtime dimension.";
 
     private readonly ILLMClientRegistry _clients;
     private readonly IModelPoolSelector _models;
@@ -123,7 +125,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
 
                 var completion = await structured.CompleteStructuredAsync(BuildRequest(pick, current, scopedCandidates.Values), cancellationToken).ConfigureAwait(false);
                 var proposals = completion.Json.Deserialize<LessonProposals>(LessonDistillationSchema.Options) ?? new LessonProposals();
-                var fold = LessonConsolidation.Apply(current, proposals, scopedCandidates, teamId, completion.Model, DateTimeOffset.UtcNow);
+                var fold = LessonConsolidation.Apply(new LessonConsolidationRequest(current, proposals, scopedCandidates, teamId, completion.Model, DateTimeOffset.UtcNow));
 
                 foreach (var rejection in fold.Rejections)
                     _logger.LogWarning("Lesson proposal refused for team {TeamId}, mode {Mode}, repository {RepositoryId}: {Reason}", teamId, scope.Mode, scope.RepositoryId, rejection);
@@ -176,9 +178,15 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
         if (fresh.Count > MaxRunsPerRound)
             _logger.LogInformation("Lesson distillation for team {TeamId}: {Deferred} candidate run(s) beyond the {Cap}-run cap deferred to the next round", teamId, fresh.Count - MaxRunsPerRound, MaxRunsPerRound);
 
+        var selected = fresh.Take(MaxRunsPerRound).ToList();
+        var selectedIds = selected.Select(row => row.Id).ToList();
+        var runtimeRows = await _db.AgentRun.AsNoTracking().Where(run => run.WorkflowRunId != null && selectedIds.Contains(run.WorkflowRunId.Value))
+            .Select(run => new { RunId = run.WorkflowRunId!.Value, run.Harness, run.TaskJson, run.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var runtimes = runtimeRows.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => RuntimeFacts(group.Select(row => (row.Harness, row.TaskJson, row.ResultJson))));
         var candidates = new Dictionary<Guid, CandidateRun>();
 
-        foreach (var row in fresh.Take(MaxRunsPerRound))
+        foreach (var row in selected)
         {
             var mode = await RunModeReader.DeriveAsync(_db, row.Id, teamId, cancellationToken).ConfigureAwait(false);
             var decisions = await _decisions.GetTerminalDecisionsAsync(row.Id, teamId, cancellationToken).ConfigureAwait(false);
@@ -188,10 +196,39 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
                 .ToList();
 
             var status = row.CompletionParkedAt is not null ? "Parked" : row.Status.ToString();
-            candidates[row.Id] = new CandidateRun(row.Id, mode, row.ScopeRepositoryIds is [var sole] ? sole : null, status, Trim(row.Error, 500), lines);
+            var runtime = runtimes.GetValueOrDefault(row.Id) ?? new CandidateRuntimeFacts([], [], []);
+            candidates[row.Id] = new CandidateRun(row.Id, mode, row.ScopeRepositoryIds is [var sole] ? sole : null, status, Trim(row.Error, 500), lines)
+            {
+                Models = runtime.Models, Harnesses = runtime.Harnesses, Tools = runtime.Tools,
+            };
         }
 
         return candidates;
+    }
+
+    private static CandidateRuntimeFacts RuntimeFacts(IEnumerable<(string Harness, string TaskJson, string? ResultJson)> rows)
+    {
+        var models = new List<string>();
+        var harnesses = new List<string>();
+        var tools = new List<string>();
+
+        foreach (var row in rows)
+        {
+            harnesses.Add(row.Harness);
+            var task = Deserialize<AgentTask>(row.TaskJson);
+            var result = Deserialize<AgentRunResult>(row.ResultJson);
+            if ((LessonApplicability.Normalize(result?.Model) ?? LessonApplicability.Normalize(task?.Model)) is { } effectiveModel) models.Add(effectiveModel);
+            if (task?.Tools is { } taskTools) tools.AddRange(taskTools);
+        }
+
+        return new(LessonApplicability.Normalize(models), LessonApplicability.Normalize(harnesses), LessonApplicability.Normalize(tools));
+    }
+
+    private static T? Deserialize<T>(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return default;
+        try { return JsonSerializer.Deserialize<T>(json, AgentJson.Options); }
+        catch (JsonException) { return default; }
     }
 
     private static StructuredLLMCompletionRequest BuildRequest(ModelPoolPick pick, IReadOnlyList<Lesson> current, IEnumerable<CandidateRun> candidates) => new()
@@ -213,7 +250,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
         sb.AppendLine("## Current lessons (update/invalidate by id; do not re-add near-duplicates)");
         if (current.Count == 0) sb.AppendLine("(none yet)");
         for (var i = 0; i < current.Count; i++)
-            sb.AppendLine($"{i + 1}. id={current[i].Id} [{current[i].FailureClass}] {current[i].WhatFailed} → {current[i].HowToApply}");
+            sb.AppendLine($"{i + 1}. id={current[i].Id} [{current[i].FailureClass}] {current[i].WhatFailed} → {current[i].HowToApply}; applicability models=[{string.Join(", ", current[i].ApplicableModels)}], harnesses=[{string.Join(", ", current[i].ApplicableHarnesses)}], requiredTools=[{string.Join(", ", current[i].RequiredTools)}]");
 
         sb.AppendLine();
         sb.AppendLine("## Runs to learn from (cite ONLY these ids)");
@@ -221,6 +258,7 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
         foreach (var run in candidates)
         {
             sb.AppendLine($"### run {run.RunId} — mode {run.Mode}, outcome {run.Status}");
+            sb.AppendLine($"runtime models=[{string.Join(", ", run.Models)}]; harnesses=[{string.Join(", ", run.Harnesses)}]; tools=[{string.Join(", ", run.Tools)}]");
             if (!string.IsNullOrWhiteSpace(run.Error)) sb.AppendLine($"error: {run.Error}");
             foreach (var line in run.DecisionLines) sb.AppendLine(line);
             sb.AppendLine();
@@ -232,4 +270,5 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
     private static string? Trim(string? text, int max) => text is null ? null : text.Length <= max ? text : text[..max] + "…";
 
     private sealed record LessonScope(string Mode, Guid? RepositoryId);
+    private sealed record CandidateRuntimeFacts(IReadOnlyList<string> Models, IReadOnlyList<string> Harnesses, IReadOnlyList<string> Tools);
 }

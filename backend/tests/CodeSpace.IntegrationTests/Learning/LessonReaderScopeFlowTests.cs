@@ -37,7 +37,7 @@ public sealed class LessonReaderScopeFlowTests
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "no-producer", now.AddMinutes(-3)) { RepositoryId = repositoryId, DistilledByModel = "" });
 
         using var scope = _fixture.BeginScope();
-        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.PlanMap, repositoryId, now, 10), CancellationToken.None);
+        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.PlanMap, LessonRuntimeContext.General(repositoryId), now, 10), CancellationToken.None);
 
         rows.Select(row => row.Id).ShouldBe([exact, general], "an exact repository lesson precedes the general fallback; another mode/repository or untrusted temporal/provenance row cannot reach the model");
     }
@@ -51,7 +51,7 @@ public sealed class LessonReaderScopeFlowTests
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "repository-only", now.AddMinutes(-2)) { RepositoryId = Guid.NewGuid() });
 
         using var scope = _fixture.BeginScope();
-        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, null, now, 10), CancellationToken.None);
+        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, LessonRuntimeContext.General(), now, 10), CancellationToken.None);
 
         rows.Select(row => row.Id).ShouldBe([general]);
     }
@@ -66,8 +66,8 @@ public sealed class LessonReaderScopeFlowTests
 
         using var scope = _fixture.BeginScope();
         var reader = scope.Resolve<ILessonReader>();
-        var capped = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, null, now, int.MaxValue), CancellationToken.None);
-        var empty = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, null, now, 0), CancellationToken.None);
+        var capped = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, LessonRuntimeContext.General(), now, int.MaxValue), CancellationToken.None);
+        var empty = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, LessonRuntimeContext.General(), now, 0), CancellationToken.None);
 
         capped.Count.ShouldBe(LessonReader.MaxTake);
         empty.ShouldBeEmpty();
@@ -83,9 +83,33 @@ public sealed class LessonReaderScopeFlowTests
         var qualified = await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "qualified", now.AddMinutes(-3)) { QualifiedAt = now.AddMinutes(-2) });
 
         using var scope = _fixture.BeginScope();
-        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, null, now, 5), CancellationToken.None);
+        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, LessonRuntimeContext.General(), now, 5), CancellationToken.None);
 
         rows.Select(row => row.Id).ShouldBe([qualified, newestCandidate], "formal rules rank first and at most one unqualified lesson reaches the treatment prompt");
+    }
+
+    [Fact]
+    public async Task Runtime_specific_lessons_require_every_declared_capability_and_unknown_context_fails_closed()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        var general = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "general", now.AddMinutes(-4)) { QualifiedAt = now.AddMinutes(-1) });
+        var exact = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "exact", now.AddMinutes(-3))
+        {
+            QualifiedAt = now.AddMinutes(-1), ApplicableModels = ["claude-opus-4-8"], ApplicableHarnesses = ["claude-code"], RequiredTools = ["git.status", "git.diff"],
+        });
+        await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "wrong-model", now.AddMinutes(-2)) { QualifiedAt = now.AddMinutes(-1), ApplicableModels = ["gpt-6"] });
+        await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "missing-tool", now.AddMinutes(-1)) { QualifiedAt = now.AddMinutes(-1), RequiredTools = ["browser.open"] });
+
+        using var scope = _fixture.BeginScope();
+        var reader = scope.Resolve<ILessonReader>();
+        var matched = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.PlanMap,
+            new LessonRuntimeContext(null, "CLAUDE-OPUS-4-8", "Claude-Code", ["git.diff", "git.status", "extra"]), now, 10), CancellationToken.None);
+        var unknown = await reader.ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.PlanMap,
+            new LessonRuntimeContext(null, null, null, null), now, 10), CancellationToken.None);
+
+        matched.Select(row => row.Id).ShouldBe([exact, general], "a specialized rule needs its exact model/harness and every required tool; general rules remain fallbacks");
+        unknown.Select(row => row.Id).ShouldBe([general], "unknown runtime facts cannot authorize a specialized lesson");
     }
 
     private async Task<Guid> SeedAsync(LessonSeed seed)
@@ -99,6 +123,7 @@ public sealed class LessonReaderScopeFlowTests
             SourceRunIds = seed.SourceRunIds?.ToList() ?? [Guid.NewGuid()], DistilledByModel = seed.DistilledByModel,
             ValidFrom = seed.ValidFrom, InvalidatedAt = seed.InvalidatedAt, ExpiresAt = seed.ExpiresAt ?? seed.ValidFrom.AddDays(30),
             QualifiedAt = seed.QualifiedAt, SuccessfulExposureRunIds = seed.QualifiedAt == null ? [] : [Guid.NewGuid(), Guid.NewGuid()],
+            ApplicableModels = seed.ApplicableModels.ToList(), ApplicableHarnesses = seed.ApplicableHarnesses.ToList(), RequiredTools = seed.RequiredTools.ToList(),
         };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();
@@ -113,5 +138,8 @@ public sealed class LessonReaderScopeFlowTests
         public IReadOnlyList<Guid>? SourceRunIds { get; init; }
         public string DistilledByModel { get; init; } = "test-model";
         public DateTimeOffset? QualifiedAt { get; init; }
+        public IReadOnlyList<string> ApplicableModels { get; init; } = [];
+        public IReadOnlyList<string> ApplicableHarnesses { get; init; } = [];
+        public IReadOnlyList<string> RequiredTools { get; init; } = [];
     }
 }
