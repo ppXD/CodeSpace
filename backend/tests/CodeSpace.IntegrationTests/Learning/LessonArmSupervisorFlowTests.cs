@@ -149,7 +149,7 @@ public sealed class LessonArmSupervisorFlowTests
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = "supervisor", FailureClass = "broken-acceptance-command",
             WhatFailed = "check.sh exits 2 on a clean tree", Why = "unrestored solution", HowToApply = LessonText,
-            SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow,
+            SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.Add(LessonConsolidation.Lifetime),
         });
 
         await db.SaveChangesAsync();

@@ -32,6 +32,7 @@ public class LessonConsolidationTests
         lesson.TeamId.ShouldBe(Team);
         lesson.DistilledByModel.ShouldBe("test-model");
         lesson.InvalidatedAt.ShouldBeNull();
+        lesson.ExpiresAt.ShouldBeGreaterThan(lesson.ValidFrom);
     }
 
     [Fact]
@@ -72,6 +73,20 @@ public class LessonConsolidationTests
         fold.Updates.ShouldBe(1);
         existing.HowToApply.ShouldBe("new advice");
         existing.SourceRunIds.ShouldBe(new[] { RunB, RunA }, ignoreOrder: true, customMessage: "citations UNION — provenance only ever grows");
+    }
+
+    [Fact]
+    public void Adds_and_updates_receive_a_bounded_server_owned_lifetime()
+    {
+        var now = new DateTimeOffset(2026, 9, 9, 1, 0, 0, TimeSpan.Zero);
+        var added = LessonConsolidation.Apply([], new LessonProposals { Lessons = [Proposal("add", sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now).Inserts.ShouldHaveSingleItem();
+        added.ValidFrom.ShouldBe(now);
+        added.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime);
+
+        var existing = ExistingLesson();
+        existing.ExpiresAt = now.AddHours(1);
+        LessonConsolidation.Apply([existing], new LessonProposals { Lessons = [Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now);
+        existing.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime, "fresh evidence renews the lesson for one bounded lifetime");
     }
 
     [Fact]
@@ -129,6 +144,6 @@ public class LessonConsolidationTests
     private static Lesson ExistingLesson() => new()
     {
         Id = Guid.NewGuid(), TeamId = Team, Mode = "supervisor", FailureClass = "stale", WhatFailed = "old", Why = "old", HowToApply = "old advice",
-        SourceRunIds = [RunB], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow.AddDays(-3),
+        SourceRunIds = [RunB], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow.AddDays(-3), ExpiresAt = DateTimeOffset.UtcNow.AddDays(27),
     };
 }

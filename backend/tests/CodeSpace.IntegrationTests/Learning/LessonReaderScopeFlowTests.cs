@@ -31,6 +31,7 @@ public sealed class LessonReaderScopeFlowTests
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "wrong-mode", now.AddMinutes(-3)) { RepositoryId = repositoryId });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "wrong-repository", now.AddMinutes(-3)) { RepositoryId = otherRepositoryId });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "future", now.AddMinutes(1)) { RepositoryId = repositoryId });
+        await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "expired", now.AddDays(-31)) { RepositoryId = repositoryId, ExpiresAt = now.AddMinutes(-1) });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "invalidated", now.AddMinutes(-3)) { RepositoryId = repositoryId, InvalidatedAt = now.AddMinutes(-1) });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "no-sources", now.AddMinutes(-3)) { RepositoryId = repositoryId, SourceRunIds = [] });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "no-producer", now.AddMinutes(-3)) { RepositoryId = repositoryId, DistilledByModel = "" });
@@ -81,7 +82,7 @@ public sealed class LessonReaderScopeFlowTests
             Id = Guid.NewGuid(), TeamId = seed.TeamId, Mode = seed.Mode, RepositoryId = seed.RepositoryId,
             FailureClass = seed.Marker, WhatFailed = seed.Marker, Why = seed.Marker, HowToApply = seed.Marker,
             SourceRunIds = seed.SourceRunIds?.ToList() ?? [Guid.NewGuid()], DistilledByModel = seed.DistilledByModel,
-            ValidFrom = seed.ValidFrom, InvalidatedAt = seed.InvalidatedAt,
+            ValidFrom = seed.ValidFrom, InvalidatedAt = seed.InvalidatedAt, ExpiresAt = seed.ExpiresAt ?? seed.ValidFrom.AddDays(30),
         };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();
@@ -92,6 +93,7 @@ public sealed class LessonReaderScopeFlowTests
     {
         public Guid? RepositoryId { get; init; }
         public DateTimeOffset? InvalidatedAt { get; init; }
+        public DateTimeOffset? ExpiresAt { get; init; }
         public IReadOnlyList<Guid>? SourceRunIds { get; init; }
         public string DistilledByModel { get; init; } = "test-model";
     }

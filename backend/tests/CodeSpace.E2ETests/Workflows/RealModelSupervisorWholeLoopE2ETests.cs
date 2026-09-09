@@ -270,6 +270,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             SourceRunIds = [Guid.NewGuid()],
             DistilledByModel = "a4-lesson-arm-probe",
             ValidFrom = DateTimeOffset.UtcNow.AddMinutes(-5),
+            ExpiresAt = DateTimeOffset.UtcNow.Add(LessonConsolidation.Lifetime),
         };
 
         db.Lesson.Add(lesson);

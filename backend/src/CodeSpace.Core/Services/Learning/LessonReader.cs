@@ -32,7 +32,7 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
 
         return await _db.Lesson.AsNoTracking()
             .Where(lesson => lesson.TeamId == request.TeamId && lesson.Mode == request.Mode)
-            .Where(lesson => lesson.ValidFrom <= request.AsOf && (lesson.InvalidatedAt == null || lesson.InvalidatedAt > request.AsOf))
+            .Where(lesson => lesson.ValidFrom <= request.AsOf && lesson.ExpiresAt > request.AsOf && (lesson.InvalidatedAt == null || lesson.InvalidatedAt > request.AsOf))
             .Where(lesson => lesson.SourceRunIds.Count > 0 && lesson.DistilledByModel != "")
             .Where(lesson => request.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.RepositoryId)
             .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)

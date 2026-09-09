@@ -16,6 +16,8 @@ public sealed record LessonFold(IReadOnlyList<Lesson> Inserts, int Updates, int 
 /// </summary>
 public static class LessonConsolidation
 {
+    public static readonly TimeSpan Lifetime = TimeSpan.FromDays(30);
+
     public static LessonFold Apply(IReadOnlyList<Lesson> current, LessonProposals proposals, IReadOnlyDictionary<Guid, CandidateRun> candidates, Guid teamId, string distilledByModel, DateTimeOffset now)
     {
         var inserts = new List<Lesson>();
@@ -103,6 +105,7 @@ public static class LessonConsolidation
             SourceRunIds = cited.ToList(),
             DistilledByModel = distilledByModel,
             ValidFrom = now,
+            ExpiresAt = now + Lifetime,
         };
     }
 
@@ -113,6 +116,7 @@ public static class LessonConsolidation
         target.Why = proposal.Why ?? target.Why;
         target.HowToApply = proposal.HowToApply ?? target.HowToApply;
         target.SourceRunIds = target.SourceRunIds.Union(freshCitations).ToList();
+        target.ExpiresAt = now + Lifetime;
         target.LastModifiedDate = now;
     }
 }

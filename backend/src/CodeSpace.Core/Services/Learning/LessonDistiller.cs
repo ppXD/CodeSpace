@@ -99,7 +99,8 @@ public sealed class LessonDistiller : ILessonDistiller, IScopedDependency
         }
 
         var (structured, pick) = resolved;
-        var current = await _db.Lesson.Where(l => l.TeamId == teamId && l.InvalidatedAt == null).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var currentAt = DateTimeOffset.UtcNow;
+        var current = await _db.Lesson.Where(l => l.TeamId == teamId && l.InvalidatedAt == null && l.ValidFrom <= currentAt && l.ExpiresAt > currentAt).ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(pick, current, candidates.Values), cancellationToken).ConfigureAwait(false);
 
