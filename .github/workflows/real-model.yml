@@ -1108,7 +1108,9 @@ jobs:
     # shared gateway may not serve, so it is INFORMATIONAL (one reported attempt; a run that can't complete is non-gating
     # infra, never a false red) — plus the DETERMINISTIC real-codex-binary proofs (RealCodexResume: thread resume +
     # persona rollout, dummy key, no gateway). The persona and real TaskLaunch lesson behavioral gates (~30-90s each)
-    # run best-of-N, alongside the report-only skill probe and fast deterministic
+    # run best-of-N; the TaskLaunch gate first uses a real structured-model call to retain the relevant lesson and
+    # abstain from an unrelated structurally valid one, then proves the real CLI applies only the retained instruction.
+    # They run alongside the report-only skill probe and fast deterministic
     # proofs, so the 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets / a CLI are absent
     # (skip ≠ pass; a fork stays green at zero cost).
     timeout-minutes: 30
@@ -1203,7 +1205,7 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
-      - name: Test (the live behavioral injection gates — real claude + real codex apply a persona / obey a skill)
+      - name: Test (live semantic lesson selection + real claude/codex injection behavior)
         # Scoped to the injection classes in E2ETests:
         #   ~RealModelAgentInjection → the CLAUDE behavioral proof. PERSONA and the cross-run lesson launched through
         #     real TaskLaunch Quick (--append-system-prompt, always in context) GATE the blessed wire on a persistent

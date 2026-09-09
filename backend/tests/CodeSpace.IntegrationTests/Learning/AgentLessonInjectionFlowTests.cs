@@ -108,7 +108,8 @@ public sealed class AgentLessonInjectionFlowTests
     public async Task Real_agent_run_creation_persists_the_shared_runtime_prompt_and_receipt()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        using var identityScope = _fixture.BeginScopeAs(userId, teamId);
+        using var scope = identityScope.BeginLifetimeScope(builder => builder.RegisterInstance(AllRelevantEvaluator.Instance).As<ILessonRelevanceEvaluator>());
         var workflowRunId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(WorkflowsTestSeed.MinimalDefinition(), teamId, userId, "{}", [], TaskProjectionKinds.SingleAgent, null, CancellationToken.None);
         var lesson = await SeedLessonAsync(teamId, "single-agent");
         var goal = Enumerable.Range(0, 1000).Select(i => $"runtime task {i}").First(value => LessonArms.Assign(teamId, value) == LessonArms.Injected);
@@ -127,7 +128,8 @@ public sealed class AgentLessonInjectionFlowTests
     public async Task Real_map_agent_creation_keys_receipts_by_cell_and_runtime()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        using var identityScope = _fixture.BeginScopeAs(userId, teamId);
+        using var scope = identityScope.BeginLifetimeScope(builder => builder.RegisterInstance(AllRelevantEvaluator.Instance).As<ILessonRelevanceEvaluator>());
         var workflowRunId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(WorkflowsTestSeed.MinimalDefinition(), teamId, userId, "{}", [], TaskProjectionKinds.PlanMapSynth, null, CancellationToken.None);
         var lessonA = await SeedLessonAsync(teamId, RunModeKeys.PlanMap, "map model-a", new LessonRuntimeSeed { Models = ["model-a"] });
         var lessonB = await SeedLessonAsync(teamId, RunModeKeys.PlanMap, "map model-b", new LessonRuntimeSeed { Models = ["model-b"] });
@@ -309,9 +311,55 @@ public sealed class AgentLessonInjectionFlowTests
         await Should.ThrowAsync<InvalidOperationException>(() => verify.Resolve<IAgentLessonPromptReceiptStore>().GetOrCreateAsync(new(workflowRunId, foreignTeamId, new string('b', 64), []), CancellationToken.None));
     }
 
-    private async Task<AgentTask> InjectAsync(AgentTask task, Guid teamId, Guid workflowRunId)
+    [Fact]
+    public async Task Semantic_selection_is_frozen_with_candidates_and_excludes_an_unselected_structural_match()
     {
-        using var scope = _fixture.BeginScope();
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.SingleAgent, TaskTextFor(teamId, LessonArms.Injected));
+        var selected = await SeedLessonAsync(teamId, "single-agent", "restore dependency failure", qualified: true);
+        var unrelated = await SeedLessonAsync(teamId, "single-agent", "unrelated stylesheet failure", qualified: true);
+        var evaluator = new FixedSelectionEvaluator([selected.Id]);
+        var source = new AgentTask { Goal = "restore and compile the service", Harness = "claude-code" };
+
+        var task = await InjectAsync(source, teamId, workflowRunId, evaluator);
+
+        task.LessonIds.ShouldBe([selected.Id]);
+        task.SystemPrompt.ShouldContain(LessonArms.Line(selected));
+        task.SystemPrompt.ShouldNotContain(LessonArms.Line(unrelated));
+        using var verify = _fixture.BeginScope();
+        var key = AgentLessonInjector.PromptKey(new(source, teamId, workflowRunId, null, ""));
+        var receipt = await verify.Resolve<IAgentLessonPromptReceiptStore>().ReadAsync(workflowRunId, teamId, key, CancellationToken.None);
+        receipt.ShouldNotBeNull();
+        receipt!.CandidateIds.ShouldBe([unrelated.Id, selected.Id], ignoreOrder: true);
+        receipt.RelevanceStatus.ShouldBe(LessonRelevanceStatuses.Selected);
+        receipt.RelevanceModel.ShouldBe("test-observed-model");
+        receipt.RelevanceGeneration.ShouldBe(LlmLessonRelevanceEvaluator.Generation);
+        receipt.AssessmentDigest.ShouldBe(new string('d', 64));
+    }
+
+    [Fact]
+    public async Task Explicit_semantic_abstention_is_an_immutable_retry_receipt()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowRunId = await SeedRunAsync(teamId, TaskProjectionKinds.SingleAgent, TaskTextFor(teamId, LessonArms.Injected));
+        var lesson = await SeedLessonAsync(teamId, "single-agent", "restore dependency failure", qualified: true);
+        var abstaining = new FixedSelectionEvaluator([]);
+        var source = new AgentTask { Goal = "compile the service", Harness = "claude-code" };
+
+        var first = await InjectAsync(source, teamId, workflowRunId, abstaining);
+        var retrySelector = new FixedSelectionEvaluator([lesson.Id]);
+        var retry = await InjectAsync(source with { Goal = source.Goal + "\nretry feedback" }, teamId, workflowRunId, retrySelector);
+
+        first.LessonIds.ShouldBeEmpty();
+        first.SystemPrompt.ShouldBeNull();
+        retry.LessonIds.ShouldBeEmpty("a retry reads the first abstention receipt instead of re-sampling model relevance");
+        abstaining.Calls.ShouldBe(1);
+        retrySelector.Calls.ShouldBe(0);
+    }
+
+    private async Task<AgentTask> InjectAsync(AgentTask task, Guid teamId, Guid workflowRunId, ILessonRelevanceEvaluator? evaluator = null)
+    {
+        using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(evaluator ?? AllRelevantEvaluator.Instance).As<ILessonRelevanceEvaluator>());
         return await scope.Resolve<IAgentLessonInjector>().InjectAsync(new(task, teamId, workflowRunId, null, ""), CancellationToken.None);
     }
 
@@ -339,7 +387,7 @@ public sealed class AgentLessonInjectionFlowTests
         return runId;
     }
 
-    private async Task<Lesson> SeedLessonAsync(Guid teamId, string mode, string whatFailed = "restore failed", LessonRuntimeSeed? runtime = null)
+    private async Task<Lesson> SeedLessonAsync(Guid teamId, string mode, string whatFailed = "restore failed", LessonRuntimeSeed? runtime = null, bool qualified = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -349,6 +397,7 @@ public sealed class AgentLessonInjectionFlowTests
             Id = Guid.NewGuid(), TeamId = teamId, Mode = mode, FailureClass = "build", WhatFailed = whatFailed, Why = "missing deps", HowToApply = "run restore first",
             ApplicableModels = runtime?.Models.ToList() ?? [], ApplicableHarnesses = runtime?.Harnesses.ToList() ?? [], RequiredTools = runtime?.Tools.ToList() ?? [],
             SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test", ValidFrom = now.AddMinutes(-1), ExpiresAt = now.AddDays(1),
+            SuccessfulExposureRunIds = qualified ? [Guid.NewGuid(), Guid.NewGuid()] : [], QualifiedAt = qualified ? now : null,
         };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();
@@ -397,5 +446,27 @@ public sealed class AgentLessonInjectionFlowTests
         public IReadOnlyList<string> Models { get; init; } = [];
         public IReadOnlyList<string> Harnesses { get; init; } = [];
         public IReadOnlyList<string> Tools { get; init; } = [];
+    }
+
+    private sealed class AllRelevantEvaluator : ILessonRelevanceEvaluator
+    {
+        public static readonly AllRelevantEvaluator Instance = new();
+        public Task<LessonRelevanceResult> EvaluateAsync(LessonRelevanceRequest request, CancellationToken cancellationToken)
+        {
+            var selected = request.Candidates.Take(request.Take).ToList();
+            return Task.FromResult(new LessonRelevanceResult(selected, request.Candidates.Select(lesson => lesson.Id).ToList(), selected.Count == 0 ? LessonRelevanceStatuses.NoCandidates : LessonRelevanceStatuses.Selected, "test-observed-model", selected.Count == 0 ? null : new string('d', 64)));
+        }
+    }
+
+    private sealed class FixedSelectionEvaluator(IReadOnlyCollection<Guid> selectedIds) : ILessonRelevanceEvaluator
+    {
+        public int Calls { get; private set; }
+
+        public Task<LessonRelevanceResult> EvaluateAsync(LessonRelevanceRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            var selected = request.Candidates.Where(lesson => selectedIds.Contains(lesson.Id)).Take(request.Take).ToList();
+            return Task.FromResult(new LessonRelevanceResult(selected, request.Candidates.Select(lesson => lesson.Id).ToList(), selected.Count == 0 ? LessonRelevanceStatuses.Abstained : LessonRelevanceStatuses.Selected, "test-observed-model", new string('d', 64)));
+        }
     }
 }

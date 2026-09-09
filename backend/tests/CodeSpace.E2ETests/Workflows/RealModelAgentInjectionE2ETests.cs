@@ -113,9 +113,11 @@ public sealed class RealModelAgentInjectionE2ETests
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
             var marker = "LESSON-APPLIED-" + Guid.NewGuid().ToString("N")[..10];
+            var unrelatedMarker = "UNRELATED-LESSON-" + Guid.NewGuid().ToString("N")[..10];
             var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
             var lesson = await SeedLessonAsync(live.TeamId, marker);
-            var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
+            var unrelated = await SeedLessonAsync(live.TeamId, unrelatedMarker, relevant: false);
+            var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
             var jobs = ResolveJobClient();
             jobs.Clear();
             jobs.AutoExecute = true;
@@ -144,8 +146,10 @@ public sealed class RealModelAgentInjectionE2ETests
             task.LessonArm.ShouldBe(LessonArms.Injected);
             task.LessonIds.ShouldNotBeNull();
             task.LessonIds.ShouldContain(lesson.Id, "a best-of-N retry may leave another valid current lesson in the shared team; the durable receipt must contain this attempt's lesson without pretending it was the only one");
+            task.LessonIds.ShouldNotContain(unrelated.Id, "the structured relevance model must abstain from a structurally valid lesson for an unrelated database-migration task");
             task.SystemPrompt.ShouldNotBeNull();
             task.SystemPrompt!.ShouldContain(marker);
+            task.SystemPrompt.ShouldNotContain(unrelatedMarker);
             task.Goal.ShouldBe(goal);
 
             if (!RealModelRunClassifier.HasInspectableModelReply(agent))
@@ -211,7 +215,7 @@ public sealed class RealModelAgentInjectionE2ETests
     /// <summary>Seed a fresh credential + run ONE real claude agent for <paramref name="taskFactory"/>, and return whether <paramref name="marker"/> reached the model's OWN reply, ALONG WITH that reply text (for a diagnostic snippet on a miss). Succeeded and completion-review NeedsReview runs both carry inspectable model output: the latter is the honest completion contract parking a reply that ends in a question, which is orthogonal to whether the persona was applied. A run without inspectable output is gateway/exec infra (an <see cref="AgentExecutionInfraException"/> → the gate's non-gating skip) or a real behavior miss.</summary>
     private async Task<(bool Found, string ModelReply)> RunAndCheckMarkerAsync(LiveContext live, Func<Guid, AgentTask> taskFactory, string marker)
     {
-        var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
+        var credId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
         var task = taskFactory(credId);
 
         Guid runId;
@@ -329,7 +333,7 @@ public sealed class RealModelAgentInjectionE2ETests
     }
 
     /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the executor resolves via <c>ModelCredentialId</c> and the ClaudeCodeHarness projects onto its env (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY). The live key is read from the DB, never in-process.</summary>
-    private async Task<Guid> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey)
+    private async Task<Guid> SeedAgentCredentialAsync(Guid teamId, string baseUrl, string apiKey, string model)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -342,20 +346,23 @@ public sealed class RealModelAgentInjectionE2ETests
             EncryptedApiKey = encryptor.Encrypt(apiKey), BaseUrl = baseUrl, Status = CredentialStatus.Active,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = model, Source = ModelSource.Manual, Enabled = true });
 
         await db.SaveChangesAsync();
         return credId;
     }
 
-    private async Task<Lesson> SeedLessonAsync(Guid teamId, string marker)
+    private async Task<Lesson> SeedLessonAsync(Guid teamId, string marker, bool relevant = true)
     {
         using var scope = _fixture.BeginScope();
         var now = DateTimeOffset.UtcNow;
         var lesson = new Lesson
         {
-            Id = Guid.NewGuid(), TeamId = teamId, Mode = TaskProjectionKinds.SingleAgent, FailureClass = "response-format",
-            WhatFailed = "A prior agent omitted the learned response marker", Why = "the instruction was missed",
-            HowToApply = $"Begin the final reply with the exact marker {marker}", SourceRunIds = [Guid.NewGuid()],
+            Id = Guid.NewGuid(), TeamId = teamId, Mode = TaskProjectionKinds.SingleAgent, FailureClass = relevant ? "response-format" : "database-migration",
+            WhatFailed = relevant ? "A prior greeting agent omitted the learned response marker" : "A prior sharded time-series database migration used an unsafe retention window",
+            Why = relevant ? "the greeting instruction was missed" : "the partition retention policy was not validated",
+            HowToApply = relevant ? $"Begin the short greeting reply with the exact marker {marker}" : $"During a sharded time-series database migration, include the audit marker {marker} in the retention manifest",
+            SourceRunIds = [Guid.NewGuid()],
             SuccessfulExposureRunIds = [Guid.NewGuid(), Guid.NewGuid()], QualifiedAt = now,
             DistilledByModel = "real-model-lesson-probe", ValidFrom = now, ExpiresAt = now.AddHours(1),
         };
