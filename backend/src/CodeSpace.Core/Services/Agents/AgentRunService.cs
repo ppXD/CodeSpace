@@ -181,6 +181,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
     private readonly IToolCallLedgerService _ledger;
     private readonly Completion.ICompletionContractStore _contracts;
     private readonly Capture.INativeRecordPlane _nativeRecords;
+    private readonly Learning.IAgentLessonInjector _lessonInjector;
     private readonly ILogger<AgentRunService> _logger;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
 
@@ -193,6 +194,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         _ledger = runtime.Ledger;
         _contracts = runtime.Contracts;
         _nativeRecords = runtime.NativeRecords;
+        _lessonInjector = runtime.Lessons;
         _authority = authority;
         _logger = logger;
         _completeness = completeness;
@@ -207,6 +209,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         var agentRunId = Guid.NewGuid();
         task = await _authority.AdmitAgentAsync(new AgentAuthorityAdmission(task, teamId, agentRunId, workflowRunId), cancellationToken).ConfigureAwait(false);
+        task = await _lessonInjector.InjectAsync(task, teamId, workflowRunId, cancellationToken).ConfigureAwait(false);
         return await PersistCreatedAsync(new AgentRunCreation { Task = task, TeamId = teamId, RunId = agentRunId, WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = iterationKey }, cancellationToken).ConfigureAwait(false);
     }
 

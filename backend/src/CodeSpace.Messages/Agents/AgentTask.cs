@@ -36,6 +36,20 @@ public sealed record AgentTask
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SystemPrompt { get; init; }
 
+    /// <summary>
+    /// The frozen cross-run-learning experiment arm for the prompt this agent receives. Null identifies a legacy or
+    /// standalone task that never entered the experiment; injected / withheld / none are server-assigned values.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LessonArm { get; init; }
+
+    /// <summary>
+    /// Exact lesson rows rendered into this agent's system prompt. Empty for withheld / none; null on legacy tasks.
+    /// This durable receipt is attribution evidence and is reused across retries even after a lesson expires.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<Guid>? LessonIds { get; init; }
+
     /// <summary>Harness kind to run this task — resolved via <see cref="IAgentHarnessRegistry"/> (e.g. "codex-cli").</summary>
     public required string Harness { get; init; }
 

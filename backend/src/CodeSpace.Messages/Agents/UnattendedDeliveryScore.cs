@@ -129,8 +129,8 @@ public sealed record ArmedRunScore
 {
     /// <summary>
     /// The <c>LessonArms</c> value the run ran under (<c>injected</c> / <c>withheld</c> / <c>none</c>), read from
-    /// EITHER lane that assigns one: the supervisor's frozen decision-row arm, or the <c>plan.author</c> node's
-    /// own <c>lessonArm</c> output. Null when the run was in neither lane (a single-agent run) — and null is
+    /// any prompt lane that assigns one: the supervisor decision tape, <c>plan.author</c> output, or shared agent-runtime
+    /// assignment. Null only for legacy or non-agent runs outside the experiment — and null is
     /// DISTINCT from <c>none</c>: one is "never in the experiment", the other is "measured as the empty-lesson
     /// control". Merging them would dilute the group the injected arm is compared against.
     /// </summary>

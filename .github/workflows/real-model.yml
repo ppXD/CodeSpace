@@ -1107,7 +1107,8 @@ jobs:
     # auto-discovery) → GATES on a persistent non-apply, best-of-N-floored. Codex rides the OpenAI `responses` wire the
     # shared gateway may not serve, so it is INFORMATIONAL (one reported attempt; a run that can't complete is non-gating
     # infra, never a false red) — plus the DETERMINISTIC real-codex-binary proofs (RealCodexResume: thread resume +
-    # persona rollout, dummy key, no gateway). Two behavioral gates (~30-90s each) × best-of-N + the fast deterministic
+    # persona rollout, dummy key, no gateway). The persona and real TaskLaunch lesson behavioral gates (~30-90s each)
+    # run best-of-N, alongside the report-only skill probe and fast deterministic
     # proofs, so the 30-min ceiling holds with headroom. Each self-skips LOUDLY when the secrets / a CLI are absent
     # (skip ≠ pass; a fork stays green at zero cost).
     timeout-minutes: 30
@@ -1204,8 +1205,9 @@ jobs:
 
       - name: Test (the live behavioral injection gates — real claude + real codex apply a persona / obey a skill)
         # Scoped to the injection classes in E2ETests:
-        #   ~RealModelAgentInjection → the CLAUDE behavioral proof. PERSONA (--append-system-prompt, always in context)
-        #     GATES the blessed wire on a persistent non-apply (best-of-N floored). SKILL obedience (CLAUDE_CONFIG_DIR/
+        #   ~RealModelAgentInjection → the CLAUDE behavioral proof. PERSONA and the cross-run lesson launched through
+        #     real TaskLaunch Quick (--append-system-prompt, always in context) GATE the blessed wire on a persistent
+        #     non-apply (best-of-N floored). SKILL obedience (CLAUDE_CONFIG_DIR/
         #     skills auto-discovery + the model's auto-invocation) is REPORTED, not gated — its LOADING is gated
         #     deterministically by RealHarnessSkillProjectionTests (no live model needed).
         #   ~RealModelCodexInjection → the CODEX behavioral proof (persona via $CODEX_HOME/AGENTS.md; skill via
@@ -1238,11 +1240,11 @@ jobs:
             RealCodexResume \
             RealModelAgentInjection \
             RealModelCodexInjection \
-            A_real_claude_agent_applies_its_injected_persona
-          # That last token is a METHOD, not a class, and it is the whole reason this lane exists: a drift that
-          # de-selects ONLY the persona kill-gate while the informational Codex and deterministic resume arms still
-          # match would satisfy every class-level clause and pass green with the gate running on nothing. The script
-          # greps the fully-qualified name, which carries the method too, so the finer grain needs no separate check.
+            A_real_claude_agent_applies_its_injected_persona \
+            A_real_TaskLaunch_quick_agent_applies_its_frozen_cross_run_lesson
+          # The final two tokens are METHODS, not classes: a drift that de-selects only one strict Claude gate while
+          # the class's report-only tests still match must not pass green. The script greps the fully-qualified name,
+          # which carries the method too, so the finer grain needs no separate mechanism.
 
 
       # The trx + the step-summary verdicts are the only record of WHAT the live model actually did — how many golden

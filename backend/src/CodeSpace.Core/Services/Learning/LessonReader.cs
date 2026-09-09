@@ -82,6 +82,9 @@ public static class LessonArms
     /// <summary>The lesson window BOTH lanes read, so the two treatments carry the same slice of the ledger.</summary>
     public const int TopK = 5;
 
+    /// <summary>True only for a server-issued experiment value. Persisted or caller-provided unknown text is never trusted as prompt policy.</summary>
+    public static bool IsKnown(string? arm) => arm is Injected or Withheld or None;
+
     /// <summary>The arm for a lane whose current-lesson window holds <paramref name="currentLessonCount"/> entries: an EMPTY window is <see cref="None"/> (outside the experiment — never a control), anything else the deterministic assignment.</summary>
     public static string For(Guid teamId, string taskGoal, int currentLessonCount) => currentLessonCount == 0 ? None : Assign(teamId, taskGoal);
 

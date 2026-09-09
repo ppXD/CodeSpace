@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents.Eval;
 
 /// <summary>
-/// Reads the exact lessons a run's model prompts actually saw across both launch lanes. These immutable receipts
+/// Reads the exact lessons a run's model prompts actually saw across every prompt lane. These immutable receipts
 /// are the only honest substrate for success attribution: the current lesson table can expire, consolidate, or
 /// change after a run and therefore cannot reconstruct historical exposure.
 /// </summary>
@@ -19,12 +19,27 @@ public static class RunLessonExposures
 
         var receipts = await SupervisorExposuresAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
         var planner = await PlannerExposuresAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var assignments = await AssignmentExposuresAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
+        var agents = await AgentExposuresAsync(db, runIds, teamId, cancellationToken).ConfigureAwait(false);
 
         foreach (var row in planner)
         {
             if (!Guid.TryParse(row.LessonId, out var lessonId)) continue;
             if (!receipts.TryGetValue(row.RunId, out var ids)) receipts[row.RunId] = ids = [];
             ids.Add(lessonId);
+        }
+
+        foreach (var row in agents)
+        {
+            if (!Guid.TryParse(row.LessonId, out var lessonId)) continue;
+            if (!receipts.TryGetValue(row.RunId, out var ids)) receipts[row.RunId] = ids = [];
+            ids.Add(lessonId);
+        }
+
+        foreach (var row in assignments)
+        {
+            if (!receipts.TryGetValue(row.RunId, out var ids)) receipts[row.RunId] = ids = [];
+            ids.Add(row.LessonId);
         }
 
         return receipts
@@ -63,6 +78,38 @@ public static class RunLessonExposures
     }
 
     private sealed record PlannerLessonRow(Guid RunId, string LessonId);
+
+    private static async Task<List<AssignmentLessonRow>> AssignmentExposuresAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = runIds.ToArray();
+        return await db.Database.SqlQuery<AssignmentLessonRow>($"""
+            SELECT assignment.workflow_run_id AS run_id, exposure.lesson_id
+            FROM workflow_run_lesson_assignment assignment
+            CROSS JOIN LATERAL unnest(assignment.lesson_ids) AS exposure(lesson_id)
+            WHERE assignment.team_id = {teamId} AND assignment.workflow_run_id = ANY({ids})
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record AssignmentLessonRow(Guid RunId, Guid LessonId);
+
+    private static async Task<List<AgentLessonRow>> AgentExposuresAsync(CodeSpaceDbContext db, IReadOnlyList<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = runIds.ToArray();
+        return await db.Database.SqlQuery<AgentLessonRow>($"""
+            SELECT a.workflow_run_id AS run_id, exposure.value AS lesson_id
+            FROM agent_run a
+            JOIN workflow_run w ON w.id = a.workflow_run_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(a.task_jsonb -> 'lessonIds') = 'array'
+                     THEN a.task_jsonb -> 'lessonIds'
+                     ELSE '[]'::jsonb END) AS exposure(value)
+            WHERE a.team_id = {teamId}
+              AND w.team_id = {teamId}
+              AND a.workflow_run_id = ANY({ids})
+            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record AgentLessonRow(Guid RunId, string LessonId);
 
     private static readonly IReadOnlyDictionary<Guid, IReadOnlyList<Guid>> Empty = new Dictionary<Guid, IReadOnlyList<Guid>>();
 }

@@ -5,13 +5,22 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Learning;
+using CodeSpace.Core.Services.Tasks;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks;
+using CodeSpace.Messages.Tasks.Effort;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using System.Text.Json;
 
 namespace CodeSpace.E2ETests.Workflows;
 
@@ -25,6 +34,8 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <list type="bullet">
 /// <item><b>Persona</b> rides Claude's native <c>--append-system-prompt</c>: the model ALWAYS sees the system prompt, so
 /// a persona instruction is followed directly — a high-confidence gate.</item>
+/// <item><b>Cross-run lesson</b> enters through the real <c>ITaskLaunchService</c> Quick route, is frozen as the run's
+/// exact durable assignment, persists on the AgentTask, and must change the real CLI model reply.</item>
 /// <item><b>Skill</b> is projected as <c>CLAUDE_CONFIG_DIR/skills/&lt;slug&gt;/SKILL.md</c>. The headless CLI
 /// <c>claude -p</c> AUTO-DISCOVERS user skills by default (the hermetic-no-filesystem-settings default is the
 /// programmatic Agent <i>SDK</i>'s, NOT the CLI's — corrected in #982), so the harness loads the projected skill with
@@ -91,6 +102,62 @@ public sealed class RealModelAgentInjectionE2ETests
                 : $"{Provider} '{live.Model}': the real claude agent did NOT apply its injected persona — {(reply.StartsWith("[run", StringComparison.Ordinal) ? reply : $"marker absent in the reply: \"{Snippet(reply)}\"")}";
             Console.WriteLine($"[injection-e2e] persona: {verdict}");   // ALSO to stdout — the step-summary sink isn't greppable from the CLI/API
             return (applied, verdict);
+        });
+    }
+
+    [SkippableFact]
+    public async Task A_real_TaskLaunch_quick_agent_applies_its_frozen_cross_run_lesson()
+    {
+        if (await EnsureLiveOrSkipAsync() is not { } live) return;
+
+        await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
+        {
+            var marker = "LESSON-APPLIED-" + Guid.NewGuid().ToString("N")[..10];
+            var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
+            var lesson = await SeedLessonAsync(live.TeamId, marker);
+            var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey);
+            var jobs = ResolveJobClient();
+            jobs.Clear();
+            jobs.AutoExecute = true;
+
+            LaunchTaskResult launch;
+            using (var scope = _fixture.BeginScope())
+                launch = await scope.Resolve<ITaskLaunchService>().LaunchAsync(new TaskLaunchRequest
+                {
+                    TeamId = live.TeamId,
+                    ActorUserId = live.UserId,
+                    SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                    TaskText = goal,
+                    RequestedEffort = TaskEffortModes.Quick,
+                    Autonomy = nameof(AgentAutonomyLevel.Trusted),
+                    Overrides = new TaskExecutionOverrides { Harness = "claude-code", RunnerKind = "local", ModelCredentialId = credentialId, Model = live.Model },
+                }, CancellationToken.None);
+
+            using (var scope = _fixture.BeginScope())
+                await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(launch.RunId, CancellationToken.None);
+            await jobs.WaitForPendingAsync();
+
+            using var read = _fixture.BeginScope();
+            var db = read.Resolve<CodeSpaceDbContext>();
+            var agent = await db.AgentRun.AsNoTracking().Where(run => run.WorkflowRunId == launch.RunId).OrderBy(run => run.CreatedDate).FirstAsync();
+            var task = JsonSerializer.Deserialize<AgentTask>(agent.TaskJson, AgentJson.Options)!;
+            task.LessonArm.ShouldBe(LessonArms.Injected);
+            task.LessonIds.ShouldBe([lesson.Id]);
+            task.SystemPrompt.ShouldNotBeNull();
+            task.SystemPrompt!.ShouldContain(marker);
+            task.Goal.ShouldBe(goal);
+
+            if (!RealModelRunClassifier.HasInspectableModelReply(agent))
+            {
+                var reason = $"status={agent.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(agent)}; error={agent.Error ?? "(none)"}";
+                if (RealModelRunClassifier.IsGatewayInfra(agent)) throw new AgentExecutionInfraException($"the quick lesson run did not complete — gateway/exec infra (non-gating skip): {reason}");
+                return (false, $"{Provider} '{live.Model}': TaskLaunch quick persisted the exact lesson receipt but the live CLI produced no inspectable reply ({reason})");
+            }
+
+            var events = await read.Resolve<IAgentRunService>().GetEventsAsync(agent.Id, live.TeamId, 0, CancellationToken.None);
+            var reply = string.Join("\n", events.Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.FinalSummary).Select(e => e.Text));
+            var applied = reply.Contains(marker, StringComparison.Ordinal);
+            return (applied, $"{Provider} '{live.Model}': TaskLaunch quick {(applied ? "APPLIED" : "did NOT apply")} the frozen cross-run lesson in the real CLI reply");
         });
     }
 
@@ -277,6 +344,29 @@ public sealed class RealModelAgentInjectionE2ETests
 
         await db.SaveChangesAsync();
         return credId;
+    }
+
+    private async Task<Lesson> SeedLessonAsync(Guid teamId, string marker)
+    {
+        using var scope = _fixture.BeginScope();
+        var now = DateTimeOffset.UtcNow;
+        var lesson = new Lesson
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Mode = TaskProjectionKinds.SingleAgent, FailureClass = "response-format",
+            WhatFailed = "A prior agent omitted the learned response marker", Why = "the instruction was missed",
+            HowToApply = $"Begin the final reply with the exact marker {marker}", SourceRunIds = [Guid.NewGuid()],
+            SuccessfulExposureRunIds = [Guid.NewGuid(), Guid.NewGuid()], QualifiedAt = now,
+            DistilledByModel = "real-model-lesson-probe", ValidFrom = now, ExpiresAt = now.AddHours(1),
+        };
+        scope.Resolve<CodeSpaceDbContext>().Lesson.Add(lesson);
+        await scope.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
+        return lesson;
+    }
+
+    private InMemoryBackgroundJobClient ResolveJobClient()
+    {
+        using var scope = _fixture.BeginScope();
+        return scope.Resolve<InMemoryBackgroundJobClient>();
     }
 
     /// <summary>Whether the real <c>claude</c> coding-agent CLI is on PATH — the gate self-skips (NOT a pass) when it is absent (fork/local, or a runner without the install step).</summary>
