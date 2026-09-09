@@ -122,8 +122,8 @@ public sealed record UnattendedDeliveryRollup
 }
 
 /// <summary>
-/// One run reduced to the two fields a by-arm slice needs: which lesson A/B arm it ran under, and its already-scored
-/// north-star bits. A data noun (Rule 18.1) so <c>LessonArmSlicer</c> stays pure + DB-free.
+/// One run reduced to the facts a by-arm slice needs: its lesson A/B arm, scored north-star bits, human touches and
+/// independently priceable execution/brain spend. A data noun (Rule 18.1) so <c>LessonArmSlicer</c> stays pure + DB-free.
 /// </summary>
 public sealed record ArmedRunScore
 {
@@ -139,6 +139,9 @@ public sealed record ArmedRunScore
     public required bool Solved { get; init; }
     public required bool Delivered { get; init; }
     public required bool UnattendedSolvedWithDelivery { get; init; }
+    public required int HumanTouches { get; init; }
+    public decimal? CostUsd { get; init; }
+    public decimal? BrainPlaneUsd { get; init; }
 }
 
 /// <summary>
@@ -156,6 +159,33 @@ public sealed record LessonArmSlice
 
     /// <summary><see cref="UnattendedSolvedWithDeliveryRuns"/> / <see cref="Runs"/>, in 0..1. <see cref="Runs"/> is never 0 (an arm with no runs has no slice).</summary>
     public required double UnattendedSolveWithDeliveryRate { get; init; }
+
+    /// <summary>Runs in this arm that stopped for at least one human decision or approval.</summary>
+    public required int HumanTouchedRuns { get; init; }
+
+    /// <summary><see cref="HumanTouchedRuns"/> / <see cref="Runs"/>. This is the arm's intervention incidence, separate from how many asks each touched run made.</summary>
+    public required double HumanInterventionRate { get; init; }
+
+    /// <summary>Total human touches divided by every run in the arm, including zero-touch runs.</summary>
+    public required double AvgHumanTouches { get; init; }
+
+    /// <summary>Sum of known agent-execution spend. Null when no run in the arm was priceable.</summary>
+    public decimal? TotalCostUsd { get; init; }
+
+    /// <summary>Runs whose agent-execution spend was unknown. They remain in the quality sample and are never treated as free.</summary>
+    public required int UnknownCostRuns { get; init; }
+
+    /// <summary><see cref="TotalCostUsd"/> divided only by priceable runs; null when none were priceable.</summary>
+    public decimal? AvgCostPerPricedRunUsd { get; init; }
+
+    /// <summary>Sum of known planner, supervisor, critic and grader model spend. Null when no run carried a priceable brain-plane call.</summary>
+    public decimal? BrainPlaneUsd { get; init; }
+
+    /// <summary>Runs whose brain-plane spend was unknown, kept explicit beside the partial sum.</summary>
+    public required int UnknownBrainCostRuns { get; init; }
+
+    /// <summary><see cref="BrainPlaneUsd"/> divided only by runs with known brain-plane spend.</summary>
+    public decimal? AvgBrainPlaneCostPerPricedRunUsd { get; init; }
 }
 
 /// <summary>The team's unattended-delivery scorecard — the cross-run north-star roll-up plus recent per-run scores. The north-star-metric analogue of <see cref="SupervisorScorecard"/> / <see cref="AgentRunScorecard"/>.</summary>

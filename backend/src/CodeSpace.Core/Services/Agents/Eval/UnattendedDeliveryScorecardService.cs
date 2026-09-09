@@ -131,7 +131,7 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// supervisor decision" into "the arm is MEASURED against the north-star". Nothing sliced a rate by it before,
     /// so injection's effect had never been measured at all.
     ///
-    /// <para>ONLY the ARM is read from a durable source; every scored BIT comes from the live score computed just
+    /// <para>ONLY the ARM is read from a durable source; every scored bit, human touch and agent cost comes from the live score computed just
     /// above. That split is load-bearing: a persisted row can be stale (its run's manifest settled after the row
     /// was written, and the backfill has not revisited it), so preferring the row's own <c>solved</c>/<c>delivered</c>
     /// bits made <c>SolvedRuns</c> and <c>sum(ByLessonArm.SolvedRuns)</c> disagree on the same page — two numbers
@@ -139,8 +139,8 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
     /// rollup: same runs, same bits, same totals, just grouped.</para>
     ///
     /// <para>The arm prefers the row and falls back to a batched read of the decision ledger's frozen value, so an
-    /// empty table degrades to a purely live slice rather than an empty one. Supervisor-lane runs only — see
-    /// <see cref="ArmedRunScore.LessonArm"/>.</para>
+    /// empty table degrades to a purely live slice rather than an empty one. Brain-plane spend is not part of the
+    /// live scorer, so this endpoint reports that dimension as unknown; the durable trend supplies it.</para>
     /// </summary>
     private async Task<IReadOnlyList<LessonArmSlice>> SliceByLessonArmAsync(Guid teamId, IReadOnlyList<Guid> runIds, IReadOnlyList<UnattendedDeliveryRunScore> liveScores, CancellationToken cancellationToken)
     {
@@ -158,6 +158,8 @@ public sealed class UnattendedDeliveryScorecardService : IUnattendedDeliveryScor
                 Solved = score.Solved,
                 Delivered = score.Delivered,
                 UnattendedSolvedWithDelivery = score.UnattendedSolvedWithDelivery,
+                HumanTouches = score.HumanTouches,
+                CostUsd = score.CostUsd,
             })
             .ToList();
 
