@@ -48,10 +48,10 @@ public class LessonArmFreezeTests
     }
 
     [Fact]
-    public async Task A_frozen_injected_arm_keeps_carrying_the_teams_current_lessons()
+    public async Task A_frozen_injected_arm_reuses_its_empty_exact_receipt_without_rereading_current_lessons()
     {
-        // The complement: assignment is frozen, the injected CONTENT is not. The intervention under test is
-        // "the prompt carries the team's CURRENT lessons", so a treated run re-reads them every turn.
+        // The first row is the exact prompt receipt. Empty records a fail-closed semantic abstention; re-reading the
+        // mutable ledger would silently turn that abstention into a later treatment and reroll a long-running prompt.
         var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, "{}", "{}", lessonArm: LessonArms.Injected);
 
@@ -59,9 +59,8 @@ public class LessonArmFreezeTests
         var context = await Service(ledger, lessons).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
         context.LessonArm.ShouldBe(LessonArms.Injected);
-        context.LessonLines.Count.ShouldBe(LessonCount);
-        context.LessonLines[0].ShouldBe(LessonArms.Line(Lesson(0)), "both lanes render a lesson line through the one shared renderer");
-        lessons.LastRequest.ShouldNotBeNull().Mode.ShouldBe(CodeSpace.Core.Services.Completion.RunModeKeys.Supervisor);
+        context.LessonLines.ShouldBeEmpty();
+        lessons.Calls.ShouldBe(0, "an immutable empty receipt cannot become a later semantic selection");
     }
 
     [Fact]
