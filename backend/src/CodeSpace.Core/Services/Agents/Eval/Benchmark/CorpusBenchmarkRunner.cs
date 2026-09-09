@@ -69,12 +69,27 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
         var tasks = request.Tasks.ToDictionary(task => task.Id, StringComparer.Ordinal);
         var cells = manifest.Cells.OrderBy(cell => CellOrder(request.OrderingSeed, cell.TaskId, cell.Mode, request.ObservationSession), StringComparer.Ordinal).ToList();
 
-        for (var index = 0; index < cells.Count; index++)
+        if (request.SelectedCells is null)
         {
-            var cell = cells[index];
-            var candidateFirst = (index + request.ObservationSession) % 2 == 0;
-            await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? candidate : control, cancellationToken).ConfigureAwait(false);
-            await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? control : candidate, cancellationToken).ConfigureAwait(false);
+            for (var index = 0; index < cells.Count; index++)
+            {
+                var cell = cells[index];
+                var candidateFirst = (index + request.ObservationSession) % 2 == 0;
+                await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? candidate : control, cancellationToken).ConfigureAwait(false);
+                await RunPairAsync(tasks[cell.TaskId], cell.Mode, candidateFirst ? control : candidate, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            var selected = ValidateSelectedCells(request.SelectedCells, manifest);
+            var selectedIndex = 0;
+            foreach (var cell in cells.Where(cell => selected.ContainsKey((cell.TaskId, cell.Mode))))
+            {
+                var arms = selected[(cell.TaskId, cell.Mode)];
+                var candidateFirst = (selectedIndex++ + request.ObservationSession) % 2 == 0;
+                foreach (var arm in OrderedArms(arms, candidateFirst))
+                    await RunPairAsync(tasks[cell.TaskId], cell.Mode, arm == "candidate" ? candidate : control, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return new PairedCorpusBenchmarkRun
@@ -94,6 +109,23 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
 
     private static string CellOrder(string seed, string taskId, BenchmarkMode mode, int session) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{seed}\u001f{session}\u001f{taskId}\u001f{mode}")));
+
+    private static IReadOnlyDictionary<(string TaskId, BenchmarkMode Mode), HashSet<string>> ValidateSelectedCells(IReadOnlyList<PairedCorpusBenchmarkCell> selected, EvalSuiteManifest manifest)
+    {
+        var manifestKeys = manifest.Cells.Select(cell => (cell.TaskId, cell.Mode)).ToHashSet();
+        var distinct = selected.Select(cell => (cell.TaskId, cell.Mode, cell.Arm)).ToHashSet();
+        if (selected.Count == 0 || distinct.Count != selected.Count) throw new ArgumentException("Selected paired cells must be a non-empty unique keyset.", nameof(selected));
+        if (selected.Any(cell => !manifestKeys.Contains((cell.TaskId, cell.Mode)) || cell.Arm is not ("control" or "candidate"))) throw new ArgumentException("Selected paired cells must belong to the frozen manifest and a known arm.", nameof(selected));
+        return selected.GroupBy(cell => (cell.TaskId, cell.Mode)).ToDictionary(group => group.Key, group => group.Select(cell => cell.Arm).ToHashSet(StringComparer.Ordinal));
+    }
+
+    private static IEnumerable<string> OrderedArms(IReadOnlySet<string> arms, bool candidateFirst)
+    {
+        var first = candidateFirst ? "candidate" : "control";
+        var second = candidateFirst ? "control" : "candidate";
+        if (arms.Contains(first)) yield return first;
+        if (arms.Contains(second)) yield return second;
+    }
 
     private static void ValidatePairedRequest(PairedCorpusBenchmarkRequest request)
     {

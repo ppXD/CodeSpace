@@ -37,4 +37,12 @@ public sealed record PairedCorpusBenchmarkRequest
     public required string CodeRevision { get; init; }
     public IBenchmarkFixtureStager? FixtureStager { get; init; }
     public string? SuiteContentHash { get; init; }
+    public IReadOnlyList<PairedCorpusBenchmarkCell>? SelectedCells { get; init; }
+}
+
+public sealed record PairedCorpusBenchmarkCell
+{
+    public required string TaskId { get; init; }
+    public required BenchmarkMode Mode { get; init; }
+    public required string Arm { get; init; }
 }

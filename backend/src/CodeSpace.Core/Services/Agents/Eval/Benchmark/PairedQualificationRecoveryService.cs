@@ -19,15 +19,24 @@ public sealed class PairedQualificationRecoveryService : IPairedQualificationRec
     private readonly IHiddenSuiteSource _suite;
     private readonly CodeSpaceDbContext _db;
     private readonly IPairedQualificationResultStore _results;
+    private readonly IPairedQualificationCampaignLock _campaignLock;
 
-    public PairedQualificationRecoveryService(IHiddenSuiteSource suite, CodeSpaceDbContext db, IPairedQualificationResultStore results)
+    public PairedQualificationRecoveryService(IHiddenSuiteSource suite, CodeSpaceDbContext db, IPairedQualificationResultStore results, IPairedQualificationCampaignLock campaignLock)
     {
         _suite = suite;
         _db = db;
         _results = results;
+        _campaignLock = campaignLock;
     }
 
     public async Task<PairedQualificationOutcome> RecoverAsync(Guid observationGroupId, CancellationToken cancellationToken)
+    {
+        if (observationGroupId == Guid.Empty) throw Invalid("observation-group-unbound");
+        await using var claim = await _campaignLock.AcquireAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
+        return await RecoverClaimedAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<PairedQualificationOutcome> RecoverClaimedAsync(Guid observationGroupId, CancellationToken cancellationToken)
     {
         if (observationGroupId == Guid.Empty) throw Invalid("observation-group-unbound");
         var protocol = await _db.PairedQualificationProtocol.AsNoTracking().SingleOrDefaultAsync(row => row.ObservationGroupId == observationGroupId, cancellationToken).ConfigureAwait(false)
