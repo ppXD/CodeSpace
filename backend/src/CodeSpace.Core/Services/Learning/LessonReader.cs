@@ -13,8 +13,14 @@ public interface ILessonReader
     Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>The runtime facts known at one prompt boundary. Null means unknown, which can admit only lessons that do not constrain that dimension.</summary>
+public sealed record LessonRuntimeContext(Guid? RepositoryId, string? Model, string? Harness, IReadOnlyList<string>? Tools)
+{
+    public static LessonRuntimeContext General(Guid? repositoryId = null) => new(repositoryId, null, null, null);
+}
+
 /// <summary>The complete server-owned scope for a prompt-facing lesson lookup.</summary>
-public sealed record LessonReadRequest(Guid TeamId, string Mode, Guid? RepositoryId, DateTimeOffset AsOf, int Take);
+public sealed record LessonReadRequest(Guid TeamId, string Mode, LessonRuntimeContext Runtime, DateTimeOffset AsOf, int Take);
 
 /// <summary>Arc D / D2 — the learning loop's read side: the injection reader over the lesson ledger.</summary>
 public sealed class LessonReader : ILessonReader, IScopedDependency
@@ -31,15 +37,21 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
         var take = Math.Clamp(request.Take, 0, MaxTake);
         if (take == 0 || string.IsNullOrWhiteSpace(request.Mode)) return [];
 
+        var model = LessonApplicability.Normalize(request.Runtime.Model);
+        var harness = LessonApplicability.Normalize(request.Runtime.Harness);
+        var tools = LessonApplicability.Normalize(request.Runtime.Tools);
         var scoped = _db.Lesson.AsNoTracking()
             .Where(lesson => lesson.TeamId == request.TeamId && lesson.Mode == request.Mode)
             .Where(lesson => lesson.ValidFrom <= request.AsOf && lesson.ExpiresAt > request.AsOf && (lesson.InvalidatedAt == null || lesson.InvalidatedAt > request.AsOf))
             .Where(lesson => lesson.QualificationSuppressedAt == null)
             .Where(lesson => lesson.SourceRunIds.Count > 0 && lesson.DistilledByModel != "")
-            .Where(lesson => request.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.RepositoryId);
+            .Where(lesson => request.Runtime.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.Runtime.RepositoryId)
+            .Where(lesson => lesson.ApplicableModels.Count == 0 || (model != null && lesson.ApplicableModels.Contains(model)))
+            .Where(lesson => lesson.ApplicableHarnesses.Count == 0 || (harness != null && lesson.ApplicableHarnesses.Contains(harness)))
+            .Where(lesson => lesson.RequiredTools.Count == 0 || (tools != null && lesson.RequiredTools.All(tool => tools.Contains(tool))));
 
         var qualified = await scoped.Where(lesson => lesson.QualifiedAt != null)
-            .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)
+            .OrderByDescending(lesson => request.Runtime.RepositoryId != null && lesson.RepositoryId == request.Runtime.RepositoryId)
             .ThenByDescending(lesson => lesson.ValidFrom)
             .ThenBy(lesson => lesson.Id)
             .Take(take)
@@ -49,7 +61,7 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
         if (candidateTake == 0) return qualified;
 
         var candidates = await scoped.Where(lesson => lesson.QualifiedAt == null)
-            .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)
+            .OrderByDescending(lesson => request.Runtime.RepositoryId != null && lesson.RepositoryId == request.Runtime.RepositoryId)
             .ThenByDescending(lesson => lesson.ValidFrom)
             .ThenBy(lesson => lesson.Id)
             .Take(candidateTake)

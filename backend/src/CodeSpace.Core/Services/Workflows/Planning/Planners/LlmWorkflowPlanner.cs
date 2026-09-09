@@ -66,7 +66,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         // D2 (cross-run learning): the distilled lessons ride the plan prompt — under a deterministic, toggle-free
         // A/B arm hashed from team + the UNDECORATED goal (never the prompt text, which a re-plan's feedback fold and
         // the flat-plan constraint both move), so the same task lands in the same arm here and on the supervisor lane.
-        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(request.TeamId, RunModeKeys.PlanMap, request.RepositoryId, DateTimeOffset.UtcNow, LessonTopK), cancellationToken).ConfigureAwait(false);
+        // The planner brain is not the runtime that will execute a model-authored subtask. Until a concrete AgentTask
+        // exists, only runtime-agnostic lessons are safe; the agent injection boundary applies exact selectors later.
+        var runtime = Learning.LessonRuntimeContext.General(request.RepositoryId);
+        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(request.TeamId, RunModeKeys.PlanMap, runtime, DateTimeOffset.UtcNow, LessonTopK), cancellationToken).ConfigureAwait(false);
         var arm = Learning.LessonArms.For(request.TeamId, request.TaskGoal ?? request.TaskText, current.Count);
         var injected = arm == Learning.LessonArms.Injected ? current : Array.Empty<Persistence.Entities.Lesson>();
 

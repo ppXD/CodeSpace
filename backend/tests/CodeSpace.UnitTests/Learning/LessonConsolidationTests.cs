@@ -57,6 +57,23 @@ public class LessonConsolidationTests
     }
 
     [Fact]
+    public void Applicability_selectors_are_normalized_and_must_be_observed_on_every_cited_run()
+    {
+        var accepted = Apply(Proposal("add", sourceRunIds: [RunA.ToString()]) with
+        {
+            ApplicableModels = [" CLAUDE-OPUS-4-8 "], ApplicableHarnesses = ["Claude-Code"], RequiredTools = ["Git.Status", "git.status"],
+        });
+        var lesson = accepted.Inserts.ShouldHaveSingleItem();
+        lesson.ApplicableModels.ShouldBe(["claude-opus-4-8"]);
+        lesson.ApplicableHarnesses.ShouldBe(["claude-code"]);
+        lesson.RequiredTools.ShouldBe(["git.status"]);
+
+        var refused = Apply(Proposal("add", sourceRunIds: [RunA.ToString(), RunB.ToString()]) with { ApplicableModels = ["claude-opus-4-8"] });
+        refused.Inserts.ShouldBeEmpty("a selector absent from one cited run is a model-authored guess, not shared provenance");
+        refused.Rejections.ShouldContain(reason => reason.Contains("not observed on every cited run", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void An_update_naming_a_hallucinated_id_mints_nothing()
     {
         var existing = ExistingLesson();
@@ -91,16 +108,28 @@ public class LessonConsolidationTests
     }
 
     [Fact]
+    public void An_update_cannot_retroactively_specialize_historical_citations()
+    {
+        var existing = ExistingLesson();
+        var fold = Apply(Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()]) with { ApplicableModels = ["claude-opus-4-8"] }, existing);
+
+        fold.Updates.ShouldBe(0);
+        fold.Inserts.ShouldBeEmpty();
+        fold.Rejections.ShouldContain(reason => reason.Contains("historical citations do not carry", StringComparison.Ordinal));
+        existing.InvalidatedAt.ShouldBeNull("a rejected update cannot retire the current version");
+    }
+
+    [Fact]
     public void Adds_and_updates_receive_a_bounded_server_owned_lifetime()
     {
         var now = new DateTimeOffset(2026, 9, 9, 1, 0, 0, TimeSpan.Zero);
-        var added = LessonConsolidation.Apply([], new LessonProposals { Lessons = [Proposal("add", sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now).Inserts.ShouldHaveSingleItem();
+        var added = LessonConsolidation.Apply(new LessonConsolidationRequest([], new LessonProposals { Lessons = [Proposal("add", sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now)).Inserts.ShouldHaveSingleItem();
         added.ValidFrom.ShouldBe(now);
         added.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime);
 
         var existing = ExistingLesson();
         existing.ExpiresAt = now.AddHours(1);
-        var replacement = LessonConsolidation.Apply([existing], new LessonProposals { Lessons = [Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now).Inserts.ShouldHaveSingleItem();
+        var replacement = LessonConsolidation.Apply(new LessonConsolidationRequest([existing], new LessonProposals { Lessons = [Proposal("update", existing.Id.ToString(), sourceRunIds: [RunA.ToString()])] }, Candidates(), Team, "test-model", now)).Inserts.ShouldHaveSingleItem();
         replacement.ExpiresAt.ShouldBe(now + LessonConsolidation.Lifetime, "fresh evidence creates one bounded candidate version");
         existing.ExpiresAt.ShouldNotBe(now + LessonConsolidation.Lifetime, "historical validity is not rewritten");
     }
@@ -138,11 +167,14 @@ public class LessonConsolidationTests
     // ─── Plumbing ────────────────────────────────────────────────────────────────
 
     private static LessonFold Apply(LessonProposal proposal, params Lesson[] current) =>
-        LessonConsolidation.Apply(current, new LessonProposals { Lessons = [proposal] }, Candidates(), Team, "test-model", DateTimeOffset.UtcNow);
+        LessonConsolidation.Apply(new LessonConsolidationRequest(current, new LessonProposals { Lessons = [proposal] }, Candidates(), Team, "test-model", DateTimeOffset.UtcNow));
 
     private static Dictionary<Guid, CandidateRun> Candidates() => new()
     {
-        [RunA] = new CandidateRun(RunA, "supervisor", Repo, "Failure", "boom: exit 2", ["1. spawn [Succeeded]"]),
+        [RunA] = new CandidateRun(RunA, "supervisor", Repo, "Failure", "boom: exit 2", ["1. spawn [Succeeded]"])
+        {
+            Models = ["claude-opus-4-8"], Harnesses = ["claude-code"], Tools = ["git.status", "git.diff"],
+        },
         [RunB] = new CandidateRun(RunB, "supervisor", Repo, "Parked", null, []),
     };
 

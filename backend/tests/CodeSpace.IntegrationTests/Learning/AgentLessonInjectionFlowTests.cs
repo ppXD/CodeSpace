@@ -187,10 +187,42 @@ public sealed class AgentLessonInjectionFlowTests
         task.SystemPrompt!.IndexOf(LessonArms.Line(second), StringComparison.Ordinal).ShouldBeLessThan(task.SystemPrompt.IndexOf(LessonArms.Line(first), StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task First_runtime_assignment_filters_on_the_resolved_model_harness_and_complete_tool_set()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var matchingRun = await SeedRunAsync(teamId, TaskProjectionKinds.SingleAgent, TaskTextFor(teamId, LessonArms.Injected));
+        var unknownRun = await SeedRunAsync(teamId, TaskProjectionKinds.SingleAgent, TaskTextFor(teamId, LessonArms.Injected));
+        var lesson = await SeedLessonAsync(teamId, "single-agent", runtime: new LessonRuntimeSeed
+        {
+            Models = ["claude-opus-4-8"], Harnesses = ["claude-code"], Tools = ["git.status", "git.diff"],
+        });
+
+        var matching = await InjectAsync(new AgentTask { Goal = "task", Harness = "CLAUDE-CODE", Model = "CLAUDE-OPUS-4-8", Tools = ["git.diff", "git.status", "extra"] }, teamId, matchingRun);
+        var unknown = await InjectAsync(new AgentTask { Goal = "task", Harness = "claude-code" }, teamId, unknownRun);
+
+        matching.LessonIds.ShouldBe([lesson.Id]);
+        matching.SystemPrompt.ShouldContain(LessonArms.Line(lesson));
+        unknown.LessonArm.ShouldBe(LessonArms.None);
+        unknown.LessonIds.ShouldBeEmpty();
+        unknown.SystemPrompt.ShouldBeNull("missing model/tool facts cannot authorize a runtime-specific lesson");
+    }
+
     private async Task<AgentTask> InjectAsync(AgentTask task, Guid teamId, Guid workflowRunId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IAgentLessonInjector>().InjectAsync(task, teamId, workflowRunId, CancellationToken.None);
+    }
+
+    private static string TaskTextFor(Guid teamId, string arm)
+    {
+        for (var i = 0; i < 100_000; i++)
+        {
+            var goal = $"runtime-applicability-{i}";
+            if (LessonArms.Assign(teamId, goal) == arm) return goal;
+        }
+
+        throw new InvalidOperationException($"Could not find deterministic {arm} assignment");
     }
 
     private async Task<Guid> SeedRunAsync(Guid teamId, string projectionKind, string? operatorGoal = null)
@@ -206,12 +238,17 @@ public sealed class AgentLessonInjectionFlowTests
         return runId;
     }
 
-    private async Task<Lesson> SeedLessonAsync(Guid teamId, string mode, string whatFailed = "restore failed")
+    private async Task<Lesson> SeedLessonAsync(Guid teamId, string mode, string whatFailed = "restore failed", LessonRuntimeSeed? runtime = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var lesson = new Lesson { Id = Guid.NewGuid(), TeamId = teamId, Mode = mode, FailureClass = "build", WhatFailed = whatFailed, Why = "missing deps", HowToApply = "run restore first", SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test", ValidFrom = now.AddMinutes(-1), ExpiresAt = now.AddDays(1) };
+        var lesson = new Lesson
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Mode = mode, FailureClass = "build", WhatFailed = whatFailed, Why = "missing deps", HowToApply = "run restore first",
+            ApplicableModels = runtime?.Models.ToList() ?? [], ApplicableHarnesses = runtime?.Harnesses.ToList() ?? [], RequiredTools = runtime?.Tools.ToList() ?? [],
+            SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test", ValidFrom = now.AddMinutes(-1), ExpiresAt = now.AddDays(1),
+        };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();
         return lesson;
@@ -252,5 +289,12 @@ public sealed class AgentLessonInjectionFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<CodeSpaceDbContext>().Lesson.Where(lesson => lesson.Id == lessonId).ExecuteUpdateAsync(setters => setters.SetProperty(lesson => lesson.InvalidatedAt, DateTimeOffset.UtcNow));
+    }
+
+    private sealed record LessonRuntimeSeed
+    {
+        public IReadOnlyList<string> Models { get; init; } = [];
+        public IReadOnlyList<string> Harnesses { get; init; } = [];
+        public IReadOnlyList<string> Tools { get; init; } = [];
     }
 }

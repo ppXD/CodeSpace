@@ -27,6 +27,15 @@ public class Lesson : IEntity<Guid>, IAuditable
 
     public string HowToApply { get; set; } = "";
 
+    /// <summary>Normalized model ids this lesson is restricted to. Empty means model-agnostic.</summary>
+    public List<string> ApplicableModels { get; set; } = [];
+
+    /// <summary>Normalized harness kinds this lesson is restricted to. Empty means harness-agnostic.</summary>
+    public List<string> ApplicableHarnesses { get; set; } = [];
+
+    /// <summary>Normalized tool capabilities every target runtime must expose. Empty means no tool precondition.</summary>
+    public List<string> RequiredTools { get; set; } = [];
+
     /// <summary>The runs that taught this lesson — never empty, only ids the distiller actually showed the model.</summary>
     public List<Guid> SourceRunIds { get; set; } = [];
 

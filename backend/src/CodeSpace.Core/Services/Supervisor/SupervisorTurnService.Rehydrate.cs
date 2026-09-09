@@ -1840,7 +1840,8 @@ public sealed partial class SupervisorTurnService
 
         if (frozen is Learning.LessonArms.Withheld or Learning.LessonArms.None) return (frozen, [], []);
 
-        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(teamId, RunModeKeys.Supervisor, goalConfig?.AgentProfile?.RepositoryId, DateTimeOffset.UtcNow, Learning.LessonArms.TopK), cancellationToken).ConfigureAwait(false);
+        var runtime = Learning.LessonRuntimeContext.General(goalConfig?.AgentProfile?.RepositoryId);
+        var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(teamId, RunModeKeys.Supervisor, runtime, DateTimeOffset.UtcNow, Learning.LessonArms.TopK), cancellationToken).ConfigureAwait(false);
         var arm = frozen ?? Learning.LessonArms.For(teamId, LessonAssignmentGoal(goal, goalConfig), current.Count);
 
         return arm == Learning.LessonArms.Injected

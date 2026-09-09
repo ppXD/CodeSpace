@@ -3,7 +3,18 @@ using CodeSpace.Core.Persistence.Entities;
 namespace CodeSpace.Core.Services.Learning;
 
 /// <summary>One candidate run as shown to the brain — the closed set a proposal may cite from.</summary>
-public sealed record CandidateRun(Guid RunId, string Mode, Guid? RepositoryId, string Status, string? Error, IReadOnlyList<string> DecisionLines);
+public sealed record CandidateRun(Guid RunId, string Mode, Guid? RepositoryId, string Status, string? Error, IReadOnlyList<string> DecisionLines)
+{
+    public IReadOnlyList<string> Models { get; init; } = [];
+    public IReadOnlyList<string> Harnesses { get; init; } = [];
+    public IReadOnlyList<string> Tools { get; init; } = [];
+}
+
+internal sealed record LessonSelectors(IReadOnlyList<string> Models, IReadOnlyList<string> Harnesses, IReadOnlyList<string> Tools);
+
+public sealed record LessonConsolidationRequest(IReadOnlyList<Lesson> Current, LessonProposals Proposals, IReadOnlyDictionary<Guid, CandidateRun> Candidates, Guid TeamId, string DistilledByModel, DateTimeOffset Now);
+
+internal sealed record LessonMintContext(IReadOnlyDictionary<Guid, CandidateRun> Candidates, Guid TeamId, string DistilledByModel, DateTimeOffset Now);
 
 /// <summary>The fold's effects: rows to insert, version updates, invalidations, and proposals refused with reasons (logged loudly — a rejection is a signal, never silence).</summary>
 public sealed record LessonFold(IReadOnlyList<Lesson> Inserts, int Updates, int Invalidations, IReadOnlyList<string> Rejections);
@@ -18,8 +29,10 @@ public static class LessonConsolidation
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromDays(30);
 
-    public static LessonFold Apply(IReadOnlyList<Lesson> current, LessonProposals proposals, IReadOnlyDictionary<Guid, CandidateRun> candidates, Guid teamId, string distilledByModel, DateTimeOffset now)
+    public static LessonFold Apply(LessonConsolidationRequest request)
     {
+        var (current, proposals, candidates, teamId, distilledByModel, now) = request;
+        var mintContext = new LessonMintContext(candidates, teamId, distilledByModel, now);
         var inserts = new List<Lesson>();
         var rejections = new List<string>();
         var updates = 0;
@@ -32,13 +45,13 @@ public static class LessonConsolidation
                 case "noop":
                     break;
 
-                case "add" when TryResolveCitations(proposal, candidates, rejections) is { } cited:
-                    inserts.Add(Mint(proposal, cited, candidates, teamId, distilledByModel, now));
+                case "add" when TryResolveCitations(proposal, candidates, rejections) is { } cited && TryResolveSelectors(proposal, cited, candidates, rejections) is { } selectors:
+                    inserts.Add(Mint(proposal, cited, selectors, mintContext));
                     break;
 
-                case "update" when TryResolveCurrent(proposal, current, rejections) is { } target && TryResolveCitations(proposal, candidates, rejections) is { } freshCitations:
+                case "update" when TryResolveCurrent(proposal, current, rejections) is { } target && TryResolveCitations(proposal, candidates, rejections) is { } freshCitations && TryResolveSelectors(proposal, freshCitations, candidates, rejections) is { } replacementSelectors && PreservesHistoricalApplicability(target, replacementSelectors, rejections):
                     target.InvalidatedAt = now;
-                    inserts.Add(Replace(target, proposal, freshCitations, distilledByModel, now));
+                    inserts.Add(Replace(target, proposal, freshCitations, replacementSelectors, mintContext));
                     updates++;
                     break;
 
@@ -89,29 +102,63 @@ public static class LessonConsolidation
         return null;
     }
 
-    private static Lesson Mint(LessonProposal proposal, IReadOnlyList<Guid> cited, IReadOnlyDictionary<Guid, CandidateRun> candidates, Guid teamId, string distilledByModel, DateTimeOffset now)
+    private static LessonSelectors? TryResolveSelectors(LessonProposal proposal, IReadOnlyList<Guid> cited, IReadOnlyDictionary<Guid, CandidateRun> candidates, List<string> rejections)
     {
+        var selectors = new LessonSelectors(LessonApplicability.Normalize(proposal.ApplicableModels), LessonApplicability.Normalize(proposal.ApplicableHarnesses), LessonApplicability.Normalize(proposal.RequiredTools));
         var citedRuns = cited.Select(id => candidates[id]).ToList();
+        var errors = new[]
+        {
+            LessonApplicability.Validate(selectors.Models, citedRuns.Select(run => run.Models), "applicableModels"),
+            LessonApplicability.Validate(selectors.Harnesses, citedRuns.Select(run => run.Harnesses), "applicableHarnesses"),
+            LessonApplicability.Validate(selectors.Tools, citedRuns.Select(run => run.Tools), "requiredTools"),
+        }.Where(error => error is not null).Select(error => error!).ToList();
+
+        if (errors.Count == 0) return selectors;
+        rejections.AddRange(errors);
+        return null;
+    }
+
+    private static bool PreservesHistoricalApplicability(Lesson target, LessonSelectors selectors, List<string> rejections)
+    {
+        var historical = new LessonSelectors(LessonApplicability.Normalize(target.ApplicableModels), LessonApplicability.Normalize(target.ApplicableHarnesses), LessonApplicability.Normalize(target.RequiredTools));
+        var changed = new[]
+        {
+            (Name: "applicableModels", Before: historical.Models, After: selectors.Models),
+            (Name: "applicableHarnesses", Before: historical.Harnesses, After: selectors.Harnesses),
+            (Name: "requiredTools", Before: historical.Tools, After: selectors.Tools),
+        }.FirstOrDefault(dimension => dimension.After.Count > 0 && !dimension.Before.SequenceEqual(dimension.After, StringComparer.Ordinal));
+
+        if (changed.After is null) return true;
+        rejections.Add($"{changed.Name} cannot specialize or change an existing lesson because its historical citations do not carry the new selector evidence");
+        return false;
+    }
+
+    private static Lesson Mint(LessonProposal proposal, IReadOnlyList<Guid> cited, LessonSelectors selectors, LessonMintContext context)
+    {
+        var citedRuns = cited.Select(id => context.Candidates[id]).ToList();
         var repositories = citedRuns.Select(r => r.RepositoryId).Distinct().ToList();
 
         return new Lesson
         {
             Id = Guid.NewGuid(),
-            TeamId = teamId,
+            TeamId = context.TeamId,
             Mode = citedRuns[0].Mode,
             RepositoryId = repositories is [{ } sole] ? sole : null,
             FailureClass = proposal.FailureClass ?? "",
             WhatFailed = proposal.WhatFailed ?? "",
             Why = proposal.Why ?? "",
             HowToApply = proposal.HowToApply ?? "",
+            ApplicableModels = selectors.Models.ToList(),
+            ApplicableHarnesses = selectors.Harnesses.ToList(),
+            RequiredTools = selectors.Tools.ToList(),
             SourceRunIds = cited.ToList(),
-            DistilledByModel = distilledByModel,
-            ValidFrom = now,
-            ExpiresAt = now + Lifetime,
+            DistilledByModel = context.DistilledByModel,
+            ValidFrom = context.Now,
+            ExpiresAt = context.Now + Lifetime,
         };
     }
 
-    private static Lesson Replace(Lesson target, LessonProposal proposal, IReadOnlyList<Guid> freshCitations, string distilledByModel, DateTimeOffset now)
+    private static Lesson Replace(Lesson target, LessonProposal proposal, IReadOnlyList<Guid> freshCitations, LessonSelectors selectors, LessonMintContext context)
     {
         return new Lesson
         {
@@ -123,10 +170,13 @@ public static class LessonConsolidation
             WhatFailed = proposal.WhatFailed ?? target.WhatFailed,
             Why = proposal.Why ?? target.Why,
             HowToApply = proposal.HowToApply ?? target.HowToApply,
+            ApplicableModels = selectors.Models.ToList(),
+            ApplicableHarnesses = selectors.Harnesses.ToList(),
+            RequiredTools = selectors.Tools.ToList(),
             SourceRunIds = target.SourceRunIds.Union(freshCitations).ToList(),
-            DistilledByModel = distilledByModel,
-            ValidFrom = now,
-            ExpiresAt = now + Lifetime,
+            DistilledByModel = context.DistilledByModel,
+            ValidFrom = context.Now,
+            ExpiresAt = context.Now + Lifetime,
         };
     }
 }

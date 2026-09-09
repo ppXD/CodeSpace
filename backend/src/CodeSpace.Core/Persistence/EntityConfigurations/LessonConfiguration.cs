@@ -15,6 +15,9 @@ public class LessonConfiguration : IEntityTypeConfiguration<Lesson>
         builder.Property(l => l.WhatFailed).IsRequired();
         builder.Property(l => l.Why).IsRequired();
         builder.Property(l => l.HowToApply).IsRequired();
+        builder.Property(l => l.ApplicableModels).IsRequired();
+        builder.Property(l => l.ApplicableHarnesses).IsRequired();
+        builder.Property(l => l.RequiredTools).IsRequired();
         builder.Property(l => l.SourceRunIds).IsRequired();
         builder.Property(l => l.DistilledByModel).IsRequired();
         builder.Property(l => l.SuccessfulExposureRunIds).IsRequired();

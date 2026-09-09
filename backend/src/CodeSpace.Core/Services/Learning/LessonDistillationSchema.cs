@@ -28,9 +28,12 @@ public static class LessonDistillationSchema
                   "whatFailed": { "type": "string" },
                   "why": { "type": "string" },
                   "howToApply": { "type": "string", "description": "What the planner should do differently next time — imperative, concrete." },
+                  "applicableModels": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "description": "Restrict to model ids observed on EVERY cited run. Empty means model-agnostic." },
+                  "applicableHarnesses": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "description": "Restrict to harness kinds observed on EVERY cited run. Empty means harness-agnostic." },
+                  "requiredTools": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 120 }, "description": "Tool capabilities observed on EVERY cited run that a target must expose. Empty means no tool precondition." },
                   "sourceRunIds": { "type": "array", "items": { "type": "string" }, "description": "The run ids (from the prompt) that teach this lesson. Never cite a run you were not shown." }
                 },
-                "required": ["action", "failureClass", "whatFailed", "why", "howToApply", "sourceRunIds"]
+                "required": ["action", "failureClass", "whatFailed", "why", "howToApply", "applicableModels", "applicableHarnesses", "requiredTools", "sourceRunIds"]
               }
             }
           },
@@ -56,5 +59,8 @@ public sealed record LessonProposal
     public string? WhatFailed { get; init; }
     public string? Why { get; init; }
     public string? HowToApply { get; init; }
+    public List<string> ApplicableModels { get; init; } = [];
+    public List<string> ApplicableHarnesses { get; init; } = [];
+    public List<string> RequiredTools { get; init; } = [];
     public List<string> SourceRunIds { get; init; } = [];
 }

@@ -59,7 +59,8 @@ public sealed class AgentLessonInjector : IAgentLessonInjector, IScopedDependenc
         }
 
         var mode = await RunModeReader.DeriveAsync(_db, runId, teamId, cancellationToken).ConfigureAwait(false);
-        var current = await _lessons.ListCurrentAsync(new LessonReadRequest(teamId, mode, task.RepositoryId, DateTimeOffset.UtcNow, LessonArms.TopK), cancellationToken).ConfigureAwait(false);
+        var runtime = new LessonRuntimeContext(task.RepositoryId, task.Model, task.Harness, task.Tools);
+        var current = await _lessons.ListCurrentAsync(new LessonReadRequest(teamId, mode, runtime, DateTimeOffset.UtcNow, LessonArms.TopK), cancellationToken).ConfigureAwait(false);
         var operatorGoal = await ReadOperatorGoalAsync(runId, teamId, cancellationToken).ConfigureAwait(false) ?? task.DisplayTitle ?? task.Goal;
         var arm = LessonArms.For(teamId, operatorGoal, current.Count);
         return new(runId, teamId, arm, arm == LessonArms.Injected ? current.Select(lesson => lesson.Id).ToList() : []);

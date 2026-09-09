@@ -74,7 +74,7 @@ public sealed class LessonQualificationFlowTests
         lesson.QualifiedAt.ShouldBeNull("an equal negative body removes formal-rule status while retaining all audit evidence");
         lesson.QualificationSuppressedAt.ShouldNotBeNull("repeated negative evidence removes the lesson from prompt exploration without erasing it");
         using var scope = _fixture.BeginScope();
-        var visible = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, "supervisor", null, DateTimeOffset.UtcNow, 5), CancellationToken.None);
+        var visible = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, "supervisor", LessonRuntimeContext.General(), DateTimeOffset.UtcNow, 5), CancellationToken.None);
         visible.Select(row => row.Id).ShouldNotContain(lessonId);
     }
 
