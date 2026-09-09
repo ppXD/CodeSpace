@@ -3,8 +3,8 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <summary>
 /// Arc D / D1 — one distilled cross-run lesson: what failed, why, and how to apply it next time (the Reflexion
 /// three-part shape), CITING the runs that taught it. A lesson without citations cannot exist — provenance is the
-/// anti-confabulation guard. Consolidation may UPDATE a lesson (merging citations) and INVALIDATE it one-way
-/// (temporal, Graphiti-style); readers see only current rows and history is never rewritten.
+/// anti-confabulation guard. Consolidation versions an UPDATE by retiring the prior row and minting a new candidate,
+/// or INVALIDATES it one-way (temporal, Graphiti-style); readers see only current rows and history is never rewritten.
 /// </summary>
 public class Lesson : IEntity<Guid>, IAuditable
 {
@@ -32,6 +32,21 @@ public class Lesson : IEntity<Guid>, IAuditable
 
     /// <summary>Which model wrote the lesson — the distillation is only as good as the brain that did it.</summary>
     public string DistilledByModel { get; set; } = "";
+
+    /// <summary>Exact genuine-launch runs that saw this lesson and later reached the north-star unattended solved-with-delivery outcome.</summary>
+    public List<Guid> SuccessfulExposureRunIds { get; set; } = [];
+
+    /// <summary>Exact genuine-launch runs that saw this lesson but did not reach the north-star outcome. Correlational evidence retained for qualification and audit.</summary>
+    public List<Guid> NegativeExposureRunIds { get; set; } = [];
+
+    /// <summary>Server-owned qualification stamp. Null means experimental candidate; non-null means the recorded success evidence currently satisfies <c>LessonQualification</c>.</summary>
+    public DateTimeOffset? QualifiedAt { get; set; }
+
+    /// <summary>Fairness cursor for the bounded recurring sweep. It is operational progress, not quality evidence.</summary>
+    public DateTimeOffset? QualificationCheckedAt { get; set; }
+
+    /// <summary>Reversible evidence-based prompt suppression. Unlike semantic invalidation, a corrected scorecard can clear it.</summary>
+    public DateTimeOffset? QualificationSuppressedAt { get; set; }
 
     public DateTimeOffset ValidFrom { get; set; }
 

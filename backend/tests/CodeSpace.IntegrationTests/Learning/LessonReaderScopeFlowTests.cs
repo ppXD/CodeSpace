@@ -26,8 +26,8 @@ public sealed class LessonReaderScopeFlowTests
         var repositoryId = Guid.NewGuid();
         var otherRepositoryId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
-        var exact = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "exact", now.AddMinutes(-2)) { RepositoryId = repositoryId });
-        var general = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "general", now.AddMinutes(-1)));
+        var exact = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "exact", now.AddMinutes(-2)) { RepositoryId = repositoryId, QualifiedAt = now.AddMinutes(-1) });
+        var general = await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "general", now.AddMinutes(-1)) { QualifiedAt = now.AddMinutes(-1) });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "wrong-mode", now.AddMinutes(-3)) { RepositoryId = repositoryId });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "wrong-repository", now.AddMinutes(-3)) { RepositoryId = otherRepositoryId });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.PlanMap, "future", now.AddMinutes(1)) { RepositoryId = repositoryId });
@@ -47,7 +47,7 @@ public sealed class LessonReaderScopeFlowTests
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var now = DateTimeOffset.UtcNow;
-        var general = await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "general", now.AddMinutes(-1)));
+        var general = await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "general", now.AddMinutes(-1)) { QualifiedAt = now.AddMinutes(-1) });
         await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "repository-only", now.AddMinutes(-2)) { RepositoryId = Guid.NewGuid() });
 
         using var scope = _fixture.BeginScope();
@@ -62,7 +62,7 @@ public sealed class LessonReaderScopeFlowTests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var now = DateTimeOffset.UtcNow;
         for (var index = 0; index < LessonReader.MaxTake + 5; index++)
-            await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, $"lesson-{index}", now.AddSeconds(-index - 1)));
+            await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, $"lesson-{index}", now.AddSeconds(-index - 1)) { QualifiedAt = now.AddMinutes(-1) });
 
         using var scope = _fixture.BeginScope();
         var reader = scope.Resolve<ILessonReader>();
@@ -71,6 +71,21 @@ public sealed class LessonReaderScopeFlowTests
 
         capped.Count.ShouldBe(LessonReader.MaxTake);
         empty.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Qualified_rules_precede_one_bounded_candidate_for_controlled_exploration()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var now = DateTimeOffset.UtcNow;
+        var newestCandidate = await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "candidate-new", now.AddMinutes(-1)));
+        await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "candidate-old", now.AddMinutes(-2)));
+        var qualified = await SeedAsync(new LessonSeed(teamId, RunModeKeys.Supervisor, "qualified", now.AddMinutes(-3)) { QualifiedAt = now.AddMinutes(-2) });
+
+        using var scope = _fixture.BeginScope();
+        var rows = await scope.Resolve<ILessonReader>().ListCurrentAsync(new LessonReadRequest(teamId, RunModeKeys.Supervisor, null, now, 5), CancellationToken.None);
+
+        rows.Select(row => row.Id).ShouldBe([qualified, newestCandidate], "formal rules rank first and at most one unqualified lesson reaches the treatment prompt");
     }
 
     private async Task<Guid> SeedAsync(LessonSeed seed)
@@ -83,6 +98,7 @@ public sealed class LessonReaderScopeFlowTests
             FailureClass = seed.Marker, WhatFailed = seed.Marker, Why = seed.Marker, HowToApply = seed.Marker,
             SourceRunIds = seed.SourceRunIds?.ToList() ?? [Guid.NewGuid()], DistilledByModel = seed.DistilledByModel,
             ValidFrom = seed.ValidFrom, InvalidatedAt = seed.InvalidatedAt, ExpiresAt = seed.ExpiresAt ?? seed.ValidFrom.AddDays(30),
+            QualifiedAt = seed.QualifiedAt, SuccessfulExposureRunIds = seed.QualifiedAt == null ? [] : [Guid.NewGuid(), Guid.NewGuid()],
         };
         db.Lesson.Add(lesson);
         await db.SaveChangesAsync();
@@ -96,5 +112,6 @@ public sealed class LessonReaderScopeFlowTests
         public DateTimeOffset? ExpiresAt { get; init; }
         public IReadOnlyList<Guid>? SourceRunIds { get; init; }
         public string DistilledByModel { get; init; } = "test-model";
+        public DateTimeOffset? QualifiedAt { get; init; }
     }
 }

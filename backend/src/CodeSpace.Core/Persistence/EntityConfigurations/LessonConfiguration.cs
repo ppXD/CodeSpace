@@ -17,6 +17,8 @@ public class LessonConfiguration : IEntityTypeConfiguration<Lesson>
         builder.Property(l => l.HowToApply).IsRequired();
         builder.Property(l => l.SourceRunIds).IsRequired();
         builder.Property(l => l.DistilledByModel).IsRequired();
+        builder.Property(l => l.SuccessfulExposureRunIds).IsRequired();
+        builder.Property(l => l.NegativeExposureRunIds).IsRequired();
         builder.Property(l => l.ExpiresAt).IsRequired();
         builder.HasIndex(l => new { l.TeamId, l.Mode });
     }

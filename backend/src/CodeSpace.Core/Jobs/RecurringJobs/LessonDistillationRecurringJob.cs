@@ -3,7 +3,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Jobs.RecurringJobs;
 
-/// <summary>Arc D / D1 — the nightly post-mortem: distill yesterday's failed/parked runs into the lesson ledger (thin Rule-14 dispatcher).</summary>
+/// <summary>Arc D — nightly lesson lifecycle: reconcile objective exposure outcomes, then distill fresh failures into experimental candidates.</summary>
 public sealed class LessonDistillationRecurringJob : IRecurringJob
 {
     private readonly IMediator _mediator;
