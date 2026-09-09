@@ -16,4 +16,17 @@ public sealed class AgentLessonPromptReceiptSchemaTests
         sql.ShouldContain("BEFORE UPDATE OR DELETE");
         DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith("0215_agent_lesson_prompt_receipt.sql", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void Relevance_migration_pins_candidates_abstention_provenance_and_selection_shape()
+    {
+        var sql = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0216_agent_lesson_relevance_receipt.sql"));
+        sql.ShouldContain("cardinality(candidate_ids) <= 20");
+        sql.ShouldContain("'abstained'");
+        sql.ShouldContain("lesson_ids <@ candidate_ids");
+        sql.ShouldContain("relevance_status = 'no-candidates'");
+        sql.ShouldContain("relevance_status NOT IN ('selected', 'abstained') OR assessment_digest IS NOT NULL");
+        sql.ShouldContain("assessment_digest ~ '^[0-9a-f]{64}$'");
+        DbUpRunner.DiscoverScriptNames().ShouldContain(name => name.EndsWith("0216_agent_lesson_relevance_receipt.sql", StringComparison.OrdinalIgnoreCase));
+    }
 }

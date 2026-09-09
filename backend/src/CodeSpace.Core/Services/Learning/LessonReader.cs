@@ -11,6 +11,15 @@ public interface ILessonReader
 {
     /// <summary>Applicable, current and provenance-backed lessons for one prompt boundary.</summary>
     Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken);
+
+    async Task<LessonRelevanceResult> SelectCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken)
+    {
+        var lessons = await ListCurrentAsync(request, cancellationToken).ConfigureAwait(false);
+        return new(lessons, lessons.Select(lesson => lesson.Id).ToList(), LessonRelevanceStatuses.Legacy, null, null);
+    }
+
+    Task<LessonRelevanceResult> SelectAsync(LessonRelevanceRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(new LessonRelevanceResult(request.Candidates.Take(request.Take).ToList(), request.Candidates.Select(lesson => lesson.Id).ToList(), LessonRelevanceStatuses.Legacy, null, null));
 }
 
 /// <summary>The runtime facts known at one prompt boundary. Null means unknown, which can admit only lessons that do not constrain that dimension.</summary>
@@ -20,7 +29,7 @@ public sealed record LessonRuntimeContext(Guid? RepositoryId, string? Model, str
 }
 
 /// <summary>The complete server-owned scope for a prompt-facing lesson lookup.</summary>
-public sealed record LessonReadRequest(Guid TeamId, string Mode, LessonRuntimeContext Runtime, DateTimeOffset AsOf, int Take);
+public sealed record LessonReadRequest(Guid TeamId, string Mode, LessonRuntimeContext Runtime, DateTimeOffset AsOf, int Take, string? TaskNeed = null);
 
 public sealed record LessonAvailabilityRequest(Guid TeamId, string Mode, Guid? RepositoryId, DateTimeOffset AsOf);
 
@@ -31,13 +40,22 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
     public const int MaxCandidateTake = 1;
 
     private readonly CodeSpaceDbContext _db;
+    private readonly ILessonRelevanceEvaluator _relevance;
 
-    public LessonReader(CodeSpaceDbContext db) => _db = db;
+    public LessonReader(CodeSpaceDbContext db, ILessonRelevanceEvaluator relevance)
+    {
+        _db = db;
+        _relevance = relevance;
+    }
 
-    public async Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken) =>
+        (await SelectCurrentAsync(request, cancellationToken).ConfigureAwait(false)).Lessons;
+
+    public async Task<LessonRelevanceResult> SelectCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken)
     {
         var take = Math.Clamp(request.Take, 0, MaxTake);
-        if (take == 0 || string.IsNullOrWhiteSpace(request.Mode)) return [];
+        if (take == 0 || string.IsNullOrWhiteSpace(request.Mode)) return new([], [], LessonRelevanceStatuses.NoCandidates, null, null);
+        var queryTake = string.IsNullOrWhiteSpace(request.TaskNeed) ? take : MaxTake;
 
         var model = LessonApplicability.Normalize(request.Runtime.Model);
         var harness = LessonApplicability.Normalize(request.Runtime.Harness);
@@ -51,21 +69,22 @@ public sealed class LessonReader : ILessonReader, IScopedDependency
             .OrderByDescending(lesson => request.Runtime.RepositoryId != null && lesson.RepositoryId == request.Runtime.RepositoryId)
             .ThenByDescending(lesson => lesson.ValidFrom)
             .ThenBy(lesson => lesson.Id)
-            .Take(take)
+            .Take(queryTake)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var candidateTake = Math.Min(MaxCandidateTake, take - qualified.Count);
-        if (candidateTake == 0) return qualified;
-
-        var candidates = await scoped.Where(lesson => lesson.QualifiedAt == null)
+        var candidateTake = Math.Min(MaxCandidateTake, queryTake - qualified.Count);
+        var candidates = candidateTake == 0 ? [] : await scoped.Where(lesson => lesson.QualifiedAt == null)
             .OrderByDescending(lesson => request.Runtime.RepositoryId != null && lesson.RepositoryId == request.Runtime.RepositoryId)
             .ThenByDescending(lesson => lesson.ValidFrom)
             .ThenBy(lesson => lesson.Id)
             .Take(candidateTake)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        return qualified.Concat(candidates).ToList();
+        var structural = qualified.Concat(candidates).ToList();
+        if (string.IsNullOrWhiteSpace(request.TaskNeed)) return new(structural, structural.Select(lesson => lesson.Id).ToList(), LessonRelevanceStatuses.Legacy, null, null);
+        return await SelectAsync(new(request.TeamId, request.TaskNeed, structural, take), cancellationToken).ConfigureAwait(false);
     }
+
+    public Task<LessonRelevanceResult> SelectAsync(LessonRelevanceRequest request, CancellationToken cancellationToken) => _relevance.EvaluateAsync(request, cancellationToken);
 
     internal static Task<bool> HasCurrentAsync(CodeSpaceDbContext db, LessonAvailabilityRequest request, CancellationToken cancellationToken) =>
         string.IsNullOrWhiteSpace(request.Mode) ? Task.FromResult(false) : Current(db, request).AnyAsync(cancellationToken);

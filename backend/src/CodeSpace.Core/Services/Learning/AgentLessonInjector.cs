@@ -57,8 +57,16 @@ public sealed class AgentLessonInjector : IAgentLessonInjector, IScopedDependenc
         var receipt = await _promptReceipts.ReadAsync(runId, request.TeamId, promptKey, cancellationToken).ConfigureAwait(false);
         if (receipt is null)
         {
-            var proposedLessonIds = await ProposePromptLessonsAsync(request, assignment, promptKey, cancellationToken).ConfigureAwait(false);
-            receipt = await _promptReceipts.GetOrCreateAsync(new(runId, request.TeamId, promptKey, proposedLessonIds), cancellationToken).ConfigureAwait(false);
+            var selection = await ProposePromptLessonsAsync(request, assignment, promptKey, cancellationToken).ConfigureAwait(false);
+            var selectedLessonIds = selection.Status == LessonRelevanceStatuses.Legacy ? selection.CandidateIds : selection.Lessons.Select(lesson => lesson.Id).ToList();
+            receipt = await _promptReceipts.GetOrCreateAsync(new(runId, request.TeamId, promptKey, selectedLessonIds)
+            {
+                CandidateIds = selection.CandidateIds,
+                RelevanceStatus = selection.Status,
+                RelevanceModel = selection.ObservedModel,
+                RelevanceGeneration = selection.Status == LessonRelevanceStatuses.Legacy ? LessonRelevanceStatuses.Legacy : LlmLessonRelevanceEvaluator.Generation,
+                AssessmentDigest = selection.AssessmentDigest,
+            }, cancellationToken).ConfigureAwait(false);
         }
 
         var historical = await ReadHistoricalAsync(receipt.LessonIds, request.TeamId, cancellationToken).ConfigureAwait(false);
@@ -82,16 +90,21 @@ public sealed class AgentLessonInjector : IAgentLessonInjector, IScopedDependenc
         return new(runId, request.TeamId, LessonArms.For(request.TeamId, operatorGoal, hasAnyLesson ? 1 : 0), []);
     }
 
-    private async Task<IReadOnlyList<Guid>> ProposePromptLessonsAsync(AgentLessonInjectionRequest request, RunLessonAssignment assignment, string promptKey, CancellationToken cancellationToken)
+    private async Task<LessonRelevanceResult> ProposePromptLessonsAsync(AgentLessonInjectionRequest request, RunLessonAssignment assignment, string promptKey, CancellationToken cancellationToken)
     {
-        if (await ReadLegacyPromptReceiptAsync(request, promptKey, cancellationToken).ConfigureAwait(false) is { } legacy) return legacy;
+        if (await ReadLegacyPromptReceiptAsync(request, promptKey, cancellationToken).ConfigureAwait(false) is { } legacy)
+        {
+            var historical = await ReadHistoricalAsync(legacy, request.TeamId, cancellationToken).ConfigureAwait(false);
+            return new(historical, legacy, LessonRelevanceStatuses.Legacy, null, null);
+        }
 
         var mode = await RunModeReader.DeriveAsync(_db, assignment.WorkflowRunId, request.TeamId, cancellationToken).ConfigureAwait(false);
         var runtime = new LessonRuntimeContext(request.Task.RepositoryId, request.Task.Model, request.Task.Harness, request.Task.Tools);
-        var current = await _lessons.ListCurrentAsync(new LessonReadRequest(request.TeamId, mode, runtime, DateTimeOffset.UtcNow, LessonArms.TopK), cancellationToken).ConfigureAwait(false);
+        var current = await _lessons.ListCurrentAsync(new LessonReadRequest(request.TeamId, mode, runtime, DateTimeOffset.UtcNow, LessonReader.MaxTake), cancellationToken).ConfigureAwait(false);
         var inherited = await ReadHistoricalAsync(assignment.LessonIds, request.TeamId, cancellationToken).ConfigureAwait(false);
-        var compatibleInherited = inherited.Where(lesson => LessonApplicability.AppliesTo(runtime, lesson.ApplicableModels, lesson.ApplicableHarnesses, lesson.RequiredTools)).Select(lesson => lesson.Id);
-        return current.Select(lesson => lesson.Id).Concat(compatibleInherited).Distinct().Take(AgentLessonPromptReceiptStore.MaxLessons).ToList();
+        var compatibleInherited = inherited.Where(lesson => LessonApplicability.AppliesTo(runtime, lesson.ApplicableModels, lesson.ApplicableHarnesses, lesson.RequiredTools));
+        var candidates = compatibleInherited.Concat(current).DistinctBy(lesson => lesson.Id).Take(LlmLessonRelevanceEvaluator.MaxCandidates).ToList();
+        return await _lessons.SelectAsync(new(request.TeamId, request.Task.Goal, candidates, LessonArms.TopK), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<IReadOnlyList<Guid>?> ReadLegacyPromptReceiptAsync(AgentLessonInjectionRequest request, string promptKey, CancellationToken cancellationToken)
