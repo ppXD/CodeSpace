@@ -26,13 +26,15 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
     private readonly IBenchmarkFixtureStager _stager;
     private readonly IBenchmarkResultStore _results;
     private readonly ILogger<CorpusBenchmarkRunner> _logger;
+    private readonly IPairedQualificationCellAdmissionStore _admissions;
 
-    public CorpusBenchmarkRunner(IBenchmarkRunner runner, IBenchmarkFixtureStager stager, IBenchmarkResultStore results, ILogger<CorpusBenchmarkRunner> logger)
+    public CorpusBenchmarkRunner(IBenchmarkRunner runner, IBenchmarkFixtureStager stager, IBenchmarkResultStore results, ILogger<CorpusBenchmarkRunner> logger, IPairedQualificationCellAdmissionStore admissions)
     {
         _runner = runner;
         _stager = stager;
         _results = results;
         _logger = logger;
+        _admissions = admissions;
     }
 
     public Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken) => RunAsync(new CorpusBenchmarkRequest { Tasks = corpus, TeamId = teamId, Selection = selection }, cancellationToken);
@@ -165,6 +167,8 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
             var stager = request.FixtureStager ?? _stager;
             stager.Stage(task.FixtureRef, workspace);
 
+            await AdmitPairedCellAsync(request, task, mode, cancellationToken).ConfigureAwait(false);
+
             var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, Selection = request.Selection, FixtureStager = stager };
             var result = await _runner.RunAsync(task, mode, context, cancellationToken).ConfigureAwait(false);
 
@@ -191,6 +195,28 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
         {
             try { Directory.Delete(workspace, recursive: true); } catch { /* best-effort reclaim */ }
         }
+    }
+
+    private async Task AdmitPairedCellAsync(CorpusBenchmarkRequest request, BenchmarkTask task, BenchmarkMode mode, CancellationToken cancellationToken)
+    {
+        if (!request.RequireDurableObservation) return;
+        if (request.ObservationGroupId is not { } groupId || request.ObservationSession is not { } session || request.ObservationArm is not { } arm || request.Selection?.ModelCredentialModelId is not { } modelRowId)
+            throw new DurableBenchmarkObservationException($"Paired benchmark cell {task.Id}/{mode} has no complete durable admission identity.");
+        PairedQualificationCellAdmissionDecision decision;
+        try
+        {
+            decision = await _admissions.AdmitAsync(new PairedQualificationCellAdmissionRequest
+            {
+                ObservationGroupId = groupId, ObservationSession = session, ObservationArm = arm,
+                TaskId = task.Id, Mode = mode, ModelCredentialModelId = modelRowId,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not DurableBenchmarkObservationException)
+        {
+            throw new DurableBenchmarkObservationException($"Durable paired benchmark admission {task.Id}/{mode} could not be committed.", exception);
+        }
+        if (decision == PairedQualificationCellAdmissionDecision.AlreadyAdmitted)
+            throw new DurableBenchmarkObservationException($"Paired benchmark cell {task.Id}/{mode} execution-indeterminate: a durable admission exists without the required observation, so automatic paid replay is forbidden.");
     }
 
     /// <summary>
@@ -234,4 +260,5 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
             _logger.LogWarning(ex, "Benchmark infra cell {TaskId}/{Mode} could not be persisted; the corpus verdict is unaffected", error.TaskId, error.Mode);
         }
     }
+
 }

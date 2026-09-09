@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -25,7 +26,7 @@ public class CorpusBenchmarkRunnerTests
         // task A solves; task B does not. Across 2 modes → each mode has 1 solved + 1 unsolved = a 0.5 solve rate.
         var solved = new HashSet<string> { "task-a" };
         var runner = new StubRunner(passWhen: (taskId, _) => solved.Contains(taskId));
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var corpus = new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) };
 
@@ -53,7 +54,7 @@ public class CorpusBenchmarkRunnerTests
         // ran long enough to TIME OUT (never reached RunStatus.Succeeded) must still land in run.Scorecard.Overall.Total
         // as an attempted-but-unsolved pair — never vanish from the rate the way a stricter "Succeeded-only" filter would.
         var runner = new StubRunner(passWhen: (_, _) => true, timedOutWhen: (taskId, _) => taskId == "task-b");
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -70,7 +71,7 @@ public class CorpusBenchmarkRunnerTests
     {
         var stager = new RecordingStager();
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, stager, new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, stager, new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -87,7 +88,7 @@ public class CorpusBenchmarkRunnerTests
         // The runner throws for task-b only (a runner-side infra fault). The corpus must NOT abort, and task-b must not
         // be scored as an unsolved task — it is excluded, surfaced in Errored.
         var runner = new StubRunner(passWhen: (_, _) => true, throwWhen: (taskId, _) => taskId == "task-b");
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -104,7 +105,7 @@ public class CorpusBenchmarkRunnerTests
     public async Task A_staging_failure_is_an_infra_error_not_an_unsolved_task()
     {
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -121,7 +122,7 @@ public class CorpusBenchmarkRunnerTests
         // a silent skip because the cell was headed for TaskLaunchBenchmarkCellRunner instead of the direct instrument.
         var launchModes = new[] { BenchmarkMode.TaskLaunchQuick };
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("unknown-fixture-task", launchModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -147,7 +148,7 @@ public class CorpusBenchmarkRunnerTests
     public async Task A_corpus_of_only_launch_arms_reports_TaskLaunch_execution_path()
     {
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("task-a", new[] { BenchmarkMode.TaskLaunchStandard }) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -158,7 +159,7 @@ public class CorpusBenchmarkRunnerTests
     public async Task A_caller_cancellation_propagates_and_is_not_swallowed_as_an_infra_error()
     {
         var runner = new StubRunner(passWhen: (_, _) => true, cancel: true);
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         await Should.ThrowAsync<OperationCanceledException>(
             () => sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None));
@@ -171,7 +172,7 @@ public class CorpusBenchmarkRunnerTests
         // belongs to the run and must reach EVERY (task × mode) the instrument runs, unchanged — else a real-model gate
         // would silently run the fake CLI on some pairs.
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var credId = Guid.NewGuid();
         var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "gw-model", ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted };
@@ -186,7 +187,7 @@ public class CorpusBenchmarkRunnerTests
     public async Task A_null_selection_reaches_the_instrument_as_null_the_deterministic_default()
     {
         var runner = new StubRunner(passWhen: (_, _) => true);
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -202,7 +203,7 @@ public class CorpusBenchmarkRunnerTests
         // was re-derived from scratch each run and never comparable across runs, commits, or model bundles.
         var store = new RecordingResultStore();
         var runner = new StubRunner(passWhen: (taskId, _) => taskId == "task-a");
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
         var teamId = Guid.NewGuid();
         var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "claude-sonnet-4-5" };
 
@@ -220,7 +221,7 @@ public class CorpusBenchmarkRunnerTests
     {
         var store = new RecordingResultStore();
         var runner = new StubRunner(passWhen: (_, _) => true, throwWhen: (taskId, _) => taskId == "task-b");
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
 
         var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
@@ -238,10 +239,10 @@ public class CorpusBenchmarkRunnerTests
         var corpus = new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) };
         var teamId = Guid.NewGuid();
 
-        var healthy = await new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance)
+        var healthy = await new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted))
             .RunAsync(corpus, teamId, selection: null, CancellationToken.None);
 
-        var broken = await new CorpusBenchmarkRunner(new StubRunner(passWhen: (taskId, _) => taskId == "task-a"), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance)
+        var broken = await new CorpusBenchmarkRunner(new StubRunner(passWhen: (taskId, _) => taskId == "task-a"), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted))
             .RunAsync(corpus, teamId, selection: null, CancellationToken.None);
 
         broken.Results.Count.ShouldBe(healthy.Results.Count);
@@ -256,7 +257,7 @@ public class CorpusBenchmarkRunnerTests
         var stager = new RecordingStager();
         var runner = new StubRunner((_, _) => true);
         var store = new RecordingResultStore();
-        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
         var tasks = new[] { MakeTask("private-fixture", TwoModes) };
         var request = new CorpusBenchmarkRequest { Tasks = tasks, TeamId = Guid.NewGuid(), FixtureStager = stager, SuiteContentHash = "frozen-a" };
 
@@ -278,7 +279,7 @@ public class CorpusBenchmarkRunnerTests
     {
         var runner = new StubRunner((_, _) => true);
         var store = new RecordingPairedStore();
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
         var tasks = Enumerable.Range(0, 20).Select(index => MakeTask($"task-{index}", new[] { BenchmarkMode.TaskLaunchQuick })).ToList();
         var control = new BenchmarkAgentSelection { Harness = "claude-code", Model = "control", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m };
         var candidate = new BenchmarkAgentSelection { Harness = "claude-code", Model = "candidate", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m };
@@ -309,7 +310,7 @@ public class CorpusBenchmarkRunnerTests
     {
         var runner = new StubRunner((_, _) => true);
         var store = new RecordingPairedStore();
-        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
         var controlRow = Guid.NewGuid();
         var candidateRow = Guid.NewGuid();
 
@@ -364,7 +365,7 @@ public class CorpusBenchmarkRunnerTests
             var runner = new StubRunner((_, _) => true);
             var stager = new RecordingStager();
             var store = new RecordingPairedStore();
-            var sut = new CorpusBenchmarkRunner(runner, stager, store, NullLogger<CorpusBenchmarkRunner>.Instance);
+            var sut = new CorpusBenchmarkRunner(runner, stager, store, NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
             var request = new PairedCorpusBenchmarkRequest
             {
                 Tasks = new[] { MakeTask("task-a", TwoModes) }, TeamId = Guid.NewGuid(),
@@ -383,7 +384,7 @@ public class CorpusBenchmarkRunnerTests
     [Fact]
     public async Task Paired_qualification_stops_when_its_durable_observation_cannot_be_appended()
     {
-        var sut = new CorpusBenchmarkRunner(new StubRunner((_, _) => true), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance);
+        var sut = new CorpusBenchmarkRunner(new StubRunner((_, _) => true), new NoopStager(), new ThrowingResultStore(), NullLogger<CorpusBenchmarkRunner>.Instance, new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.Admitted));
         var request = new PairedCorpusBenchmarkRequest
         {
             Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
@@ -395,6 +396,28 @@ public class CorpusBenchmarkRunnerTests
         var failure = await Should.ThrowAsync<InvalidOperationException>(() => sut.RunPairedAsync(request, CancellationToken.None));
 
         failure.Message.ShouldContain("could not be appended");
+    }
+
+    [Fact]
+    public async Task A_previously_admitted_missing_cell_is_parked_before_model_execution()
+    {
+        var runner = new StubRunner((_, _) => true);
+        var admissions = new FixedAdmissionStore(PairedQualificationCellAdmissionDecision.AlreadyAdmitted);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), new RecordingPairedStore(), NullLogger<CorpusBenchmarkRunner>.Instance, admissions);
+        var request = new PairedCorpusBenchmarkRequest
+        {
+            Tasks = new[] { MakeTask("task", new[] { BenchmarkMode.TaskLaunchQuick }) }, TeamId = Guid.NewGuid(),
+            Control = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            Candidate = new BenchmarkAgentSelection { Harness = "claude-code", ModelCredentialModelId = Guid.NewGuid(), MaxCostUsd = 5m },
+            ObservationGroupId = Guid.NewGuid(), ObservationSession = 0, OrderingSeed = "frozen-order", CodeRevision = new string('a', 40),
+            SelectedCells = new[] { new PairedCorpusBenchmarkCell { TaskId = "task", Mode = BenchmarkMode.TaskLaunchQuick, Arm = "control" } },
+        };
+
+        var failure = await Should.ThrowAsync<DurableBenchmarkObservationException>(() => sut.RunPairedAsync(request, CancellationToken.None));
+
+        failure.Message.ShouldContain("execution-indeterminate");
+        runner.Calls.ShouldBeEmpty("an admission with no observation may represent an accepted paid call, so automatic replay is forbidden");
+        admissions.Requests.ShouldHaveSingleItem().ModelCredentialModelId.ShouldBe(request.Control.ModelCredentialModelId!.Value);
     }
 
     // ─── stubs ───
@@ -503,5 +526,17 @@ public class CorpusBenchmarkRunnerTests
     private sealed class ThrowingStager : IBenchmarkFixtureStager
     {
         public void Stage(string fixtureRef, string directory) => throw new InvalidOperationException($"unknown fixture {fixtureRef}");
+    }
+
+    private sealed class FixedAdmissionStore : IPairedQualificationCellAdmissionStore
+    {
+        private readonly PairedQualificationCellAdmissionDecision _decision;
+        public List<PairedQualificationCellAdmissionRequest> Requests { get; } = new();
+        public FixedAdmissionStore(PairedQualificationCellAdmissionDecision decision) => _decision = decision;
+        public Task<PairedQualificationCellAdmissionDecision> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            return Task.FromResult(_decision);
+        }
     }
 }
