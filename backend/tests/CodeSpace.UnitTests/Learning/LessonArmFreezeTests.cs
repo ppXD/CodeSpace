@@ -55,11 +55,13 @@ public class LessonArmFreezeTests
         var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, "{}", "{}", lessonArm: LessonArms.Injected);
 
-        var context = await Service(ledger, new SeededLessonReader(LessonCount)).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
+        var lessons = new SeededLessonReader(LessonCount);
+        var context = await Service(ledger, lessons).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
         context.LessonArm.ShouldBe(LessonArms.Injected);
         context.LessonLines.Count.ShouldBe(LessonCount);
         context.LessonLines[0].ShouldBe(LessonArms.Line(Lesson(0)), "both lanes render a lesson line through the one shared renderer");
+        lessons.LastRequest.ShouldNotBeNull().Mode.ShouldBe(CodeSpace.Core.Services.Completion.RunModeKeys.Supervisor);
     }
 
     [Fact]
@@ -100,10 +102,12 @@ public class LessonArmFreezeTests
         public SeededLessonReader(int count) => _count = count;
 
         public int Calls { get; private set; }
+        public LessonReadRequest? LastRequest { get; private set; }
 
-        public Task<IReadOnlyList<Lesson>> ListCurrentAsync(Guid teamId, Guid? repositoryId, int take, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken)
         {
             Calls++;
+            LastRequest = request;
             return Task.FromResult<IReadOnlyList<Lesson>>(Enumerable.Range(0, _count).Select(LessonArmFreezeTests.Lesson).ToList());
         }
     }

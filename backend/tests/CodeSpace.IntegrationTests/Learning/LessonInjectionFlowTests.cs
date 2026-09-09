@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
@@ -97,7 +98,7 @@ public sealed class LessonInjectionFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var lesson = new Lesson
         {
-            Id = Guid.NewGuid(), TeamId = teamId, Mode = "supervisor", FailureClass = "broken-acceptance-command",
+            Id = Guid.NewGuid(), TeamId = teamId, Mode = RunModeKeys.PlanMap, FailureClass = "broken-acceptance-command",
             WhatFailed = "check.sh exits 2 on a clean tree", Why = "unrestored solution", HowToApply = howToApply,
             SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow,
         };

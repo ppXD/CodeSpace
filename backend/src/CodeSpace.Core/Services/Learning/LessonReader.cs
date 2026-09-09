@@ -9,24 +9,38 @@ namespace CodeSpace.Core.Services.Learning;
 
 public interface ILessonReader
 {
-    /// <summary>The team's CURRENT lessons for injection — repo-matched lessons first (the sharper key), then the freshest; capped at <paramref name="take"/>.</summary>
-    Task<IReadOnlyList<Lesson>> ListCurrentAsync(Guid teamId, Guid? repositoryId, int take, CancellationToken cancellationToken);
+    /// <summary>Applicable, current and provenance-backed lessons for one prompt boundary.</summary>
+    Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken);
 }
+
+/// <summary>The complete server-owned scope for a prompt-facing lesson lookup.</summary>
+public sealed record LessonReadRequest(Guid TeamId, string Mode, Guid? RepositoryId, DateTimeOffset AsOf, int Take);
 
 /// <summary>Arc D / D2 — the learning loop's read side: the injection reader over the lesson ledger.</summary>
 public sealed class LessonReader : ILessonReader, IScopedDependency
 {
+    public const int MaxTake = 20;
+
     private readonly CodeSpaceDbContext _db;
 
     public LessonReader(CodeSpaceDbContext db) => _db = db;
 
-    public async Task<IReadOnlyList<Lesson>> ListCurrentAsync(Guid teamId, Guid? repositoryId, int take, CancellationToken cancellationToken) =>
-        await _db.Lesson.AsNoTracking()
-            .Where(l => l.TeamId == teamId && l.InvalidatedAt == null)
-            .OrderByDescending(l => repositoryId != null && l.RepositoryId == repositoryId)
-            .ThenByDescending(l => l.ValidFrom)
+    public async Task<IReadOnlyList<Lesson>> ListCurrentAsync(LessonReadRequest request, CancellationToken cancellationToken)
+    {
+        var take = Math.Clamp(request.Take, 0, MaxTake);
+        if (take == 0 || string.IsNullOrWhiteSpace(request.Mode)) return [];
+
+        return await _db.Lesson.AsNoTracking()
+            .Where(lesson => lesson.TeamId == request.TeamId && lesson.Mode == request.Mode)
+            .Where(lesson => lesson.ValidFrom <= request.AsOf && (lesson.InvalidatedAt == null || lesson.InvalidatedAt > request.AsOf))
+            .Where(lesson => lesson.SourceRunIds.Count > 0 && lesson.DistilledByModel != "")
+            .Where(lesson => request.RepositoryId == null ? lesson.RepositoryId == null : lesson.RepositoryId == null || lesson.RepositoryId == request.RepositoryId)
+            .OrderByDescending(lesson => request.RepositoryId != null && lesson.RepositoryId == request.RepositoryId)
+            .ThenByDescending(lesson => lesson.ValidFrom)
+            .ThenBy(lesson => lesson.Id)
             .Take(take)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
 }
 
 /// <summary>
