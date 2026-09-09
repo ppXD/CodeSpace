@@ -33,8 +33,39 @@ public sealed class PairedQualificationStatisticsTests
 
         outcome.PairedCells.ShouldBe(15);
         outcome.IndependentClusters.ShouldBe(3, "five repeats of one task remain one independent source");
+        outcome.Strata.Sum(stratum => stratum.IndependentClusters).ShouldBe(3, "stratum disclosure must not relabel repeated sessions as independent evidence");
         outcome.QualifiedForCapabilityClaim.ShouldBeFalse();
         outcome.BlockingReasons.ShouldContain("insufficient-independent-clusters");
+    }
+
+    [Fact]
+    public void A_large_aggregate_lift_cannot_hide_a_regression_in_one_frozen_stratum()
+    {
+        var tasks = Enumerable.Range(0, 300).Select(index => Task($"task-{index}") with
+        {
+            Stratum = index < 40 ? "safety-critical" : "general", IndependenceCluster = $"source-{index}",
+        }).ToList();
+        var suite = new HiddenSuite(tasks, "sha256:hidden", new NoopStager());
+        var fixture = new Fixture(tasks, suite, EvalSuite.ManifestFor(tasks, suite.SuiteContentHash), new List<PairedCorpusBenchmarkRun>
+        {
+            new()
+            {
+                Control = RunSelective(tasks, index => index < 40, "control-observed"),
+                Candidate = RunSelective(tasks, index => index is >= 40 and < 240, "candidate-observed"),
+            },
+        });
+
+        var outcome = Analyze(fixture, Spec(minimumClusters: 300) with { MinimumStrata = 2 });
+
+        outcome.QualityDifference.ShouldBeGreaterThan(0.5);
+        outcome.QualityDifferenceLower95.ShouldBeGreaterThan(0);
+        outcome.QualifiedForCapabilityClaim.ShouldBeFalse("a generic claim cannot trade away one frozen task family behind a strong aggregate");
+        outcome.BlockingReasons.ShouldContain("stratum-regression");
+        var regressed = outcome.Strata.Single(stratum => stratum.Stratum == "safety-critical");
+        regressed.Pairs.ShouldBe(40);
+        regressed.IndependentClusters.ShouldBe(40);
+        regressed.QualityDifference.ShouldBe(-1);
+        regressed.QualityDifferenceLower95.ShouldBe(-1);
     }
 
     [Fact]
@@ -178,6 +209,25 @@ public sealed class PairedQualificationStatisticsTests
         {
             ExecutionPath = BenchmarkExecutionPath.TaskLaunch, Results = results,
             Errored = options.InfraTask is null ? Array.Empty<CorpusBenchmarkError>() : new[] { new CorpusBenchmarkError { TaskId = options.InfraTask, Mode = BenchmarkMode.TaskLaunchQuick, Error = "gateway unavailable" } },
+            Scorecard = BenchmarkScorecard.Compute(results), SuiteVersion = EvalSuite.ManifestFor(tasks, "sha256:hidden").Version, Cells = cells,
+        };
+    }
+
+    private static CorpusBenchmarkRun RunSelective(IReadOnlyList<BenchmarkTask> tasks, Func<int, bool> solved, string observed)
+    {
+        var results = tasks.Select((task, index) => new BenchmarkResult
+        {
+            TaskId = task.Id, Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
+            Grade = new BenchmarkGrade { Passed = solved(index), Detail = solved(index) ? "passed" : "failed" }, McpFullCatalog = false,
+            ObservedModel = observed, CostUsd = 1m,
+        }).ToList();
+        var cells = tasks.Select((task, index) => new CorpusCellOutcome
+        {
+            TaskId = task.Id, Mode = BenchmarkMode.TaskLaunchQuick, State = solved(index) ? CorpusCellState.Solved : CorpusCellState.Unsolved,
+        }).ToList();
+        return new CorpusBenchmarkRun
+        {
+            ExecutionPath = BenchmarkExecutionPath.TaskLaunch, Results = results, Errored = Array.Empty<CorpusBenchmarkError>(),
             Scorecard = BenchmarkScorecard.Compute(results), SuiteVersion = EvalSuite.ManifestFor(tasks, "sha256:hidden").Version, Cells = cells,
         };
     }
