@@ -68,7 +68,7 @@ public static class SupervisorActionRoster
     internal static IReadOnlyList<string> Withheld(SupervisorTurnContext context) =>
         Vocabulary.Where(v => UnavailableReasonFor(v.Verb, context) is not null).Select(v => v.Verb).ToList();
 
-    /// <summary>Why this verb cannot advance the run this turn, else null. The ONLY availability authority the roster consults — <see cref="SupervisorActionMask"/>'s own per-verb reader — so the menu and the withheld half beneath it answer from one source. Every other verb is unmasked BY DESIGN, and the mask's own summary documents why: the escape hatches must always be reachable, and a futile <c>merge</c>/<c>spawn</c>/<c>retry</c> is a judgement call rather than a server-decided fact.</summary>
+    /// <summary>Why this verb cannot advance the run this turn, else null. The ONLY availability authority the roster consults — <see cref="SupervisorActionMask"/>'s own per-verb reader — so the menu and the withheld half beneath it answer from one source. Every other verb is unmasked BY DESIGN, and the mask's own summary documents why: the escape hatches must always be reachable, while staging is left to model judgement.</summary>
     private static string? UnavailableReasonFor(string verb, SupervisorTurnContext context) => SupervisorActionMask.UnavailableReasonFor(verb, context);
 
     private static string MeaningFor(string verb) => Vocabulary.Single(v => v.Verb == verb).Meaning;

@@ -33,6 +33,11 @@ public class SupervisorActionRosterTests
         integration = new { status = "Conflicted", conflictedFiles = new[] { "src/Foo.cs" }, preservedBranches = new[] { "codespace/agent/a" }, outcomes = Array.Empty<object>() },
     }, AgentJson.Options);
 
+    private static string CleanOutcome() => JsonSerializer.Serialize(new
+    {
+        integration = new { status = "Clean", integratedBranch = "codespace/integration/run", outcomes = Array.Empty<object>() },
+    }, AgentJson.Options);
+
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship it", TurnNumber = prior.Length, PriorDecisions = prior };
 
@@ -193,6 +198,19 @@ public class SupervisorActionRosterTests
 
         RenderedOffers(block).ShouldNotContain(SupervisorDecisionKinds.Resolve);
         block.ShouldContain("nothing to reconcile", Case.Insensitive, "the no-conflict arm reads differently from the cap arm — one wastes a turn, the other ends the run");
+    }
+
+    [Fact]
+    public void With_a_clean_integration_and_no_new_work_merge_is_withheld_and_the_closing_move_says_stop()
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()));
+        var block = SupervisorActionRoster.Render(context);
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        RenderedOffers(block).ShouldNotContain(SupervisorDecisionKinds.Merge);
+        block.ShouldContain("latest integration is already clean", Case.Sensitive);
+        prompt.TrimEnd().ShouldEndWith($"{LlmSupervisorDecider.ClosingAlreadyIntegrated} Return ONLY the schema-constrained JSON.", Case.Sensitive);
+        prompt.ShouldNotContain(LlmSupervisorDecider.ClosingLandsWithAMerge, Case.Sensitive);
     }
 
     // ── (d) Coherence: one reader answers both halves ────────────────────────────────
