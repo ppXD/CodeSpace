@@ -64,10 +64,13 @@ public sealed record PairedStratumSummary
 {
     public required string Stratum { get; init; }
     public required int Pairs { get; init; }
+    public required int IndependentClusters { get; init; }
     public required int ControlSolved { get; init; }
     public required int CandidateSolved { get; init; }
     public required int ControlInfraUnknown { get; init; }
     public required int CandidateInfraUnknown { get; init; }
+    public required double QualityDifference { get; init; }
+    public required double QualityDifferenceLower95 { get; init; }
 }
 
 public sealed record PairedInfraObservation
@@ -81,7 +84,7 @@ public sealed record PairedInfraObservation
 
 public sealed record PairedQualificationOutcome
 {
-    public const string StatisticsVersion = "paired-cluster-bootstrap/v1";
+    public const string StatisticsVersion = "paired-cluster-bootstrap/v2";
 
     public required Guid ObservationGroupId { get; init; }
     public string? ProtocolDigest { get; init; }
@@ -248,13 +251,13 @@ public static class PairedQualificationStatistics
         var lower = ClusterBootstrapLower(pairs, spec.OrderingSeed);
         var requiredComplete = pairs.Where(pair => pair.Required).All(pair => pair.Control.State != CorpusCellState.InfraUnknown && pair.Candidate.State != CorpusCellState.InfraUnknown);
         var costReduction = CostReduction(control, candidate);
-        var stratumCount = pairs.Select(pair => pair.Stratum).Distinct(StringComparer.Ordinal).Count();
+        var strata = SummarizeStrata(pairs, spec.OrderingSeed);
         var protocolEvidenceMatches = ProtocolEvidenceMatches(sessions, manifest, spec.SessionsPerCell);
         var blockers = Blockers(new QualificationEvidence
         {
             ObservationGroupId = request.ObservationGroupId, CodeRevision = request.CodeRevision,
             Spec = spec, ControlSelection = request.Control, CandidateSelection = request.Candidate, Control = control, Candidate = candidate,
-            Clusters = clusters, Strata = stratumCount, RequiredClusters = requiredClusters, RequiredComplete = requiredComplete,
+            Clusters = clusters, Strata = strata.Count, StratumRegression = strata.Any(stratum => stratum.QualityDifference < 0), RequiredClusters = requiredClusters, RequiredComplete = requiredComplete,
             ProtocolEvidenceMatches = protocolEvidenceMatches, Difference = difference, Lower = lower, CostReduction = costReduction,
         });
 
@@ -264,16 +267,24 @@ public static class PairedQualificationStatistics
             IndependentClusters = clusters, PairedCells = pairs.Count, RequiredExecutionClusters = requiredClusters, Control = control, Candidate = candidate,
             QualityDifference = difference, QualityDifferenceLower95 = lower, CostReduction = costReduction,
             RequiredExecutionComplete = requiredComplete, QualifiedForCapabilityClaim = blockers.Count == 0, BlockingReasons = blockers,
-            Strata = pairs.GroupBy(pair => pair.Stratum, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal).Select(group => new PairedStratumSummary
-            {
-                Stratum = group.Key, Pairs = group.Count(), ControlSolved = group.Count(pair => pair.Control.BudgetAdmissibleSolved),
-                CandidateSolved = group.Count(pair => pair.Candidate.BudgetAdmissibleSolved),
-                ControlInfraUnknown = group.Count(pair => pair.Control.State == CorpusCellState.InfraUnknown),
-                CandidateInfraUnknown = group.Count(pair => pair.Candidate.State == CorpusCellState.InfraUnknown),
-            }).ToList(),
+            Strata = strata,
             InfraFailures = pairs.SelectMany(pair => Infra(pair)).ToList(),
         };
     }
+
+    private static IReadOnlyList<PairedStratumSummary> SummarizeStrata(IReadOnlyList<CellPair> pairs, string seed) =>
+        pairs.GroupBy(pair => pair.Stratum, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal).Select(group =>
+        {
+            var cells = group.ToList();
+            var clusterDifferences = cells.GroupBy(pair => pair.Cluster, StringComparer.Ordinal).Select(cluster => cluster.Average(pair => pair.Difference)).ToList();
+            return new PairedStratumSummary
+            {
+                Stratum = group.Key, Pairs = cells.Count, IndependentClusters = clusterDifferences.Count,
+                ControlSolved = cells.Count(pair => pair.Control.BudgetAdmissibleSolved), CandidateSolved = cells.Count(pair => pair.Candidate.BudgetAdmissibleSolved),
+                ControlInfraUnknown = cells.Count(pair => pair.Control.State == CorpusCellState.InfraUnknown), CandidateInfraUnknown = cells.Count(pair => pair.Candidate.State == CorpusCellState.InfraUnknown),
+                QualityDifference = clusterDifferences.Count == 0 ? 0 : clusterDifferences.Average(), QualityDifferenceLower95 = ClusterBootstrapLower(cells, $"{seed}\u001f{group.Key}"),
+            };
+        }).ToList();
 
     private static IReadOnlyList<CellPair> Pair(int sessionIndex, PairedCorpusBenchmarkRun session, EvalSuiteManifest manifest, IReadOnlyDictionary<string, BenchmarkTask> tasks, decimal cap)
     {
@@ -349,6 +360,7 @@ public static class PairedQualificationStatistics
         if (spec.RequireDistinctObservedModels && control.ObservedModels.Count == 1 && candidate.ObservedModels.Count == 1 && string.Equals(control.ObservedModels[0], candidate.ObservedModels[0], StringComparison.OrdinalIgnoreCase)) blockers.Add("identical-observed-model");
         if (evidence.Clusters < spec.MinimumIndependentClusters) blockers.Add("insufficient-independent-clusters");
         if (evidence.Strata < spec.MinimumStrata) blockers.Add("insufficient-strata");
+        if (evidence.StratumRegression) blockers.Add("stratum-regression");
         if (evidence.RequiredClusters < spec.MinimumRequiredExecutionClusters) blockers.Add("required-execution-strata-absent");
         if (!evidence.ProtocolEvidenceMatches) blockers.Add("paired-protocol-evidence-mismatch");
         if (control.EvaluatorHealth < spec.MinimumEvaluatorHealth || candidate.EvaluatorHealth < spec.MinimumEvaluatorHealth) blockers.Add("evaluator-health-below-floor");
@@ -436,6 +448,7 @@ public static class PairedQualificationStatistics
         public required PairedArmQualificationSummary Candidate { get; init; }
         public required int Clusters { get; init; }
         public required int Strata { get; init; }
+        public required bool StratumRegression { get; init; }
         public required int RequiredClusters { get; init; }
         public required bool RequiredComplete { get; init; }
         public required bool ProtocolEvidenceMatches { get; init; }
