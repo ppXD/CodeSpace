@@ -408,8 +408,23 @@ public sealed record DeliverableFile
     public required string ContentType { get; init; }
     public required Guid ArtifactId { get; init; }
 
+    /// <summary>Current bounded storage-plane reachability. Unknown is the fail-closed compatibility value for an older producer; Reachable means the backend served a range with matching length metadata, not that the whole object was re-hashed.</summary>
+    public RoomDeliverableAvailability Availability { get; init; }
+
     /// <summary>Which agent produced it, so a multi-agent turn attributes its files.</summary>
     public required Guid AgentRunId { get; init; }
+}
+
+/// <summary>Transport-stable storage facts for a produced file. Values mirror the bounded artifact range reader without leaking provider-specific errors.</summary>
+public enum RoomDeliverableAvailability
+{
+    Unknown = 0,
+    Reachable = 1,
+    MetadataMissing = 2,
+    PhysicalObjectMissing = 3,
+    IntegrityFailure = 4,
+    BackendUnavailable = 5,
+    AccessDenied = 6,
 }
 
 /// <summary>A decision the AI needs answered — rendered as an inline answerable card (the wait it parked on).</summary>

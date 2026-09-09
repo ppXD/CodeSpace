@@ -326,6 +326,8 @@ export interface DeliverableFile {
   contentType: string;
   artifactId: string;
   agentRunId: string;
+  /** Current bounded storage reachability. Reachable does not claim that the entire object was re-hashed. */
+  availability: "Unknown" | "Reachable" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied";
 }
 /// Files a turn produced as files rather than as a repository change. Absent when it produced none — an empty
 /// list would read as "it produced nothing", which is a claim about the run rather than about this card.

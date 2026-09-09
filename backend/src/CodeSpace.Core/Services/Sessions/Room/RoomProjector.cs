@@ -1365,10 +1365,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// row pointing at its successor is exactly what makes a re-capture auditable, so a reader that wants "what did
     /// this run produce" filters, and a reader that wants the chain still has it.</para>
     /// </summary>
-    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
-        (await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
+    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var manifests = (await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
             .Where(manifest => manifest.SupersededByManifestId == null)
             .Take(MaxChangedFiles)
+            .ToList();
+        if (manifests.Count == 0) return Array.Empty<DeliverableFile>();
+
+        var reads = await _artifacts.ReadRangesAsync(new ArtifactRangesReadRequest(teamId, manifests.Select(manifest => manifest.ContentArtifactId).Distinct().Take(MaxDeliverableAvailabilityProbes).ToArray(), 0, 1), cancellationToken).ConfigureAwait(false);
+        return manifests
             .Select(manifest => new DeliverableFile
             {
                 Path = manifest.LogicalPath,
@@ -1377,8 +1383,21 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 ContentType = manifest.ContentType,
                 ArtifactId = manifest.ContentArtifactId,
                 AgentRunId = manifest.AgentRunId,
+                Availability = reads.TryGetValue(manifest.ContentArtifactId, out var read) ? DeliverableAvailability(read.State) : RoomDeliverableAvailability.Unknown,
             })
             .ToList();
+    }
+
+    private static RoomDeliverableAvailability DeliverableAvailability(ArtifactRangeReadState state) => state switch
+    {
+        ArtifactRangeReadState.Available => RoomDeliverableAvailability.Reachable,
+        ArtifactRangeReadState.MetadataMissing => RoomDeliverableAvailability.MetadataMissing,
+        ArtifactRangeReadState.PhysicalObjectMissing => RoomDeliverableAvailability.PhysicalObjectMissing,
+        ArtifactRangeReadState.IntegrityFailure => RoomDeliverableAvailability.IntegrityFailure,
+        ArtifactRangeReadState.BackendUnavailable => RoomDeliverableAvailability.BackendUnavailable,
+        ArtifactRangeReadState.AccessDenied => RoomDeliverableAvailability.AccessDenied,
+        _ => RoomDeliverableAvailability.Unknown,
+    };
 
     private async Task<IReadOnlyList<SupervisorPriorDecision>> ReadTerminalDecisionsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -1417,6 +1436,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private const int MaxToolScan = 2000;
     private const int MaxToolArtifactHydrates = 128;
     private const int MaxToolPayloadPrefixBytes = 16 * 1024;
+    private const int MaxDeliverableAvailabilityProbes = 16;
     private const int MaxFailureScan = 50;
     private const int MaxDeliveryRecordScan = 20;
 
