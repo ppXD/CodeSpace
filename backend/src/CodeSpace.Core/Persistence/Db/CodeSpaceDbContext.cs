@@ -113,6 +113,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<ArtifactManifest> ArtifactManifest => Set<ArtifactManifest>();
     public DbSet<QualificationReceipt> QualificationReceipt => Set<QualificationReceipt>();
     public DbSet<PairedQualificationProtocol> PairedQualificationProtocol => Set<PairedQualificationProtocol>();
+    public DbSet<PairedQualificationCellAdmission> PairedQualificationCellAdmission => Set<PairedQualificationCellAdmission>();
     public DbSet<PairedQualificationResult> PairedQualificationResult => Set<PairedQualificationResult>();
 
     public DbSet<Lesson> Lesson => Set<Lesson>();
