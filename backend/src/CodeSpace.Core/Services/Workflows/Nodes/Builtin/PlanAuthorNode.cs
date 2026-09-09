@@ -113,6 +113,7 @@ public sealed class PlanAuthorNode : INodeRuntime
                   }
                 },
                 "executionNeeded": { "type": "boolean", "description": "false when the planner declared the goal needs no execution (hasEnoughContext) — a downstream logic.if can route straight to synthesis." },
+                "injectedLessonIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Exact lesson ids exposed to the planner. Present only when lessons were injected; kept outside the offloadable json payload as durable evaluation evidence." },
                 "json": { "type": "object", "description": "The raw structured plan (goal/subtasks/successCriteria/risks/recommendedWorkflowKind) — binding-compatible with a structured llm.complete's 'json' output." }
               }
             }
@@ -281,7 +282,7 @@ public sealed class PlanAuthorNode : INodeRuntime
     internal static string ComposeTaskText(string goal, string feedback) =>
         string.IsNullOrWhiteSpace(feedback) ? goal : $"{goal}\n\nThe operator reviewed a PRIOR version of this plan and asked for changes. Revise the plan to address this feedback:\n{feedback}";
 
-    private static Dictionary<string, JsonElement> BuildOutputs(Guid planId, int version, PlannedWorkflow plan, string itemsJson)
+    internal static Dictionary<string, JsonElement> BuildOutputs(Guid planId, int version, PlannedWorkflow plan, string itemsJson)
     {
         // The PERSISTED items bytes (one serialization, AgentJson camelCase) — outputs and store can't drift.
         using var items = JsonDocument.Parse(itemsJson);
@@ -319,6 +320,10 @@ public sealed class PlanAuthorNode : INodeRuntime
         // most. As its own small key it is always inline and always readable. Conditional, so a plan whose producer
         // stamped no arm keeps byte-identical outputs.
         if (plan.LessonArm is { Length: > 0 } lessonArm) outputs["lessonArm"] = JsonSerializer.SerializeToElement(lessonArm);
+
+        // Exact exposure is promotion evidence. Keep the ids as a small top-level output so node.completed retains
+        // them even when the full plan JSON is offloaded. Conditional preserves legacy bytes for withheld/none runs.
+        if (plan.InjectedLessonIds is { Count: > 0 } lessonIds) outputs["injectedLessonIds"] = JsonSerializer.SerializeToElement(lessonIds);
 
         return outputs;
     }

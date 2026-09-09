@@ -258,6 +258,9 @@ public class SupervisorDecisionLogTests
         await Should.ThrowAsync<PostgresException>(() =>
             ExecRawAsync("UPDATE supervisor_decision SET team_id = @id WHERE id = @id", decisionId));
 
+        await Should.ThrowAsync<PostgresException>(() =>
+            ExecRawAsync("UPDATE supervisor_decision SET lesson_ids = ARRAY[@lesson]::uuid[] WHERE id = @id", decisionId, ("lesson", Guid.NewGuid())));
+
         // A DELETE is rejected too — the ledger is permanent audit.
         await Should.ThrowAsync<PostgresException>(() =>
             ExecRawAsync("DELETE FROM supervisor_decision WHERE id = @id", decisionId));

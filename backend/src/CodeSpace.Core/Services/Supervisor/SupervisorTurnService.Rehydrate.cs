@@ -168,6 +168,7 @@ public sealed partial class SupervisorTurnService
             Goal = goal,
             LessonArm = lessons.Arm,
             LessonLines = lessons.Lines,
+            LessonIds = lessons.Ids,
             SynthesisPromptBudgetChars = SupervisorSynthesisBudget.Normalize(goalConfig?.SynthesisPromptBudgetChars),
             SupervisorRunId = supervisorRunId,
             TeamId = teamId,
@@ -1833,15 +1834,17 @@ public sealed partial class SupervisorTurnService
     /// team's CURRENT lessons" — recorded per turn in the prompt itself, not pinned at turn 1.
     /// <para>A frozen withheld/none arm skips the ledger read entirely (the control arm costs no query).</para>
     /// </summary>
-    private async Task<(string Arm, IReadOnlyList<string> Lines)> ResolveLessonInjectionAsync(string goal, SupervisorGoalConfig? goalConfig, IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
+    private async Task<(string Arm, IReadOnlyList<string> Lines, IReadOnlyList<Guid> Ids)> ResolveLessonInjectionAsync(string goal, SupervisorGoalConfig? goalConfig, IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
     {
         var frozen = rows.Select(r => r.LessonArm).FirstOrDefault(arm => !string.IsNullOrWhiteSpace(arm));
 
-        if (frozen is Learning.LessonArms.Withheld or Learning.LessonArms.None) return (frozen, []);
+        if (frozen is Learning.LessonArms.Withheld or Learning.LessonArms.None) return (frozen, [], []);
 
         var current = await _lessons.ListCurrentAsync(new Learning.LessonReadRequest(teamId, RunModeKeys.Supervisor, goalConfig?.AgentProfile?.RepositoryId, DateTimeOffset.UtcNow, Learning.LessonArms.TopK), cancellationToken).ConfigureAwait(false);
         var arm = frozen ?? Learning.LessonArms.For(teamId, LessonAssignmentGoal(goal, goalConfig), current.Count);
 
-        return arm == Learning.LessonArms.Injected ? (arm, current.Select(Learning.LessonArms.Line).ToList()) : (arm, []);
+        return arm == Learning.LessonArms.Injected
+            ? (arm, current.Select(Learning.LessonArms.Line).ToList(), current.Select(lesson => lesson.Id).ToList())
+            : (arm, [], []);
     }
 }

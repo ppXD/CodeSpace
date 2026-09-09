@@ -46,7 +46,7 @@ public sealed class FakeSupervisorDecisionLog : ISupervisorDecisionLog, ISupervi
 
         // The real ledger normalizes a blank arm to NULL (the column means "outside the experiment"); mirror it, or a
         // fake row would carry "" and the run's frozen-arm read-back would behave differently here than in production.
-        var row = new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = request.TeamId, SupervisorRunId = request.SupervisorRunId, Sequence = ++_seq, DecisionKind = request.DecisionKind, IdempotencyKey = request.IdempotencyKey, InputHash = request.InputHash, PayloadJson = request.PayloadJson, Status = SupervisorDecisionStatus.Pending, FenceEpoch = request.FenceEpoch, LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm };
+        var row = new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = request.TeamId, SupervisorRunId = request.SupervisorRunId, Sequence = ++_seq, DecisionKind = request.DecisionKind, IdempotencyKey = request.IdempotencyKey, InputHash = request.InputHash, PayloadJson = request.PayloadJson, Status = SupervisorDecisionStatus.Pending, FenceEpoch = request.FenceEpoch, LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm, LessonIds = request.LessonIds.Distinct().OrderBy(id => id).ToList() };
         Rows.Add(row);
         return Task.FromResult(SupervisorDecisionClaim.Proceed(row.Id));
     }

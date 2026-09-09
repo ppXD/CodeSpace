@@ -24,6 +24,9 @@ public sealed record SupervisorTurnContext
     /// <summary>D2 (cross-run learning, decider lane): pre-rendered lesson lines the turn prompt carries — filled at rehydration from the lesson ledger; empty unless <see cref="LessonArm"/> is <c>injected</c> AND the team currently has lessons.</summary>
     public IReadOnlyList<string> LessonLines { get; init; } = [];
 
+    /// <summary>The exact durable lesson ids represented by <see cref="LessonLines"/>. Empty for withheld/none arms. Stamped onto each emitted decision so later success attribution never guesses exposure from a mutable lesson ledger.</summary>
+    public IReadOnlyList<Guid> LessonIds { get; init; } = [];
+
     /// <summary>
     /// D2: which experiment arm THIS run was assigned — <c>injected</c> / <c>withheld</c> / <c>none</c> (a
     /// <c>LessonArms</c> value). Assigned at turn 1 from the team + the run's undecorated goal, then stamped onto

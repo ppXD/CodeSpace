@@ -45,7 +45,7 @@ public sealed class LessonArmSupervisorFlowTests
     public async Task A_supervisor_turn_persists_its_arm_and_only_an_injected_run_sees_the_lesson(string arm)
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        await SeedLessonAsync(teamId);
+        var lessonId = await SeedLessonAsync(teamId);
 
         var goal = GoalFor(teamId, arm);
         var runId = Guid.NewGuid();
@@ -59,12 +59,20 @@ public sealed class LessonArmSupervisorFlowTests
         context.LessonArm.ShouldBe(arm);
 
         if (arm == LessonArms.Injected)
+        {
             context.LessonLines.ShouldHaveSingleItem().ShouldContain(LessonText, customMessage: "the injected arm's treatment must actually reach the turn prompt, not just the ledger");
+            context.LessonIds.ShouldBe([lessonId], "the exact prompt exposure must survive rehydrate");
+        }
         else
+        {
             context.LessonLines.ShouldBeEmpty("the withheld arm is the control — no lesson text may reach the prompt");
+            context.LessonIds.ShouldBeEmpty();
+        }
 
         (await RecordedArmsAsync(runId, teamId)).ShouldAllBe(recorded => recorded == arm,
             "every decision row carries the run's arm — an unrecorded treatment contaminates the control group it is compared against");
+        (await RecordedLessonIdsAsync(runId, teamId)).ShouldAllBe(ids => ids.SequenceEqual(context.LessonIds),
+            "every decision row freezes exactly the lessons its model prompt saw");
 
         (await ScorecardArmAsync(teamId, runId)).ShouldBe(arm, "the supervisor scorecard is the production reader — without it the arm is written and never sliced");
     }
@@ -132,6 +140,15 @@ public sealed class LessonArmSupervisorFlowTests
             .ToListAsync();
     }
 
+    private async Task<IReadOnlyList<List<Guid>>> RecordedLessonIdsAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .Select(d => d.LessonIds)
+            .ToListAsync();
+    }
+
     private async Task<string?> ScorecardArmAsync(Guid teamId, Guid runId)
     {
         using var scope = _fixture.BeginScope();
@@ -140,19 +157,21 @@ public sealed class LessonArmSupervisorFlowTests
         return card.Runs.Single(r => r.SupervisorRunId == runId).LessonArm;
     }
 
-    private async Task SeedLessonAsync(Guid teamId)
+    private async Task<Guid> SeedLessonAsync(Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.Lesson.Add(new Lesson
+        var lesson = new Lesson
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = "supervisor", FailureClass = "broken-acceptance-command",
             WhatFailed = "check.sh exits 2 on a clean tree", Why = "unrestored solution", HowToApply = LessonText,
             SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model", ValidFrom = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.Add(LessonConsolidation.Lifetime),
-        });
+        };
+        db.Lesson.Add(lesson);
 
         await db.SaveChangesAsync();
+        return lesson.Id;
     }
 
     private static SupervisorTurnService NewTurnService(ILifetimeScope scope) => new(
