@@ -33,6 +33,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
 {
     private const string Provider = "Anthropic";
     private const string BaselineModelEnvVar = "CODESPACE_LLM_BASELINE_MODEL_ID";
+    private const string EvidenceDirectoryEnvVar = "CODESPACE_QUALIFICATION_EVIDENCE_DIRECTORY";
 
     /// <summary>The rehearsal's report bar — deliberately the corpus lane's conservative floor, NOT the operator's claim bar: the printout reports the bound and the operator compares it to the bar they intend to mint with.</summary>
     private const double RehearsalBar = 0.5;
@@ -149,28 +150,30 @@ public sealed class RealModelQualificationRehearsalE2ETests
             };
 
             PairedQualificationOutcome outcome;
+            List<BenchmarkResultRecord> durable;
             using (var scope = _fixture.BeginScope())
             {
                 var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>());
                 outcome = await runner.RunAsync(request, CancellationToken.None);
             }
-
-            outcome.SuiteDigest.ShouldBe(input.Suite.SuiteContentHash);
-            outcome.PairedCells.ShouldBe(input.Suite.Tasks.Sum(task => task.Modes.Count));
             using (var scope = _fixture.BeginScope())
             {
-                var durable = await scope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().Where(row => row.ObservationGroupId == outcome.ObservationGroupId).ToListAsync();
+                durable = await scope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().Where(row => row.ObservationGroupId == outcome.ObservationGroupId).ToListAsync();
                 durable.Count.ShouldBe(outcome.PairedCells * 2, "every control/candidate cell must be durably appendable before the report can exist");
                 durable.ShouldAllBe(row => row.GitSha == outcome.CodeRevision && row.ObservationSession == 0);
                 durable.Count(row => row.ObservationArm == "control" && row.ModelCredentialModelId == controlRowId).ShouldBe(outcome.PairedCells);
                 durable.Count(row => row.ObservationArm == "candidate" && row.ModelCredentialModelId == candidateRowId).ShouldBe(outcome.PairedCells);
             }
+
+            outcome.SuiteDigest.ShouldBe(input.Suite.SuiteContentHash);
+            outcome.PairedCells.ShouldBe(input.Suite.Tasks.Sum(task => task.Modes.Count));
             if (usedFallbackBaseline)
             {
                 outcome.QualifiedForCapabilityClaim.ShouldBeFalse("one configured model can exercise the paired plumbing but cannot become its own independent baseline");
                 outcome.BlockingReasons.ShouldContain("identical-observed-model");
             }
 
+            var cellOrdinals = input.Suite.Tasks.SelectMany(task => task.Modes.Select(mode => (task.Id, Mode: mode.ToString()))).Select((cell, index) => (cell, index)).ToDictionary(item => item.cell, item => item.index);
             var evidence = new
             {
                 schema = PairedQualificationOutcome.StatisticsVersion,
@@ -194,15 +197,36 @@ public sealed class RealModelQualificationRehearsalE2ETests
                 baselineConfiguration = usedFallbackBaseline ? "same-model-plumbing-rehearsal" : "distinct-configured-models",
                 identicalSingleObservedModel = outcome.Control.ObservedModels.Count == 1 && outcome.Candidate.ObservedModels.Count == 1
                     && string.Equals(outcome.Control.ObservedModels[0], outcome.Candidate.ObservedModels[0], StringComparison.OrdinalIgnoreCase),
+                cells = durable.OrderBy(row => cellOrdinals[(row.TaskId, row.Mode)]).ThenBy(row => row.ObservationArm, StringComparer.Ordinal).Select(row => new
+                {
+                    cellOrdinal = cellOrdinals[(row.TaskId, row.Mode)], row.Mode, arm = row.ObservationArm, session = row.ObservationSession,
+                    state = row.OutcomeState, detail = row.OutcomeDetail, row.Solved, runStatus = row.RunStatus,
+                    row.CostUsd, row.CostIndeterminate, row.MaxCostUsd, row.ReviseRounds, row.ExitReason, row.DurationSeconds,
+                }),
             };
-            Directory.CreateDirectory("backend/TestResults");
-            await File.WriteAllTextAsync($"backend/TestResults/paired-tasklaunch-{input.SuiteKind}.json", JsonSerializer.Serialize(evidence, AgentJson.Options));
+            var evidenceDirectory = QualificationEvidenceDirectory();
+            Directory.CreateDirectory(evidenceDirectory);
+            await File.WriteAllTextAsync(Path.Combine(evidenceDirectory, $"paired-tasklaunch-{SafeEvidenceFilePart(input.SuiteKind)}.json"), JsonSerializer.Serialize(evidence, AgentJson.Options));
             var report = $"{input.SuiteKind} paired suite {outcome.SuiteDigest} at {outcome.CodeRevision}: {outcome.PairedCells} cell pairs / {outcome.IndependentClusters} independent clusters, "
-                       + $"budget-admissible solves control {outcome.Control.BudgetAdmissibleSolved}/{outcome.Control.Total}, candidate {outcome.Candidate.BudgetAdmissibleSolved}/{outcome.Candidate.Total}, "
+                       + $"solves control {outcome.Control.Solved}/{outcome.Control.Total}, candidate {outcome.Candidate.Solved}/{outcome.Candidate.Total}; "
+                       + $"budget-admissible control {outcome.Control.BudgetAdmissibleSolved}/{outcome.Control.Total}, candidate {outcome.Candidate.BudgetAdmissibleSolved}/{outcome.Candidate.Total}; "
+                       + $"cost-known control {outcome.Control.CostKnownCells}/{outcome.Control.Total}, candidate {outcome.Candidate.CostKnownCells}/{outcome.Candidate.Total}; "
                        + $"paired difference {outcome.QualityDifference:P1}, cluster-bootstrap lower 95% {outcome.QualityDifferenceLower95:P1}, qualified {outcome.QualifiedForCapabilityClaim}; blockers [{string.Join(',', outcome.BlockingReasons)}].";
             Console.WriteLine($"[paired-qualification-rehearsal] {report}");
             return (RealModelOutcome.Drove, report);
         });
+    }
+
+    internal static string QualificationEvidenceDirectory(string? configured = null)
+    {
+        configured ??= Environment.GetEnvironmentVariable(EvidenceDirectoryEnvVar);
+        return !string.IsNullOrWhiteSpace(configured) ? Path.GetFullPath(configured) : Path.Combine(Path.GetTempPath(), "codespace-qualification-evidence");
+    }
+
+    internal static string SafeEvidenceFilePart(string value)
+    {
+        var safe = new string(value.Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-').ToArray());
+        return string.IsNullOrWhiteSpace(safe) ? "suite" : safe;
     }
 
     private static (string BaseUrl, string ApiKey, string CandidateModel) LiveConnection()
