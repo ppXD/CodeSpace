@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Budget;
+using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -133,6 +134,21 @@ public class RoomProjectorFlowTests
         file.SizeBytes.ShouldBe(4096);
         file.AgentRunId.ShouldBe(agentRunId, "a multi-agent turn has to say which agent produced which file");
         file.ArtifactId.ShouldNotBe(Guid.Empty, "the id is the whole point — it is what GET /api/artifacts/{id} takes");
+        file.Availability.ShouldBe(RoomDeliverableAvailability.Reachable);
+    }
+
+    [Fact]
+    public async Task A_recorded_deliverable_whose_bytes_are_gone_is_unavailable_before_the_operator_clicks_it()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Produced a report");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report", resultSummary: "done");
+        await SeedMissingProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, sizeBytes: 4096);
+
+        var file = (await DeliverablesOfAsync(runId, teamId)).Files.ShouldHaveSingleItem();
+
+        file.Availability.ShouldBe(RoomDeliverableAvailability.PhysicalObjectMissing,
+            "a manifest proves that a file was recorded, not that its physical bytes are still retrievable; the Room must expose the current storage fact before download");
     }
 
     [Fact]
@@ -196,6 +212,7 @@ public class RoomProjectorFlowTests
         var wire = JsonSerializer.Serialize(room, ApiJson);
 
         wire.ShouldContain("\"type\":\"deliverables\"", Case.Sensitive, "the frontend switches on this exact discriminator");
+        wire.ShouldContain("\"availability\":\"Reachable\"", Case.Sensitive);
 
         var readBack = JsonSerializer.Deserialize<RoomView>(wire, ApiJson).ShouldNotBeNull();
         AllBlocks(readBack).OfType<DeliverablesBlock>().ShouldHaveSingleItem()
@@ -320,6 +337,29 @@ public class RoomProjectorFlowTests
         await db.SaveChangesAsync();
 
         return agentRunId;
+    }
+
+    private async Task SeedMissingProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+        var sha = Convert.ToHexString(Guid.NewGuid().ToByteArray().Concat(Guid.NewGuid().ToByteArray()).ToArray()).ToLowerInvariant();
+        var root = DurableRoots.ArtifactStore(RuntimeSettings.Current.ArtifactStoreDirectory);
+        db.WorkflowArtifact.Add(new WorkflowArtifact
+        {
+            Id = artifactId, TeamId = teamId, Sha256 = sha, ContentType = "text/markdown", SizeBytes = sizeBytes,
+            InlineBytes = null, StorageUrl = new Uri(Path.Combine(root, sha[..2], sha.Substring(2, 2), sha)).AbsoluteUri, CreatedAt = now,
+        });
+        db.ArtifactManifest.Add(new ArtifactManifest
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentRunId, WorkflowRunId = runId, FenceEpoch = 1,
+            Kind = kind, LogicalPath = path, ContentArtifactId = artifactId, Sha256 = sha, SizeBytes = sizeBytes,
+            ContentType = "text/markdown", CreatedDate = now, LastModifiedDate = now,
+        });
+        await db.SaveChangesAsync();
     }
 
     [Fact]

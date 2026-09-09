@@ -2001,15 +2001,21 @@ export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
       <span className="room-pr-av"><Sym n="file" s={16} /></span>
       <div className="room-pr-main">
         <div className="room-pr-title"><span className="room-pr-name">{block.title}</span></div>
-        {block.files.map((file) => (
-          <div className="room-pr-sub" key={file.artifactId}>
-            <button type="button" className="room-pr-btn" onClick={() => save(file)}>{file.path}</button>
-            <span className="room-row-mid">·</span>
-            <span className="room-muted">{file.kind.toLowerCase()}</span>
-            <span className="room-row-mid">·</span>
-            <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
-          </div>
-        ))}
+        {block.files.map((file) => {
+          const availability = file.availability ?? "Unknown";
+          const unavailable = availability !== "Unknown" && availability !== "Reachable";
+          const reason: StorageUnavailableReason | null = availability === "Unknown" || availability === "Reachable" ? null : availability;
+          return (
+            <div className="room-pr-sub" key={file.artifactId}>
+              <button type="button" className="room-pr-btn" disabled={unavailable} onClick={() => save(file)}>{file.path}</button>
+              <span className="room-row-mid">·</span>
+              <span className="room-muted">{file.kind.toLowerCase()}</span>
+              <span className="room-row-mid">·</span>
+              <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
+              {unavailable && reason && <span className="room-danger"> · {roomFileUnavailableNote(reason)}</span>}
+            </div>
+          );
+        })}
         {failed && <div className="room-pr-sub room-danger">Could not fetch {baseName(failed.path)}. {failed.reason ? roomFileUnavailableNote(failed.reason) : "The storage plane gave no reason."}</div>}
       </div>
     </div>

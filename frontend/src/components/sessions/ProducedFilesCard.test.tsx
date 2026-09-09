@@ -17,7 +17,7 @@ const block = (overrides: Partial<DeliverablesBlock> = {}): DeliverablesBlock =>
   seq: 4,
   type: "deliverables",
   title: "Produced 1 file",
-  files: [{ path: "docs/report.md", kind: "Document", sizeBytes: 4096, contentType: "text/markdown", artifactId: "a1", agentRunId: "r1" }],
+  files: [{ path: "docs/report.md", kind: "Document", sizeBytes: 4096, contentType: "text/markdown", artifactId: "a1", agentRunId: "r1", availability: "Reachable" }],
   ...overrides,
 });
 
@@ -58,6 +58,26 @@ describe("ProducedFilesCard", () => {
     await waitFor(() => expect(screen.getByText(new RegExp(escapeRegExp(roomFileUnavailableNote(reason))))).toBeInTheDocument());
   });
 
+  it.each(STORAGE_UNAVAILABLE_REASONS)("exposes a known storage fault before download and does not offer a dead control: %s", async (availability) => {
+    render(<ProducedFilesCard block={block({ files: [{ ...block().files[0], availability }] })} />);
+
+    const file = screen.getByRole("button", { name: "docs/report.md" });
+    expect(file).toBeDisabled();
+    expect(screen.getByText(new RegExp(escapeRegExp(roomFileUnavailableNote(availability))))).toBeInTheDocument();
+    await userEvent.click(file);
+    expect(downloadArtifact).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unprobed compatibility row usable without claiming that storage is reachable", async () => {
+    vi.mocked(downloadArtifact).mockResolvedValue(undefined);
+    render(<ProducedFilesCard block={block({ files: [{ ...block().files[0], availability: "Unknown" }] })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "docs/report.md" }));
+
+    expect(downloadArtifact).toHaveBeenCalledWith("a1", "report.md");
+    expect(screen.queryByText(/storage availability/i)).not.toBeInTheDocument();
+  });
+
   it("does not guess at a removal when the failure carried no reason", async () => {
     vi.mocked(downloadArtifact).mockRejectedValueOnce(new ApiError(503, "http_503", "Service Unavailable"));
     render(<ProducedFilesCard block={block()} />);
@@ -72,8 +92,8 @@ describe("ProducedFilesCard", () => {
     render(<ProducedFilesCard block={block({
       title: "Produced 2 files",
       files: [
-        { path: "report.md", kind: "Document", sizeBytes: 2048, contentType: "text/markdown", artifactId: "a1", agentRunId: "r1" },
-        { path: "data.csv", kind: "Dataset", sizeBytes: 3 * 1024 * 1024, contentType: "text/csv", artifactId: "a2", agentRunId: "r2" },
+        { path: "report.md", kind: "Document", sizeBytes: 2048, contentType: "text/markdown", artifactId: "a1", agentRunId: "r1", availability: "Reachable" },
+        { path: "data.csv", kind: "Dataset", sizeBytes: 3 * 1024 * 1024, contentType: "text/csv", artifactId: "a2", agentRunId: "r2", availability: "Reachable" },
       ],
     })} />);
 
