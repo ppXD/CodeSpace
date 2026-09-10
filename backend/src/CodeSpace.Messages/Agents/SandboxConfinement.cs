@@ -44,4 +44,16 @@ public sealed record SandboxConfinement
 
     /// <summary>Whether the launch put the agent in a fresh EMPTY net namespace (<c>--unshare-net</c>) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
     public bool NetworkSevered { get; init; }
+
+    /// <summary>
+    /// Whether the run's model credential was BROKERED (true) or placed in the sandbox's environment as the tenant's
+    /// own provider key (false). Null when the launch injected no credential at all — a harness that authenticates
+    /// some other way, or a run for which none resolved — because there is then nothing to disclose either way.
+    ///
+    /// <para>A distinct fact from <see cref="Outcome"/>, stated separately because a reader who is told only about
+    /// confinement will assume the wrong thing about the key: a run can be fully confined and still hold a long-lived
+    /// third-party credential its operator cannot withdraw before the process dies. False is what
+    /// <c>AgentAutonomyPolicy.DirectModelCredentialCaveat</c> exists to say out loud.</para>
+    /// </summary>
+    public bool? ModelCredentialBrokered { get; init; }
 }

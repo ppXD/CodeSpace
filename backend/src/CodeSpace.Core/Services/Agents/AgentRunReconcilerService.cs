@@ -103,9 +103,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly IToolCallLedgerService _ledger;
     private readonly Capture.ICaptureIntentService _captureIntents;
     private readonly Capture.INativeRecordPlane _nativeRecords;
+    // Withdraws an abandoned run's brokered model credential before its orphaned process is killed. Optional so a
+    // deployment (or a hand-built double) without a broker has nothing to withdraw.
+    private readonly Credentials.IModelCredentialBroker? _credentialBroker;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _db = db;
         _runs = runs;
@@ -115,6 +118,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _ledger = ledger;
         _captureIntents = captureIntents;
         _nativeRecords = nativeRecords;
+        _credentialBroker = credentialBroker;
         _logger = logger;
     }
 
@@ -571,6 +575,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         // fencing is what makes a call here safe even if that read were ever stale.
         await TerminalizeAbandonedHarnessExecutionQuietlyAsync(candidate.TeamId, runId, candidate.Epoch + 1, cause, cancellationToken).ConfigureAwait(false);
 
+        // Before the kill, for the reason the cancel path states: a signal races the orphan's next model call, and a
+        // withdrawn lease does not. A no-op unless THIS worker holds the lease — an orphan abandoned by a different
+        // worker stopped being able to spend when its own worker's heartbeat stopped, one TTL earlier.
+        await RevokeBrokeredCredentialQuietlyAsync(runId).ConfigureAwait(false);
+
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
@@ -598,6 +607,15 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         {
             _logger.LogWarning(ex, "AgentRunReconciler: best-effort egress-netns teardown for abandoned run {RunId} failed", runId);
         }
+    }
+
+    /// <summary>Withdraw an abandoned run's brokered model credential — best-effort: the abandon already stands, and no failure here may change it.</summary>
+    private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId)
+    {
+        if (_credentialBroker is null) return;
+
+        try { await _credentialBroker.RevokeAsync(runId, "run-abandoned", CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception exception) { _logger.LogWarning(exception, "AgentRunReconciler: the brokered model credential for abandoned run {RunId} could not be revoked; it lapses on its own TTL instead", runId); }
     }
 
     /// <summary>

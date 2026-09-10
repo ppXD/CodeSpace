@@ -24,6 +24,10 @@ public sealed partial class LocalProcessRunner
             var egress = await SetupEgressNetnsAsync(spec, key, cancellationToken).ConfigureAwait(false);
             invocation.EgressKey = egress.Key;
 
+            // Re-layer the spec env with the broker host resolved (the start info was built before the run's /30
+            // existed). A no-op for every run whose env does not mention the token — the values are identical.
+            foreach (var (name, value) in ResolveModelBrokerHost(spec, egress.GatewayIp).Environment) invocation.StartInfo.Environment[name] = value;
+
             if (spec.ConfigHomeEnvVars.Count > 0)
             {
                 invocation.ConfigHome = Path.Combine(Path.GetTempPath(), "codespace-command-" + key);

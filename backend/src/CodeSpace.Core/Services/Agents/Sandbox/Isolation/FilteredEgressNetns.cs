@@ -34,6 +34,16 @@ public static class FilteredEgressNetns
         /// <summary>The <c>ip netns exec &lt;ns&gt;</c> prefix a caller prepends to run its command inside the filtered netns. Empty when setup failed.</summary>
         public IReadOnlyList<string> ExecPrefix { get; init; } = Array.Empty<string>();
 
+        /// <summary>
+        /// The HOST-side veth address of this run's /30 (<c>FilteredEgressPlan.HostIp</c>) — the namespace's default
+        /// gateway, and therefore the only address a process inside it can reach this worker at. Null when setup
+        /// failed. It is returned because a per-run worker-hosted endpoint (the model-credential broker) has to be
+        /// addressed by the child, and this address is not knowable before the /30 is reserved HERE. Reaching it is
+        /// not an egress-allowlist question: a packet to the host's own address is delivered locally, so the plan's
+        /// forward-hook filter never sees it.
+        /// </summary>
+        public string? HostIp { get; init; }
+
         public string? SetupError { get; init; }
     }
 
@@ -70,7 +80,7 @@ public static class FilteredEgressNetns
                 return new SetupResult { SetupOk = false, SetupError = $"nft -f - → exit {nftExit}: {Trim(nftOut)}" };
             }
 
-            return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix };
+            return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix, HostIp = plan.HostIp };
         }
         catch (Exception ex)
         {

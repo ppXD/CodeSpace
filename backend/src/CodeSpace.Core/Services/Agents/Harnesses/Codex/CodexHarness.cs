@@ -27,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
 /// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IBrokeredModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -447,6 +447,30 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
             throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
     }
+
+    /// <summary>
+    /// Project a BROKERED credential: the broker's base URL on <see cref="BaseUrlEnvVar"/> and the run token on
+    /// <see cref="ApiKeyEnvVar"/>. The upstream provider key is not present because the caller is never handed one —
+    /// what lands in <c>OPENAI_API_KEY</c> is a bearer that authenticates to the broker and to nothing else.
+    ///
+    /// <para>Codex ignores the base-URL env var, so the two entries are picked back up by
+    /// <see cref="AppendModelProviderConfig"/> exactly as an operator gateway's are: it emits the <c>-c</c>
+    /// model-provider override pointing at the broker, with <c>env_key=<see cref="ApiKeyEnvVar"/></c> so the CLI
+    /// reads the token from the env rather than the argv. Nothing broker-specific is needed there — from Codex's side
+    /// the broker IS an OpenAI-compatible gateway, which is why it must speak the Responses wire (it forwards to an
+    /// upstream that does).</para>
+    ///
+    /// <para>One consequence of that reuse, stated rather than left to be discovered: the broker's URL — including its
+    /// unguessable per-run route segment — rides the ARGV, where the host's process list shows it. It is a locator,
+    /// not the capability: the bearer stays in the environment, and a reader of <c>/proc</c> able to see this argv can
+    /// read that environment too. The route's unguessability protects it from a caller who holds only the run id, not
+    /// from a process already inside the worker.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProjectBrokered(BrokeredModelCredential brokered) => new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [BaseUrlEnvVar] = brokered.BaseUrl,
+        [ApiKeyEnvVar] = brokered.RunToken,
+    };
 
     /// <summary>
     /// Route Codex at a custom OpenAI-compatible gateway via inline <c>-c</c> config overrides. Codex 0.142.x ignores

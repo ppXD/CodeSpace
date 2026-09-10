@@ -167,15 +167,16 @@ public static class AgentAutonomyPolicy
     {
         // "on" needs no record to be honest — it was never the claim this row exists to qualify — so it keeps its
         // unqualified sentence whether or not a posture was recorded.
-        if (Derive(effective).Network == AgentNetworkAccess.On) return WithHostSubnetPosture($"Network: on ({effective})", EgressSubnetAllocator.ObservedHostDegradation);
+        if (Derive(effective).Network == AgentNetworkAccess.On)
+            return WithModelCredentialPosture(WithHostSubnetPosture($"Network: on ({effective})", EgressSubnetAllocator.ObservedHostDegradation), confinement);
 
         var qualifier = OffQualifier(confinement);
 
-        if (Derive(deploymentCeiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by deployment ceiling ({deploymentCeiling}){qualifier}";
+        if (Derive(deploymentCeiling).Network != AgentNetworkAccess.On) return WithModelCredentialPosture($"Network: clamped off by deployment ceiling ({deploymentCeiling}){qualifier}", confinement);
 
-        if (Derive(ceiling).Network != AgentNetworkAccess.On) return $"Network: clamped off by policy (ceiling {ceiling}){qualifier}";
+        if (Derive(ceiling).Network != AgentNetworkAccess.On) return WithModelCredentialPosture($"Network: clamped off by policy (ceiling {ceiling}){qualifier}", confinement);
 
-        return $"Network: off ({effective}){qualifier}";
+        return WithModelCredentialPosture($"Network: off ({effective}){qualifier}", confinement);
     }
 
     /// <summary>The write posture derived from the same permission row the process runner receives. Before launch there is no confinement record, so read-only is explicitly qualified rather than presented as an OS guarantee.</summary>
@@ -208,6 +209,16 @@ public static class AgentAutonomyPolicy
     internal static string WithHostSubnetPosture(string line, string? subnetDegradation) => subnetDegradation is null ? line : line + ProcessLocalSubnetCaveat;
 
     /// <summary>
+    /// Append <see cref="DirectModelCredentialCaveat"/> when the run's launch recorded that it put the tenant's own
+    /// provider key in the sandbox. Appended to EVERY branch, including "on" — unlike the confinement qualifier,
+    /// which exists to qualify an "off" claim, this fact is at its most load-bearing exactly where the network IS on,
+    /// since that is the run whose agent can spend the key. Silent when no record exists (an un-launched composer
+    /// preview) and when the run injected no credential at all: there is nothing to disclose either way.
+    /// </summary>
+    internal static string WithModelCredentialPosture(string line, SandboxConfinement? confinement) =>
+        confinement?.ModelCredentialBrokered is false ? line + DirectModelCredentialCaveat : line;
+
+    /// <summary>
     /// What replaces <see cref="ConfinementCaveat"/> once a run's launch recorded its posture. An unconfined run is
     /// stated LOUDLY (upper case, naming the reason): "off" there is a permission the OS never enforced, which is a
     /// materially different fact from a severed namespace and must not read like a milder version of it.
@@ -233,6 +244,16 @@ public static class AgentAutonomyPolicy
     /// moment a launch confines, and <c>Sandbox:RequireConfinement</c> is what refuses an unconfinable host outright.
     /// </summary>
     public const string UnconfinedIsolationCaveat = "; cross-team isolation not enforced";
+
+    /// <summary>
+    /// What a run whose launch injected the model credential DIRECTLY has to disclose, beside
+    /// <see cref="UnconfinedIsolationCaveat"/> and independently of it (a fully confined run can still be holding the
+    /// key). The credential is a long-lived third-party one: while it is in the CLI's environment the only way to
+    /// stop the agent spending it is to kill the process, so an operator cancelling a run is racing whatever call it
+    /// makes next, and a lease that lapses under a live worker stops nothing at all. A brokered run says nothing
+    /// here, because for it the sentence would be false.
+    /// </summary>
+    public const string DirectModelCredentialCaveat = "; model credential injected directly (not revocable mid-run)";
 
     /// <summary>
     /// The qualifier an "off" posture carries when NO confinement record exists — the sandbox severs egress only

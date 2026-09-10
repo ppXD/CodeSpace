@@ -184,8 +184,11 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
     private readonly Learning.IAgentLessonInjector _lessonInjector;
     private readonly ILogger<AgentRunService> _logger;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
+    // Withdraws a cancelled run's brokered model credential before its process is killed. Optional like _completeness
+    // — a deployment (or a hand-built double) with no broker simply has nothing to withdraw.
+    private readonly Credentials.IModelCredentialBroker? _credentialBroker;
 
-    public AgentRunService(CodeSpaceDbContext db, AgentRunRuntimeServices runtime, ExecutionAuthorityService authority, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null)
+    public AgentRunService(CodeSpaceDbContext db, AgentRunRuntimeServices runtime, ExecutionAuthorityService authority, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _db = db;
         _admissionController = runtime.Admission;
@@ -198,6 +201,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         _authority = authority;
         _logger = logger;
         _completeness = completeness;
+        _credentialBroker = credentialBroker;
     }
 
     public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
@@ -762,6 +766,14 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         if (cancelled == 0) return false;
 
+        // FIRST side effect of a won cancel: withdraw the run's brokered model credential. Before the kill, not
+        // after — a kill is a signal that races the agent's next model call, and losing that race used to mean the
+        // cancelled run got one more turn on the tenant's key. Revoking first makes the call itself impossible, so
+        // the ordering here is the guarantee rather than tidiness. No-op for an unbrokered run, and for one whose
+        // lease is held by a DIFFERENT worker (the lease is process-local) — there, the owning worker's heartbeat
+        // stops renewing on this very epoch bump and the lease lapses within its TTL.
+        await RevokeBrokeredCredentialQuietlyAsync(runId, "run-cancelled").ConfigureAwait(false);
+
         // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own
         // fencing is what makes a call here safe even if that read were ever stale.
         await TerminalizeCancelledHarnessExecutionQuietlyAsync(snapshot.TeamId, runId, snapshot.FenceEpoch + 1, cause, cancellationToken).ConfigureAwait(false);
@@ -796,6 +808,15 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         {
             _logger.LogWarning(exception, "Agent run {RunId} harness execution could not be terminalized after cancel (cause {Cause}); the row stays live for a later sweep", runId, cause);
         }
+    }
+
+    /// <summary>Withdraw a run's brokered model credential — best-effort and last-word-less: the cancel it belongs to already stands, and no failure here may change that. A no-op when no broker is registered.</summary>
+    private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId, string reason)
+    {
+        if (_credentialBroker is null) return;
+
+        try { await _credentialBroker.RevokeAsync(runId, reason, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked ({Reason}); it lapses on its own TTL instead", runId, reason); }
     }
 
     /// <summary>Resolve the durable runner for a persisted handle, or null when the handle is absent/unparseable or its runner isn't durable (then there is no detached process to terminate). Mirrors the reconciler's resolver.</summary>

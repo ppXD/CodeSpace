@@ -139,6 +139,19 @@ public sealed record SandboxHandle
     public string? McpSocketPath { get; init; }
 
     /// <summary>
+    /// The per-run bearer this run's brokered model credential was minted with (null when the run injected its
+    /// credential directly, or injected none). Persisted for ONE reason, and deliberately not the reason
+    /// <see cref="McpRunToken"/> is: a re-attaching worker must rebuild the SAME redactor the launch masked the
+    /// spool with, and this token is one of the launch's needles — rebuilt from the credential alone it would be
+    /// missing, and the fingerprint gate below would then refuse to re-tail every brokered run's native log.
+    ///
+    /// <para>It does NOT re-open the lease. The lease lives in the launching worker's memory and dies with it, which
+    /// is the guarantee this whole path exists for — a token read off this row after that worker is gone is inert,
+    /// authenticates to nothing, and (unlike the model key, which is never persisted anywhere) grants no spend.</para>
+    /// </summary>
+    public string? ModelBrokerRunToken { get; init; }
+
+    /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
     /// deny-by-default allowlist was enforceable and a netns was set up. It is the teardown handle: the netns / veth /
     /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, from a DIFFERENT worker

@@ -248,4 +248,26 @@ public class AgentAutonomyPolicyTests
     public void The_host_subnet_posture_is_appended_only_when_this_host_proved_a_degradation(string? degradation, string expected) =>
         AgentAutonomyPolicy.WithHostSubnetPosture("Network: on (Trusted)", degradation).ShouldBe(expected,
             customMessage: "the caveat is keyed on the allocator's OWN recorded cause, so both degradation reasons disclose and no reason invents one");
+
+    [Theory]
+    [InlineData(null, false)]    // no record (an un-launched preview) — nothing was decided yet, so nothing is claimed
+    [InlineData(true, false)]    // brokered — the sentence would be false
+    [InlineData(false, true)]    // the tenant's own key went into the sandbox — say so
+    public void The_model_credential_posture_is_appended_only_for_a_run_that_was_handed_the_key(bool? brokered, bool discloses) =>
+        AgentAutonomyPolicy.WithModelCredentialPosture("Network: on (Trusted)", new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, ModelCredentialBrokered = brokered })
+            .ShouldBe(discloses ? "Network: on (Trusted)" + AgentAutonomyPolicy.DirectModelCredentialCaveat : "Network: on (Trusted)",
+                customMessage: "a directly-injected model credential cannot be withdrawn while the run lives, so the operator reading a posture has to be told which runs are holding one");
+
+    [Fact]
+    public void An_unconfined_run_holding_the_key_discloses_BOTH_losses()
+    {
+        // The two caveats are independent facts and they compose: a host that could not confine ALSO could not keep
+        // one team's run out of another's, and a run holding the key cannot be stopped short of a kill. Neither
+        // sentence may swallow the other — a reader told only about isolation would assume the key was withdrawable.
+        var line = AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, Unbounded,
+            new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = SandboxConfinement.ReasonNotLinux, ModelCredentialBrokered = false });
+
+        line.ShouldBe("Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)"
+                      + AgentAutonomyPolicy.UnconfinedIsolationCaveat + AgentAutonomyPolicy.DirectModelCredentialCaveat);
+    }
 }

@@ -109,4 +109,7 @@ public static class FailureCodes
 
     /// <summary>This host cannot reserve a filtered-egress run's own /30 subnet, so the run is refused rather than handed one nothing reserved. Remedy: make the reservation directory under the agent-run spool root writable by the worker — a retry on the same host cannot help.</summary>
     public const string SandboxEgressReservationUnavailable = "sandbox_egress_reservation_unavailable";
+
+    /// <summary>A run's model credential could not be brokered on a deployment that requires confinement, so the run is refused rather than handed the tenant's long-lived provider key. Remedy: make the worker able to bind a broker listener, use a harness that honours a base-URL override, or store an upstream endpoint on the credential — a retry on the same host cannot help.</summary>
+    public const string ModelCredentialBrokerUnavailable = "model_credential_broker_unavailable";
 }
