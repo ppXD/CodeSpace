@@ -7,10 +7,10 @@ namespace CodeSpace.Messages.Quality;
 /// WHY without replaying the policy, and so a stop can never be an unexplained stop (the P22 invariant: every stop
 /// — goal met, cost exhausted, no progress, human-waived — has evidence).
 ///
-/// <para><b>No expected-value field, on purpose.</b> An earlier draft carried an <c>ExpectedMarginalValue</c> that
-/// was <c>0</c> for a stop and <c>null</c> for everything else — which is not a measurement, it is the mechanism
-/// enum restated in a numeric field a consumer could mistake for one. P22-9c's same-budget ablation harness is
-/// what produces real per-mechanism values; the field arrives WITH them, carrying numbers somebody measured.</para>
+/// <para><b>No expected-value field, on purpose.</b> A field that is <c>0</c> for a stop and <c>null</c> for
+/// everything else is not a measurement — it is the mechanism enum restated in a numeric field a consumer could
+/// mistake for one. P22-9c's same-budget ablation harness is what produces real per-mechanism values; the field
+/// arrives WITH them, carrying numbers somebody measured.</para>
 /// </summary>
 public sealed record QualityDecision
 {

@@ -16,14 +16,16 @@ namespace CodeSpace.Core.Services.Quality;
 /// increment should buy?". A new task phrasing or repository shape needs no new case, because there is no case to
 /// add.</para>
 ///
-/// <para><b>Ordering is soundness, not taste.</b> The affordability gate is FIRST because a mechanism nobody can
-/// pay for is not an option; the machinery-failed row precedes every row that spends on the work, so a check that
-/// could not run never buys a stronger model; the disputed row precedes the goal-met row so a passing check other
-/// recorded evidence disagrees with still buys an independent look before shipping; and the rows that BUY EVIDENCE
-/// precede the rows that spend on production, because a mechanism chosen without evidence is the thing P22 exists
-/// to stop. Every pair that can actually collide on one input is pinned by
-/// <c>QualityPolicyTests.Orderings</c>, so a reorder is a test-visible decision rather than a silent behaviour
-/// change.</para>
+/// <para><b>Ordering is soundness, not taste.</b> The two zero-cost human exits come FIRST — a recorded human
+/// verdict and a human's waiver both outrank a budget or no-progress computation, because a human's decision is
+/// not something arithmetic may override; the affordability and no-progress gates follow because a mechanism
+/// nobody can pay for, or a run out of decisions, is not an option; the machinery-failed row precedes every row
+/// that spends on the work, so a check that could not run never buys a stronger model; the disputed row precedes
+/// the goal-met row so a passing check other recorded evidence disagrees with still buys an independent look
+/// before shipping; and the rows that BUY EVIDENCE precede the rows that spend on production, because a mechanism
+/// chosen without evidence is the thing P22 exists to stop. Every pair that can actually collide on one input is
+/// pinned by <c>QualityPolicyTests.Orderings</c>, so a reorder is a test-visible decision rather than a silent
+/// behaviour change.</para>
 ///
 /// <para><b>Every row has an exit.</b> A row that fires on a condition its own mechanism cannot change is a loop,
 /// not a policy: the no-check row is guarded on <see cref="QualityDecisionInput.IndependentReviewRecorded"/> so the
@@ -68,11 +70,11 @@ public static class QualityPolicy
     /// </summary>
     private static readonly IReadOnlyList<PolicyRow> Rows = new[]
     {
-        new PolicyRow(CannotAffordAnotherAttempt, QualityMechanism.Stop, ExhaustedBudgetReason),
         new PolicyRow(AHumanVerdictIsRequired, QualityMechanism.AskHuman, HumanRequiredReason),
+        new PolicyRow(AHumanWaivedVerification, QualityMechanism.Stop, WaivedReason),
+        new PolicyRow(CannotAffordAnotherAttempt, QualityMechanism.Stop, ExhaustedBudgetReason),
         new PolicyRow(NoProgressCapIsReached, QualityMechanism.Stop, NoProgressReason),
         new PolicyRow(TheCheckMachineryFailed, QualityMechanism.BoundedRepair, MachineryFailedReason),
-        new PolicyRow(AHumanWaivedVerification, QualityMechanism.Stop, WaivedReason),
         new PolicyRow(ADeclaredCheckNeverRan, QualityMechanism.BoundedRepair, UnrunCheckReason),
         new PolicyRow(NothingCanGradeTheWorkYet, QualityMechanism.IndependentCritic, NoCheckReason),
         new PolicyRow(ThePassedCheckIsDisputed, QualityMechanism.IndependentCritic, DisputedEvidenceReason),
@@ -95,12 +97,14 @@ public static class QualityPolicy
     private static bool NoProgressCapIsReached(QualityDecisionInput f) => f.MaxNoProgressDecisions is { } cap && f.NoProgressDecisions >= cap;
 
     /// <summary>The MACHINERY failed, not the work — the one recorded classification that says so (<c>Classify</c>'s infra arm). Placed before every row that spends on the work, so a stronger model is never bought to fix a check that could not run.</summary>
+    /// <para>Bounded by nothing INSIDE this row: repeated repair attempts are capped only by the caller's own bounds above it — the recorded no-progress cap (<c>SupervisorTurnContext.MaxNoProgressDecisions</c>, default 8) and the budget rows. This row deliberately adds no separate repair-count floor of its own.</para>
     private static bool TheCheckMachineryFailed(QualityDecisionInput f) => f.LatestDisposition == VerificationDisposition.InfraUnknown;
 
     /// <summary>A HUMAN authorized forgoing verification for this work. No automated mechanism may spend past a human's authorization to stop — and equally, a waiver is never read here as a recorded pass (the amend-acceptance FATAL-1 invariant): the mechanism is the same Stop, the evidence is emphatically not.</summary>
     private static bool AHumanWaivedVerification(QualityDecisionInput f) => f.LatestDisposition == VerificationDisposition.Waived;
 
     /// <summary>A check WAS declared, work HAS been attempted, and there is still no verdict — the evidence the work was supposed to produce never got produced. An approving review cannot stand in for it (the row that stops on a review is guarded on there being no declared check).</summary>
+    /// <para>Bounded by nothing INSIDE this row either: the same caller bounds — the recorded no-progress cap and the budget rows above it — are what eventually stop a check that keeps failing to run, not a repair-count floor added here.</para>
     private static bool ADeclaredCheckNeverRan(QualityDecisionInput f) => AnObjectiveCheckCanGrade(f) && WorkHasBeenAttempted(f) && f.LatestDisposition == VerificationDisposition.Unknown;
 
     /// <summary>Work exists, no objective check can grade it, and no review has been produced either — so no amount of further production can produce evidence, and a review is the only evidence available. Guarded on the review NOT existing yet: that is this row's exit, and without it an approving reviewer would simply buy another reviewer.</summary>
@@ -119,8 +123,8 @@ public static class QualityPolicy
     /// </summary>
     private static bool ThePassedCheckIsDisputed(QualityDecisionInput f) => TheCheckPassed(f) && !NothingDisputesTheEvidence(f);
 
-    /// <summary>The declared check ran and passed. Reached only after the disputed row declined, so nothing recorded disagrees with it.</summary>
-    private static bool TheCheckPassed(QualityDecisionInput f) => f.LatestDisposition == VerificationDisposition.Passed;
+    /// <summary>An objective check WAS DECLARED, and it ran and passed. Reached only after the disputed row declined, so nothing recorded disagrees with it. Guarded on <see cref="AnObjectiveCheckCanGrade"/> so a Passed disposition recorded with no declared check — a contradictory input this record's own shape cannot rule out — reads as ungraded work instead of quietly borrowing a "declared check" reason it did not earn.</summary>
+    private static bool TheCheckPassed(QualityDecisionInput f) => AnObjectiveCheckCanGrade(f) && f.LatestDisposition == VerificationDisposition.Passed;
 
     /// <summary>The check keeps failing on work whose recorded scale already has seams to split along.</summary>
     private static bool FailureRepeatsAtScale(QualityDecisionInput f) => FailureRepeats(f) && IsLargeScale(f);

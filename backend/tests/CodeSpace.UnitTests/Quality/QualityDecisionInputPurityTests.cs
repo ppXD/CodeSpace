@@ -12,10 +12,10 @@ namespace CodeSpace.UnitTests.Quality;
 /// TYPE rather than a promise in a doc-comment: <see cref="QualityDecisionInput"/>'s transitive shape cannot carry
 /// an identity at all.
 ///
-/// <para><b>An ALLOW-list, not a deny-list.</b> An earlier draft banned <c>string</c>, <c>Guid</c> and
-/// <c>object</c> — which refuses only the identity carriers somebody already thought of. A <c>Uri</c>, a
-/// <c>byte[]</c> content digest, a <c>KeyValuePair&lt;string, int&gt;</c>, an enum minted per repository, or a
-/// nested options record would all have passed. So the rule is inverted: a member may carry ONLY a type on
+/// <para><b>An ALLOW-list, not a deny-list.</b> A ban on <c>string</c>, <c>Guid</c> and <c>object</c> would refuse
+/// only the identity carriers somebody already thought of. A <c>Uri</c>, a <c>byte[]</c> content digest, a
+/// <c>KeyValuePair&lt;string, int&gt;</c>, an enum minted per repository, or a nested options record would all
+/// pass such a ban. So the rule is inverted: a member may carry ONLY a type on
 /// <see cref="CarriedTypeAllowList"/>, the walk recurses into every non-primitive it finds, and both member names
 /// AND carried type names are checked against the identity nouns. Widening the surface then means editing this
 /// list, in the open.</para>
@@ -33,7 +33,7 @@ public sealed class QualityDecisionInputPurityTests
     private static readonly Type[] CarriedTypeAllowList = { typeof(bool), typeof(int), typeof(decimal), typeof(VerificationDisposition), typeof(QualityAttemptFact) };
 
     /// <summary>The nouns that name a THING rather than measure one. A member — or a carried type — whose name contains any of these is naming an identity, which the quality surface must never see.</summary>
-    private static readonly string[] IdentityNouns = { "Task", "Goal", "Provider", "Model", "Repo", "Path", "Name" };
+    private static readonly string[] IdentityNouns = { "Task", "Goal", "Provider", "Model", "Repo", "Path", "Name", "Id", "Kind", "Hash", "Digest", "Harness", "Agent", "Vendor", "Key" };
 
     [Fact]
     public void Every_type_carried_anywhere_in_the_decision_input_is_on_the_allow_list()

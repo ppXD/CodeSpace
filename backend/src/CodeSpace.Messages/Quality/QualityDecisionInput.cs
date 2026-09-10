@@ -4,7 +4,9 @@ namespace CodeSpace.Messages.Quality;
 
 /// <summary>
 /// The COMPLETE fact surface <c>QualityPolicy</c> decides from (P22, Rule 18.1 — a data noun). Every member is a
-/// fact the platform ALREADY RECORDS, reduced to a number, a bool, or a typed classification.
+/// fact the platform ALREADY RECORDS, reduced to a number, a bool, or a typed classification — with one named
+/// exception: <see cref="EstimatedNextAttemptCostUsd"/> is CALLER-DERIVED from recorded costs, not itself a single
+/// recorded figure (see its own doc).
 ///
 /// <para><b>PURITY INVARIANT (the P22 refutation, enforced — <c>QualityDecisionInputPurityTests</c>):</b> the
 /// carried types are an ALLOW-LIST (<c>bool</c>, <c>int</c>, <c>decimal</c>, <see cref="VerificationDisposition"/>,
@@ -56,9 +58,10 @@ public sealed record QualityDecisionInput
     public decimal? BudgetCapUsd { get; init; }
 
     /// <summary>
-    /// What ONE more attempt would cost in USD, derived by the caller from the RECORDED cost of the attempts
-    /// already made (<c>AgentRunResult.CostUsd</c>). Null when no attempt has a priced cost yet — nothing recorded
-    /// then says what another attempt costs, so the affordability row cannot fire and the policy must not guess.
+    /// NOT itself a recorded fact — the one exception to the class doc's claim: what ONE more attempt would cost in
+    /// USD, derived by the caller from the RECORDED cost of the attempts already made (<c>AgentRunResult.CostUsd</c>).
+    /// Null when no attempt has a priced cost yet — nothing recorded then says what another attempt costs, so the
+    /// affordability row cannot fire and the policy must not guess.
     /// <para>UNSPECIFIED HERE, deliberately: the estimator (last attempt's cost? the mean? the max? the plan's
     /// cap ÷ its spawn budget, as the supervisor's own reservation slice does?) is a 9b decision with real
     /// consequences — a mean over a cheap first attempt under-stops, a max over one expensive outlier over-stops.
@@ -73,12 +76,16 @@ public sealed record QualityDecisionInput
     /// deliberately changes NO mechanism: an undercount can only ever make the policy UNDER-stop (the true
     /// remainder is smaller than the computed one), never over-stop, so it needs no compensating fudge — only
     /// disclosure. Pinned by test.
-    /// <para>REACHABILITY for 9b to confirm before relying on it: both lanes already force-stop the
-    /// undercount-WITH-a-cap shape upstream of any quality decision — <c>SupervisorBounds</c> returns
-    /// <c>SupervisorStopReasons.UnpricedModelUnderCap</c> when a cap and an unpriced spend coexist, and
-    /// <c>AgentRunExecutor.CostBudgetStopsFurtherCalls</c> treats a cap plus <c>CostIndeterminate</c> as no honest
-    /// budget left. Since the affordability row needs a cap, this qualifier may be unreachable in exactly the row
-    /// it annotates. That is an argument for checking, not for padding arithmetic nobody measured.</para>
+    /// <para>REACHABILITY for 9b to confirm before relying on it: this qualifier is pre-empted UPSTREAM of any
+    /// quality decision only when grain and signal align. <c>SupervisorBounds</c> force-stops when a PLAN-level cap
+    /// (<c>SupervisorGoalPlan.MaxCostUsd</c>) coexists with an unpriced spend at that same grain
+    /// (<c>SupervisorTurnContext.UnpricedSpendModel</c>, folded from <c>SupervisorOutcome.FirstUnpricedModel</c> —
+    /// NOT <c>CostIndeterminate</c>); <c>AgentRunExecutor.CostBudgetStopsFurtherCalls</c> separately stops further
+    /// calls WITHIN one run when a TASK-level cap (<c>AgentTask.MaxCostUsd</c>) coexists with that run's own
+    /// <c>CostIndeterminate</c> result. Every other grain/signal combination reaches this row unobstructed: a
+    /// task-level cap paired with an unpriced model, a plan-level cap paired with a priced model's
+    /// <c>CostIndeterminate</c> result, and a capped task running under an uncapped plan are all reachable. That is
+    /// an argument for confirming which grain 9b reads, not for assuming the qualifier is dead weight.</para>
     /// </summary>
     public bool SpendIsUndercounted { get; init; }
 
