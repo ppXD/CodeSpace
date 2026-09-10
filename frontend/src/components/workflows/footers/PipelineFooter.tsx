@@ -282,12 +282,12 @@ function integrateDigest(out: Record<string, unknown>): PipelineDigest | null {
   return { tone: "success", label: <span className="wf-pf-muted">Nothing to integrate</span> };
 }
 
-/** The first non-applied contribution from `outputs.conflicts[]` — its label + reason; null when the array is absent/empty or the entry has no label. */
+/** The first REAL (non-skipped) contribution from `outputs.conflicts[]` — its label + reason; null when the array is absent/empty, every entry is a `skipped` bystander (swept in only because a DIFFERENT contribution's failure or a set-level abort stopped things before its own turn — e.g. a missing base commit blocks every contribution), or the entry has no label. Falling back to null here (rather than the bystander) lets the caller fall back to `outputs.reason` — the set-level reason — instead of naming a bystander as the culprit. */
 function firstConflict(out: Record<string, unknown>): { label: string; reason?: string } | null {
   const conflicts = out["conflicts"];
   if (!Array.isArray(conflicts) || conflicts.length === 0) return null;
 
-  const entry = conflicts[0];
+  const entry = conflicts.find((c) => c && typeof c === "object" && (c as Record<string, unknown>)["skipped"] !== true);
   if (!entry || typeof entry !== "object") return null;
 
   const o = entry as Record<string, unknown>;
