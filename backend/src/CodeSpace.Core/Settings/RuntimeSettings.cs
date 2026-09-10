@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Configuration;
 
 namespace CodeSpace.Core.Settings;
@@ -103,6 +104,26 @@ public sealed record RuntimeSettings
     /// <summary>EXTRA https hosts a skill/agent pack may be cloned from, comma-separated, ADDED to the built-in github.com / gitlab.com — a self-hosted GitLab or an enterprise GitHub. Anything not on the resulting list is refused, which is what keeps pack import from becoming an SSRF surface.</summary>
     public string? PackAllowedHosts { get; init; }
 
+    /// <summary>
+    /// This deployment's FALLBACK cost cap in USD, over the rolling window a team cap uses — the ceiling applied to
+    /// any team that has no <c>budget_team_cap</c> row of its own. It is the operator's answer to "a team nobody has
+    /// configured must still not be able to spend without limit", which before P15-5b-ii nothing anywhere provided:
+    /// the ledger's only sum was per RUN, so any number of individually modest runs added up to no ceiling at all.
+    ///
+    /// <para>A team's OWN row wins outright rather than being clamped by this — an operator who raises one team
+    /// above the deployment floor has said so explicitly, and silently clamping it would make the management
+    /// endpoint a lie. Null (the default) ⇒ a team with no row keeps the per-run ceiling only, so an unset value
+    /// leaves behaviour exactly as it was.</para>
+    ///
+    /// <para>Read through the key <see cref="DeploymentCostCapUsdKey"/>, whose literal value is pinned by a unit
+    /// test (Rule 8). A configured-but-unparseable or non-positive value FAILS STARTUP: for a ceiling, landing on
+    /// the default silently means no ceiling, and a typo must never be the thing that lifts one.</para>
+    /// </summary>
+    public decimal? DeploymentCostCapUsd { get; init; }
+
+    /// <summary>The configuration key <see cref="DeploymentCostCapUsd"/> is read from. Pinned by a unit test — see <see cref="DeploymentCostCapUsd"/> for why a rename is not a harmless refactor.</summary>
+    public const string DeploymentCostCapUsdKey = "Budget:DeploymentCostCapUsd";
+
     public const int DefaultShutdownDrainSeconds = 30;
 
     private static readonly AsyncLocal<RuntimeSettings?> ScopedOverride = new();
@@ -126,6 +147,7 @@ public sealed record RuntimeSettings
         ArtifactLocalRwxShared = configuration.GetValue("Artifacts:LocalRwxShared", false),
         ShutdownDrainSeconds = Positive(configuration["Shutdown:DrainSeconds"], DefaultShutdownDrainSeconds),
         PackAllowedHosts = Trimmed(configuration["Agents:PackAllowedHosts"]),
+        DeploymentCostCapUsd = PositiveUsd(configuration[DeploymentCostCapUsdKey], DeploymentCostCapUsdKey),
         // Secrets. The LEGACY flat keys are still honoured, and that is load-bearing rather than tidy: every
         // deployment that exists today sets CODESPACE_VARIABLE_MASTER_KEY, and a rename that quietly stopped reading
         // it would fail those pods closed at startup with a message about a key they had in fact set.
@@ -153,6 +175,19 @@ public sealed record RuntimeSettings
     /// "kill in-flight work immediately", which nobody configures on purpose, so both land on the default too.
     /// </summary>
     private static int Positive(string? raw, int fallback) => int.TryParse(raw, out var value) && value > 0 ? value : fallback;
+
+    /// <summary>
+    /// A configured USD amount, or null when the setting is absent or blank. Unlike <see cref="Positive"/> this
+    /// REFUSES to fall back on a malformed value: the fallback for a spending ceiling is "no ceiling", so a typo
+    /// that landed on the default would quietly remove the limit the operator was configuring.
+    /// </summary>
+    private static decimal? PositiveUsd(string? raw, string key)
+    {
+        if (Trimmed(raw) is not { } value) return null;
+        if (decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var amount) && amount > 0m) return amount;
+
+        throw new InvalidOperationException($"Refusing to start: '{key}' must be a positive amount in USD when configured. Omit the setting for no deployment cost cap.");
+    }
 
     private sealed class Scope : IDisposable
     {

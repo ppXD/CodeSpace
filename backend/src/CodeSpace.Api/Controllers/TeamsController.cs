@@ -1,5 +1,7 @@
+using CodeSpace.Messages.Commands.Budget;
 using CodeSpace.Messages.Commands.Invitations;
 using CodeSpace.Messages.Commands.Teams;
+using CodeSpace.Messages.Queries.Budget;
 using CodeSpace.Messages.Queries.Invitations;
 using CodeSpace.Messages.Queries.Users;
 using MediatR;
@@ -99,6 +101,30 @@ public class TeamsController : ControllerBase
     public async Task<IActionResult> TransferOwnership([FromBody] TransferTeamOwnershipCommand command, CancellationToken cancellationToken)
     {
         await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    /// <summary>The team's effective cost cap — its own row, or the deployment fallback standing in for one. Null body when neither applies.</summary>
+    [HttpGet("cost-cap")]
+    public async Task<IActionResult> CostCap(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetTeamCostCapQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>The ceiling every run in this team is admitted against, on top of each run's own cap.</summary>
+    [HttpPut("cost-cap")]
+    public async Task<IActionResult> SetCostCap([FromBody] SetTeamCostCapCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Drops the team back to the deployment fallback. Idempotent — clearing a cap the team never had is a no-op.</summary>
+    [HttpDelete("cost-cap")]
+    public async Task<IActionResult> ClearCostCap(CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new ClearTeamCostCapCommand(), cancellationToken).ConfigureAwait(false);
         return NoContent();
     }
 

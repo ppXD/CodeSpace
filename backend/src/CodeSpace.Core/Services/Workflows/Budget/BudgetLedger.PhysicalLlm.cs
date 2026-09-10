@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Exceptions;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Contracts;
 using Microsoft.EntityFrameworkCore;
 
@@ -21,7 +22,7 @@ public sealed partial class BudgetLedger
         if (input.InvocationId == Guid.Empty || input.LogicalCallId == Guid.Empty || input.CandidateId == Guid.Empty || input.CandidateOrdinal <= 0)
             throw new PhysicalLlmAccountingException("Physical admission requires complete server-owned causal identities.");
         await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await TakeRunLockAsync(input.RunId, cancellationToken).ConfigureAwait(false);
+        await TakeAdmissionLocksAsync(input.RunId, input.TeamId, input.CapUsd, cancellationToken).ConfigureAwait(false);
         if (!await _db.WorkflowRun.AsNoTracking().AnyAsync(r => r.Id == input.RunId && r.TeamId == input.TeamId, cancellationToken).ConfigureAwait(false))
             throw new PhysicalLlmAccountingException("The physical admission workflow scope is unavailable.");
         var existing = await _db.WorkflowRunModelCallAttempt.AsNoTracking().SingleOrDefaultAsync(a => a.Id == input.InvocationId, cancellationToken).ConfigureAwait(false);
@@ -34,7 +35,11 @@ public sealed partial class BudgetLedger
             return new BudgetAdmission(matches, matches ? claim!.Id : null, committed, input.CapUsd, matches ? "physical-invocation-already-admitted" : "physical-invocation-intent-mismatch") { IsReplay = true, ReservationState = matches ? claim!.State : null };
         }
         if (committed + input.EstimateUsd > input.CapUsd)
-            return new BudgetAdmission(false, null, committed, input.CapUsd, "The next physical POST would exceed the run's admission commitments.");
+            return new BudgetAdmission(false, null, committed, input.CapUsd, "The next physical POST would exceed the run's admission commitments.") { RefusedGrain = BudgetCapGrain.Run };
+
+        // P15-5b-ii: the physical POST mints a reservation like any other admission, so it answers to the team's
+        // standing cap too — otherwise this path would be the one way to spend past it.
+        if (await TeamRefusalAsync(input.TeamId, input.EstimateUsd, input.CapUsd, committed, cancellationToken).ConfigureAwait(false) is { } teamRefusal) return teamRefusal;
 
         var call = await _db.WorkflowRunModelCall.AsNoTracking().SingleOrDefaultAsync(c => c.Id == input.LogicalCallId, cancellationToken).ConfigureAwait(false);
         if (call is not null && !MatchesLogical(call, input))

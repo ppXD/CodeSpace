@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
@@ -519,10 +520,28 @@ public static class RoomNarrative
             items.Add(new StatItem { Text = "Supervisor / critic / grader", Detail = SpendDetail(summary.BrainPlaneUsd, summary.UnknownBrainCalls, "call"), Tone = summary.UnknownBrainCalls > 0 ? NarrativeTone.Info : NarrativeTone.Success });
         if (summary.CommittedUsd is not null || summary.UnresolvedClaims > 0)
             items.Add(new StatItem { Text = "Budget ledger", Detail = $"{Usd(summary.CommittedUsd ?? 0m)} committed{(summary.UnresolvedClaims > 0 ? $" · {Count(summary.UnresolvedClaims, "unresolved claim")}" : "")}", Tone = summary.UnresolvedClaims > 0 ? NarrativeTone.Error : NarrativeTone.Success });
+        if (TeamCapItem(summary) is { } teamCap) items.Add(teamCap);
         if (summary.InputTokens + summary.OutputTokens > 0)
             items.Add(new StatItem { Text = "Tokens", Detail = $"{summary.InputTokens.ToString("N0", CultureInfo.InvariantCulture)} input · {summary.OutputTokens.ToString("N0", CultureInfo.InvariantCulture)} output" });
 
         return headline.Count == 0 && items.Count == 0 ? null : new StatBlock { Id = $"{idPrefix}:stat:budget", Seq = seq, Kind = "budget", Label = "Budget", Detail = string.Join(" · ", headline), Items = items };
+    }
+
+    /// <summary>
+    /// P15-5b-ii: the standing cap ABOVE this run — the team's own, or the deployment fallback standing in for it.
+    /// It answers the question the run's own cap cannot: a launch well under its own budget can still be refused
+    /// because the team has spent its window, and without this row that refusal has no visible cause. Omitted when
+    /// no cap applies, so an absent cap never renders as a limit of any kind.
+    /// </summary>
+    private static StatItem? TeamCapItem(RoomBudgetSummary summary)
+    {
+        if (summary.TeamCapUsd is not { } cap) return null;
+
+        var grain = summary.TeamCapGrain ?? BudgetCapGrain.Team;
+        var committed = summary.TeamCommittedUsd is { } spent ? $"{Usd(spent)} of " : string.Empty;
+        var window = summary.TeamCapWindow is { Length: > 0 } name ? $" · {name}" : string.Empty;
+
+        return new StatItem { Text = $"{char.ToUpperInvariant(BudgetCapRefusal.Word(grain)[0])}{BudgetCapRefusal.Word(grain)[1..]} cap", Detail = $"{committed}{Usd(cap)}{window}", Tone = summary.TeamCommittedUsd >= cap ? NarrativeTone.Error : NarrativeTone.Info };
     }
 
     private static string SpendDetail(decimal? usd, int unknown, string noun)

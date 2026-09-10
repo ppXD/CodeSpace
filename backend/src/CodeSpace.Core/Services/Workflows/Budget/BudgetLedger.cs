@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
@@ -45,11 +46,14 @@ public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal
     /// <summary>A lookup of an existing logical claim, never permission for a second physical provider request.</summary>
     public bool IsReplay { get; init; }
     public string? ReservationState { get; init; }
+
+    /// <summary>WHICH cap refused this admission — null on anything but a refusal. The <see cref="Reason"/> names it in prose; this is the same fact typed, for a caller that must branch on it rather than read it.</summary>
+    public BudgetCapGrain? RefusedGrain { get; init; }
 }
 
 public interface IBudgetLedger
 {
-    /// <summary>Atomically reserve an estimate under the cap, serialized per run. This bounds admission commitments; it bounds the eventual provider bill only when the estimate is a trustworthy upper bound. Idempotent for the same run, team and reservation identity. A null <paramref name="capUsd"/> records an unbounded observability claim that never refuses (an <c>Unbudgeted</c> plane) — never a real admission gate.</summary>
+    /// <summary>Atomically reserve an estimate under BOTH the run's cap and the team's (P15-5b-ii), serialized per run and per team. This bounds admission commitments; it bounds the eventual provider bill only when the estimate is a trustworthy upper bound. Idempotent for the same run, team and reservation identity. A null <paramref name="capUsd"/> records an unbounded observability claim that never refuses (an <c>Unbudgeted</c> plane) — never a real admission gate, and never admitted against the team cap either.</summary>
     Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken);
 
     /// <summary>Record known actual spend exactly. Null actual keeps the reserved claim and records Indeterminate, never an invented bill. A later known receipt supersedes uncertain or released bookkeeping; a confirmed settlement is idempotent.</summary>
@@ -63,6 +67,9 @@ public interface IBudgetLedger
 
     /// <summary>The run's committed total: settled + live reserved — what the invariant compares against the cap.</summary>
     Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>The TEAM's committed total across every run since <paramref name="since"/> — the same settled + live arithmetic, over the team cap's rolling window instead of one run. Rows created before the window are spend the cap has already forgiven.</summary>
+    Task<decimal> CommittedTeamUsdAsync(Guid teamId, DateTimeOffset since, CancellationToken cancellationToken);
 
     /// <summary>
     /// W-hard slice 2: pessimistically reconcile a KIND PREFIX's dangling reservations — INDETERMINATE rows (the
@@ -82,8 +89,13 @@ public interface IBudgetLedger
 public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocationLedger, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ITeamCostCapResolver _teamCaps;
 
-    public BudgetLedger(CodeSpaceDbContext db) => _db = db;
+    public BudgetLedger(CodeSpaceDbContext db, ITeamCostCapResolver teamCaps)
+    {
+        _db = db;
+        _teamCaps = teamCaps;
+    }
 
     public async Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
     {
@@ -91,7 +103,7 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
         if (capUsd is < 0) throw new ArgumentOutOfRangeException(nameof(capUsd));
         await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        await TakeRunLockAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+        await TakeAdmissionLocksAsync(workflowRunId, teamId, capUsd, cancellationToken).ConfigureAwait(false);
 
         var existing = await _db.BudgetReservation.AsNoTracking()
             .Where(r => r.WorkflowRunId == workflowRunId && r.Kind == kind && r.ScopeKey == scopeKey)
@@ -107,11 +119,12 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
         }
 
         var committed = await CommittedInTxAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var refusal = await RefusalAsync(teamId, estimateUsd, capUsd, committed, cancellationToken).ConfigureAwait(false);
 
-        if (capUsd is { } cap && committed + estimateUsd > cap)
+        if (refusal is not null)
         {
             await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new BudgetAdmission(false, null, committed, capUsd, $"admission would commit {committed + estimateUsd:F4} past the {cap:F4} cap");
+            return refusal;
         }
 
         var reservation = new BudgetReservation
@@ -189,6 +202,47 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
             .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired && !r.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix))
             .SumAsync(r => r.SettledUsd ?? r.ReservedUsd, cancellationToken).ConfigureAwait(false);
 
+    public async Task<decimal> CommittedTeamUsdAsync(Guid teamId, DateTimeOffset since, CancellationToken cancellationToken) =>
+        await _db.BudgetReservation.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.CreatedDate >= since && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired && !r.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix))
+            .SumAsync(r => r.SettledUsd ?? r.ReservedUsd, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The FIRST cap this admission passes, or null when it clears every grain that applies. Run before team,
+    /// because the run cap is the tighter and more actionable of the two: a launch over its own cap should say so
+    /// rather than blaming the team's month.
+    /// </summary>
+    private async Task<BudgetAdmission?> RefusalAsync(Guid teamId, decimal estimateUsd, decimal? capUsd, decimal committed, CancellationToken cancellationToken)
+    {
+        // An Unbudgeted observability claim (see BudgetKinds.UnbudgetedPrefix) declares no cap at all, and is
+        // excluded from every committed sum including the team's — so it can neither refuse nor be refused.
+        if (capUsd is not { } cap) return null;
+
+        if (committed + estimateUsd > cap)
+            return new BudgetAdmission(false, null, committed, capUsd, BudgetCapRefusal.Reason(BudgetCapGrain.Run, committed + estimateUsd, cap)) { RefusedGrain = BudgetCapGrain.Run };
+
+        return await TeamRefusalAsync(teamId, estimateUsd, capUsd, committed, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P15-5b-ii: the same invariant one grain up. Read inside the admission transaction, behind the team lock
+    /// taken above, so two connections cannot each see the other's headroom as free and jointly overshoot.
+    /// <see cref="BudgetAdmission.CommittedUsd"/> stays the RUN's total on a team refusal — it is the run's own
+    /// accounting figure, and the team's numbers belong to the reason (and to the Room's budget block).
+    /// </summary>
+    private async Task<BudgetAdmission?> TeamRefusalAsync(Guid teamId, decimal estimateUsd, decimal? capUsd, decimal committed, CancellationToken cancellationToken)
+    {
+        if (await _teamCaps.ResolveAsync(teamId, cancellationToken).ConfigureAwait(false) is not { } teamCap) return null;
+
+        var teamCommitted = await CommittedTeamUsdAsync(teamId, teamCap.WindowStart(DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+        if (teamCommitted + estimateUsd <= teamCap.CapUsd) return null;
+
+        var reason = BudgetCapRefusal.Reason(teamCap.Grain, teamCommitted + estimateUsd, teamCap.CapUsd, teamCap.Window);
+
+        return new BudgetAdmission(false, null, committed, capUsd, reason) { RefusedGrain = teamCap.Grain };
+    }
+
     public async Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken)
     {
         var terminal = new[] { WorkflowRunStatus.Success, WorkflowRunStatus.Failure, WorkflowRunStatus.Cancelled };
@@ -212,4 +266,26 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
     /// <summary>Serialize admission, settlement and release per run — pg_advisory_xact_lock releases with the transaction.</summary>
     private async Task TakeRunLockAsync(Guid workflowRunId, CancellationToken cancellationToken) =>
         await _db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtextextended({workflowRunId.ToString()}, 42))", cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// LOCK ORDER — RUN FIRST, THEN TEAM. Fixed, and the only order anything in this class takes: settlement and
+    /// release take the run lock alone, so no path can ever hold the team lock while waiting for a run's. Reversing
+    /// it here would let one admission hold run A while waiting on the team, and another hold the team while
+    /// waiting on run A.
+    ///
+    /// <para>The team lock is skipped for an <c>Unbudgeted</c> claim (null cap): it is admitted against nothing, so
+    /// taking a team-wide lock for it would serialize every real admission in the team behind an observability row.</para>
+    /// </summary>
+    private async Task TakeAdmissionLocksAsync(Guid workflowRunId, Guid teamId, decimal? capUsd, CancellationToken cancellationToken)
+    {
+        await TakeRunLockAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+
+        if (capUsd is null) return;
+
+        await TakeTeamLockAsync(teamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Serialize admission across the team's runs — a DIFFERENT hash seed from the run lock so a team id and a run id can never collide onto one key.</summary>
+    private async Task TakeTeamLockAsync(Guid teamId, CancellationToken cancellationToken) =>
+        await _db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock(hashtextextended({teamId.ToString()}, 43))", cancellationToken).ConfigureAwait(false);
 }

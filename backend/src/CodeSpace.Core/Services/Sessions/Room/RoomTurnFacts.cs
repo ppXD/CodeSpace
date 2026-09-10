@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Plans;
 
@@ -190,4 +191,20 @@ public sealed record RoomBudgetSummary
     public int UnresolvedClaims { get; init; }
     /// <summary>Spend recorded under an <c>unbudgeted:</c> ledger kind — a plane with no run-level cap. Surfaced on its own because it never counts toward <see cref="CommittedUsd"/> or <see cref="CapUsd"/>.</summary>
     public decimal? UnbudgetedUsd { get; init; }
+
+    /// <summary>
+    /// P15-5b-ii: the TEAM's standing cap this run was also admitted against, and what the team has committed
+    /// inside its window. Null when the team has no cap and the deployment sets no fallback — so an unset cap stays
+    /// unsaid rather than rendering as an unlimited one. Team-wide figures, deliberately kept apart from
+    /// <see cref="CapUsd"/> / <see cref="CommittedUsd"/>, which are this run's own.
+    /// </summary>
+    public decimal? TeamCapUsd { get; init; }
+
+    public decimal? TeamCommittedUsd { get; init; }
+
+    /// <summary>Which cap <see cref="TeamCapUsd"/> came from — the team's own row or the deployment fallback. Null with the cap.</summary>
+    public BudgetCapGrain? TeamCapGrain { get; init; }
+
+    /// <summary>The window <see cref="TeamCommittedUsd"/> is summed over (e.g. <c>rolling-30d</c>). Null with the cap.</summary>
+    public string? TeamCapWindow { get; init; }
 }

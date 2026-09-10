@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -681,6 +682,42 @@ public class RoomNarrativeTests
         var budget = narrative.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
 
         budget.Detail.ShouldBe("$0.0200 unbudgeted", "never a cap figure — nothing here was ever an admission claim");
+    }
+
+    [Theory]
+    [InlineData(BudgetCapGrain.Team, 12.5, "Team cap", "$12.50 of $50.00 · rolling-30d", NarrativeTone.Info)]
+    [InlineData(BudgetCapGrain.Deployment, 12.5, "Deployment cap", "$12.50 of $50.00 · rolling-30d", NarrativeTone.Info)]
+    [InlineData(BudgetCapGrain.Team, 50, "Team cap", "$50.00 of $50.00 · rolling-30d", NarrativeTone.Error)]
+    public void Budget_row_names_the_standing_cap_above_the_run(BudgetCapGrain grain, decimal committed, string label, string detail, NarrativeTone tone)
+    {
+        // P15-5b-ii: a run well under its OWN cap can still be refused because the team has spent its window, and
+        // this is the only row where that cause is visible. The grain is named because the remedy differs.
+        var facts = new RoomTurnFacts
+        {
+            Budget = new RoomBudgetSummary
+            {
+                CommittedUsd = 0.30m, CapUsd = 1m,
+                TeamCapUsd = 50m, TeamCommittedUsd = committed, TeamCapGrain = grain, TeamCapWindow = TeamCostCap.RollingThirtyDays,
+            },
+        };
+
+        var budget = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Running, facts: facts).Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+        var row = budget.Items.Single(item => item.Text == label);
+
+        row.Detail.ShouldBe(detail);
+        row.Tone.ShouldBe(tone);
+        budget.Detail.ShouldBe("$1.00 cap", customMessage: "the headline stays the RUN's own cap — the team's figures are a separate row, never conflated with this run's");
+    }
+
+    [Fact]
+    public void Budget_row_stays_silent_about_a_standing_cap_the_team_does_not_have()
+    {
+        // An absent cap must never render as an unlimited one, and must not invent a row.
+        var facts = new RoomTurnFacts { Budget = new RoomBudgetSummary { CommittedUsd = 0.30m, CapUsd = 1m } };
+
+        var budget = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Running, facts: facts).Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+
+        budget.Items.ShouldNotContain(item => item.Text.EndsWith("cap", StringComparison.Ordinal));
     }
 
     [Fact]

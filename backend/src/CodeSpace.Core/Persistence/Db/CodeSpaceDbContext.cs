@@ -129,6 +129,9 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<CompletionAssessmentRecord> CompletionAssessmentRecord => Set<CompletionAssessmentRecord>();
     public DbSet<BudgetReservation> BudgetReservation => Set<BudgetReservation>();
 
+    /// <summary>P15-5b-ii: the standing per-team cost cap every reservation is admitted against, on top of its own run cap.</summary>
+    public DbSet<BudgetTeamCap> BudgetTeamCap => Set<BudgetTeamCap>();
+
     /// <summary>A4: the durable north-star row per terminal run (observation-only, upserted by run) — what makes "the rate went from X to Y" answerable.</summary>
     public DbSet<RunScorecard> RunScorecard => Set<RunScorecard>();
 
