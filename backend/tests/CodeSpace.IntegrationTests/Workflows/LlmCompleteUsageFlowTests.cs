@@ -6,6 +6,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -150,6 +151,64 @@ public class LlmCompleteUsageFlowTests
 
         reservation.Kind.ShouldBe("unbudgeted:llm.complete", "the node's TypeKey names the plane in the kind, prefixed so no cap's committed sum ever counts it");
         reservation.State.ShouldBe(CodeSpace.Core.Services.Workflows.Budget.BudgetReservationStates.Settled, "the call completed, so the observability record settles at its actual spend like any other");
+    }
+
+    [Fact]
+    public async Task A_capped_runs_node_call_is_admitted_against_the_runs_own_cap()
+    {
+        // The gap this closes: the engine's per-node scope was Unbudgeted even for a run that DECLARES a cost cap,
+        // so a $1 launch could spend unboundedly through its own nodes while the Room displayed the $1 ceiling —
+        // only agent attempts and nested supervisor turns were ever metered. The cap is read from the same
+        // route-provenance column the Room shows it from, so "displayed as capped" and "admitted against the cap"
+        // cannot disagree.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PricedModel, provider: DeterministicSynthLlmClient.ProviderTag);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, PricedModel);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, routePlanJson: WorkflowsTestSeed.RouteJsonWithCostCap(1.00m));
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success, "a call that FITS the cap runs exactly as before");
+
+        var reservation = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).SingleAsync();
+
+        reservation.Kind.ShouldBe("llm:llm.complete", "a real admission claim under the run's cap — NOT the 'unbudgeted:' observability row an uncapped run records");
+        reservation.CapUsd.ShouldBe(1.00m, "the cap the row was admitted against is frozen on it, so a later reader can check the arithmetic");
+        reservation.State.ShouldBe(CodeSpace.Core.Services.Workflows.Budget.BudgetReservationStates.Settled);
+        reservation.SettledUsd.ShouldBe(0.00056m, "settled at the call's OBSERVED cost, correcting the pessimistic admission estimate");
+    }
+
+    [Fact]
+    public async Task A_capped_runs_node_call_is_REFUSED_once_the_cap_is_spent()
+    {
+        // The other half: admission that cannot refuse is not a cap. $0.95 of prior spend leaves less headroom than
+        // the node's own admission estimate (8192 output tokens of claude-opus-4-8 ≈ $0.20), so the call never
+        // reaches the provider — the node fails naming the ceiling instead of quietly billing past it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PricedModel, provider: DeterministicSynthLlmClient.ProviderTag);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, PricedModel);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, routePlanJson: WorkflowsTestSeed.RouteJsonWithCostCap(1.00m));
+
+        using (var pre = _fixture.BeginScope())
+        {
+            var admitted = await pre.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>()
+                .ReserveAsync(runId, teamId, "prior-work", "earlier-turn", 0.95m, 1.00m, "realized-v1", null, null, CancellationToken.None);
+            admitted.Admitted.ShouldBeTrue("the fixture's own precondition must hold or the test measures nothing");
+        }
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
+        (await db.BudgetReservation.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId && r.Kind.StartsWith("llm:"))).ShouldBe(0, "a refused admission reserves nothing — the spend that would overshoot never happens");
+        (await db.WorkflowRunRecord.AsNoTracking().Where(r => r.RunId == runId && r.NodeId == "gen" && r.RecordType == WorkflowRunRecordTypes.NodeFailed).SingleAsync())
+            .PayloadJson.ShouldContain("refused by the budget ledger", Case.Sensitive, "the operator must be able to read WHY the node stopped");
+        (await db.WorkflowRunRecord.AsNoTracking().CountAsync(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.ExternalCallCompleted)).ShouldBe(0, "no provider call was made at all");
     }
 
     private async Task<Guid> CreateLlmWorkflowAsync(Guid teamId, Guid userId, string pinnedModel)

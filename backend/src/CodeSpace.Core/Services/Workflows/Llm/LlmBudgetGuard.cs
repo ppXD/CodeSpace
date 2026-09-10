@@ -26,21 +26,31 @@ public sealed class LlmBudgetExceededException(string kind, decimal committedUsd
 
 /// <summary>
 /// Reserves an admission estimate before buffered and structured provider calls, then records complete known
-/// usage or retains an uncertain claim. Only scopes carrying both ledger and cap are guarded — a declared cap with
-/// no cap VALUE (<see cref="LlmCallScope.CapUsd"/> null) stays the deliberate no-cap-configured no-op it always
-/// was. The prompt heuristic and default output estimate are not wire upper bounds; provider-internal retries and
-/// direct streaming require their own request admission before this can be described as a hard cap on the bill.
+/// usage or retains an uncertain claim. A scope carrying a cap VALUE is admitted against it; a scope carrying a
+/// ledger but NO cap value records an "unbudgeted:" observability row instead of enforcing anything. The prompt
+/// heuristic and default output estimate are not wire upper bounds; provider-internal retries and direct streaming
+/// require their own request admission before this can be described as a hard cap on the bill.
 ///
 /// <para><b>P15-5a fail-LOUD:</b> a scope with no <see cref="LlmCallScope.Budget"/> ledger wired at all is no
 /// longer a silent, unlogged passthrough (the old fail-open let a plane spend past its launch's cap forever) — it
 /// throws <see cref="UnscopedModelCallException"/>, a programming-error signal for a plane that forgot to thread
 /// its scope. A plane that legitimately has no launch marks itself <see cref="LlmCallScope.Unbudgeted"/> instead,
 /// which still passes through but is LOGGED and, when a ledger is carried, recorded under an "unbudgeted:" kind.</para>
+///
+/// <para><b>Every call is admitted or recorded:</b> a BUDGETED scope whose cap value is null used to return
+/// <c>await call(...)</c> directly — row-less and unlogged, the one silent passthrough left standing behind this
+/// class's own "never a silent passthrough" claim. It now takes the same Unbudgeted passthrough under
+/// <see cref="NoRunCapReason"/>, so a reader asking "what did this run spend on models" is never answered by an
+/// absence. Enforcement is unchanged: an "unbudgeted:" row is excluded from every committed sum, so no capped
+/// plane's headroom moves.</para>
 /// </summary>
 public static class LlmBudgetGuard
 {
     /// <summary>Legacy output-token estimate for admission when the request has no explicit bound. This is not a wire ceiling.</summary>
     public const int DefaultMaxOutputTokensEstimate = 8192;
+
+    /// <summary>The Unbudgeted reason a BUDGETED scope with no cap VALUE records under — an operator who configured no ceiling on an otherwise-instrumented launch. Pinned by test: it is the phrase an operator reads on the row explaining why their call was never metered.</summary>
+    public const string NoRunCapReason = "run has no MaxCostUsd";
 
     /// <summary>Every llm reservation carries this TTL — generously past any real call's own HTTP timeout, so only a reservation ORPHANED by a worker teardown between reserve and settle ever reaches it. The expiry sweep then moves it to Indeterminate and the settlement sweep reconciles it pessimistically; without a deadline it would sit live forever, invisibly holding headroom against every later call of a reclaimed run. Pinned by test.</summary>
     public static readonly TimeSpan ReservationTtl = TimeSpan.FromMinutes(30);
@@ -53,7 +63,8 @@ public static class LlmBudgetGuard
         if (scope is not { Budget: { } budget })
             throw new UnscopedModelCallException(scope?.Kind ?? "(unscoped)", model);
 
-        if (scope.CapUsd is not { } capUsd) return await call(cancellationToken).ConfigureAwait(false);
+        if (scope.CapUsd is not { } capUsd)
+            return await UnbudgetedPassthroughAsync(scope, NoRunCapReason, model, systemPrompt, userPrompt, maxOutputTokens, call, actualUsd, cancellationToken).ConfigureAwait(false);
 
         var estimate = EstimateUsd(model, systemPrompt, userPrompt, maxOutputTokens, scope.ModelPrices);
 
@@ -85,13 +96,58 @@ public static class LlmBudgetGuard
         }
         catch (LlmBudgetExceededException) { throw; }
         catch (UnpricedModelUnderCapException) { throw; }
-        catch
+        catch (Exception ex)
         {
-            // The call itself failed — the actual spend is unknowable here; the ledger's null-actual settle is
-            // uncertain: it retains the reserve without inventing an actual bill.
-            await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
+            // The call failed, so no usage was observed here in EITHER direction — what differs is whether the
+            // provider could have billed anyway (see ObservedNoSpend). A transport failure that never produced a
+            // completion RELEASES its headroom; anything ambiguous keeps the pessimistic null-actual settle.
+            if (ObservedNoSpend(ex))
+                await ReleaseQuietlyAsync(budget, scope, kind, scopeKey, cancellationToken).ConfigureAwait(false);
+            else
+                await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
+
             throw;
         }
+    }
+
+    /// <summary>
+    /// Whether a THROWN model call proves nothing was billed, so its admission estimate must go back to the cap.
+    ///
+    /// <para>WHY this branch exists: a null-actual settle lands <c>Indeterminate</c>, which HOLDS the estimate
+    /// forever (<c>ReconcileDanglingAsync</c> keeps holding it, and no fact source ever settles an <c>llm:</c>
+    /// row). A 429 / format-fault storm across failover hops — each hop its OWN reservation, since every successor
+    /// re-enters this guard — therefore filled the run's cap with phantom estimates for calls that produced no
+    /// tokens, and the next real call was refused with <see cref="LlmBudgetExceededException"/>. Releasing is
+    /// recoverable in the one direction that matters: a late real receipt still supersedes a Released row
+    /// (<c>BudgetLedger.SettleAsync</c> writes any state that is not already Settled), while a phantom hold is
+    /// only ever corrected by the operator raising the cap.</para>
+    ///
+    /// <para>The exception shapes, first typed verdict in the inner chain wins:</para>
+    /// <list type="bullet">
+    ///   <item><see cref="LlmApiException"/> <see cref="LlmErrorCategory.Transient"/> (5xx/408/reset),
+    ///         <see cref="LlmErrorCategory.RateLimited"/> (429), <see cref="LlmErrorCategory.AuthFailed"/>
+    ///         (401/403) and <see cref="LlmErrorCategory.BadRequest"/> (400/422) — the gateway REJECTED the
+    ///         request, so no completion was generated ⇒ RELEASE.</item>
+    ///   <item><see cref="HttpRequestException"/> — the request never completed a response ⇒ RELEASE.</item>
+    ///   <item><see cref="LlmErrorCategory.Malformed"/> (a 2xx whose body would not parse — its own doc says it
+    ///         MAY have billed), <see cref="LlmErrorCategory.ContextLengthExceeded"/> and
+    ///         <see cref="LlmErrorCategory.ContentFiltered"/> (a provider may bill the input it screened) ⇒ hold.</item>
+    ///   <item><see cref="OperationCanceledException"/> (a <c>TaskCanceledException</c> HttpClient timeout
+    ///         included) and <see cref="TimeoutException"/> — the request may well have been served and billed
+    ///         after we stopped listening ⇒ hold. Never release on an ambiguous outcome.</item>
+    ///   <item>Anything else (an untyped provider/parse fault) ⇒ hold, the pre-existing behaviour.</item>
+    /// </list>
+    /// </summary>
+    internal static bool ObservedNoSpend(Exception thrown)
+    {
+        for (var e = thrown; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException or TimeoutException) return false;
+            if (e is LlmApiException api) return api.Category is LlmErrorCategory.Transient or LlmErrorCategory.RateLimited or LlmErrorCategory.AuthFailed or LlmErrorCategory.BadRequest;
+            if (e is HttpRequestException) return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -124,6 +180,9 @@ public static class LlmBudgetGuard
         }
         catch
         {
+            // Deliberately NOT the metered path's release branch: this row holds no cap's headroom (it is excluded
+            // from every committed sum), so releasing would buy nothing — and the Room sums an Unbudgeted row's
+            // estimate whatever its state, so a Released one would still read as spend. Keep it uncertain.
             await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
             throw;
         }
@@ -144,6 +203,14 @@ public static class LlmBudgetGuard
         var outputTokens = maxOutputTokens is > 0 ? maxOutputTokens.Value : DefaultMaxOutputTokensEstimate;
 
         return LlmUsageCost.Usd(model, new LlmUsage { InputTokens = inputTokens, OutputTokens = outputTokens }, rowPrices);
+    }
+
+    /// <summary>Return an admission estimate whose call provably spent nothing (see <see cref="ObservedNoSpend"/>) — best-effort exactly like the settle below: a ledger fault must never replace the provider's own failure with an accounting one.</summary>
+    private static async Task ReleaseQuietlyAsync(IBudgetLedger budget, LlmCallScope scope, string kind, string scopeKey, CancellationToken cancellationToken)
+    {
+        try { await budget.ReleaseAsync(scope.RunId, scope.TeamId, kind, scopeKey, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* torn down — the expiry sweep reconciles the live reservation */ }
+        catch { /* best-effort — see summary */ }
     }
 
     /// <summary>Preserve the provider outcome if accounting persistence fails. Its existing reservation retains the admission estimate, not a guaranteed bound on the unknown bill; recovery and cost qualification must keep that distinction.</summary>

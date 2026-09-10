@@ -41,8 +41,15 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
 
     public async Task<(int Settled, int Released, int Expired)> SweepAsync(int batchSize, CancellationToken cancellationToken)
     {
+        // Close the bookkeeping of agent-attempt rows that entered this pass ALREADY dangling — an orphan the
+        // expiry sweep moved to Indeterminate, or a live row whose run has gone terminal. Deliberately BEFORE this
+        // pass's own fact-based settlement, which supersedes it: a row this pass can still settle from the tape is
+        // never labelled decided-pessimistically first, and a row left Indeterminate by this pass gets its closing
+        // on the next one. Headroom is never freed either way — Reconciled keeps holding the claim.
+        await _ledger.ReconcileDanglingAsync(BudgetKinds.AgentAttempt, batchSize, cancellationToken).ConfigureAwait(false);
+
         var live = await _db.BudgetReservation.AsNoTracking()
-            .Where(r => r.Kind == "agent-attempt" && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight || r.State == BudgetReservationStates.Indeterminate || r.State == BudgetReservationStates.Reconciled))
+            .Where(r => r.Kind == BudgetKinds.AgentAttempt && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight || r.State == BudgetReservationStates.Indeterminate || r.State == BudgetReservationStates.Reconciled))
             .OrderBy(r => r.LastModifiedDate).ThenBy(r => r.Id)
             .Take(batchSize)
             .Select(r => new { r.WorkflowRunId, r.TeamId, r.ScopeKey })
@@ -71,6 +78,12 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
         // unknown and their estimates continue to count toward committed budget until confirmed evidence arrives.
         await _ledger.ReconcileDanglingAsync("llm:", batchSize, cancellationToken).ConfigureAwait(false);
 
+        // Map-branch AFTER the release pass above, never before: a Reconciled row is no longer RELEASABLE (release
+        // only acts on Reserved/InFlight), so reconciling first would strand a terminal run's branch estimate
+        // holding headroom permanently — the exact thing that pass exists to return. What is left for this call is
+        // the branch claim the release pass CANNOT help: one already moved to Indeterminate.
+        await _ledger.ReconcileDanglingAsync(WorkflowEngine.MapBranchReservationKind, batchSize, cancellationToken).ConfigureAwait(false);
+
         var expired = await _ledger.ExpireOverdueAsync(batchSize, cancellationToken).ConfigureAwait(false);
 
         return (settled, released, expired);
@@ -90,32 +103,22 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
     /// </summary>
     private async Task<int> ReleaseTerminalMapBranchesAsync(int batchSize, CancellationToken cancellationToken)
     {
-        var live = await _db.BudgetReservation.AsNoTracking()
+        // The terminal-run predicate is part of the CANDIDATE selection, not a post-filter on the batch: a run of
+        // still-live branches on ACTIVE runs would otherwise fill the batch and starve the terminal rows this pass
+        // exists for — and the reconcile pass that follows would then close them as Reconciled, past releasing.
+        var releasable = await _db.BudgetReservation.AsNoTracking()
             .Where(r => r.Kind == WorkflowEngine.MapBranchReservationKind
-                     && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight))
+                     && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight)
+                     && _db.WorkflowRun.Any(w => w.Id == r.WorkflowRunId && (w.Status == WorkflowRunStatus.Success || w.Status == WorkflowRunStatus.Failure || w.Status == WorkflowRunStatus.Cancelled)))
             .OrderBy(r => r.CreatedDate)
             .Take(batchSize)
             .Select(r => new { r.WorkflowRunId, r.TeamId, r.ScopeKey })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (live.Count == 0) return 0;
-
-        var terminalRunIds = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => live.Select(l => l.WorkflowRunId).Contains(r.Id)
-                     && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled))
-            .Select(r => r.Id)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        var terminal = terminalRunIds.ToHashSet();
-        var released = 0;
-
-        foreach (var row in live.Where(l => terminal.Contains(l.WorkflowRunId)))
-        {
+        foreach (var row in releasable)
             await _ledger.ReleaseAsync(row.WorkflowRunId, row.TeamId, WorkflowEngine.MapBranchReservationKind, row.ScopeKey, cancellationToken).ConfigureAwait(false);
-            released++;
-        }
 
-        return released;
+        return releasable.Count;
     }
 
     private async Task<(int Settled, int Released)> SettleRunAsync(Guid runId, Guid teamId, HashSet<string> liveScopeKeys, CancellationToken cancellationToken)
@@ -160,7 +163,7 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
                 // This pricer prevents arithmetic loss; full CLI usage provenance requires the harness receipt path.
                 var actual = Agents.Cost.LlmUsageCost.Usd(results[k].Model, new Llm.LlmUsage { InputTokens = results[k].InputTokens, OutputTokens = results[k].OutputTokens }, modelPrices);
 
-                await _ledger.SettleAsync(runId, teamId, "agent-attempt", key, actual, cancellationToken).ConfigureAwait(false);
+                await _ledger.SettleAsync(runId, teamId, BudgetKinds.AgentAttempt, key, actual, cancellationToken).ConfigureAwait(false);
                 matchedKeys.Add(key);
                 if (actual is not null) settled++;
             }
@@ -171,12 +174,12 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
             {
                 // A missing outcome is also compatible with a billed attempt whose completion ACK was lost.
                 // Keep uncertainty separate from workflow completion; terminal status does not prove no spend.
-                await _ledger.SettleAsync(runId, teamId, "agent-attempt", orphanKey, null, cancellationToken).ConfigureAwait(false);
+                await _ledger.SettleAsync(runId, teamId, BudgetKinds.AgentAttempt, orphanKey, null, cancellationToken).ConfigureAwait(false);
             }
 
         // Even an active attempt with no result must rotate through a bounded global sweep. This changes only
         // inspection time on still-unsettled rows, never an actual receipt or its state.
-        await _db.BudgetReservation.Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.Kind == "agent-attempt" && liveScopeKeys.Contains(r.ScopeKey) && r.State != BudgetReservationStates.Settled)
+        await _db.BudgetReservation.Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.Kind == BudgetKinds.AgentAttempt && liveScopeKeys.Contains(r.ScopeKey) && r.State != BudgetReservationStates.Settled)
             .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
 
         return (settled, 0);

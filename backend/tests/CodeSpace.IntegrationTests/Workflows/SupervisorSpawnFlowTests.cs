@@ -328,6 +328,12 @@ public class SupervisorSpawnFlowTests : IDisposable
             reservations.Count.ShouldBe(2, "one slice per staged attempt");
             reservations.ShouldAllBe(r => r.Kind == "agent-attempt" && r.State == Core.Services.Workflows.Budget.BudgetReservationStates.Reserved);
             reservations.Select(r => r.ScopeKey).OrderBy(k => k).ShouldBe(new[] { "sup#turn1#0", "sup#turn1#1" });
+
+            // And each slice carries a DEADLINE. A deadline-less row is invisible to IBudgetLedger.ExpireOverdueAsync
+            // (that sweep only targets rows with one), so a wave orphaned between reserving and staging held this
+            // run's cap headroom live forever with nothing left to settle it. Bounded below by the grace alone, so
+            // the assertion holds whatever wall clock the dispatched task carries.
+            reservations.ShouldAllBe(r => r.ExpiresAt != null && r.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(Core.Services.Supervisor.Executors.RealSupervisorActionExecutor.AttemptReservationGraceMinutes - 1));
         }
         finally
         {

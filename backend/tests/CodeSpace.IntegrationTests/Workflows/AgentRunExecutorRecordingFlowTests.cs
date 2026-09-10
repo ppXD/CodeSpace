@@ -123,6 +123,50 @@ public class AgentRunExecutorRecordingFlowTests
         prompt.ShouldContain("compare the two runtimes", customMessage: "and judges it against the run's goal");
     }
 
+    /// <summary>
+    /// The critic call is no longer the one model call in the system that produced NO ledger row at all: it used to
+    /// be <c>Unbudgeted</c> with no ledger carried, so the executor's own review spend was invisible AND un-metered
+    /// even for a task under a cost ceiling. Under a cap it is a real admission claim (<c>llm:</c>); with no cap it
+    /// is an <c>unbudgeted:</c> observability row. Either way a reader asking "what did this run spend on models"
+    /// is never answered by an absence. The critic re-labels the pushed scope's Kind to its own call kind, so the
+    /// row lands under <c>critic.output</c> — the executor's push supplies the identity cell.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "unbudgeted:critic.output")]
+    [InlineData(5.0, "llm:critic.output")]
+    public async Task The_output_review_critics_model_call_lands_a_ledger_row(double? maxCostUsd, string expectedKind)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // A model the built-in price table KNOWS: under a cap an unpriceable model is refused before the call (D1
+        // fail-closed), so an unpriced reviewer would prove nothing about admission here.
+        var (_, reviewerModelId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var task = new AgentTask { Goal = "ship the widget", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerModelId, MaxCostUsd = (decimal?)maxCostUsd };
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did it", ChangedFiles = new[] { "src/widget.cs" }, Patch = "diff --git a/src/widget.cs b/src/widget.cs\n+// change" };
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var agentRun = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, runId, "agent-node", "", CancellationToken.None);
+            var owner = (await scope.Resolve<IAgentRunService>().ClaimOwnershipAsync(agentRun.Id, CancellationToken.None))!;
+            var reviewed = await BuildExecutor(scope).ReviewOutputIfEnabledAsync(owner, task, result, agentRun, CancellationToken.None);
+
+            reviewed.UnreviewedReason.ShouldBeNull("the review must actually have HAPPENED, or the ledger row below would be measuring a call that never went out");
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var reservation = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).SingleAsync();
+
+        reservation.Kind.ShouldBe(expectedKind);
+        reservation.CapUsd.ShouldBe((decimal?)maxCostUsd, "a capped critic call freezes the ceiling it was admitted against; an uncapped observability row carries no cap it could be mistaken for");
+        reservation.State.ShouldBe(CodeSpace.Core.Services.Workflows.Budget.BudgetReservationStates.Settled, "the call completed, so the row settles at its observed spend");
+    }
+
     /// <summary>The started record's user prompt, resolved through the offloader — a large prompt rides an <c>$artifact_id</c> reference instead of the inline string, so both shapes have to be read.</summary>
     private static async Task<string> ResolvePromptAsync(ILifetimeScope scope, Guid teamId, JsonElement started)
     {

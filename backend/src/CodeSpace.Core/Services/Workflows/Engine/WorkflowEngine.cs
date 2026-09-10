@@ -3300,13 +3300,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // (llm.complete, the plan-author's planner + critic, a future model-calling node) with ZERO per-node wiring.
             // A more-specific inner Push (e.g. the supervisor's per-turn "supervisor.decision") nests + wins for its call.
             //
-            // P15-5a: a plain node has no RUN-LEVEL cost cap of its own (WorkflowRun carries none) — only a more
-            // specific caller nested above (a supervisor turn, a grader) knows its launch's cap and pushes its own
-            // budgeted scope, which wins. So this baseline scope is explicitly Unbudgeted rather than leaving Budget
-            // unset: LlmBudgetGuard now throws on a missing ledger, and a silent fail-open here is exactly the bug
-            // this slice closes. The ledger still rides (this engine already resolves one for map admission below),
-            // so an Unbudgeted call from a plain node is still LOGGED and recorded for observability.
-            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader, Budget: _lifetimeScope.Resolve<Budget.IBudgetLedger>(), CaptureRedactor: PersistenceSecretRedactor.FromScope(exec.Scope), Completeness: _completenessWriter).Unbudgeted("plain workflow node has no run-level cost cap; a nested caller (e.g. a supervisor turn) pushes its own budgeted scope that wins for its own calls"));
+            // The ledger + prices come off THIS engine instance's own scope, which is already per-node for a
+            // parallel wave (RunNodeInChildScopeAsync resolves a fresh engine per node precisely so two nodes never
+            // share one EF change-tracker) — so a node's admission write can never collide with a sibling's.
+            using var recording = Llm.LlmCallContext.Push(await BuildNodeCallScopeAsync(exec, cancellationToken).ConfigureAwait(false));
 
             var result = await exec.Runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
             return (result, null);
@@ -3319,6 +3316,37 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _logger.LogError("Node {NodeId} threw {ExceptionType}: {Message}", exec.Node.Id, ex.GetType().Name, RedactForPersistence(exec.Scope, ex.Message));
             return (null, ex);   // the EXCEPTION (not just its message) so the retry loop can classify a typed retryable-vs-terminal fault
         }
+    }
+
+    /// <summary>
+    /// The baseline model-call scope every node runs under — the identity cell (run, node, iteration, the node's
+    /// TypeKey as the plane name) plus this engine's record logger / offloader / completeness writer.
+    ///
+    /// <para>BUDGETED under the run's own declared ceiling when it has one (<see cref="Budget.RunCostCap"/> reads
+    /// the launch-stamped route provenance — the same column the Room shows the cap from), so every model call a
+    /// node makes (<c>llm.complete</c>, the launch classifier, the plan author's planner + critic) is admitted
+    /// against that cap and REFUSED once it is spent. Previously every one of them was Unbudgeted even on a capped
+    /// run: a $2 launch could spend unboundedly through its own nodes while the Room displayed the $2 ceiling, and
+    /// only an agent attempt or a nested supervisor turn was ever metered. The team's operator-typed prices ride
+    /// along, because under a cap an unpriceable model is REFUSED (D1 fail-closed) and a pool model priced only on
+    /// its own credential row must not be mistaken for one.</para>
+    ///
+    /// <para>A run that declares NO ceiling stays explicitly Unbudgeted: still never blocked, but logged and
+    /// recorded under an "unbudgeted:" kind (excluded from every committed sum) so an un-metered call is visible
+    /// by name instead of vanishing. A more specific caller nested above (a supervisor turn, a grader) pushes its
+    /// own scope that wins for its own calls, capped or not.</para>
+    /// </summary>
+    private async Task<Llm.LlmCallScope> BuildNodeCallScopeAsync(NodeExecution exec, CancellationToken cancellationToken)
+    {
+        var scope = new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader,
+            Budget: _lifetimeScope.Resolve<Budget.IBudgetLedger>(), CaptureRedactor: PersistenceSecretRedactor.FromScope(exec.Scope), Completeness: _completenessWriter);
+
+        if (Budget.RunCostCap.Of(exec.Run) is not { } capUsd)
+            return scope.Unbudgeted("the run declares no cost cap; a nested caller (e.g. a supervisor turn) pushes its own budgeted scope that wins for its own calls");
+
+        var prices = await Agents.Cost.ModelPriceResolver.LoadAsync(_db, exec.Run.TeamId, cancellationToken).ConfigureAwait(false);
+
+        return scope with { CapUsd = capUsd, ModelPrices = prices };
     }
 
     /// <summary>The durable attempt ledger: how many <c>attempt.failed</c> records this (run, node, iteration) has already written — the cross-suspend-cycle base for the retry budget, so a respawned suspend-node CONTINUES its budget on re-entry instead of resetting it (see <see cref="ExecuteNodeAsync"/>).</summary>
