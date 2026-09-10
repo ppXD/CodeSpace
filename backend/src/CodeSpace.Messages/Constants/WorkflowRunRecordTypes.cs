@@ -115,7 +115,7 @@ public static class WorkflowRunRecordTypes
     /// <summary>External call returned. Payload: {"status":N,"response_artifact_id":"...","duration_ms":N}.</summary>
     public const string ExternalCallCompleted = "external_call.completed";
 
-    /// <summary>External call threw (network error, non-2xx with retry-exhausted, etc). Payload: {"target":"...","error":"...","duration_ms":N}.</summary>
+    /// <summary>External call threw (network error, non-2xx with retry-exhausted, etc). Payload: {"target":"...","error":"...","duration_ms":N,"category"?:"..."} — category is the transport's <c>LlmErrorCategory</c> name when the throw was a classified LLM transport fault, else absent.</summary>
     public const string ExternalCallFailed = "external_call.failed";
 
     // ─── Model interactions (the generic LLM/reasoning capture) ───────────────

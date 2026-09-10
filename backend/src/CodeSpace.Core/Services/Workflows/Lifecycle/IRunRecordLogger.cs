@@ -112,8 +112,8 @@ public interface IRunRecordLogger
     /// <summary>Emit <c>external_call.completed</c> paired with the original start by <paramref name="correlationId"/>.</summary>
     Task ExternalCallCompletedAsync(Guid runId, string? nodeId, Guid correlationId, int? statusCode, JsonElement? responsePayload, TimeSpan duration, CancellationToken cancellationToken);
 
-    /// <summary>Emit <c>external_call.failed</c> paired with the original start by <paramref name="correlationId"/>.</summary>
-    Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken cancellationToken);
+    /// <summary>Emit <c>external_call.failed</c> paired with the original start by <paramref name="correlationId"/>. <paramref name="category"/> is the transport's <c>LlmErrorCategory</c> name when the throw was a classified LLM transport fault (e.g. a gateway 429/5xx), else null — lets a consumer (the real-model gate) tell a gateway/transport fault apart from a genuine code regression without sniffing <paramref name="error"/>'s prose.</summary>
+    Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, string? category, CancellationToken cancellationToken);
 
     /// <summary>Emit a free-form <c>log</c> entry tied to a node or to the run as a whole (nodeId=null).</summary>
     Task LogAsync(Guid runId, string? nodeId, LogLevel level, string message, CancellationToken cancellationToken);

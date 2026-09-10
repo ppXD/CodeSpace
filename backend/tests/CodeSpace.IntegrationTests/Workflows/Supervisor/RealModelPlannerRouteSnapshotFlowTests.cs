@@ -18,7 +18,15 @@ using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
-/// <summary>Fits the existing RealModelPlanner CI filter: real classifier wire, production preview/launch and Postgres. Jobs remain undispatched; this measures routing reuse, not task execution quality.</summary>
+/// <summary>
+/// Fits the existing RealModelPlanner CI filter: real classifier wire, production preview/launch and Postgres. Jobs
+/// remain undispatched; this measures routing reuse, not task execution quality.
+///
+/// <para>A classifier fallback whose <see cref="EffortDecision.FallbackReason"/> classifies as gateway infra (via
+/// <see cref="RealModelGate.IsGatewayInfraCategory"/>) is a non-gating skip — nothing was measured about real routing,
+/// the same as any other gateway outage on this lane. A fallback with an unclassified reason (or none recorded) is a
+/// real regression and gates.</para>
+/// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
 public sealed class RealModelPlannerRouteSnapshotFlowTests
@@ -46,7 +54,16 @@ public sealed class RealModelPlannerRouteSnapshotFlowTests
         var input = new TaskLaunchRequest { TeamId = teamId, ActorUserId = userId, SurfaceKind = "chat", TaskText = "Write a concise explanation of how a durable queue recovers an interrupted job", Autonomy = "Confined", AcceptanceCriteria = ["Explain retries and duplicate suppression"] };
 
         var preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(input, CancellationToken.None);
-        preview.Route.Decision!.ClassifierKind.ShouldBe(LlmEffortClassifier.ClassifierKind, "heuristic fallback is not a real-model success");
+        var decision = preview.Route.Decision!;
+
+        // A fallback to the heuristic classifier whose reason classifies as gateway infra (the LLM effort classifier's
+        // model call hit a transient/rate-limited/auth gateway fault, per LlmEffortClassifier.ClassifyFallbackReason) is
+        // NOTHING measured about real routing — a non-gating skip, not the behavioural miss a heuristic fallback with an
+        // unclassified (or no) reason still is.
+        if (decision.ClassifierKind != LlmEffortClassifier.ClassifierKind && decision.FallbackReason is { } reason && RealModelGate.IsGatewayInfraCategory(reason))
+            throw RealModelGate.ReportSkipped(provider, $"the structured-LLM effort classifier fell back to '{decision.ClassifierKind}' on a gateway-infra fault ({reason})");
+
+        decision.ClassifierKind.ShouldBe(LlmEffortClassifier.ClassifierKind, $"heuristic fallback is not a real-model success{(decision.FallbackReason is { } r ? $" (fallback reason '{r}' is NOT a gateway-infra signature — a real regression)" : "")}");
         classifier.Calls.ShouldBe(1);
         var launch = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input with { RouteSnapshotId = preview.RouteSnapshotId }, CancellationToken.None);
         var retry = await scope.Resolve<ITaskLaunchService>().LaunchAsync(input with { RouteSnapshotId = preview.RouteSnapshotId }, CancellationToken.None);

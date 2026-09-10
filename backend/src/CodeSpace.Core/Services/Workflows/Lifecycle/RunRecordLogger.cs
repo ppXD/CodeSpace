@@ -213,13 +213,14 @@ public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedge
         await InsertAsync(runId, WorkflowRunRecordTypes.ExternalCallCompleted, nodeId, iterationKey: string.Empty, payload, correlationId, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken cancellationToken)
+    public async Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, string? category, CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Serialize(new
         {
             target,
             error,
             duration_ms = (long)duration.TotalMilliseconds,
+            category,
         });
         await InsertAsync(runId, WorkflowRunRecordTypes.ExternalCallFailed, nodeId, iterationKey: string.Empty, payload, correlationId, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
