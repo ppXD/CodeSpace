@@ -144,6 +144,32 @@ public class SupervisorDecisionTimelineMapTests
         oneFile.Title.ShouldBe("Supervisor hit a merge conflict in 1 file");
     }
 
+    /// <summary>A LABELED conflicted outcome — every test above uses <see cref="Integration"/>'s label-less outcomes, so FailingContributions/SkippedContributions stayed empty and this rendering path was never exercised. Pins that a real failure and a survivor merely skipped (never attempted because the first one's conflict aborted the set) render as two distinctly-labeled groups, not one undifferentiated list.</summary>
+    private static string LabeledConflictedIntegration(string failingLabel, string failingReason, string skippedLabel, string skippedReason, params string[] conflictedFiles) =>
+        JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Conflicted",
+                outcomes = new object[]
+                {
+                    new { label = failingLabel, disposition = "Conflicted", reason = failingReason, conflictedFiles, skipped = false },
+                    new { label = skippedLabel, disposition = "Conflicted", reason = skippedReason, conflictedFiles = Array.Empty<string>(), skipped = true },
+                },
+            },
+        });
+
+    [Fact]
+    public void Merge_summary_names_the_failing_contribution_separately_from_a_skipped_survivor()
+    {
+        var outcome = LabeledConflictedIntegration("agent-a", "textual conflict applying the patch: f.txt", "agent-b", "not integrated — an earlier contribution conflicted", "f.txt");
+
+        var ev = SupervisorDecisionTimelineMap.ToEvent(Decision(SupervisorDecisionKinds.Merge, outcome: outcome));
+
+        ev.Summary.ShouldBe("Conflicted while integrating: f.txt (agent-a: textual conflict applying the patch: f.txt; not attempted: agent-b: not integrated — an earlier contribution conflicted)",
+            "the real failure and the merely-skipped survivor each ride their own labeled segment");
+    }
+
     // ── Resolve: verified vs needs-review ───────────────────────────────────────────────────────────────────────
 
     [Fact]

@@ -337,9 +337,9 @@ public sealed partial class RealSupervisorActionExecutor
         outcomes = ProjectOutcomes(result),
     };
 
-    /// <summary>The per-contribution outcomes array — the ONE projection both the single-repo flat block (<see cref="ProjectIntegrationResult"/>) and the per-repo block (<see cref="ProjectRepoBlock"/>) emit, so the two shapes can't drift (the write-side analogue of the read-side <see cref="SupervisorOutcome.ReadIntegration"/> unification).</summary>
+    /// <summary>The per-contribution outcomes array — the ONE projection both the single-repo flat block (<see cref="ProjectIntegrationResult"/>) and the per-repo block (<see cref="ProjectRepoBlock"/>) emit, so the two shapes can't drift (the write-side analogue of the read-side <see cref="SupervisorOutcome.ReadIntegration"/> unification). Carries <c>skipped</c> verbatim off <see cref="ContributionOutcome.Skipped"/> so the reader's failing/skipped split never has to pattern-match <c>reason</c> prose.</summary>
     private static object ProjectOutcomes(IntegrationResult result) =>
-        result.Outcomes.Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch }).ToList();
+        result.Outcomes.Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch, skipped = o.Skipped }).ToList();
 
     // ── Facet (a), multi-repo: integrate EACH writable repo on its own axis (resolver loop #379, S7-C) ──────────────
 

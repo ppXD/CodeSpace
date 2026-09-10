@@ -83,6 +83,16 @@ public sealed record ContributionOutcome
 
     /// <summary>Why this contribution was not applied (e.g. "base SHA mismatch", "diff exceeded inline cap", "no patch and no branch"). Null when applied cleanly.</summary>
     public string? Reason { get; init; }
+
+    /// <summary>
+    /// True when this contribution was never individually attempted — blocked ONLY because a DIFFERENT contribution's
+    /// problem stopped the whole set (an earlier contribution conflicted during apply, or the set was refused before
+    /// the apply loop ever began), never because of a defect in ITS OWN patch/base. False for every disposition that
+    /// names something wrong with THIS contribution itself (a real textual conflict, a bad base, an unresolved
+    /// patch). Downstream readers (<see cref="CodeSpace.Messages.Agents.SupervisorIntegrationOutcome"/>) key the
+    /// failing/skipped split off this flag rather than pattern-matching <see cref="Reason"/> prose.
+    /// </summary>
+    public bool Skipped { get; init; }
 }
 
 /// <summary>The whole-set integration outcome.</summary>

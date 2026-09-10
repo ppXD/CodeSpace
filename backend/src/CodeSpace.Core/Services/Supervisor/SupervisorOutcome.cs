@@ -1246,6 +1246,7 @@ public static class SupervisorOutcome
             var conflictedFiles = new List<string>();
             var preservedBranches = new List<string>();
             var failingContributions = new List<string>();
+            var skippedContributions = new List<string>();
 
             // Multi-repo (S7-C): collect across EVERY repo's outcomes; single-repo: the top-level outcomes array. A
             // multi-repo block has no single integratedBranch — the per-repo branches live in repositories[] (S7-D).
@@ -1253,11 +1254,11 @@ public static class SupervisorOutcome
             {
                 foreach (var repo in repositories.EnumerateArray())
                     if (repo.ValueKind == JsonValueKind.Object && repo.TryGetProperty("outcomes", out var repoOutcomes))
-                        CollectOutcomeDetail(repoOutcomes, conflictedFiles, preservedBranches, failingContributions);
+                        CollectOutcomeDetail(repoOutcomes, conflictedFiles, preservedBranches, failingContributions, skippedContributions);
             }
             else if (integration.TryGetProperty("outcomes", out var outcomes))
             {
-                CollectOutcomeDetail(outcomes, conflictedFiles, preservedBranches, failingContributions);
+                CollectOutcomeDetail(outcomes, conflictedFiles, preservedBranches, failingContributions, skippedContributions);
             }
 
             return new SupervisorIntegrationOutcome
@@ -1268,6 +1269,7 @@ public static class SupervisorOutcome
                 ConflictedFiles = conflictedFiles,
                 PreservedBranches = preservedBranches,
                 FailingContributions = failingContributions,
+                SkippedContributions = skippedContributions,
             };
         }
         catch (JsonException)
@@ -1326,8 +1328,8 @@ public static class SupervisorOutcome
         }
     }
 
-    /// <summary>Accumulate one <c>outcomes</c> array's conflicted files + preserved fallback branches into the running aggregate (deduped, order-preserved). The single per-contribution reader both the single-repo top-level outcomes and each multi-repo repository's outcomes feed, so the two shapes can't drift.</summary>
-    private static void CollectOutcomeDetail(JsonElement outcomes, List<string> conflictedFiles, List<string> preservedBranches, List<string> failingContributions)
+    /// <summary>Accumulate one <c>outcomes</c> array's conflicted files + preserved fallback branches + failing/skipped contributions into the running aggregates (deduped, order-preserved). The single per-contribution reader both the single-repo top-level outcomes and each multi-repo repository's outcomes feed, so the two shapes can't drift.</summary>
+    private static void CollectOutcomeDetail(JsonElement outcomes, List<string> conflictedFiles, List<string> preservedBranches, List<string> failingContributions, List<string> skippedContributions)
     {
         if (outcomes.ValueKind != JsonValueKind.Array) return;
 
@@ -1343,13 +1345,16 @@ public static class SupervisorOutcome
             if (o.TryGetProperty("fallbackBranch", out var fb) && fb.ValueKind == JsonValueKind.String && fb.GetString() is { Length: > 0 } branch && !preservedBranches.Contains(branch))
                 preservedBranches.Add(branch);
 
-            if (FormatFailingContribution(o) is { Length: > 0 } named && !failingContributions.Contains(named))
-                failingContributions.Add(named);
+            if (FormatContributionDetail(o) is not { Length: > 0 } named) continue;
+
+            var target = IsSkipped(o) ? skippedContributions : failingContributions;
+
+            if (!target.Contains(named)) target.Add(named);
         }
     }
 
-    /// <summary>One outcome in its own words — "{label}: {reason}", or the bare label when it carries no reason — when it did NOT apply; null for an Applied contribution or one carrying no label. Read alongside the aggregated <c>conflictedFiles</c>/<c>fallbackBranch</c> above so a reader sees not just WHAT conflicted but WHICH contribution and why.</summary>
-    private static string? FormatFailingContribution(JsonElement o)
+    /// <summary>One outcome in its own words — "{label}: {reason}", or the bare label when it carries no reason — when it did NOT apply; null for an Applied contribution or one carrying no label. Read alongside the aggregated <c>conflictedFiles</c>/<c>fallbackBranch</c> above so a reader sees not just WHAT conflicted but WHICH contribution and why. Routed to <see cref="SupervisorIntegrationOutcome.FailingContributions"/> or <see cref="SupervisorIntegrationOutcome.SkippedContributions"/> by <see cref="IsSkipped"/>.</summary>
+    private static string? FormatContributionDetail(JsonElement o)
     {
         if (o.TryGetProperty("disposition", out var d) && d.ValueKind == JsonValueKind.String && d.GetString() == "Applied") return null;
 
@@ -1359,6 +1364,9 @@ public static class SupervisorOutcome
             ? $"{label}: {reason}"
             : label;
     }
+
+    /// <summary>True when the outcome was never individually attempted — blocked ONLY because a DIFFERENT contribution's failure stopped the whole set before its turn (<see cref="ContributionOutcome.Skipped"/>, mirrored onto the wire as this same key by <c>RealSupervisorActionExecutor.ProjectOutcomes</c>). Read off the integrator's own tag rather than matching <c>reason</c> prose — absent (an older outcome, or the spawn-blocked-subtask shape that carries no per-outcome disposition at all) defaults to false, a real failure.</summary>
+    private static bool IsSkipped(JsonElement o) => o.TryGetProperty("skipped", out var s) && s.ValueKind == JsonValueKind.True;
 
     /// <summary>
     /// Read the build/test VERDICT off a <c>resolve</c> decision's folded outcome (resolver loop #379, S3): the
@@ -1716,7 +1724,7 @@ public static class SupervisorOutcome
                 if (!(repo.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String && s.GetString() == "Conflicted")) continue;
 
                 var files = new List<string>();
-                CollectOutcomeDetail(repo.TryGetProperty("outcomes", out var o) ? o : default, files, new List<string>(), new List<string>());
+                CollectOutcomeDetail(repo.TryGetProperty("outcomes", out var o) ? o : default, files, new List<string>(), new List<string>(), new List<string>());
 
                 conflicted.Add(new SupervisorConflictedRepo
                 {
