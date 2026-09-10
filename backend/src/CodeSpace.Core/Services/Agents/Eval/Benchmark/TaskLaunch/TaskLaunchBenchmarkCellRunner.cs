@@ -83,7 +83,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
     /// <summary>The cell's whole drive budget: the task's own agent timeout plus a fixed grace margin absorbing Launch's routing/projection/dispatch overhead — this runner drives the engine itself (see <see cref="DriveToTerminalAsync"/>), so no external background worker's latency needs a separate allowance.</summary>
     private static DateTimeOffset DriveDeadline(BenchmarkTask task) => DateTimeOffset.UtcNow.AddSeconds(task.TimeoutSeconds + DriveGraceSeconds);
 
-    private const int DriveGraceSeconds = 60;
+    internal const int DriveGraceSeconds = 60;
 
     /// <summary>Open one FRESH child lifetime scope (its own <c>CodeSpaceDbContext</c> + connection), run <paramref name="action"/> against it, then dispose it. The one seam every DB-touching / engine-driving operation in this class goes through — see the scope-discipline note on the class itself.</summary>
     private async Task<TResult> InFreshScopeAsync<TResult>(Func<ILifetimeScope, Task<TResult>> action)

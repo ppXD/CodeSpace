@@ -1923,7 +1923,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No model is available in the team's credentialed model pool — add a credentialed, enabled model for the supervisor's provider, or widen the allowed model pool." }, AgentJson.Options),
     };
 
-    private const string SystemPrompt =
+    // Internal (not private): the qualification runtime manifest freezes this prompt's digest, so a prompt edit is a
+    // NEW runtime bundle rather than a silent change to what a campaign measured.
+    internal const string SystemPrompt =
         "You are a software-delivery supervisor driving a bounded loop of decisions toward a goal. " +
         "On each turn you emit ONE action. " + SupervisorActionRoster.SystemPromptPointer + " " +
         "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +

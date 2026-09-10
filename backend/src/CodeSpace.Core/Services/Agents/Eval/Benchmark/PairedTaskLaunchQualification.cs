@@ -198,7 +198,9 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         return protocol;
     }
 
-    private static string ProtocolDigest(PairedQualificationProtocol protocol)
+    // Internal (not private) so the composition — including the frozen runtime manifest's digest — is unit-pinned
+    // directly (InternalsVisibleTo) rather than only through a durable flow.
+    internal static string ProtocolDigest(PairedQualificationProtocol protocol)
     {
         var fields = new object?[]
         {
@@ -207,6 +209,9 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
             protocol.ControlSelectionJson, protocol.CandidateSelectionJson,
             protocol.RequiresCellAdmission,
             protocol.RequiresResultDigest,
+            // The frozen runtime bundle's own digest, not its JSON: the manifest already canonicalizes itself, and
+            // folding the digest keeps the protocol identity a fixed-width composition. Null on a legacy protocol.
+            protocol.RuntimeManifestDigest,
             protocol.SessionsPerCell, protocol.MinimumIndependentClusters, protocol.MinimumStrata, protocol.MinimumRequiredExecutionClusters,
             protocol.MinimumEvaluatorHealth, protocol.MaxCostUsdPerLaunch, protocol.MinimumQualityLift, protocol.NonInferiorityMargin,
             protocol.MinimumCostReduction, protocol.RequireDistinctObservedModels, protocol.OrderingSeed,

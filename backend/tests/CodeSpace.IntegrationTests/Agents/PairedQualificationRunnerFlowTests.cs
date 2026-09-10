@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -457,6 +458,108 @@ public sealed class PairedQualificationRunnerFlowTests
         (await finalScope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(2);
         (await finalScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(row => row.ObservationGroupId == groupId)).ShouldBeFalse();
     }
+
+    [Fact]
+    public async Task The_frozen_runtime_manifest_round_trips_through_the_protocol_row_without_its_secret()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (controlCredential, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (candidateCredential, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+        var frozen = RuntimeManifest(controlRow, controlCredential, candidateRow, candidateCredential);
+        var written = RuntimeManifestProtocol(groupId, teamId, controlRow, candidateRow, frozen);
+
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var db = writeScope.Resolve<CodeSpaceDbContext>();
+            db.PairedQualificationProtocol.Add(written);
+            await db.SaveChangesAsync();
+        }
+
+        using var readScope = _fixture.BeginScope();
+        var stored = await readScope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking().SingleAsync(row => row.ObservationGroupId == groupId);
+
+        stored.RuntimeManifestDigest.ShouldBe(frozen.ManifestDigest());
+        stored.RuntimeManifestJson.ShouldNotBeNull().ShouldNotContain(RuntimeManifestSecret);
+        var reloaded = QualificationRuntimeManifest.Parse(stored.RuntimeManifestJson!);
+        reloaded.ManifestDigest().ShouldBe(stored.RuntimeManifestDigest, "a manifest that cannot be read back at its own digest could never be compared at recovery");
+        QualificationRuntimeManifest.Compare(frozen, reloaded).ShouldBeNull();
+        stored.ProtocolDigest.ShouldBe(written.ProtocolDigest);
+        written.ProtocolDigest.ShouldNotBe(RuntimeManifestProtocol(groupId, teamId, controlRow, candidateRow, null).ProtocolDigest,
+            "the protocol identity must cover the frozen runtime, or a substituted runtime could reuse it");
+        await AssertProtocolImmutableAsync(groupId);
+    }
+
+    [Theory]
+    [InlineData("{\"harnesses\":[]}", null)]
+    [InlineData(null, "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899")]
+    [InlineData("{\"harnesses\":[]}", "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")]
+    [InlineData("[]", "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899")]
+    public async Task Postgres_refuses_a_half_frozen_or_malformed_runtime_manifest(string? manifestJson, string? digest)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        using var scope = _fixture.BeginScope();
+        var groupId = Guid.NewGuid();
+
+        var failure = await Should.ThrowAsync<PostgresException>(() => scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO paired_qualification_protocol (observation_group_id, team_id, suite_digest, suite_version, code_revision,
+                control_model_row_id, candidate_model_row_id, statistics_version, criterion, sessions_per_cell,
+                minimum_independent_clusters, minimum_strata, minimum_required_execution_clusters, minimum_evaluator_health,
+                max_cost_usd_per_launch, minimum_quality_lift, non_inferiority_margin, minimum_cost_reduction,
+                require_distinct_observed_models, ordering_seed, protocol_digest, requires_cell_admission, requires_result_digest,
+                runtime_manifest_json, runtime_manifest_digest, created_date, created_by, last_modified_date, last_modified_by)
+            VALUES ({groupId}, {teamId}, 'sha256:hidden', 'suite/v1', {new string('c', 40)}, {controlRow}, {candidateRow},
+                'paired-cluster-bootstrap/v2', 'Quality', 1, 1, 1, 1, 1, 3, 0.05, -0.02, 0.2, TRUE, 'frozen-order',
+                {groupId.ToString("N").ToUpperInvariant() + groupId.ToString("N").ToUpperInvariant()}, TRUE, TRUE, {manifestJson}::jsonb, {digest}, now(), {Guid.Empty}, now(), {Guid.Empty})
+            """));
+
+        failure.SqlState.ShouldBe(PostgresErrorCodes.CheckViolation);
+        failure.ConstraintName.ShouldBe("ck_paired_qualification_protocol_runtime_manifest", "a manifest without its digest, or a digest without its manifest, can never be verified");
+    }
+
+    private const string RuntimeManifestSecret = "sk-test-live-0f1e2d3c-DO-NOT-PERSIST";
+
+    private static PairedQualificationProtocol RuntimeManifestProtocol(Guid groupId, Guid teamId, Guid controlRow, Guid candidateRow, QualificationRuntimeManifest? manifest)
+    {
+        var protocol = new PairedQualificationProtocol
+        {
+            ObservationGroupId = groupId, TeamId = teamId, SuiteDigest = "sha256:hidden", SuiteVersion = "suite/v1", CodeRevision = new string('c', 40),
+            ControlModelRowId = controlRow, CandidateModelRowId = candidateRow,
+            RuntimeManifestJson = manifest?.CanonicalJson(), RuntimeManifestDigest = manifest?.ManifestDigest(),
+            RequiresCellAdmission = true, RequiresResultDigest = true,
+            StatisticsVersion = PairedQualificationOutcome.StatisticsVersion, Criterion = nameof(PairedQualificationCriterion.Quality),
+            SessionsPerCell = 1, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1,
+            MaxCostUsdPerLaunch = 3m, MinimumQualityLift = 0.05, NonInferiorityMargin = -0.02, MinimumCostReduction = 0.2,
+            RequireDistinctObservedModels = true, OrderingSeed = "frozen-order",
+        };
+
+        protocol.ProtocolDigest = PairedTaskLaunchQualificationRunner.ProtocolDigest(protocol);
+
+        return protocol;
+    }
+
+    private static QualificationRuntimeManifest RuntimeManifest(Guid controlRow, Guid controlCredential, Guid candidateRow, Guid candidateCredential) => new()
+    {
+        Harnesses = [new HarnessBinaryIdentity { Kind = "claude-code", Version = "2.1.263", BinarySha256 = new string('a', 64) }],
+        Runner = new RunnerProfile { BuildIdentity = "1.0.0+test", OsPlatform = "Linux", OsArchitecture = "X64", BubblewrapAvailable = false, RequireConfinement = false, MaxAutonomy = "Unleashed" },
+        CredentialEndpoints =
+        [
+            CredentialEndpointIdentity.Observe(QualificationCredentialRole.Control, controlRow, controlCredential, "Custom", "https://example.test/v1", RuntimeManifestSecret, "campaign-salt"),
+            CredentialEndpointIdentity.Observe(QualificationCredentialRole.Candidate, candidateRow, candidateCredential, "Custom", "https://example.test/v1", RuntimeManifestSecret, "campaign-salt"),
+        ],
+        Reviewer = new ReviewerResolution { IndependencePolicyVersion = "llm-rubric-judge/v2-observed-identity" },
+        Execution = new ExecutionSettings
+        {
+            ArmEffortTiers = new Dictionary<string, string?> { ["TaskLaunchAuto"] = null, ["TaskLaunchQuick"] = "quick" },
+            DefaultCompletionMode = CompletionEnforcementMode.Shadow, CompletionPolicyVersion = 2,
+            CellDriveGraceSeconds = 60, DeepAgentTimeoutSeconds = 7200, LlmRequestTimeoutSeconds = 600,
+            AcceptanceEvaluatorVersion = "supervisor-acceptance/v7", DeliveryEvaluatorVersion = "publish-manifest/v1",
+            PlannerPromptDigest = new string('1', 64), PlannerSchemaDigest = new string('2', 64),
+            SupervisorPromptDigest = new string('3', 64), SupervisorSchemaDigest = new string('4', 64),
+        },
+    };
 
     private static PairedQualificationCampaignResumeService Resumer(ILifetimeScope scope, IBenchmarkRunner instrument)
     {

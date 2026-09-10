@@ -27,7 +27,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// harness contributes NO model-call rows and the per-run aggregate stays the only figure it has. Recording nothing is
 /// the honest outcome; the fix is a Codex that prints per-call records, not a reader that invents them.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentTranscriptModelSource, IAgentGroundedFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -512,7 +512,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessContractGeneratio
     };
 
     /// <summary>The Codex executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>codex</c> on PATH.</summary>
-    private static string ResolveCommand() =>
+    public string ResolveCommand() =>
         System.Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } path ? path : DefaultCommand;
 
     private static string SandboxMode(AgentPermissions permissions) =>
