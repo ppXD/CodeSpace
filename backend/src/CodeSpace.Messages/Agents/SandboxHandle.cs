@@ -127,6 +127,17 @@ public sealed record SandboxHandle
     public string? McpRunToken { get; init; }
 
     /// <summary>
+    /// The absolute path of the Unix-domain socket the launching run bound its tool-fabric endpoint on (null when the
+    /// run has no tool fabric). It is persisted for the same reason as <see cref="McpRunToken"/> — a re-attach must
+    /// re-open the endpoint at the SAME address the detached agent's declaration file already points at — but it is
+    /// also the ONLY way back to that address, and that is deliberate. The path used to be derived from the run id, so
+    /// anything holding the id (a URL, an event, an artifact) could compute another run's listener address; it now ends
+    /// in a 128-bit CSPRNG segment that exists nowhere but here. Null on an older handle and for a run with no fabric —
+    /// and a re-attach that finds no path re-opens nothing rather than binding a guess.
+    /// </summary>
+    public string? McpSocketPath { get; init; }
+
+    /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
     /// deny-by-default allowlist was enforceable and a netns was set up. It is the teardown handle: the netns / veth /
     /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, from a DIFFERENT worker
