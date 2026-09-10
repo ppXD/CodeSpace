@@ -48,8 +48,9 @@ public sealed record FilteredEgressPlan
     /// <summary>
     /// Build the plan for an allowlist of already-resolved destination IPs. <paramref name="runId"/> seeds the
     /// GUID-derived unique names; <paramref name="subnet"/> is the COLLISION-FREE /30 the caller reserved from
-    /// <see cref="EgressSubnetAllocator"/> (so two concurrent runs never share a subnet — a host-global nft-chain
-    /// hazard); <paramref name="allowedIps"/> are the only reachable destinations (plus DNS).
+    /// <see cref="EgressSubnetAllocator"/> (so no two concurrent runs on the host — in this worker process or any
+    /// other — share a subnet, a host-global nft-chain hazard); <paramref name="allowedIps"/> are the only reachable
+    /// destinations (plus DNS).
     /// </summary>
     public static FilteredEgressPlan Build(string runId, IReadOnlyList<string> allowedIps, EgressSubnetAllocator.Lease subnet)
     {

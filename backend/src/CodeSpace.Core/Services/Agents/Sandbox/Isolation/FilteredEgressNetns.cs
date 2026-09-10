@@ -46,9 +46,10 @@ public static class FilteredEgressNetns
     /// </summary>
     public static async Task<SetupResult> SetupAsync(string runId, IReadOnlyList<string> allowedIps, int timeoutSeconds, CancellationToken cancellationToken)
     {
-        // Reserve a COLLISION-FREE /30 so two concurrent runs never share a subnet (a host-global nft-chain hazard).
-        // Released in TeardownAsync; the netns/table NAMES stay runId-derived so teardown needs no setup-time state.
-        var plan = FilteredEgressPlan.Build(runId, allowedIps, EgressSubnetAllocator.Acquire(runId));
+        // Reserve a COLLISION-FREE /30 so no other run ON THIS HOST — this worker process or any other — shares a
+        // subnet (a host-global nft-chain hazard). Released in TeardownAsync; the netns/table NAMES stay runId-derived
+        // so teardown needs no setup-time state.
+        var plan = FilteredEgressPlan.Build(runId, allowedIps, EgressSubnetAllocator.Host.Acquire(runId));
 
         try
         {
@@ -89,8 +90,9 @@ public static class FilteredEgressNetns
     /// </summary>
     public static async Task TeardownAsync(string runId, CancellationToken cancellationToken)
     {
-        // Free the run's reserved /30 (no-op if this process never held it — e.g. a reaper on a restarted worker).
-        EgressSubnetAllocator.Release(runId);
+        // Free the run's reserved /30 (no-op if this process never held it — e.g. a reaper on a restarted worker;
+        // the crashed worker's own handles already dropped its locks).
+        EgressSubnetAllocator.Host.Release(runId);
 
         // The teardown argv are reconstructed PURELY from the runId (names are runId-derived) — no setup-time subnet.
         foreach (var argv in FilteredEgressPlan.TeardownCommandsFor(runId))
