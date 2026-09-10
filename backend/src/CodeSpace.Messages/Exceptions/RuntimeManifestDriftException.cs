@@ -32,7 +32,7 @@ public sealed class RuntimeManifestDriftException : InvalidOperationException, I
     /// <summary>The manifest digest this host observes now.</summary>
     public string ObservedDigest { get; }
 
-    public FailureKind Kind => FailureKind.Internal;
+    public FailureKind Kind => FailureKind.Conflict;
 
     public string Code => FailureCodes.Internal;
 
