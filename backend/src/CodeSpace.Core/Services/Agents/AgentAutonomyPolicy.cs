@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 
@@ -152,12 +153,21 @@ public static class AgentAutonomyPolicy
     /// <c>OFF REQUESTED BUT UNCONFINED</c> naming the wall the host hit. Passing null (an old run, an un-launched
     /// composer preview) keeps the hedge, which is the honest answer when nothing was recorded. The "on" sentence
     /// takes no qualifier either way: it claims network, which the tier alone already settles.</para>
+    ///
+    /// <para><b>The "on" sentence does disclose one HOST fact</b> (<see cref="ProcessLocalSubnetCaveat"/>): a run with
+    /// network is the only kind whose egress can be narrowed to an allowlist (<c>SandboxEgressPolicy.Derive</c> reads
+    /// an allowlist only when network is granted), and that narrowing runs in a per-run /30 whose uniqueness is
+    /// host-wide only while <c>EgressSubnetAllocator</c> can hold a host-level reservation. Where it degraded to
+    /// process-local uniqueness, two workers on this host can hand out the same /30 and the two netns then
+    /// co-evaluate each other's packets — a reader told "network: on, allowlisted" would assume otherwise, so the
+    /// line says it. Read WITHOUT probing, so asking for a posture never creates a reservation directory on a host
+    /// that has launched no filtered-egress run; it therefore appears only after a launch has proved it.</para>
     /// </summary>
     public static string DescribeNetwork(AgentAutonomyLevel effective, AgentAutonomyLevel ceiling, AgentAutonomyLevel deploymentCeiling, SandboxConfinement? confinement = null)
     {
         // "on" needs no record to be honest — it was never the claim this row exists to qualify — so it keeps its
         // unqualified sentence whether or not a posture was recorded.
-        if (Derive(effective).Network == AgentNetworkAccess.On) return $"Network: on ({effective})";
+        if (Derive(effective).Network == AgentNetworkAccess.On) return WithHostSubnetPosture($"Network: on ({effective})", EgressSubnetAllocator.ObservedHostDegradation);
 
         var qualifier = OffQualifier(confinement);
 
@@ -194,6 +204,9 @@ public static class AgentAutonomyPolicy
         return $"Risky tools: {riskyText} ({effective}); {irreversibleText}";
     }
 
+    /// <summary>Append what this HOST proved about its filtered-egress subnet reservations, or the line unchanged while it has proved nothing. Split out so the composition is pinnable without a degraded host to stage.</summary>
+    internal static string WithHostSubnetPosture(string line, string? subnetDegradation) => subnetDegradation is null ? line : line + ProcessLocalSubnetCaveat;
+
     /// <summary>
     /// What replaces <see cref="ConfinementCaveat"/> once a run's launch recorded its posture. An unconfined run is
     /// stated LOUDLY (upper case, naming the reason): "off" there is a permission the OS never enforced, which is a
@@ -229,4 +242,15 @@ public static class AgentAutonomyPolicy
     /// (<c>frontend/src/lib/networkPosture.fixture.json</c>) that both stacks assert on.
     /// </summary>
     public const string ConfinementCaveat = " — severed only where the sandbox confines";
+
+    /// <summary>
+    /// What a network-granting posture adds while this worker's filtered-egress /30 reservations are only
+    /// process-local (<c>EgressSubnetAllocator</c> degraded: the reservation directory's filesystem does not enforce
+    /// an exclusive lock across processes, or that could not be proven). The /30 is what keeps two concurrently-active
+    /// allowlisted runs out of each other's host-global nftables forward chain, so an operator reading an allowlisted
+    /// posture has to know when its uniqueness stops covering the other workers on the host. Unlike
+    /// <see cref="ConfinementCaveat"/> it is NOT mirrored in the Launch composer's fixture: the composer speaks before
+    /// a run exists and cannot know a host fact this one only learns by probing.
+    /// </summary>
+    public const string ProcessLocalSubnetCaveat = "; filtered-egress subnet reservation is process-local on this host";
 }

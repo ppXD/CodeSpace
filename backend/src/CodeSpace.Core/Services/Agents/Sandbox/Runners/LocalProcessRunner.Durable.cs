@@ -952,8 +952,12 @@ public sealed partial class LocalProcessRunner
     /// <summary>
     /// The address a run launched BEFORE the socket id existed is bound at — derived from the run key exactly as
     /// <see cref="McpSocketPathFor"/> used to derive it: <c>&lt;spool&gt;/&lt;key&gt;/mcp/mcp.sock</c>, or the short
-    /// <c>&lt;temp&gt;/cs-mcp/&lt;key&gt;/s</c> when that overflowed the cap. The two leaf names are FROZEN COPIES, not
-    /// references to today's constants, because this must keep naming what the OLD code wrote however those move.
+    /// <c>&lt;temp&gt;/cs-mcp/&lt;key&gt;/s</c> when that overflowed the cap. What is frozen here is the SHAPE — the run
+    /// key as the path's own segment, and the literal <c>mcp.sock</c> / <c>s</c> leaf the old code wrote. The two
+    /// directory names it still reads off <see cref="McpSocketDir"/> / <see cref="McpShortSocketRoot"/> are LIVE
+    /// references, deliberately: those name where the sockets of this deploy generation live too, so a rename must
+    /// move both at once or a pre-field re-attach would bind an address nothing is listening on. Renaming either is
+    /// therefore a decision about the runs in flight, not a refactor.
     ///
     /// <para>It exists for ONE deploy generation and has exactly one caller. A run in flight when the socket id ships
     /// has a handle with no <c>SandboxHandle.McpSocketPath</c> and a live detached agent whose 0600 declaration points
