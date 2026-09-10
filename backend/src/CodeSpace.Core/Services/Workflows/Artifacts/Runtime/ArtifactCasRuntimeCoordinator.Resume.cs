@@ -133,6 +133,10 @@ public sealed partial class ArtifactCasRuntimeCoordinator
 
         try
         {
+            // Before the saga is driven anywhere, because driving it may reach a terminal state, and a terminal state
+            // releases the lease this reclaim's own write is fenced on — after which the key could never be cleared.
+            await ReclaimStagingAsync(claim, create.Lease!, cancellationToken).ConfigureAwait(false);
+
             return await FinishAsync(claim, create.Lease!, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -140,6 +144,51 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             await DisposeLeaseQuietlyAsync(create.Lease!).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Deletes the temporary object the dead worker left at the destination, and drops the row's record of it.
+    ///
+    /// <para>A remote staged publish is upload-then-server-side-copy, and the driver deletes its staging object in a
+    /// <c>finally</c>. That covers a caught fault; it does not cover the process being killed, and what survives then
+    /// is bytes in the bucket that no <c>artifact_location</c>, <c>artifact_object</c> or verifier can reach. So the
+    /// writer records the key before it uploads, and this is the only thing that ever acts on that record.</para>
+    ///
+    /// <para>FENCED by the claim <see cref="ResumeOneAsync"/> already took, twice over: the claim itself only lands on
+    /// a lapsed lease, so a live worker's staging object is never touched, and the clearing write is re-judged against
+    /// that fence and lease inside its own statement. Bounded to the staging key by the DRIVER — the reclaim contract
+    /// refuses any key outside its own staging area — so a wrong or stale recorded value can never reach the published
+    /// object, which this sweep must never delete.</para>
+    ///
+    /// <para>Discard first, clear second. A cleared row whose bytes are still there is an orphan nobody will look for
+    /// again; a cleared-late row is re-asked next pass, told the object is already gone, and cleared then. Absent is
+    /// success in the reclaim contract for exactly that reason.</para>
+    /// </summary>
+    private async Task ReclaimStagingAsync(IntentSnapshot claim, StorageRuntimeDriverLease driverLease, CancellationToken cancellationToken)
+    {
+        var staging = claim.TemporaryObjectKey;
+        if (staging == null) return;
+        if (driverLease.Driver is not IArtifactStorageStagingReclaimer reclaimer) return;
+
+        var discarded = await InvokeAsync(token => reclaimer.DiscardStagingAsync(staging, token), ResumeOperationTimeout, cancellationToken, driverLease).ConfigureAwait(false);
+
+        if (discarded.Problem != null || discarded.Timeout || discarded.Value?.IsSuccess != true)
+        {
+            LeftStaged(claim, staging, discarded.Value?.Error?.Code);
+            return;
+        }
+
+        if (!await RecordStagingAsync(claim, SystemUsers.SeederId, ResumeOperationTimeout, null, cancellationToken).ConfigureAwait(false)) return;
+
+        _logger.LogWarning(
+            "Abandoned transfer {IntentId} for team {TeamId} left a staging object at {TemporaryObjectKey} under profile revision {ProfileRevisionId}; its writer was killed before its own cleanup ran, so this sweep discarded those bytes and cleared the record of them",
+            claim.Id, claim.TeamId, staging, claim.ProfileRevisionId);
+    }
+
+    /// <summary>Says the bytes are still there and still named, which is the whole point of the record: the resume proceeds, and a later pass re-asks the destination once this claim's lease lapses.</summary>
+    private void LeftStaged(IntentSnapshot claim, string staging, ArtifactStorageErrorCode? code) =>
+        _logger.LogWarning(
+            "Abandoned transfer {IntentId} for team {TeamId} still has a staging object at {TemporaryObjectKey} that this pass could not discard ({Problem}); the row keeps naming it, so a later pass will re-ask",
+            claim.Id, claim.TeamId, staging, code);
 
     /// <summary>
     /// Where the abandoned transfer was writing, admitted under the SAME write eligibility its caller had. A profile

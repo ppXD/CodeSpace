@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using AlibabaCloud.OSS.V2;
 using AlibabaCloud.OSS.V2.Models;
@@ -20,11 +21,16 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 /// effect on such a bucket, which would void the declared ConditionalCreate capability. Discarding by version id, and
 /// a fixture that models delete markers, are what this driver needs before it can honestly claim either shape.
 /// </summary>
-internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageDriver
+internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageDriver, IArtifactStorageStagingReclaimer
 {
     private const string ObjectArea = "objects/";
     private const string StagingArea = ".codespace/staging/";
     private const string ProbeArea = ".codespace/probe/";
+
+    /// <summary>Length of a staging key's one trailing segment: a GUID in <c>N</c> format. Pinned because it is half of what makes a staging key unable to name a published object.</summary>
+    internal const int StagingNonceLength = 32;
+
+    private static readonly SearchValues<char> StagingNonceCharacters = SearchValues.Create("0123456789abcdef");
 
     private static readonly StorageProviderCapabilities SupportedCapabilities = StorageProviderCapabilities.StreamingWrite
         | StorageProviderCapabilities.StreamingRead
@@ -55,7 +61,8 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         if (!_target.TryResolveKey(request.ObjectKey, ObjectArea, out var key)) return ArtifactStoragePutResult.Failed(InvalidKey(request.ObjectKey));
         if (!TryResolveContentLength(request, out var length, out var lengthError)) return ArtifactStoragePutResult.Failed(lengthError!);
 
-        var staging = _target.KeyPrefix + StagingArea + Guid.NewGuid().ToString("N");
+        var staging = request.StagingObjectKey ?? MintStagingObjectKey();
+        if (!IsOwnStagingKey(staging)) return ArtifactStoragePutResult.Failed(ForeignStagingKey(staging));
 
         try
         {
@@ -138,6 +145,37 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
         {
             return ArtifactStorageDeleteResult.Failed(AliyunOssErrors.FromException(exception, request.ObjectKey));
+        }
+    }
+
+    public string MintStagingObjectKey() => _target.KeyPrefix + StagingArea + Guid.NewGuid().ToString("N");
+
+    /// <summary>
+    /// Reclaims one staging object, by a plain DELETE rather than through <see cref="DeleteAsync"/>: that path projects
+    /// a CALLER's key onto the published-object area, which is the one place a staging key must never be able to land.
+    ///
+    /// <para>Absent is success and cannot be told from present, because OSS answers 204 to either. That is the right
+    /// answer anyway — the ordinary case is a writer whose own <c>finally</c> already discarded it, and the caller's
+    /// question is "is there anything of mine left here", not "did I delete a byte".</para>
+    /// </summary>
+    public async ValueTask<ArtifactStorageDeleteResult> DiscardStagingAsync(string stagingObjectKey, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(stagingObjectKey);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsOwnStagingKey(stagingObjectKey)) return ArtifactStorageDeleteResult.Failed(ForeignStagingKey(stagingObjectKey));
+
+        try
+        {
+            await Client.DeleteObjectAsync(new DeleteObjectRequest { Bucket = _target.Bucket, Key = stagingObjectKey }, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ArtifactStorageDeleteResult.Removed();
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsCallerCancellation(exception, cancellationToken))
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        catch (Exception exception) when (AliyunOssErrors.IsOperational(exception))
+        {
+            return ArtifactStorageDeleteResult.Failed(AliyunOssErrors.FromException(exception, stagingObjectKey));
         }
     }
 
@@ -322,6 +360,28 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
             await DiscardAsync(key).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Whether a key is one THIS driver's staging area could hold: this profile's own prefix, the reserved staging
+    /// segment, and one trailing nonce segment of the shape <see cref="MintStagingObjectKey"/> mints.
+    ///
+    /// <para>Structural rather than a lookup, and that is what makes the reclaim safe to hand a persisted value. The
+    /// staging area is a sibling of <see cref="ObjectArea"/>, so a key that passes here cannot name a published object
+    /// however wrong the value is; and refusing anything after the nonce keeps a passing key from walking into a
+    /// deeper namespace that a later layout might put objects in.</para>
+    /// </summary>
+    private bool IsOwnStagingKey(string objectKey)
+    {
+        var area = _target.KeyPrefix + StagingArea;
+        if (!objectKey.StartsWith(area, StringComparison.Ordinal)) return false;
+
+        var nonce = objectKey.AsSpan(area.Length);
+
+        return nonce.Length == StagingNonceLength && !nonce.ContainsAnyExcept(StagingNonceCharacters);
+    }
+
+    private static ArtifactStorageError ForeignStagingKey(string objectKey) =>
+        Failure(ArtifactStorageErrorCode.InvalidRequest, $"Staging key '{objectKey}' is not one this Aliyun OSS destination minted, so it must not be written to or deleted.");
 
     private static ArtifactStorageError InvalidKey(string objectKey) =>
         Failure(ArtifactStorageErrorCode.InvalidRequest, $"ObjectKey '{objectKey}' must be a relative key without traversal or empty segments and must fit the OSS key length limit.");

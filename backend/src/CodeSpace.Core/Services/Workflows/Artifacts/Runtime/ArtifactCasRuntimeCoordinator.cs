@@ -198,14 +198,17 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
             }
             else if (head.Value.Error!.Code == ArtifactStorageErrorCode.Missing)
             {
-                if (!await RenewLeaseAsync(current, request.ActorId, input.Timeout, cancellationToken).ConfigureAwait(false)) return Stale(claim.Id);
+                var staging = StagingObjectKeyOf(driver);
+                if (!await RecordStagingAsync(current, request.ActorId, input.Timeout, staging, cancellationToken).ConfigureAwait(false)) return Stale(claim.Id);
                 var put = await InvokeOwnedInputAsync(token => driver.PutAsync(new ArtifactStoragePutRequest(request.TargetObjectKey, request.Content)
                 {
                     ContentLength = request.ExpectedSizeBytes,
                     ExpectedSha256 = request.ExpectedSha256,
                     ContentType = request.ContentType,
                     Condition = ArtifactStorageWriteCondition.CreateOnly,
+                    StagingObjectKey = staging,
                 }, token), input.Timeout, cancellationToken, driverLease).ConfigureAwait(false);
+                await ForgetStagingAsync(current, request.ActorId, staging, input.Timeout, cancellationToken).ConfigureAwait(false);
                 if (put.Problem != null) return await HandleProblemAsync(current, request.ActorId, put.Problem, cancellationToken).ConfigureAwait(false);
                 if (put.Timeout) return await HandleProblemAsync(current, request.ActorId, Problem(ArtifactCasProblemCode.ProviderTimeout, true), cancellationToken).ConfigureAwait(false);
                 if (!put.Value!.IsSuccess && put.Value.Error!.Code != ArtifactStorageErrorCode.AlreadyExists)
@@ -233,6 +236,32 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         if (verification.Problem != null) return await HandleProblemAsync(current, request.ActorId, verification.Problem, cancellationToken).ConfigureAwait(false);
         return await CommitAsync(current, request.ActorId, verification.Metadata!, fence, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The temporary object this driver will occupy for the write about to start, or null for a driver that stages
+    /// nothing a sweep could act on — a direct writer, or one whose staging is a temp file with its own recovery.
+    ///
+    /// <para>Minted BEFORE the upload and recorded before it, which is the entire point: the driver's own cleanup runs
+    /// in a <c>finally</c>, and a <c>finally</c> does not run when the process is killed. A recorded key is what turns
+    /// those bytes from an object nobody knows about into one the abandoned-transfer sweep can reclaim.</para>
+    /// </summary>
+    private static string? StagingObjectKeyOf(IArtifactStorageDriver driver) => (driver as IArtifactStorageStagingReclaimer)?.MintStagingObjectKey();
+
+    /// <summary>
+    /// Drops the recorded staging key now that the driver has ANSWERED, whatever it answered.
+    ///
+    /// <para>An answer is the proof: the driver's cleanup is in a <c>finally</c>, so the only way <c>PutAsync</c> gets
+    /// to return — success, typed failure, thrown fault — is with that cleanup already run. Even a timeout qualifies,
+    /// because <see cref="InvokeOwnedInputAsync"/> waits for the abandoned provider task to settle before it answers.
+    /// The window a recorded key covers is precisely the one where no answer ever comes.</para>
+    ///
+    /// <para>Best-effort, and deliberately does not change the transfer's outcome. A failure here leaves a key that is
+    /// stale rather than wrong — the sweep discards it, is told it is already gone, and clears the row. Losing the
+    /// fence is the same non-event: whoever holds the claim now recorded its own key over this one, and its own
+    /// writer's cleanup covers it.</para>
+    /// </summary>
+    private Task ForgetStagingAsync(IntentSnapshot claim, Guid actorId, string? staging, TimeSpan timeout, CancellationToken cancellationToken) =>
+        staging == null ? Task.CompletedTask : RecordStagingAsync(claim, actorId, timeout, null, cancellationToken);
 
     /// <summary>
     /// Puts a placement that lost its bytes back into service, by re-driving the intent that already names it.
@@ -1067,13 +1096,28 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private async Task<bool> RenewIfLeasedAsync(LeaseRenewal? renewal, TimeSpan timeout, CancellationToken cancellationToken) =>
         renewal == null || await RenewLeaseAsync(renewal.Claim, renewal.ActorId, timeout, cancellationToken).ConfigureAwait(false);
 
-    private async Task<bool> RenewLeaseAsync(IntentSnapshot claim, Guid actorId, TimeSpan timeout, CancellationToken cancellationToken)
+    private Task<bool> RenewLeaseAsync(IntentSnapshot claim, Guid actorId, TimeSpan timeout, CancellationToken cancellationToken) =>
+        RenewLeaseAsync(claim, actorId, timeout, null, cancellationToken);
+
+    /// <summary>
+    /// Renews the lease and, in the SAME statement, records which temporary object this transfer has outstanding: the
+    /// key before it stages, null once the driver has answered and its own cleanup has therefore run.
+    ///
+    /// <para>One statement rather than two because the pair has to be atomic in one direction — the database must name
+    /// the staging object BEFORE the upload starts, or a process killed in between leaves bytes nothing can find. 0226
+    /// admits exactly this write: the fence holder, on a live lease, touching that column and nothing else.</para>
+    /// </summary>
+    private Task<bool> RecordStagingAsync(IntentSnapshot claim, Guid actorId, TimeSpan timeout, string? stagingObjectKey, CancellationToken cancellationToken) =>
+        RenewLeaseAsync(claim, actorId, timeout, new StagingWrite(stagingObjectKey), cancellationToken);
+
+    private async Task<bool> RenewLeaseAsync(IntentSnapshot claim, Guid actorId, TimeSpan timeout, StagingWrite? staging, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
         var leaseMilliseconds = (long)Math.Ceiling(LeaseDuration(timeout).TotalMilliseconds);
         var affected = await db.Database.ExecuteSqlInterpolatedAsync($$"""
             UPDATE artifact_transfer_intent
             SET worker_lease_expires_at = clock_timestamp() + ({{leaseMilliseconds}} * INTERVAL '1 millisecond'),
+                temporary_object_key = CASE WHEN {{staging != null}} THEN NULLIF({{staging?.Key ?? string.Empty}}, '') ELSE temporary_object_key END,
                 revision = revision + 1,
                 last_modified_date = clock_timestamp(),
                 last_modified_by = {{actorId}}
@@ -1747,6 +1791,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         NextAttemptAt = intent.NextAttemptAt,
         LeaseExpiresAt = intent.WorkerLeaseExpiresAt,
         LastErrorCode = intent.LastErrorCode,
+        TemporaryObjectKey = intent.TemporaryObjectKey,
         Problem = problem,
     };
 
@@ -1758,6 +1803,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     private sealed record ClaimResult(IntentSnapshot Intent, bool Acquired, DateTimeOffset? DatabaseNow);
     private sealed record ValidTransfer(byte[] Digest, long Size, TimeSpan Timeout);
     private sealed record LeaseRenewal(IntentSnapshot Claim, Guid ActorId);
+    /// <summary>A renewal that also writes the transfer's temporary-object record. Absent means leave that column alone; present with a null <c>Key</c> means the transfer has none outstanding any more.</summary>
+    private sealed record StagingWrite(string? Key);
     private sealed record Verification(ArtifactStorageObjectMetadata? Metadata, ArtifactCasProblem? Problem);
     private sealed record Invocation<T>(T? Value, bool Timeout, ArtifactCasProblem? Problem);
     private sealed record HashObservation(byte[]? Digest, long Size, bool Timeout, ArtifactCasProblem? Problem);
@@ -1783,6 +1830,8 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         public DateTimeOffset? NextAttemptAt { get; init; }
         public DateTimeOffset? LeaseExpiresAt { get; init; }
         public string? LastErrorCode { get; init; }
+        /// <summary>The temporary object this transfer has outstanding at its destination, or null when it has none. A non-null value on an ABANDONED intent is the only record that a killed writer's staging bytes exist.</summary>
+        public string? TemporaryObjectKey { get; init; }
         public ArtifactCasProblem? Problem { get; init; }
         /// <summary>Set only for a committed intent whose placement lost its bytes: the fence, read before any provider I/O, that a re-drive of this intent must still find unmoved at commit.</summary>
         public LocationFence? Revive { get; init; }
