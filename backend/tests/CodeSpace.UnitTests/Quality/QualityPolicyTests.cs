@@ -1,6 +1,5 @@
 using CodeSpace.Core.Services.Quality;
 using CodeSpace.Messages.Contracts;
-using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Quality;
 using Shouldly;
 
@@ -8,18 +7,18 @@ namespace CodeSpace.UnitTests.Quality;
 
 /// <summary>
 /// Pins the PURE adaptive quality policy (P22-9a) — the ordered rule table that chooses a mechanism from RECORDED
-/// evidence. Every ordered row gets its own theory case (so a reorder or a predicate change is a test-visible
-/// decision), the three soundness orderings are pinned as their own facts, a NOVEL fact shape nobody enumerated is
-/// pinned to prove no switch-case is consulted, and a bounded cartesian sweep proves the table is TOTAL and that
-/// only a stop ever reports a known marginal value.
+/// evidence. Three kinds of pin, deliberately separated: <see cref="RuleTable"/> pins that each row EXISTS and
+/// cites its own facts; <see cref="Orderings"/> pins, for every pair of rows that can collide on one input, WHICH
+/// one wins; and the remaining tests pin the boundaries and the totality of the table. A row's existence and a
+/// row's precedence are different claims, and a table that only pins the former reorders silently.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class QualityPolicyTests
 {
     /// <summary>
     /// One case per ORDERED ROW, in table order, each asserting both the mechanism and the fact-citing evidence.
-    /// The cases are built as whole fact records rather than a 13-column InlineData: naming only the facts that
-    /// matter is what makes each row's trigger readable.
+    /// The cases are built as whole fact records rather than a wide InlineData: naming only the facts that matter
+    /// is what makes each row's trigger readable. PRECEDENCE is not tested here — see <see cref="Orderings"/>.
     /// </summary>
     public static TheoryData<string, QualityDecisionInput, QualityMechanism, string> RuleTable() => new()
     {
@@ -27,7 +26,7 @@ public sealed class QualityPolicyTests
         {
             "budget below the cost of another attempt",
             new QualityDecisionInput { BudgetCapUsd = 1.00m, SpendSoFarUsd = 0.95m, EstimatedNextAttemptCostUsd = 0.20m, CheckDeclared = true },
-            QualityMechanism.Stop, "below the 0.20 USD another attempt costs"
+            QualityMechanism.Stop, "leaves 0.05 USD after 0.95 USD spent, below the 0.20 USD another attempt costs"
         },
         // Row 2 — a recorded verdict says a human must decide. The ONLY route to AskHuman.
         {
@@ -41,72 +40,79 @@ public sealed class QualityPolicyTests
             new QualityDecisionInput { NoProgressDecisions = 8, MaxNoProgressDecisions = 8, CheckDeclared = true },
             QualityMechanism.Stop, "reaching the recorded no-progress cap of 8"
         },
-        // Row 4 — infra-classed by VERDICT, and infra-classed by FAILURE KIND. Never a stronger model.
+        // Row 4 — the check MACHINERY failed. The one recorded classification that says so, and never a stronger model.
         {
             "an infra-classed verdict",
             Attempted(VerificationDisposition.InfraUnknown) with { CheckDeclared = true },
-            QualityMechanism.BoundedRepair, "failed the machinery, not the work"
+            QualityMechanism.BoundedRepair, "the machinery failed, not the work, and a stronger model cannot fix a check that could not run"
         },
+        // Row 5 — a HUMAN waived verification. A stop, and emphatically not a recorded pass.
         {
-            "a dependency-classed failure kind",
-            Attempted(VerificationDisposition.Failed, FailureKind.Unavailable) with { CheckDeclared = true },
-            QualityMechanism.BoundedRepair, "a stronger model cannot fix a check that could not run"
+            "a human-waived verdict",
+            Attempted(VerificationDisposition.Waived) with { CheckDeclared = true },
+            QualityMechanism.Stop, "a human authorized forgoing verification for this work, which is an authorization to stop spending and never a recorded pass"
         },
-        // Row 5 — a check was declared, work was attempted, and no verdict came back.
+        // Row 6 — a check was declared, work was attempted, and no verdict came back.
         {
             "a declared check that never ran",
             Attempted(VerificationDisposition.Unknown) with { CheckDeclared = true },
             QualityMechanism.BoundedRepair, "a check is declared but 1 attempt(s) recorded no verdict"
         },
-        // Row 6 — work exists that nothing objective can grade.
+        // Row 7 — work exists that nothing objective can grade, and no review has been bought yet.
         {
-            "no check declared for work already produced",
+            "no check declared and no review yet for work already produced",
             Attempted(VerificationDisposition.Unknown) with { CheckDeclared = false },
-            QualityMechanism.IndependentCritic, "no objective check is declared"
+            QualityMechanism.IndependentCritic, "no independent review has been produced"
         },
-        // Row 7 — the recorded evidence disagrees with itself, by each of its three recorded carriers.
+        // Row 8 — a PASSED check the recorded evidence disagrees with, by each of its three recorded carriers.
         {
-            "the self-claim contradicted the check",
+            "a passed check the self-claim contradicted",
             Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, SelfClaimContradictedTheCheck = true },
             QualityMechanism.IndependentCritic, "self-claim contradicted the check: True"
         },
         {
-            "an independent reviewer disapproved",
-            Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, IndependentReviewDisapproved = true },
+            "a passed check an independent reviewer disapproved",
+            Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, IndependentReviewRecorded = true, IndependentReviewDisapproved = true },
             QualityMechanism.IndependentCritic, "independent review disapproved: True"
         },
         {
-            "a recorded score below the confident floor",
-            Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, RecordedReviewScore = 40 },
+            "a passed check with a recorded score below the confident floor",
+            Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, IndependentReviewRecorded = true, RecordedReviewScore = 40 },
             QualityMechanism.IndependentCritic, "recorded score: 40 against a floor of 70"
         },
-        // Row 8 — the declared check passed and nothing recorded disputes it.
+        // Row 9 — the declared check passed and nothing recorded disputes it.
         {
             "the declared check passed undisputed",
             Attempted(VerificationDisposition.Passed) with { CheckDeclared = true },
             QualityMechanism.Stop, "nothing recorded disputes it"
         },
-        // Row 9 — the same work failure repeats on work that already has seams: split, don't escalate.
+        // Row 10 — the check keeps failing on work that already has seams: split, don't escalate.
         {
-            "a repeated work failure across several units",
-            Repeated(2, FailureKind.Unprocessable) with { CheckDeclared = true, WorkspaceUnitCount = 3, ChangedFileCount = 2 },
+            "a repeated failure across several units",
+            Failed(2) with { CheckDeclared = true, WorkspaceUnitCount = 3, ChangedFileCount = 2 },
             QualityMechanism.SplitIntoSubtasks, "already has seams to split along"
         },
         {
-            "a repeated work failure across a wide diff",
-            Repeated(2, FailureKind.Unprocessable) with { CheckDeclared = true, WorkspaceUnitCount = 1, ChangedFileCount = 10 },
+            "a repeated failure across a wide diff",
+            Failed(2) with { CheckDeclared = true, WorkspaceUnitCount = 1, ChangedFileCount = 10 },
             QualityMechanism.SplitIntoSubtasks, "across 1 unit(s) and 10 changed file(s)"
         },
-        // Row 10 — the same work failure repeats on work too localized to split: the capability changes instead.
+        // Row 11 — the check keeps failing on work too localized to split: the capability changes instead.
         {
-            "a repeated work failure on a localized diff",
-            Repeated(2, FailureKind.Invalid) with { CheckDeclared = true, WorkspaceUnitCount = 1, ChangedFileCount = 3 },
+            "a repeated failure on a localized diff",
+            Failed(2) with { CheckDeclared = true, WorkspaceUnitCount = 1, ChangedFileCount = 3 },
             QualityMechanism.EscalateModel, "too localized to split, so the capability is what changes"
         },
-        // Row 11 (catch-all) — a single failure is not yet a repeat, and a fresh unit has nothing to review.
+        // Row 12 — the review that is the ungraded work's only available evidence approves it. Row 7's EXIT.
         {
-            "one work failure, not yet a repeat",
-            Attempted(VerificationDisposition.Failed, FailureKind.Invalid) with { CheckDeclared = true },
+            "the only available evidence approves the ungraded work",
+            Attempted(VerificationDisposition.Unknown) with { CheckDeclared = false, IndependentReviewRecorded = true, RecordedReviewScore = 88 },
+            QualityMechanism.Stop, "the independent review that is its only available evidence approves it"
+        },
+        // Row 13 (catch-all) — a single failure is not yet a repeat, and a fresh unit has nothing to review.
+        {
+            "one failed verdict, not yet a repeat",
+            Failed(1) with { CheckDeclared = true },
             QualityMechanism.SingleAgent, "nothing recorded rules out another ordinary attempt"
         },
         {
@@ -115,11 +121,11 @@ public sealed class QualityPolicyTests
             QualityMechanism.SingleAgent, "the cheapest mechanism is the baseline"
         },
         // The REFUTATION row: a fact shape no case above enumerates — a 47-unit workspace, a 900-file diff, a
-        // failure kind used nowhere else, a deeper streak. No switch-case exists to be missing, so it still decides.
+        // deeper streak, a high score. No switch-case exists to be missing, so it still decides.
         {
             "a novel fact shape nobody enumerated",
-            Repeated(4, FailureKind.Forbidden) with { CheckDeclared = true, WorkspaceUnitCount = 47, ChangedFileCount = 900, RecordedReviewScore = 88 },
-            QualityMechanism.SplitIntoSubtasks, "4 consecutive attempt(s) failed the work the same way (Forbidden) across 47 unit(s) and 900 changed file(s)"
+            Failed(4) with { CheckDeclared = true, WorkspaceUnitCount = 47, ChangedFileCount = 900, RecordedReviewScore = 88 },
+            QualityMechanism.SplitIntoSubtasks, "the check failed on 4 consecutive attempt(s) across 47 unit(s) and 900 changed file(s)"
         },
     };
 
@@ -133,41 +139,115 @@ public sealed class QualityPolicyTests
         decision.Reason.ShouldContain(evidenceFragment, Case.Sensitive, $"row '{row}' must cite the facts that matched, not a bare label");
     }
 
-    [Fact]
-    public void An_infra_classed_failure_never_buys_a_stronger_model_however_often_it_repeats()
+    /// <summary>
+    /// ADVERSARIAL PRECEDENCE — one case per pair of rows that a single input can make BOTH match. Each input is
+    /// built so the later row would also fire; the expectation is the earlier row's mechanism, so a reorder reddens
+    /// here rather than shipping as a silent behaviour change. Pairs that cannot collide are absent on purpose (the
+    /// disputed row now requires a PASS and the repeat rows require failures, so those two are mutually exclusive by
+    /// construction rather than by ordering — the cases below pin that consequence instead).
+    /// </summary>
+    public static TheoryData<string, QualityDecisionInput, QualityMechanism> Orderings() => new()
     {
-        // The P22 invariant, and the reason the infra row precedes the escalate/split rows: a check that could not
-        // run is not evidence that the work needs more capability. Four identical infra failures on a wide,
-        // multi-unit diff would satisfy BOTH repeat rows on scale alone.
-        var facts = Repeated(4, FailureKind.Unavailable) with { CheckDeclared = true, WorkspaceUnitCount = 6, ChangedFileCount = 120 };
+        {
+            "affordability (1) beats the human-review row (2) — a mechanism nobody can pay for is not an option",
+            Attempted(VerificationDisposition.HumanReviewRequired) with { BudgetCapUsd = 1m, SpendSoFarUsd = 1m, EstimatedNextAttemptCostUsd = 0.5m, CheckDeclared = true },
+            QualityMechanism.Stop
+        },
+        {
+            "the human-review row (2) beats the no-progress stop (3) — a human's verdict is still owed an answer",
+            Attempted(VerificationDisposition.HumanReviewRequired) with { NoProgressDecisions = 8, MaxNoProgressDecisions = 8, CheckDeclared = true },
+            QualityMechanism.AskHuman
+        },
+        {
+            "the no-progress stop (3) beats the machinery-failed repair (4) — at the cap there is no increment left to repair with",
+            Attempted(VerificationDisposition.InfraUnknown) with { NoProgressDecisions = 8, MaxNoProgressDecisions = 8, CheckDeclared = true },
+            QualityMechanism.Stop
+        },
+        {
+            "the machinery-failed repair (4) beats the no-check critic (7) — a broken check is not ungradable work",
+            Attempted(VerificationDisposition.InfraUnknown) with { CheckDeclared = false },
+            QualityMechanism.BoundedRepair
+        },
+        {
+            "the unrun-check repair (6) beats the review-approved stop (12) — an approving review cannot stand in for a DECLARED check that never ran",
+            Attempted(VerificationDisposition.Unknown) with { CheckDeclared = true, IndependentReviewRecorded = true, RecordedReviewScore = 95 },
+            QualityMechanism.BoundedRepair
+        },
+        {
+            "the no-check critic (7) beats the goal-met stop (9) — a passing verdict nobody declared a check for licenses no stop",
+            Attempted(VerificationDisposition.Passed) with { CheckDeclared = false },
+            QualityMechanism.IndependentCritic
+        },
+        {
+            "the no-check critic (7) beats the repeat rows (10/11) — failures recorded without a declared check are not evidence about capability",
+            Failed(2) with { CheckDeclared = false, ChangedFileCount = 3 },
+            QualityMechanism.IndependentCritic
+        },
+        {
+            "the disputed row (8) beats the goal-met stop (9) — a pass the producer's own claim contradicts still buys an independent look",
+            Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, SelfClaimContradictedTheCheck = true },
+            QualityMechanism.IndependentCritic
+        },
+        {
+            "a repeated failure escalates (11) rather than buying a critic — check and reviewer AGREE the work is bad, so a third opinion buys nothing",
+            Failed(2) with { CheckDeclared = true, ChangedFileCount = 3, IndependentReviewRecorded = true, IndependentReviewDisapproved = true },
+            QualityMechanism.EscalateModel
+        },
+        {
+            "a repeated failure at scale splits (10) rather than buying a critic — same reason, and the work has seams",
+            Failed(3) with { CheckDeclared = true, WorkspaceUnitCount = 4, IndependentReviewRecorded = true, IndependentReviewDisapproved = true },
+            QualityMechanism.SplitIntoSubtasks
+        },
+        {
+            "the repeat rows (10/11) beat the review-approved stop (12) — a run of failed verdicts outweighs an approving reviewer",
+            Failed(2) with { CheckDeclared = false, ChangedFileCount = 3, IndependentReviewRecorded = true },
+            QualityMechanism.EscalateModel
+        },
+    };
 
-        var decision = QualityPolicy.Decide(facts);
-
-        decision.Mechanism.ShouldBe(QualityMechanism.BoundedRepair, "an infra-classed failure must never escalate the model or split the work");
-        decision.Reason.ShouldContain("a stronger model cannot fix a check that could not run", Case.Sensitive);
+    [Theory]
+    [MemberData(nameof(Orderings))]
+    public void The_ordering_of_every_pair_of_rows_that_can_collide_is_pinned(string precedence, QualityDecisionInput facts, QualityMechanism expected)
+    {
+        QualityPolicy.Decide(facts).Mechanism.ShouldBe(expected, precedence);
     }
 
     [Fact]
-    public void A_passing_check_that_recorded_evidence_disputes_still_buys_an_independent_look()
+    public void An_infra_classed_verdict_neither_accumulates_a_repeat_streak_nor_buys_a_stronger_model()
     {
-        // Pins row 7 BEFORE row 8: a Passed verdict the producer's own self-claim contradicts must not ship on the
-        // strength of the verdict alone. A reorder would silently turn this into a Stop, so it is pinned here.
-        var facts = Attempted(VerificationDisposition.Passed) with { CheckDeclared = true, SelfClaimContradictedTheCheck = true };
+        // The P22 invariant, now carried TWICE over: the machinery-failed row precedes every row that spends on the
+        // work, AND the streak counts only work-classed Failed verdicts, so an infra tail cannot even reach the
+        // repeat rows. Four infra failures on a wide, multi-unit diff would satisfy both repeat rows on scale alone.
+        var facts = Repeated(4, VerificationDisposition.InfraUnknown) with { CheckDeclared = true, WorkspaceUnitCount = 6, ChangedFileCount = 120 };
 
-        QualityPolicy.Decide(facts).Mechanism.ShouldBe(QualityMechanism.IndependentCritic);
+        facts.ConsecutiveFailedVerdicts.ShouldBe(0, "an infra-classed verdict is not a failure of the work, so it starts no streak");
+        QualityPolicy.Decide(facts).Mechanism.ShouldBe(QualityMechanism.BoundedRepair, "an infra-classed failure must never escalate the model or split the work");
     }
 
-    [Fact]
-    public void An_unaffordable_run_stops_on_the_budget_evidence_even_when_another_row_would_also_match()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_waived_verdict_stops_on_the_human_authorization_whether_or_not_a_check_was_declared(bool checkDeclared)
     {
-        // Pins row 1 FIRST: this input would otherwise match the human-review row. A mechanism nobody can pay for
-        // is not an option, so the affordability gate has to precede every row that spends.
-        var facts = Attempted(VerificationDisposition.HumanReviewRequired) with { BudgetCapUsd = 1m, SpendSoFarUsd = 1m, EstimatedNextAttemptCostUsd = 0.5m, CheckDeclared = true };
-
-        var decision = QualityPolicy.Decide(facts);
+        // A waiver is a human act, so it does not depend on whether machinery existed to waive. Before this row the
+        // shape fell to the catch-all and re-attempted work a human had explicitly authorized stopping.
+        var decision = QualityPolicy.Decide(Attempted(VerificationDisposition.Waived) with { CheckDeclared = checkDeclared });
 
         decision.Mechanism.ShouldBe(QualityMechanism.Stop);
-        decision.Reason.ShouldContain("leaves 0 USD", Case.Sensitive, "the stop must cite the budget arithmetic, not merely announce a stop");
+        decision.Reason.ShouldContain("a human authorized forgoing verification", Case.Sensitive, "the stop must cite the authorization, and must not read as a pass");
+        decision.Reason.Contains(nameof(VerificationDisposition.Passed), StringComparison.Ordinal).ShouldBeFalse("a waiver is NEVER a recorded pass (the amend-acceptance FATAL-1 invariant)");
+    }
+
+    [Theory]
+    [InlineData(false, QualityMechanism.IndependentCritic)]   // nothing can grade it and nothing has reviewed it → buy the only evidence available
+    [InlineData(true, QualityMechanism.Stop)]                 // …and once that review exists and approves, the work is done
+    public void A_not_applicable_verdict_is_treated_as_no_declared_check(bool reviewRecorded, QualityMechanism expected)
+    {
+        // NotApplicable is the VACUOUS-grade classification: a check was declared but returned nothing to judge the
+        // work by. Repairing it is pointless (nothing is broken), so it routes exactly as ungraded work does.
+        var facts = Attempted(VerificationDisposition.NotApplicable) with { CheckDeclared = true, IndependentReviewRecorded = reviewRecorded, RecordedReviewScore = reviewRecorded ? 91 : null };
+
+        QualityPolicy.Decide(facts).Mechanism.ShouldBe(expected);
     }
 
     [Theory]
@@ -199,32 +279,47 @@ public sealed class QualityPolicyTests
 
     [Theory]
     [InlineData(1, QualityMechanism.SingleAgent)]        // one failure is a failure, not a repetition
-    [InlineData(2, QualityMechanism.EscalateModel)]      // the second identical failure is the first repeat
+    [InlineData(2, QualityMechanism.EscalateModel)]      // the second failure is the first repeat
     [InlineData(5, QualityMechanism.EscalateModel)]
-    public void The_repeat_floor_is_where_an_identical_work_failure_becomes_evidence(int streak, QualityMechanism expected)
+    public void The_repeat_floor_is_where_a_failing_check_becomes_evidence(int streak, QualityMechanism expected)
     {
-        var facts = Repeated(streak, FailureKind.Invalid) with { CheckDeclared = true, ChangedFileCount = 2 };
+        var facts = Failed(streak) with { CheckDeclared = true, ChangedFileCount = 2 };
+
+        QualityPolicy.Decide(facts).Mechanism.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(1, QualityMechanism.EscalateModel)]        // one unit has no seam the plan did not have to invent
+    [InlineData(2, QualityMechanism.SplitIntoSubtasks)]    // a second independently-checkoutable unit IS that seam
+    public void The_unit_scale_floor_is_where_a_repeated_failure_prefers_splitting_over_escalating(int units, QualityMechanism expected)
+    {
+        // The BEHAVIOURAL boundary, not just the literal: pinning the constant alone lets an off-by-one move both
+        // the constant and the one row that reads it, and stay green.
+        var facts = Failed(2) with { CheckDeclared = true, WorkspaceUnitCount = units, ChangedFileCount = 3 };
 
         QualityPolicy.Decide(facts).Mechanism.ShouldBe(expected);
     }
 
     [Fact]
-    public void A_streak_only_counts_attempts_that_failed_the_work_the_SAME_way()
+    public void A_streak_counts_only_the_failed_verdicts_at_the_tail()
     {
-        // Two failures of DIFFERENT kinds are not "the same thing happening again", so they buy no mechanism beyond
-        // another ordinary attempt — the repeat rules key on the classification pair, never on the raw count.
-        var mixed = new QualityDecisionInput
+        // A pass between two failures breaks the run: the evidence is "the check keeps failing NOW", not "it failed
+        // twice at some point". The weaker claim is deliberate — nothing records WHICH failure each attempt was, so
+        // "the same failure repeated" is not decidable and the table never asserts it.
+        var interrupted = new QualityDecisionInput
         {
             CheckDeclared = true,
+            ChangedFileCount = 2,
             Attempts = new[]
             {
-                new QualityAttemptFact { Disposition = VerificationDisposition.Failed, Failure = FailureKind.Invalid },
-                new QualityAttemptFact { Disposition = VerificationDisposition.Failed, Failure = FailureKind.Conflict },
+                new QualityAttemptFact { Disposition = VerificationDisposition.Failed },
+                new QualityAttemptFact { Disposition = VerificationDisposition.Passed },
+                new QualityAttemptFact { Disposition = VerificationDisposition.Failed },
             },
         };
 
-        mixed.IdenticalWorkFailureStreak.ShouldBe(1);
-        QualityPolicy.Decide(mixed).Mechanism.ShouldBe(QualityMechanism.SingleAgent);
+        interrupted.ConsecutiveFailedVerdicts.ShouldBe(1);
+        QualityPolicy.Decide(interrupted).Mechanism.ShouldBe(QualityMechanism.SingleAgent);
     }
 
     [Theory]
@@ -255,20 +350,20 @@ public sealed class QualityPolicyTests
     public void Decide_is_total_over_every_recorded_fact_combination()
     {
         var defined = Enum.GetValues<QualityMechanism>();
-        var failures = new FailureKind?[] { null, FailureKind.Invalid, FailureKind.Unavailable, FailureKind.Exhausted, FailureKind.Internal };
         var evaluated = 0;
 
         foreach (var disposition in Enum.GetValues<VerificationDisposition>())
-        foreach (var failure in failures)
         foreach (var declared in Bools)
         foreach (var attempts in new[] { 0, 1, 2 })
-        foreach (var disputed in Bools)
+        foreach (var disapproved in Bools)
+        foreach (var reviewRecorded in Bools)
         {
             var facts = new QualityDecisionInput
             {
                 CheckDeclared = declared,
-                IndependentReviewDisapproved = disputed,
-                Attempts = Enumerable.Range(0, attempts).Select(_ => new QualityAttemptFact { Disposition = disposition, Failure = failure }).ToArray(),
+                IndependentReviewRecorded = reviewRecorded,
+                IndependentReviewDisapproved = disapproved,
+                Attempts = Enumerable.Range(0, attempts).Select(_ => new QualityAttemptFact { Disposition = disposition }).ToArray(),
             };
 
             var decision = QualityPolicy.Decide(facts);
@@ -276,16 +371,9 @@ public sealed class QualityPolicyTests
             decision.Mechanism.ShouldBeOneOf(defined);
             decision.Reason.ShouldNotBeNullOrWhiteSpace("every row authors evidence — a stop or a spend with no reason is the thing P22 forbids");
             evaluated++;
-
-            // Only a stop knows its marginal value (zero — no further spend can change the outcome). Every other
-            // mechanism reports null: unknown until 9c's ablation measures it, never an invented estimate.
-            if (decision.Mechanism == QualityMechanism.Stop)
-                decision.ExpectedMarginalValue.ShouldBe(0d);
-            else
-                decision.ExpectedMarginalValue.ShouldBeNull();
         }
 
-        evaluated.ShouldBe(7 * 5 * 2 * 3 * 2);
+        evaluated.ShouldBe(7 * 2 * 3 * 2 * 2);
     }
 
     [Fact]
@@ -301,20 +389,23 @@ public sealed class QualityPolicyTests
     [Fact]
     public void The_policy_thresholds_are_pinned()
     {
-        // These three numbers are the boundaries P22-9c's same-budget ablation moves. Pinned so a change is a
+        // These four numbers are the boundaries P22-9c's same-budget ablation moves. Pinned so a change is a
         // deliberate, reviewed edit rather than a silent recalibration of every run's quality spend.
         QualityPolicy.ConfidentReviewScoreFloor.ShouldBe(70);
         QualityPolicy.RepeatedFailureFloor.ShouldBe(2);
         QualityPolicy.SplitScaleFileFloor.ShouldBe(10);
+        QualityPolicy.SplitScaleUnitFloor.ShouldBe(2);
     }
 
-    /// <summary>One attempt with the given recorded classifications.</summary>
-    private static QualityDecisionInput Attempted(VerificationDisposition disposition, FailureKind? failure = null) =>
-        new() { Attempts = new[] { new QualityAttemptFact { Disposition = disposition, Failure = failure } } };
+    /// <summary>One attempt with the given recorded verdict.</summary>
+    private static QualityDecisionInput Attempted(VerificationDisposition disposition) => Repeated(1, disposition);
 
-    /// <summary><paramref name="count"/> attempts that all failed the work the same way.</summary>
-    private static QualityDecisionInput Repeated(int count, FailureKind failure) =>
-        new() { Attempts = Enumerable.Range(0, count).Select(_ => new QualityAttemptFact { Disposition = VerificationDisposition.Failed, Failure = failure }).ToArray() };
+    /// <summary><paramref name="count"/> attempts whose check failed.</summary>
+    private static QualityDecisionInput Failed(int count) => Repeated(count, VerificationDisposition.Failed);
+
+    /// <summary><paramref name="count"/> attempts that all recorded the same verdict.</summary>
+    private static QualityDecisionInput Repeated(int count, VerificationDisposition disposition) =>
+        new() { Attempts = Enumerable.Range(0, count).Select(_ => new QualityAttemptFact { Disposition = disposition }).ToArray() };
 
     private static readonly bool[] Bools = { false, true };
 }

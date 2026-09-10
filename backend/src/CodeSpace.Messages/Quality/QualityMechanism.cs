@@ -34,6 +34,6 @@ public enum QualityMechanism
     /// <summary>Spend nothing and hand the decision to a human — only ever on RECORDED evidence that a human verdict is required, never as a generic fallback.</summary>
     AskHuman,
 
-    /// <summary>Spend nothing more. Every stop carries its evidence in <see cref="QualityDecision.Reason"/> — the goal is met, the budget cannot buy another attempt, or the recorded no-progress cap is reached.</summary>
+    /// <summary>Spend nothing more. Every stop carries its evidence in <see cref="QualityDecision.Reason"/> — the goal is met, the only available evidence approves, a human waived verification, the budget cannot buy another attempt, or the recorded no-progress cap is reached. A waived stop is never a recorded pass (the amend-acceptance FATAL-1 invariant); the reason says which stop this is.</summary>
     Stop,
 }
