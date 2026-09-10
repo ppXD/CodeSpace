@@ -47,6 +47,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly bool _governanceEnabled;
     private readonly Guid? _approvalConversationId;
     private readonly McpCatalogMode _catalogMode;
+    private readonly ILogger _logger;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
     private readonly Task _acceptLoop;
@@ -69,6 +70,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _governanceEnabled = governanceEnabled;
         _approvalConversationId = approvalConversationId;
         _catalogMode = catalogMode;
+        _logger = logger;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _counters = new McpFabricCounters();
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -199,7 +201,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         var authorityContext = new McpAuthorityContext(_runId, _teamId, connectionScope.ServiceProvider.GetRequiredService<IAgentAuthorityCallGuard>(), _counters);
         var authorizedRegistry = new AuthorityCheckedToolRegistry(_registry, authorityContext);
-        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters);
+        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters, _logger);
 
         var handler = new AuthorizedMcpRequestHandler(protocol, authorityContext);
 
