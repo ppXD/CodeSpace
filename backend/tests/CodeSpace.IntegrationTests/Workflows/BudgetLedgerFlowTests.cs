@@ -254,6 +254,37 @@ public sealed class BudgetLedgerFlowTests
     }
 
     [Fact]
+    public async Task An_unbudgeted_kind_never_inflates_a_different_planes_committed_total()
+    {
+        // P15-5a: an Unbudgeted LlmCallScope records its spend for OBSERVABILITY under an "unbudgeted:" kind — it
+        // must never be admitted against a cap, and critically it must never be COUNTED toward a DIFFERENT plane's
+        // real committed total on the SAME run: an intentionally uncapped call (a plain workflow node) sharing a
+        // run with a REAL capped call (a nested supervisor turn) would otherwise silently eat that cap's headroom.
+        var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = Guid.NewGuid();
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+
+        var real = await ledger.ReserveAsync(runId, teamId, "llm:supervisor.decision", "real-1", estimateUsd: 3m, capUsd: 10m, "realized-v1", null, null, CancellationToken.None);
+        real.Admitted.ShouldBeTrue();
+
+        (await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None)).ShouldBe(3m);
+
+        // The observability row admits against an effectively-unlimited cap (LlmBudgetGuard never enforces one for
+        // Unbudgeted) and settles at a spend that WOULD have blown the real 10 cap if it counted.
+        var unbudgeted = await ledger.ReserveAsync(runId, teamId, $"{BudgetKinds.UnbudgetedPrefix}llm.complete", "unbudgeted-1", estimateUsd: 500m, capUsd: decimal.MaxValue, "realized-v1", null, null, CancellationToken.None);
+        unbudgeted.Admitted.ShouldBeTrue();
+        await ledger.SettleAsync(runId, teamId, $"{BudgetKinds.UnbudgetedPrefix}llm.complete", "unbudgeted-1", actualUsd: 500m, CancellationToken.None);
+
+        (await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None)).ShouldBe(3m,
+            "the unbudgeted row is real DB state (a reader can still see it by name), but it is EXCLUDED from the committed sum that admission checks against");
+
+        // A SECOND real reservation must still be judged only against the real 3m already committed, not 503m.
+        var second = await ledger.ReserveAsync(runId, teamId, "llm:supervisor.decision", "real-2", estimateUsd: 6m, capUsd: 10m, "realized-v1", null, null, CancellationToken.None);
+        second.Admitted.ShouldBeTrue("3 (real) + 6 ≤ 10 — the 500 unbudgeted row must never have been added to the committed total this checks against");
+    }
+
+    [Fact]
     public async Task Expiry_holds_the_claim_instead_of_silently_freeing_it()
     {
         var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);

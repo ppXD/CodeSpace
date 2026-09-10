@@ -35,9 +35,14 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed partial class SupervisorTurnService
 {
+    /// <summary>P15-5a: this drain's brain call ran BEFORE the turn's own "supervisor.decision" scope is pushed (<see cref="RunTurnAsync"/> arbitrates first, decides second), so — unfixed — it rode on whatever the OUTER caller left ambient (a plain workflow node's now-Unbudgeted scope), silently bypassing the run's own cost cap. Its own scope closes that: same ledger + cap as every other supervisor brain call this turn.</summary>
+    public const string ArbiterDecisionCallKind = "supervisor.arbitrate";
+
     /// <summary>Drain every pending child decision once this turn — auto-answer the confident ones, leave the rest for a human. A no-op when the run has no blocked children (the common path). Bounded: the list is the run's blocked children (≤ its spawned agents).</summary>
     internal async Task ArbitratePendingChildDecisionsAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
+        using var recording = Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, context.TeamId, context.NodeId, "", ArbiterDecisionCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices));
+
         foreach (var decision in context.PendingChildDecisions)
         {
             // Best-effort PER CHILD (matching the substrate's skip-a-bad-row resilience): the arbiter never throws except

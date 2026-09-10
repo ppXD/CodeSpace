@@ -183,6 +183,8 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope.NodeId.ShouldBe("agent-node");
         critic.ObservedScope.IterationKey.ShouldBe("agent-node#2", "the full cell key rides so a map-branch agent's critic is distinguishable");
         critic.ObservedScope.Kind.ShouldBe("agent.critic", "the executor's base kind — the real critic re-labels the recorded kind to the request's own on top of this cell");
+        critic.ObservedScope.UnbudgetedReason.ShouldNotBeNull(
+            "P15-5a: this executor has no IBudgetLedger reachable, so the scope is explicitly Unbudgeted rather than a silent Budget-less passthrough — LlmBudgetGuard would otherwise throw on the missing ledger");
         critic.ObservedRequest!.CallKind.ShouldBe(LlmStructuredCritic.OutputReviewCallKind,
             customMessage: "the OUTPUT review names its own kind at THIS call site — the Room's 'did anything check the result?' probe reads critic.output, and the plan/decision critics' generic critic.review must never satisfy it");
     }

@@ -1,5 +1,7 @@
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
+using CodeSpace.Messages.Exceptions;
+using Serilog;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -24,9 +26,16 @@ public sealed class LlmBudgetExceededException(string kind, decimal committedUsd
 
 /// <summary>
 /// Reserves an admission estimate before buffered and structured provider calls, then records complete known
-/// usage or retains an uncertain claim. Only scopes carrying both ledger and cap are guarded. The prompt heuristic
-/// and default output estimate are not wire upper bounds; provider-internal retries and direct streaming require
-/// their own request admission before this can be described as a hard cap on the bill.
+/// usage or retains an uncertain claim. Only scopes carrying both ledger and cap are guarded — a declared cap with
+/// no cap VALUE (<see cref="LlmCallScope.CapUsd"/> null) stays the deliberate no-cap-configured no-op it always
+/// was. The prompt heuristic and default output estimate are not wire upper bounds; provider-internal retries and
+/// direct streaming require their own request admission before this can be described as a hard cap on the bill.
+///
+/// <para><b>P15-5a fail-LOUD:</b> a scope with no <see cref="LlmCallScope.Budget"/> ledger wired at all is no
+/// longer a silent, unlogged passthrough (the old fail-open let a plane spend past its launch's cap forever) — it
+/// throws <see cref="UnscopedModelCallException"/>, a programming-error signal for a plane that forgot to thread
+/// its scope. A plane that legitimately has no launch marks itself <see cref="LlmCallScope.Unbudgeted"/> instead,
+/// which still passes through but is LOGGED and, when a ledger is carried, recorded under an "unbudgeted:" kind.</para>
 /// </summary>
 public static class LlmBudgetGuard
 {
@@ -38,7 +47,13 @@ public static class LlmBudgetGuard
 
     public static async Task<T> GuardedAsync<T>(LlmCallScope? scope, string model, string? systemPrompt, string? userPrompt, int? maxOutputTokens, Func<CancellationToken, Task<T>> call, Func<T, decimal?> actualUsd, CancellationToken cancellationToken)
     {
-        if (scope is not { Budget: { } budget, CapUsd: { } capUsd }) return await call(cancellationToken).ConfigureAwait(false);
+        if (scope is { UnbudgetedReason: { } reason })
+            return await UnbudgetedPassthroughAsync(scope, reason, model, systemPrompt, userPrompt, maxOutputTokens, call, actualUsd, cancellationToken).ConfigureAwait(false);
+
+        if (scope is not { Budget: { } budget })
+            throw new UnscopedModelCallException(scope?.Kind ?? "(unscoped)", model);
+
+        if (scope.CapUsd is not { } capUsd) return await call(cancellationToken).ConfigureAwait(false);
 
         var estimate = EstimateUsd(model, systemPrompt, userPrompt, maxOutputTokens, scope.ModelPrices);
 
@@ -77,6 +92,49 @@ public static class LlmBudgetGuard
             await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// P15-5a: the call always proceeds — an <see cref="LlmCallScope.Unbudgeted"/> plane declared it has no launch
+    /// cap to meter against. Never a silent passthrough though: this LOGS the plane + reason by name, and — when
+    /// the scope also carries a <see cref="LlmCallScope.Budget"/> ledger — records the spend under an
+    /// "unbudgeted:" kind (<see cref="BudgetKinds.UnbudgetedPrefix"/>) for observability. That kind is excluded
+    /// from every committed-sum query, so it can never be admitted-against or eat into a DIFFERENT plane's real
+    /// cap on the same run; an unpriceable model is never refused here either, since there is no cap to protect.
+    /// </summary>
+    private static async Task<T> UnbudgetedPassthroughAsync<T>(LlmCallScope scope, string reason, string model, string? systemPrompt, string? userPrompt, int? maxOutputTokens, Func<CancellationToken, Task<T>> call, Func<T, decimal?> actualUsd, CancellationToken cancellationToken)
+    {
+        Log.Warning("Model call {Kind} for model {Model} is Unbudgeted ({Reason}) — proceeding un-metered against any cap", scope.Kind, model, reason);
+
+        if (scope.Budget is not { } budget) return await call(cancellationToken).ConfigureAwait(false);
+
+        var kind = $"{BudgetKinds.UnbudgetedPrefix}{scope.Kind}";
+        var scopeKey = $"{scope.Kind}:{Guid.NewGuid():N}";
+        var estimate = EstimateUsd(model, systemPrompt, userPrompt, maxOutputTokens, scope.ModelPrices) ?? 0m;
+
+        await ReserveQuietlyAsync(budget, scope, kind, scopeKey, estimate, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var completion = await call(cancellationToken).ConfigureAwait(false);
+
+            await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd(completion), cancellationToken).ConfigureAwait(false);
+
+            return completion;
+        }
+        catch
+        {
+            await SettleQuietlyAsync(budget, scope, kind, scopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>An Unbudgeted observability record — never an admission gate (an effectively-unlimited cap, so it can never refuse), and a ledger failure here must never block or fault the call it is merely trying to describe.</summary>
+    private static async Task ReserveQuietlyAsync(IBudgetLedger budget, LlmCallScope scope, string kind, string scopeKey, decimal estimateUsd, CancellationToken cancellationToken)
+    {
+        try { await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimateUsd, decimal.MaxValue, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* torn down — nothing to reconcile since there is no cap this reservation protects */ }
+        catch { /* best-effort — see summary */ }
     }
 
     /// <summary>Legacy pre-call estimate: chars/3 input plus framing + the request's output bound or the committed default. Null when the model is unpriceable in EVERY table (per-row → env → built-in).</summary>

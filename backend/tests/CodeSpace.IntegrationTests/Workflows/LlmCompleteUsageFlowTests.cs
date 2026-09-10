@@ -128,6 +128,30 @@ public class LlmCompleteUsageFlowTests
         completed.GetProperty("usage").GetProperty("outputTokens").GetInt32().ShouldBe(19, "the completion usage is captured on the interaction row");
     }
 
+    [Fact]
+    public async Task Llm_complete_records_an_Unbudgeted_observability_row_never_a_silent_passthrough()
+    {
+        // P15-5a: a plain workflow node has no run-level cost cap of its own (WorkflowRun carries none — only a
+        // more specific caller, like a supervisor turn, knows its launch's cap). Before this fix the engine's
+        // node-level scope carried no Budget at all, so LlmBudgetGuard fell open SILENTLY. Now it is explicitly
+        // Unbudgeted: still never blocked, but LOGGED and recorded under an "unbudgeted:" ledger kind so an
+        // operator can see every un-metered call by name instead of it vanishing.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PricedModel, provider: DeterministicSynthLlmClient.ProviderTag);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, PricedModel);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var reservation = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).SingleAsync();
+
+        reservation.Kind.ShouldBe("unbudgeted:llm.complete", "the node's TypeKey names the plane in the kind, prefixed so no cap's committed sum ever counts it");
+        reservation.State.ShouldBe(CodeSpace.Core.Services.Workflows.Budget.BudgetReservationStates.Settled, "the call completed, so the observability record settles at its actual spend like any other");
+    }
+
     private async Task<Guid> CreateLlmWorkflowAsync(Guid teamId, Guid userId, string pinnedModel)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

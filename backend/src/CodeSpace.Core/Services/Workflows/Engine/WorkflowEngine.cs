@@ -3299,7 +3299,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // singleton RecordingLLMClientDecorator captures the interaction.* triple of ANY model call the node makes
             // (llm.complete, the plan-author's planner + critic, a future model-calling node) with ZERO per-node wiring.
             // A more-specific inner Push (e.g. the supervisor's per-turn "supervisor.decision") nests + wins for its call.
-            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader, CaptureRedactor: PersistenceSecretRedactor.FromScope(exec.Scope), Completeness: _completenessWriter));
+            //
+            // P15-5a: a plain node has no RUN-LEVEL cost cap of its own (WorkflowRun carries none) — only a more
+            // specific caller nested above (a supervisor turn, a grader) knows its launch's cap and pushes its own
+            // budgeted scope, which wins. So this baseline scope is explicitly Unbudgeted rather than leaving Budget
+            // unset: LlmBudgetGuard now throws on a missing ledger, and a silent fail-open here is exactly the bug
+            // this slice closes. The ledger still rides (this engine already resolves one for map admission below),
+            // so an Unbudgeted call from a plain node is still LOGGED and recorded for observability.
+            using var recording = Llm.LlmCallContext.Push(new Llm.LlmCallScope(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, exec.Node.TypeKey, _recordLogger, _offloader, Budget: _lifetimeScope.Resolve<Budget.IBudgetLedger>(), CaptureRedactor: PersistenceSecretRedactor.FromScope(exec.Scope), Completeness: _completenessWriter).Unbudgeted("plain workflow node has no run-level cost cap; a nested caller (e.g. a supervisor turn) pushes its own budgeted scope that wins for its own calls"));
 
             var result = await exec.Runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
             return (result, null);

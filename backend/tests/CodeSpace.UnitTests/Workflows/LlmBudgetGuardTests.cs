@@ -1,13 +1,17 @@
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Exceptions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
 /// 🟢 Unit: the W-hard atomic brain-plane guard — reserve-before-call, settle-at-actual, at the one funnel every
-/// model call rides. Pins: a scope without a ledger+cap (every pre-slice pusher) passes through untouched; a
+/// model call rides. Pins: a scope WITH a ledger but no cap value (an operator's deliberate no-cap-configured
+/// launch) passes through untouched, byte-identical to before; a scope with NO ledger at all — or no scope —
+/// is a P15-5a programming-error signal and THROWS instead of the old silent fail-open, unless the caller marked
+/// itself explicitly Unbudgeted, which still passes through but is recorded under an "unbudgeted:" ledger kind; a
 /// refused admission throws BEFORE the model is ever invoked (the overshoot never happens); an admitted call
 /// settles at its actual spend; a faulted call settles pessimistically (null actual = at the reserve); an
 /// unpriceable model UNDER A CAP is refused before the call (D1 fail-closed) while an uncapped one passes through,
@@ -20,15 +24,99 @@ public class LlmBudgetGuardTests
         new(Guid.NewGuid(), Guid.NewGuid(), "sup", "k", "supervisor.decision", null!, null!, budget, cap);
 
     [Fact]
-    public async Task A_scope_without_a_ledger_or_cap_passes_through_untouched()
+    public async Task A_ledgered_scope_with_no_cap_value_passes_through_untouched()
     {
+        // The fail-closed / fail-loud rules below are both scoped to "this plane never wired a ledger at all".
+        // An operator who simply configured no cap on an otherwise-instrumented launch is not that — it is the
+        // ordinary, common, BYTE-IDENTICAL no-op it always was (SupervisorBounds branches on MaxCostUsd being
+        // null the same way), so it must never start throwing.
         var ledger = new RecordingLedger(admit: true);
 
-        (await LlmBudgetGuard.GuardedAsync(Scope(null, 5m), "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.1m, CancellationToken.None)).ShouldBe(42);
         (await LlmBudgetGuard.GuardedAsync(Scope(ledger, null), "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.1m, CancellationToken.None)).ShouldBe(42);
-        (await LlmBudgetGuard.GuardedAsync(scope: null, "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.1m, CancellationToken.None)).ShouldBe(42);
 
-        ledger.Reserves.ShouldBe(0, "no cap ⇒ no reservation — byte-identical for every pre-slice pusher");
+        ledger.Reserves.ShouldBe(0, "no cap ⇒ no reservation — byte-identical for an instrumented-but-uncapped launch");
+    }
+
+    [Fact]
+    public async Task A_null_scope_throws_UnscopedModelCall_instead_of_silently_passing_through()
+    {
+        // P15-5a: GuardedAsync is only ever called by the two recording decorators, and only AFTER they already
+        // confirmed LlmCallContext.Current was non-null — so a null scope reaching here in production would mean
+        // a THIRD, unguarded call site. This pins the guard's own defensive contract in isolation.
+        var ex = await Should.ThrowAsync<UnscopedModelCallException>(() =>
+            LlmBudgetGuard.GuardedAsync(scope: null, "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.1m, CancellationToken.None));
+
+        ex.Plane.ShouldBe("(unscoped)");
+        ex.CallSite.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public async Task A_scope_with_no_budget_ledger_throws_UnscopedModelCall_naming_the_plane()
+    {
+        // The exact defect this slice closes: a plane that pushed a real run/node correlation but never threaded
+        // a budget ledger through used to spend past its launch's cap unmetered AND unlogged. Now it is a loud,
+        // typed programming-error signal instead — regardless of whatever CapUsd happens to carry.
+        var called = false;
+
+        var ex = await Should.ThrowAsync<UnscopedModelCallException>(() =>
+            LlmBudgetGuard.GuardedAsync(Scope(null, 5m), "claude-opus-4-8", "s", "u", 100, _ => { called = true; return Task.FromResult(42); }, _ => 0.1m, CancellationToken.None));
+
+        called.ShouldBeFalse("the whole point: an unscoped call is refused before it can spend anything");
+        ex.Plane.ShouldBe("supervisor.decision");
+        ex.CallSite.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public async Task An_unbudgeted_scope_passes_through_and_records_an_observability_row()
+    {
+        // A plane that legitimately has no launch (operator calibration, a plain workflow node, a benchmark
+        // cell's own cap) marks itself Unbudgeted instead of leaving Budget unset — still never blocked, but no
+        // longer a silent passthrough: the spend is recorded under an "unbudgeted:" kind for observability.
+        var ledger = new RecordingLedger(admit: true);
+        var scope = Scope(ledger, cap: null).Unbudgeted("no launch for this plane");
+
+        (await LlmBudgetGuard.GuardedAsync(scope, "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.33m, CancellationToken.None)).ShouldBe(42);
+
+        ledger.Reserves.ShouldBe(1, "Unbudgeted still records — the fix is visibility, not enforcement");
+        ledger.LastReserveKind.ShouldStartWith(BudgetKinds.UnbudgetedPrefix);
+        ledger.LastReserveCapUsd.ShouldBe(decimal.MaxValue, "an observability record is never an admission gate");
+        ledger.LastSettleActual.ShouldBe(0.33m);
+    }
+
+    [Fact]
+    public async Task An_unbudgeted_scope_with_no_ledger_at_all_still_passes_through()
+    {
+        // Some Unbudgeted planes (e.g. a Hangfire-job executor with no IBudgetLedger reference reachable) have
+        // nothing to record into. The call must still proceed — logging is the only thing it can guarantee.
+        var scope = Scope(null, null).Unbudgeted("no ledger reachable from this executor");
+
+        (await LlmBudgetGuard.GuardedAsync(scope, "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(7), _ => 0.1m, CancellationToken.None)).ShouldBe(7);
+    }
+
+    [Fact]
+    public async Task An_unbudgeted_scope_never_refuses_an_unpriceable_model()
+    {
+        // There is no cap to protect here, so D1's fail-closed refusal (UnpricedModelUnderCapException) must
+        // never fire for an Unbudgeted call — unlike the same model under a REAL cap (see the sibling test below).
+        var ledger = new RecordingLedger(admit: true);
+        var scope = Scope(ledger, cap: null).Unbudgeted("no launch for this plane");
+
+        (await LlmBudgetGuard.GuardedAsync(scope, "totally-unknown-model", "s", "u", 100, _ => Task.FromResult(1), _ => null, CancellationToken.None)).ShouldBe(1);
+
+        ledger.Reserves.ShouldBe(1, "still recorded, at the best-effort $0 estimate for an unpriced model");
+    }
+
+    [Fact]
+    public async Task An_unbudgeted_faulted_call_settles_pessimistically_and_rethrows()
+    {
+        var ledger = new RecordingLedger(admit: true);
+        var scope = Scope(ledger, cap: null).Unbudgeted("no launch for this plane");
+
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            LlmBudgetGuard.GuardedAsync<int>(scope, "claude-opus-4-8", "s", "u", 100, _ => throw new InvalidOperationException("boom"), _ => 0m, CancellationToken.None));
+
+        ledger.Settles.ShouldBe(1);
+        ledger.LastSettleActual.ShouldBeNull("actual unknowable ⇒ the null-actual settle holds the observability reserve, same as the metered path");
     }
 
     [Fact]
@@ -196,6 +284,8 @@ public class LlmBudgetGuardTests
         public int Reserves;
         public int Settles;
         public decimal? LastSettleActual;
+        public string? LastReserveKind;
+        public decimal? LastReserveCapUsd;
 
         public DateTimeOffset? LastExpiresAt;
 
@@ -203,6 +293,8 @@ public class LlmBudgetGuardTests
         {
             Reserves++;
             LastExpiresAt = expiresAt;
+            LastReserveKind = kind;
+            LastReserveCapUsd = capUsd;
             return Task.FromResult(new BudgetAdmission(admit, admit ? Guid.NewGuid() : null, 4.9m, capUsd, admit ? null : "cap") { IsReplay = replay });
         }
 

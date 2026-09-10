@@ -173,6 +173,36 @@ public class SupervisorArbiterDrainTests
     }
 
     [Fact]
+    public async Task The_arbiter_call_is_metered_against_the_runs_own_budget_ledger_and_cap()
+    {
+        // P15-5a: before this fix, the drain ran BEFORE the turn's own "supervisor.decision" scope is pushed, so
+        // it rode on whatever the OUTER caller left ambient (nothing here, or a plain workflow node's now-Unbudgeted
+        // scope in production) — a concurrent brain call that could silently bypass the run's cost cap. Now every
+        // arbitration carries its own capped scope: same ledger + cap as the turn's other supervisor brain calls.
+        CodeSpace.Core.Services.Workflows.Llm.LlmCallScope? observed = null;
+        var arbiter = new FakeDecisionArbiter(_ =>
+        {
+            observed = CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current;
+            return ArbiterVerdict.Escalate("test");
+        });
+        var ledger = new AdmitAllBudgetLedger();
+        var runId = Guid.NewGuid();
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), ledger, new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
+
+        var context = new SupervisorTurnContext { SupervisorRunId = runId, TeamId = TeamId, NodeId = "sup", Goal = "ship it", SupervisorModelId = BrainModelId, MaxCostUsd = 7.5m, PendingChildDecisions = new[] { Pending() } };
+
+        await service.ArbitratePendingChildDecisionsAsync(context, CancellationToken.None);
+
+        observed.ShouldNotBeNull("the arbiter must see a pushed scope, not an absent ambient context");
+        observed!.Budget.ShouldBeSameAs(ledger, "the SAME ledger the turn's own decision reserves against");
+        observed.CapUsd.ShouldBe(7.5m, "the run's own cost cap — a concurrent arbiter call must be judged against it, not pass through uncapped");
+        observed.Kind.ShouldBe(SupervisorTurnService.ArbiterDecisionCallKind);
+        observed.RunId.ShouldBe(runId);
+        observed.TeamId.ShouldBe(TeamId);
+        observed.UnbudgetedReason.ShouldBeNull("a real launch cap is available here — this must never fall back to Unbudgeted");
+    }
+
+    [Fact]
     public async Task Cancellation_propagates_it_is_not_swallowed()
     {
         using var cts = new CancellationTokenSource();
