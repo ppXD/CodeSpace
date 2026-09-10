@@ -77,14 +77,24 @@ public sealed partial class SupervisorTurnService
         LogAnswerOutcome(decision, result);
     }
 
-    /// <summary>Log an escalate verdict — honestly: a GATEWAY-caused escalate (<see cref="ArbiterEscalateCause.GatewayInfra"/>) is a WARNING naming the gateway as the cause (an ops-visible signal, distinct from the routine human-in-the-loop case), never rendered as if the model looked at the decision and chose to punt it.</summary>
+    /// <summary>Log an escalate verdict — honestly: an INFRA-caused escalate (<see cref="ArbiterEscalateCause.GatewayInfra"/> the gateway, <see cref="ArbiterEscalateCause.BudgetRefused"/> the run's own budget) is a WARNING naming that cause (an ops-visible signal, distinct from the routine human-in-the-loop case), never rendered as if the model looked at the decision and chose to punt it.</summary>
     private void LogEscalated(PendingDecision decision, ArbiterVerdict verdict)
     {
-        if (verdict.Cause == ArbiterEscalateCause.GatewayInfra)
-            _logger.LogWarning("Supervisor arbiter ESCALATED child decision {DecisionId} (agent run {AgentRunId}) to a human — gateway unavailable, left in the queue: {Rationale}", decision.Id, decision.AgentRunId, verdict.Rationale);
+        var infraCause = InfraCausePhrase(verdict.Cause);
+
+        if (infraCause is not null)
+            _logger.LogWarning("Supervisor arbiter ESCALATED child decision {DecisionId} (agent run {AgentRunId}) to a human — {InfraCause}, left in the queue: {Rationale}", decision.Id, decision.AgentRunId, infraCause, verdict.Rationale);
         else
             _logger.LogInformation("Supervisor arbiter ESCALATED child decision {DecisionId} (agent run {AgentRunId}) to a human — left in the queue: {Rationale}", decision.Id, decision.AgentRunId, verdict.Rationale);
     }
+
+    /// <summary>The ops-visible phrase for an INFRA escalate cause, or null for every routine (model-side) reason — see <see cref="LogEscalated"/>.</summary>
+    private static string? InfraCausePhrase(ArbiterEscalateCause cause) => cause switch
+    {
+        ArbiterEscalateCause.GatewayInfra => "gateway unavailable",
+        ArbiterEscalateCause.BudgetRefused => "its own brain call was refused by the run's budget",
+        _ => null,
+    };
 
     /// <summary>Log how an auto-answer landed: Answered = auto-resolved; anything else left the decision for a human — RequiresHuman = the floor overrode the arbiter (defense-in-depth); AlreadyResolved/NotFound = a human/deadline raced it (benign); Invalid = a mis-shaped arbiter answer.</summary>
     private void LogAnswerOutcome(PendingDecision decision, AnswerDecisionResult result)

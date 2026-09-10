@@ -79,8 +79,20 @@ public class LlmBudgetGuardTests
 
         ledger.Reserves.ShouldBe(1, "Unbudgeted still records — the fix is visibility, not enforcement");
         ledger.LastReserveKind.ShouldStartWith(BudgetKinds.UnbudgetedPrefix);
-        ledger.LastReserveCapUsd.ShouldBe(decimal.MaxValue, "an observability record is never an admission gate");
+        ledger.LastReserveCapUsd.ShouldBeNull("a null cap — never a poison sentinel a reader could mistake for a real committed cap");
         ledger.LastSettleActual.ShouldBe(0.33m);
+    }
+
+    [Fact]
+    public void Marking_a_scope_Unbudgeted_clears_any_real_cap_it_was_carrying()
+    {
+        // A scope that ALSO carries a real Budget + CapUsd would otherwise take the structured decorator's
+        // native-physical accounting path (gated on Budget-and-CapUsd both non-null), which enforces the cap for
+        // real and never reads UnbudgetedReason at all — silently contradicting "Unbudgeted never throws". Clearing
+        // CapUsd here makes that guarantee true by construction rather than by caller convention.
+        var scope = Scope(new RecordingLedger(admit: true), cap: 5m).Unbudgeted("no launch for this plane");
+
+        scope.CapUsd.ShouldBeNull();
     }
 
     [Fact]
@@ -289,7 +301,7 @@ public class LlmBudgetGuardTests
 
         public DateTimeOffset? LastExpiresAt;
 
-        public Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
+        public Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
         {
             Reserves++;
             LastExpiresAt = expiresAt;

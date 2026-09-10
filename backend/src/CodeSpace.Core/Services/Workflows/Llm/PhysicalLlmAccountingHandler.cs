@@ -43,7 +43,7 @@ public sealed class PhysicalLlmAccountingHandler(IOptions<PhysicalLlmObservation
         try { admission = await operation.Ledger.AdmitPhysicalAsync(invocation, cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { throw new PhysicalLlmAccountingException("Physical admission could not be confirmed; the provider POST was not sent.", ex); }
-        if (!admission.Admitted || admission.IsReplay) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, admission.CapUsd, admission.IsReplay ? "A physical invocation identity cannot authorize a second Send." : admission.Reason);
+        if (!admission.Admitted || admission.IsReplay) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, scope.CapUsd!.Value, admission.IsReplay ? "A physical invocation identity cannot authorize a second Send." : admission.Reason);
 
         var receipt = new PhysicalLlmSettlement { InvocationId = invocation.InvocationId, RunId = scope.RunId, TeamId = scope.TeamId, Status = "Indeterminate" };
         HttpResponseMessage? response = null;

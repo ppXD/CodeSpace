@@ -55,8 +55,8 @@ public sealed record LlmCallScope(
     /// <summary>This scope viewed for ONE model call: the same identity and collaborators, its own masking observation. The recording decorators take it before capturing, so a call whose prompt carried a secret cannot report the next call on the same node scope as masked.</summary>
     public LlmCallScope ForOneCall() => this with { Masking = new ModelCallCaptureMasking() };
 
-    /// <summary>Mark this scope explicitly Unbudgeted — see <see cref="UnbudgetedReason"/>. Never throws in <see cref="LlmBudgetGuard.GuardedAsync{T}"/>, regardless of whether <see cref="Budget"/> or <see cref="CapUsd"/> are set.</summary>
-    public LlmCallScope Unbudgeted(string reason) => this with { UnbudgetedReason = reason };
+    /// <summary>Mark this scope explicitly Unbudgeted — see <see cref="UnbudgetedReason"/>. Never throws in <see cref="LlmBudgetGuard.GuardedAsync{T}"/> regardless of whether <see cref="Budget"/> is set: this ALSO clears <see cref="CapUsd"/>, because a scope carrying both a ledger and a real cap value would otherwise take the <see cref="RecordingStructuredLLMClientDecorator"/>'s native-physical accounting path (gated on <c>Budget is not null and CapUsd is not null</c>), which enforces the cap for real and never reads <see cref="UnbudgetedReason"/> at all.</summary>
+    public LlmCallScope Unbudgeted(string reason) => this with { UnbudgetedReason = reason, CapUsd = null };
 }
 
 public static class LlmCallContext

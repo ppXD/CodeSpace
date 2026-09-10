@@ -31,7 +31,7 @@ public static class BudgetKinds
     public const string UnbudgetedPrefix = "unbudgeted:";
 }
 
-public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal CommittedUsd, decimal CapUsd, string? Reason)
+public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal CommittedUsd, decimal? CapUsd, string? Reason)
 {
     /// <summary>A lookup of an existing logical claim, never permission for a second physical provider request.</summary>
     public bool IsReplay { get; init; }
@@ -40,8 +40,8 @@ public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal
 
 public interface IBudgetLedger
 {
-    /// <summary>Atomically reserve an estimate under the cap, serialized per run. This bounds admission commitments; it bounds the eventual provider bill only when the estimate is a trustworthy upper bound. Idempotent for the same run, team and reservation identity.</summary>
-    Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken);
+    /// <summary>Atomically reserve an estimate under the cap, serialized per run. This bounds admission commitments; it bounds the eventual provider bill only when the estimate is a trustworthy upper bound. Idempotent for the same run, team and reservation identity. A null <paramref name="capUsd"/> records an unbounded observability claim that never refuses (an <c>Unbudgeted</c> plane) — never a real admission gate.</summary>
+    Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken);
 
     /// <summary>Record known actual spend exactly. Null actual keeps the reserved claim and records Indeterminate, never an invented bill. A later known receipt supersedes uncertain or released bookkeeping; a confirmed settlement is idempotent.</summary>
     Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken);
@@ -76,10 +76,10 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
     public BudgetLedger(CodeSpaceDbContext db) => _db = db;
 
-    public async Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
+    public async Task<BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(estimateUsd);
-        ArgumentOutOfRangeException.ThrowIfNegative(capUsd);
+        if (capUsd is < 0) throw new ArgumentOutOfRangeException(nameof(capUsd));
         await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
         await TakeRunLockAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
@@ -99,10 +99,10 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
         var committed = await CommittedInTxAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        if (committed + estimateUsd > capUsd)
+        if (capUsd is { } cap && committed + estimateUsd > cap)
         {
             await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new BudgetAdmission(false, null, committed, capUsd, $"admission would commit {committed + estimateUsd:F4} past the {capUsd:F4} cap");
+            return new BudgetAdmission(false, null, committed, capUsd, $"admission would commit {committed + estimateUsd:F4} past the {cap:F4} cap");
         }
 
         var reservation = new BudgetReservation

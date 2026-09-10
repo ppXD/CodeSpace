@@ -72,8 +72,8 @@ public static class LlmBudgetGuard
 
         var admission = await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimate.Value, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false);
 
-        if (!admission.Admitted) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, admission.CapUsd, admission.Reason);
-        if (admission.IsReplay) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, admission.CapUsd, "An existing logical reservation cannot authorize another provider request.");
+        if (!admission.Admitted) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, capUsd, admission.Reason);
+        if (admission.IsReplay) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, capUsd, "An existing logical reservation cannot authorize another provider request.");
 
         try
         {
@@ -129,10 +129,10 @@ public static class LlmBudgetGuard
         }
     }
 
-    /// <summary>An Unbudgeted observability record — never an admission gate (an effectively-unlimited cap, so it can never refuse), and a ledger failure here must never block or fault the call it is merely trying to describe.</summary>
+    /// <summary>An Unbudgeted observability record — never an admission gate (a null cap, so it can never refuse and never poisons a cap derived from this run's OTHER reservations), and a ledger failure here must never block or fault the call it is merely trying to describe.</summary>
     private static async Task ReserveQuietlyAsync(IBudgetLedger budget, LlmCallScope scope, string kind, string scopeKey, decimal estimateUsd, CancellationToken cancellationToken)
     {
-        try { await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimateUsd, decimal.MaxValue, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false); }
+        try { await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimateUsd, capUsd: null, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) { /* torn down — nothing to reconcile since there is no cap this reservation protects */ }
         catch { /* best-effort — see summary */ }
     }

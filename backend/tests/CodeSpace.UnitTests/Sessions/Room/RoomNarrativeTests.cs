@@ -670,6 +670,20 @@ public class RoomNarrativeTests
     }
 
     [Fact]
+    public void Budget_row_shows_unbudgeted_spend_as_its_own_headline_figure_never_a_fake_cap()
+    {
+        // F1: a plain run with ONLY Unbudgeted model calls (no route cap, no other budgeted reservation) carries
+        // no CapUsd/CommittedUsd at all — RoomProjector no longer derives either from an "unbudgeted:" row. Its
+        // spend still surfaces, as its own headline figure, so the row does not just go silent.
+        var facts = new RoomTurnFacts { Budget = new RoomBudgetSummary { UnbudgetedUsd = 0.02m } };
+
+        var narrative = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Running, facts: facts);
+        var budget = narrative.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+
+        budget.Detail.ShouldBe("$0.0200 unbudgeted", "never a cap figure — nothing here was ever an admission claim");
+    }
+
+    [Fact]
     public void Agent_cards_carry_their_own_files_and_the_final_answer_attributes_a_file_to_its_producer()
     {
         var a1 = Guid.NewGuid();
