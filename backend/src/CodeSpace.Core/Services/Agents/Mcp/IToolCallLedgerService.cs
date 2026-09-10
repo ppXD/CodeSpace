@@ -37,9 +37,11 @@ public interface IToolCallLedgerService
     /// (<see cref="RecordTerminalAsync"/>): a superseded worker's own MCP connection would otherwise still be able to
     /// claim + execute a tool the run's CURRENT owner never asked for, because neither the unique-key dedup nor the
     /// authority gate upstream (<c>ExecutionAuthorityService.EnsureAgentActionAsync</c>) checks WHICH owner is
-    /// calling — only whether the run is non-terminal. <see cref="AuthorizedMcpRequestHandler"/>'s "governed right
-    /// now" boundary already converts any exception here into a safe, retryable tool-result error, so this failing
-    /// closed never drops the MCP connection or leaks the refusal as an ungoverned side effect.
+    /// calling — only whether the run is non-terminal. <see cref="McpRequestHandler.HandleAsync"/>'s <c>tools/call</c>
+    /// dispatch already converts any exception here into a safe, retryable tool-result error (the catch itself lives
+    /// in the private <c>DispatchToolCallAsync</c> it calls), so this failing closed never drops the MCP connection or
+    /// leaks the refusal as an ungoverned side effect. (<see cref="AuthorizedMcpRequestHandler"/> only pre-checks
+    /// <c>Guard.CheckAsync</c> before delegating to the inner handler — it has no catch of its own.)
     /// </para>
     /// </summary>
     Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken cancellationToken);
