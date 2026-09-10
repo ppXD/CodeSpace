@@ -641,13 +641,18 @@ public sealed class RealModelGateTests
     [InlineData(null, false)]
     [InlineData("", false)]
     [InlineData("NotARealCategory", false)]
+    [InlineData("0", false)]                          // Enum.TryParse happily parses a numeric string as Transient (0) — not a real persisted category
+    [InlineData("Transient,RateLimited", false)]       // parses as the OR of the underlying values (0 | 1 = 1 = RateLimited) — not a real persisted category
+    [InlineData("transient", false)]                   // case-sensitive by design — a lowercase near-miss is not a real persisted category, not a typo to tolerate
     public void IsGatewayInfraCategory_matches_the_exception_based_classification_for_a_bare_category_name(string? category, bool isInfra)
     {
         // A consumer that holds only a classified STRING (a persisted external_call.failed record's `category` field,
         // or an effort classifier's FallbackReason) — not the exception, and possibly from a sibling test assembly that
         // cannot see this class's internal members — must classify identically to the exception path via a throwaway
         // LlmApiException, so the two vocabularies can never drift apart. An unparseable/null/blank name gates (the
-        // same "an unrecognised failure gates" default every other classifier here uses).
+        // same "an unrecognised failure gates" default every other classifier here uses), and so does a numeric string
+        // or a comma-combined list that Enum.TryParse would otherwise accept — the parsed value must round-trip back
+        // to the exact input string.
         RealModelGate.IsGatewayInfraCategory(category).ShouldBe(isInfra);
     }
 

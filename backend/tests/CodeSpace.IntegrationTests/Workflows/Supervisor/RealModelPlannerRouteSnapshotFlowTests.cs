@@ -61,7 +61,7 @@ public sealed class RealModelPlannerRouteSnapshotFlowTests
         // NOTHING measured about real routing — a non-gating skip, not the behavioural miss a heuristic fallback with an
         // unclassified (or no) reason still is.
         if (decision.ClassifierKind != LlmEffortClassifier.ClassifierKind && decision.FallbackReason is { } reason && RealModelGate.IsGatewayInfraCategory(reason))
-            throw RealModelGate.ReportSkipped(provider, $"the structured-LLM effort classifier fell back to '{decision.ClassifierKind}' on a gateway-infra fault ({reason})");
+            throw new SkipException(RealModelGate.ReportInfraSkip(provider, new TimeoutException($"the structured-LLM effort classifier fell back to '{decision.ClassifierKind}' on a gateway-infra fault ({reason})"), Environment.GetEnvironmentVariable(RealModelGate.StepSummaryEnvVar)));
 
         decision.ClassifierKind.ShouldBe(LlmEffortClassifier.ClassifierKind, $"heuristic fallback is not a real-model success{(decision.FallbackReason is { } r ? $" (fallback reason '{r}' is NOT a gateway-infra signature — a real regression)" : "")}");
         classifier.Calls.ShouldBe(1);

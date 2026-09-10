@@ -137,25 +137,46 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         // A transient/rate-limited LLM fault PARKS the llm.complete node (InfraPark, A2) rather than failing the run —
         // the run never reaches WorkflowRunStatus.Failure, so the branch above never sees it. The external_call.failed
         // record itself is the only place this shows up, so read ITS classified `category` field (never the run status)
-        // to tell a gateway/transport fault apart from a real regression. A started call with NO terminal record at
-        // all (neither completed nor failed) is NOT covered here — that stays a real footer bug below.
-        if (extStarted.Count == 1 && extFailed.Count == 1 && extCompleted.Count == 0)
+        // to tell a gateway/transport fault apart from a real regression.
+        //
+        // Paired by CorrelationId rather than a raw count: today's single-attempt park always lands exactly
+        // extStarted=1/extFailed=1/extCompleted=0, because NodeObservability's catch persists `.failed` and
+        // RE-THROWS (NodeObservability.cs:107-112 non-streamed / 139-143 streamed) BEFORE LlmCompleteNode's own
+        // `catch (LlmApiException fault) when (InfraPark.IsParkable(fault))` (LlmCompleteNode.cs:108) turns that
+        // rethrow into a park — the failed row is always written before the node suspends. A raw count assertion
+        // would misread a future resumed retry (e.g. 2 started/1 completed/1 failed) as this same regression, so
+        // assert the pairing invariant instead: every `.started` has exactly one terminal (`.completed` or
+        // `.failed`) sharing its correlation id (a started call with none at all is a real footer bug), and the
+        // LAST terminal overall is a `.completed`.
+        var terminals = extCompleted.Select(r => (Record: r, Completed: true))
+            .Concat(extFailed.Select(r => (Record: r, Completed: false)))
+            .OrderBy(t => t.Record.Sequence)
+            .ToList();
+
+        if (extStarted.Count == 0 || terminals.Count == 0)
+            return (false, $"{Provider} '{model}': expected at least one external_call.started + terminal record, saw {extStarted.Count} started / {terminals.Count} terminal");
+
+        foreach (var started in extStarted)
         {
-            var category = ReadCategory(extFailed[0].PayloadJson);
-
-            if (RealModelGate.IsGatewayInfraCategory(category))
-                throw new TimeoutException($"the llm.complete external call failed with a classified gateway-infra category '{category}' (NON-GATING infra skip): {extFailed[0].PayloadJson}");
-
-            return (false, $"{Provider} '{model}': the llm.complete external call FAILED and its category ('{category ?? "none"}') is NOT a gateway-infra signature — a real regression: {extFailed[0].PayloadJson}");
+            var pairedCount = terminals.Count(t => started.CorrelationId is not null && t.Record.CorrelationId == started.CorrelationId);
+            if (pairedCount != 1)
+                return (false, $"{Provider} '{model}': external_call.started (correlation={started.CorrelationId}) has {pairedCount} terminal record(s) sharing its correlation id, expected exactly 1");
         }
 
-        if (extStarted.Count != 1 || extCompleted.Count != 1)
-            return (false, $"{Provider} '{model}': expected exactly one external_call.started + one .completed, saw {extStarted.Count}/{extCompleted.Count}");
+        var lastTerminal = terminals[^1];
 
-        if (extStarted[0].CorrelationId is null || extStarted[0].CorrelationId != extCompleted[0].CorrelationId)
-            return (false, $"{Provider} '{model}': the external_call pair is not correlated (started={extStarted[0].CorrelationId}, completed={extCompleted[0].CorrelationId})");
+        if (!lastTerminal.Completed)
+        {
+            var category = ReadCategory(lastTerminal.Record.PayloadJson);
 
-        var extPayload = JsonDocument.Parse(extStarted[0].PayloadJson).RootElement;
+            if (RealModelGate.IsGatewayInfraCategory(category))
+                throw new TimeoutException($"the llm.complete external call failed with a classified gateway-infra category '{category}' (NON-GATING infra skip): {lastTerminal.Record.PayloadJson}");
+
+            return (false, $"{Provider} '{model}': the llm.complete external call FAILED and its category ('{category ?? "none"}') is NOT a gateway-infra signature — a real regression: {lastTerminal.Record.PayloadJson}");
+        }
+
+        var lastStarted = extStarted.Single(s => s.CorrelationId == lastTerminal.Record.CorrelationId);
+        var extPayload = JsonDocument.Parse(lastStarted.PayloadJson).RootElement;
         var target = extPayload.TryGetProperty("target", out var t) ? t.GetString() : null;
         var method = extPayload.TryGetProperty("method", out var m) ? m.GetString() : null;
         var expectedTarget = $"{Provider.ToLowerInvariant()}:{model}";
