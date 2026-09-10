@@ -57,8 +57,19 @@ public interface INativeRecordPlane
     /// <summary>Persist one batch of captured frames, the events projected from them and the model calls those frames record, in ONE transaction — so a projection can never be durable while the frame it cites is not.</summary>
     Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken);
 
-    /// <summary>Record how this round's physical process ended: <see cref="HarnessProcessAttemptState.Exited"/> with the code when it is known, <see cref="HarnessProcessAttemptState.Lost"/> with a reason when it is not.</summary>
-    Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken);
+    /// <summary>
+    /// Record how this round's physical process ended: <see cref="HarnessProcessAttemptState.Exited"/> with the code
+    /// when it is known, <see cref="HarnessProcessAttemptState.Lost"/> with a reason when it is not — but only while
+    /// <paramref name="expectedEpoch"/> is still the run's fence. A no-op (logged, never thrown — this plane's
+    /// failures never change what an Agent Run resolves to) when the run was reclaimed since this opening started:
+    /// the attempt this caller thinks it is closing may be the very one a re-attaching worker is now observing
+    /// (<see cref="INativeRecordExecutionPlane.ReopenAsync"/> hands it the SAME <c>AttemptId</c>), so closing it here
+    /// would stamp a live process Lost/Exited out from under the worker that reclaimed it. Deliberately the RUN's
+    /// current fence, not the attempt's own immutable <c>WorkerFenceEpoch</c> — that one is the immutable fence that
+    /// LAUNCHED the process, so demanding it would leave every attempt a re-attach observes unclosable (mirrors
+    /// <see cref="INativeRecordExecutionPlane"/>'s own closers).
+    /// </summary>
+    Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -171,7 +182,7 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
         await CommitAsync(db, batch, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken)
+    public async Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken)
     {
         var closedAt = DateTimeOffset.UtcNow;
 
@@ -180,8 +191,12 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
 
         // A pure guarded UPDATE rather than a tracked save: the attempt's own AFTER-insert trigger already advanced
         // its parent execution behind EF's cached xmin, so a tracked round trip would fight a row it did not write.
-        await db.WorkflowRunHarnessProcessAttempt
+        // Fenced on the RUN's current epoch (not the attempt's own immutable WorkerFenceEpoch — see the interface
+        // doc): a re-attach hands a fresh worker the SAME AttemptId to resume observing, so a superseded worker's own
+        // ordinary happy-path close must not land over it.
+        var closed = await db.WorkflowRunHarnessProcessAttempt
             .Where(attempt => attempt.TeamId == handle.TeamId && attempt.Id == handle.AttemptId && attempt.State == HarnessProcessAttemptState.Running)
+            .Where(attempt => db.AgentRun.Any(run => run.Id == handle.AgentRunId && run.TeamId == handle.TeamId && run.FenceEpoch == expectedEpoch))
             .ExecuteUpdateAsync(set => set
                 .SetProperty(attempt => attempt.State, exitCode is null ? HarnessProcessAttemptState.Lost : HarnessProcessAttemptState.Exited)
                 .SetProperty(attempt => attempt.ExitCode, exitCode)
@@ -192,6 +207,9 @@ public sealed partial class NativeRecordPlane : INativeRecordPlane, IScopedDepen
                 .SetProperty(attempt => attempt.LastModifiedAt, closedAt)
                 .SetProperty(attempt => attempt.Revision, attempt => attempt.Revision + 1), cancellationToken)
             .ConfigureAwait(false);
+
+        if (closed == 0)
+            _logger.LogInformation("Native record plane closed no process attempt {AttemptId} for agent run {RunId} at fence {Epoch}: the attempt was already closed or the run's fence moved, so the row is left to whoever holds the run", handle.AttemptId, handle.AgentRunId, expectedEpoch);
     }
 
     /// <summary>The Agent Run's own tenant-bound scope. The execution guard proves <c>workflow_run_id</c> EQUALS this value, so it is read from the row rather than accepted from a caller that could disagree with it.</summary>

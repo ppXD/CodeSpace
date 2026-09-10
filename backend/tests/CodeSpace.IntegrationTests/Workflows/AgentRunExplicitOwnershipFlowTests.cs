@@ -88,6 +88,46 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         await runs.AssertOwnershipAsync(second, CancellationToken.None);
     }
 
+    // P07/P09 3a: the reclaim itself, raced — the plan's own completion evidence (two workers racing a reclaim must
+    // leave exactly one valid owner). Two independent reconciler-shaped sweeps discover the SAME stale Running run at
+    // the same instant and both call ReserveReattachAsync; exactly one must win the epoch bump, the loser must see no
+    // reservation, and the ORIGINAL worker (whose epoch predates the race entirely) must lose its own fence the
+    // instant either side commits — no double adoption, no split-brain.
+    [Fact]
+    public async Task Two_concurrent_reclaims_of_one_stale_run_leave_exactly_one_winner_and_fence_out_the_original_owner()
+    {
+        var runId = await CreateQueuedAsync();
+        using var setup = _fixture.BeginScope();
+        var original = (await setup.Resolve<IAgentRunService>().ClaimOwnershipAsync(runId, CancellationToken.None))!;
+        await ExpireAsync(setup, runId);
+
+        async Task<AgentRunReattachReservation?> ReclaimAsync()
+        {
+            using var scope = _fixture.BeginScope();
+            return await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None);
+        }
+
+        var reclaims = await Task.WhenAll(ReclaimAsync(), ReclaimAsync());
+
+        var winner = reclaims.Single(r => r != null)!;
+        reclaims.Count(r => r != null).ShouldBe(1, "two sweeps racing the same stale run must leave exactly one reclaim — never two reservations, never zero");
+        winner.Epoch.ShouldBe(original.Epoch + 1, "the reclaim bumps the epoch exactly once regardless of how many sweeps raced it");
+
+        using var runs = _fixture.BeginScope();
+        var service = runs.Resolve<IAgentRunService>();
+
+        // The ORIGINAL worker's own epoch predates the race — it must lose its fence the instant EITHER racer's
+        // reclaim committed, not only after whichever one happened to win is later activated.
+        await Should.ThrowAsync<AgentRunOwnershipLostException>(() => service.HeartbeatAsync(original, CancellationToken.None));
+        await Should.ThrowAsync<AgentRunOwnershipLostException>(() => service.AssertOwnershipAsync(original, CancellationToken.None));
+
+        // The winning reservation activates into exactly one new owner, and the run is never left double-claimed.
+        var activated = (await service.ActivateReattachAsync(winner, CancellationToken.None)).ShouldNotBeNull();
+        activated.Epoch.ShouldBe(winner.Epoch);
+        activated.OwnerId.ShouldNotBe(original.OwnerId);
+        await service.AssertOwnershipAsync(activated, CancellationToken.None);
+    }
+
     [Fact]
     public async Task An_owned_new_runner_handle_clears_retry_state_from_the_previous_cleanup_obligation()
     {

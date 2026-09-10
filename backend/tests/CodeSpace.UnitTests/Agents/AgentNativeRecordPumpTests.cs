@@ -231,7 +231,7 @@ public sealed class AgentNativeRecordPumpTests
         refusedWrite.Attempts.ShouldBe(1);
 
         await pump.CaptureAsync("again", "again", new EchoHarness(), CancellationToken.None);
-        await pump.CloseAsync(0, CancellationToken.None);
+        await pump.CloseAsync(0, expectedEpoch: 0, CancellationToken.None);
 
         refusedWrite.Attempts.ShouldBe(1, customMessage: "a plane that has already failed must not be re-tried once per line for the rest of the run");
         refusedWrite.Closed.ShouldBeFalse();
@@ -860,7 +860,7 @@ public sealed class AgentNativeRecordPumpTests
             return Accept(batch);
         }
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
 
         private NativeRecordCaptureHandle Handle(Guid teamId, Guid agentRunId, long workerFenceEpoch, NativeRecordChannel channel) => new()
         {
@@ -906,7 +906,7 @@ public sealed class AgentNativeRecordPumpTests
             return Task.CompletedTask;
         }
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class ThrowingPlane : INativeRecordPlane
@@ -915,7 +915,7 @@ public sealed class AgentNativeRecordPumpTests
             throw new InvalidOperationException("the execution identity could not be opened");
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     private sealed class ThrowingResumePlane : INativeRecordPlane, INativeRecordExecutionPlane
@@ -923,7 +923,7 @@ public sealed class AgentNativeRecordPumpTests
         public Task<NativeRecordCaptureHandle?> OpenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException();
         public Task<NativeRecordCaptureOpening?> ReopenAsync(NativeRecordCaptureRequest request, CancellationToken cancellationToken) => throw new InvalidOperationException();
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task TerminalizeAsync(Guid teamId, Guid agentRunId, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task TerminalizeAbandonedAsync(Guid teamId, Guid agentRunId, long expectedEpoch, AgentRunAbandonCause cause, CancellationToken cancellationToken) => Task.CompletedTask;
     }
@@ -948,7 +948,7 @@ public sealed class AgentNativeRecordPumpTests
             throw new InvalidOperationException("the batch could not be persisted");
         }
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken)
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken)
         {
             Closed = true;
             return Task.CompletedTask;

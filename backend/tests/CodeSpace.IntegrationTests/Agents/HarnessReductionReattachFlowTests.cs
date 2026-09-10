@@ -882,7 +882,7 @@ public sealed class HarnessReductionReattachFlowTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => _inner.WriteAsync(batch, cancellationToken);
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => _inner.CloseAsync(handle, exitCode, cancellationToken);
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => _inner.CloseAsync(handle, exitCode, expectedEpoch, cancellationToken);
 
         public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) =>
             ((INativeRecordReductionPlane)_inner).ReadCheckpointAsync(teamId, executionId, reducerKind, cancellationToken);
@@ -902,7 +902,7 @@ public sealed class HarnessReductionReattachFlowTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => _inner.WriteAsync(batch, cancellationToken);
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => _inner.CloseAsync(handle, exitCode, cancellationToken);
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => _inner.CloseAsync(handle, exitCode, expectedEpoch, cancellationToken);
 
         public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) =>
             Task.FromResult<HarnessReductionCheckpointV1?>(HarnessReductionFold.SeedCheckpoint(executionId) with { ReducerKind = "harness-somethingelse/v1" });
