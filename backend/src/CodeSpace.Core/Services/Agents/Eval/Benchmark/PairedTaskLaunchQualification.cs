@@ -202,6 +202,19 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
     // directly (InternalsVisibleTo) rather than only through a durable flow.
     internal static string ProtocolDigest(PairedQualificationProtocol protocol)
     {
+        var canonical = System.Text.Json.JsonSerializer.Serialize(DigestFields(protocol), Agents.AgentJson.Options);
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    // The frozen runtime bundle's own digest, not its JSON, is appended ONLY when present: the manifest already
+    // canonicalizes itself, and folding the digest keeps the protocol identity a fixed-width composition. A
+    // legacy protocol (no frozen manifest) must serialize the exact array this method produced before the
+    // manifest existed — inserting a null placeholder here instead would shift every following field into a new
+    // array slot and move the digest already stored on every pre-existing row (pinned in
+    // QualificationRuntimeManifestTests against a digest computed from main's pre-manifest field order).
+    private static List<object?> DigestFields(PairedQualificationProtocol protocol)
+    {
         var fields = new List<object?>
         {
             protocol.ObservationGroupId, protocol.TeamId, protocol.SuiteDigest, protocol.SuiteVersion, protocol.CodeRevision,
@@ -211,12 +224,6 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
             protocol.RequiresResultDigest,
         };
 
-        // The frozen runtime bundle's own digest, not its JSON, appended ONLY when present: the manifest already
-        // canonicalizes itself, and folding the digest keeps the protocol identity a fixed-width composition. A
-        // legacy protocol (no frozen manifest) must serialize the exact array this method produced before the
-        // manifest existed — inserting a null placeholder here instead would shift every following field into a
-        // new array slot and move the digest already stored on every pre-existing row (pinned in
-        // QualificationRuntimeManifestTests against a digest computed from main's pre-manifest field order).
         if (protocol.RuntimeManifestDigest is { } runtimeManifestDigest) fields.Add(runtimeManifestDigest);
 
         fields.AddRange(new object?[]
@@ -226,8 +233,7 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
             protocol.MinimumCostReduction, protocol.RequireDistinctObservedModels, protocol.OrderingSeed,
         });
 
-        var canonical = System.Text.Json.JsonSerializer.Serialize(fields, Agents.AgentJson.Options);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        return fields;
     }
 
     private async Task<BenchmarkAgentSelection> CanonicalizeAsync(Guid teamId, BenchmarkAgentSelection selection, decimal cap, CancellationToken cancellationToken)
