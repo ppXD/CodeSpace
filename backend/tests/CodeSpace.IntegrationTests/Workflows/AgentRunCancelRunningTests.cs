@@ -155,9 +155,9 @@ public class AgentRunCancelRunningTests : IDisposable
             await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
 
         // A late writer: the ORIGINAL worker's own executor, unaware its run was already cancelled, still reaches
-        // its ordinary happy-path close for the same attempt.
+        // its ordinary happy-path close for the same attempt — under the epoch it originally launched at.
         using (var lateScope = _fixture.BeginScope())
-            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, CancellationToken.None);
+            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, handle.WorkerFenceEpoch, CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);

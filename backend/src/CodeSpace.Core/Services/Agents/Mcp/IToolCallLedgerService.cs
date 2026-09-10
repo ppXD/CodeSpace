@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
@@ -26,6 +27,20 @@ public interface IToolCallLedgerService
     /// prior call for the same key) re-reads the existing row and returns <see cref="ToolCallClaimOutcome.Duplicate"/>
     /// (with the prior terminal result) when terminal, else <see cref="ToolCallClaimOutcome.InFlight"/>. Exactly one
     /// caller for a given key ever gets <see cref="ToolCallClaimOutcome.Proceed"/>.
+    ///
+    /// <para>
+    /// P07/P09 3a: fenced on <paramref name="fenceEpoch"/> against the owning Agent Run's LIVE fence (mirrors
+    /// <see cref="Publish.IPublishManifestStore"/>'s fenced insert — <see cref="AgentRunFence"/> is the comparison,
+    /// one rule, not one per caller) — throws <see cref="Exceptions.AgentRunOwnershipLostException"/> before the
+    /// INSERT when the run was reclaimed since the caller's <c>McpRequestHandler</c> cached its epoch. This is a NEW
+    /// side-effecting call the model is asking to make, unlike a terminal write settling one already in flight
+    /// (<see cref="RecordTerminalAsync"/>): a superseded worker's own MCP connection would otherwise still be able to
+    /// claim + execute a tool the run's CURRENT owner never asked for, because neither the unique-key dedup nor the
+    /// authority gate upstream (<c>ExecutionAuthorityService.EnsureAgentActionAsync</c>) checks WHICH owner is
+    /// calling — only whether the run is non-terminal. <see cref="AuthorizedMcpRequestHandler"/>'s "governed right
+    /// now" boundary already converts any exception here into a safe, retryable tool-result error, so this failing
+    /// closed never drops the MCP connection or leaks the refusal as an ungoverned side effect.
+    /// </para>
     /// </summary>
     Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken cancellationToken);
 
@@ -167,11 +182,34 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
         _db.ToolCallLedger.Add(row);
 
+        // P07/P09 3a: lock the owning run's fence row FOR SHARE before the INSERT commits — the same
+        // read-inside-the-writing-transaction shape PublishManifestStore's fenced first write uses. A concurrent
+        // reclaim's CAS takes FOR UPDATE on this same row, so it either already committed (this read sees the bumped
+        // epoch) or blocks until this transaction ends (making this read legitimately pre-reclaim); either way the
+        // comparison is never a plain read-then-write race. A run with no matching row reads epoch 0, which only
+        // ever matches a caller's own fenceEpoch of 0 (an unclaimed/never-started run — never a live production
+        // caller, whose epoch is always >= 1 once Running).
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        var lockedEpoch = (await _db.Database.SqlQuery<long>($"SELECT fence_epoch AS \"Value\" FROM agent_run WHERE id = {agentRunId} FOR SHARE")
+            .ToListAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+
+        if (!AgentRunFence.StillOwns(lockedEpoch, fenceEpoch))
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            _db.ChangeTracker.Clear();
+
+            _logger.LogWarning("Agent run {RunId}: {Note}", agentRunId, AgentRunFence.RefusalNote($"tool-call claim ({toolKind})", lockedEpoch, fenceEpoch));
+
+            throw new AgentRunOwnershipLostException(agentRunId);
+        }
+
         try
         {
             // INSERT-first against the unique (agent_run_id, idempotency_key) index — the serialization point. Two
             // identical concurrent calls both reach here; the DB lets exactly one INSERT win.
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
             return ToolCallClaim.Proceed(row.Id);
         }
@@ -180,6 +218,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             // Lost the claim race — a concurrent or prior call already owns this (run, key). Re-read the winner
             // (mirrors ChatBotService's create-race recovery) and either return its terminal result (Duplicate) or
             // signal it's still in flight — NEVER double-run the side effect.
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
             _db.ChangeTracker.Clear();
 
             return await ReadExistingClaimAsync(agentRunId, idempotencyKey, cancellationToken).ConfigureAwait(false);

@@ -821,7 +821,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Same terminal drain for the frame plane, then close the process this re-attach was observing — the SAME
         // attempt the original launch appended, because a resumed opening records against it rather than inventing a
         // second row for one process.
-        await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
+        await native.CloseAsync(ObservedExitCode(sandbox), context.WorkerFenceEpoch, cancellationToken).ConfigureAwait(false);
 
         ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 
@@ -3208,7 +3208,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Same terminal drain for the frame plane, then close its process attempt. A forced terminal observed NO exit
         // code (the runner reports -1 because it killed the process), so that attempt is recorded Lost with a reason
         // rather than as an exit nobody saw. Both halves are best-effort: neither can change the run's own outcome.
-        await native.CloseAsync(ObservedExitCode(sandbox), cancellationToken).ConfigureAwait(false);
+        await native.CloseAsync(ObservedExitCode(sandbox), context.WorkerFenceEpoch, cancellationToken).ConfigureAwait(false);
 
         ReportUnestablishedFacts(context.Harness, facts, context.RunId);
 

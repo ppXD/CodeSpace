@@ -85,7 +85,7 @@ public sealed class HarnessExecutionCompletenessFlowTests
         using var _ = planeScope;
 
         var first = await OpenAsync(plane, run);
-        await plane.CloseAsync(first, exitCode: 0, CancellationToken.None);
+        await plane.CloseAsync(first, exitCode: 0, run.FenceEpoch, CancellationToken.None);
         await ((INativeRecordExecutionPlane)plane).TerminalizeAsync(run.TeamId, run.AgentRunId, run.FenceEpoch, CancellationToken.None);
         var second = await OpenAsync(plane, run);
 
@@ -123,7 +123,7 @@ public sealed class HarnessExecutionCompletenessFlowTests
         var firstPlane = Plane(out var firstScope);
         using var _ = firstScope;
         var first = await OpenAsync(firstPlane, run);
-        await firstPlane.CloseAsync(first, exitCode: 0, CancellationToken.None);
+        await firstPlane.CloseAsync(first, exitCode: 0, run.FenceEpoch, CancellationToken.None);
         await ((INativeRecordExecutionPlane)firstPlane).TerminalizeAsync(run.TeamId, run.AgentRunId, run.FenceEpoch, CancellationToken.None);
 
         using var secondScope = _fixture.BeginScope(builder => builder.Register<IRunDataCompletenessWriter>(context =>
@@ -175,7 +175,7 @@ public sealed class HarnessExecutionCompletenessFlowTests
         using var _ = planeScope;
 
         var first = await OpenAsync(plane, run);
-        await plane.CloseAsync(first, exitCode: 0, CancellationToken.None);
+        await plane.CloseAsync(first, exitCode: 0, run.FenceEpoch, CancellationToken.None);
         await ((INativeRecordExecutionPlane)plane).TerminalizeAsync(run.TeamId, run.AgentRunId, run.FenceEpoch, CancellationToken.None);
 
         using (var reclaimer = _fixture.BeginScope())

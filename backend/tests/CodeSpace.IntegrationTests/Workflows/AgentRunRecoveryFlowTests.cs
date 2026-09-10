@@ -457,9 +457,9 @@ public class AgentRunRecoveryFlowTests : IDisposable
             await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
 
         // A late writer: the ORIGINAL worker's own executor, unaware its run was already reconciled, still reaches
-        // its ordinary happy-path close for the same attempt.
+        // its ordinary happy-path close for the same attempt — under the epoch it originally launched at.
         using (var lateScope = _fixture.BeginScope())
-            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, CancellationToken.None);
+            await lateScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, handle.WorkerFenceEpoch, CancellationToken.None);
 
         using var verify = _fixture.BeginScope();
         var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
@@ -467,6 +467,56 @@ public class AgentRunRecoveryFlowTests : IDisposable
         attempt.State.ShouldBe(HarnessProcessAttemptState.Lost, "the reconciler's close already landed; a late writer's happy-path close must not reopen or overwrite it");
         attempt.ExitCode.ShouldBeNull("a late writer's exit code must never overwrite an already-terminal row");
         attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedNoHandleErrorCode);
+    }
+
+    // P07/P09 3a: the sibling of the two "late close" tests above, for the race those cannot reach — a RE-ATTACH
+    // rather than an abandon/cancel. A re-attach deliberately leaves the attempt row Running (ReopenAsync hands the
+    // SAME AttemptId to the fresh observer, per INativeRecordExecutionPlane's own docs), so the status-guarded CAS
+    // alone cannot refuse a stale worker's close here — only the run's own fence can. Counterexample for
+    // NativeRecordPlane.CloseAsync before it accepted an expectedEpoch: a superseded worker's happy-path close would
+    // have landed Exited over an attempt the reattached worker is still observing.
+    [Fact]
+    public async Task A_stale_worker_after_a_reattach_cannot_close_the_attempt_its_reattacher_still_observes()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.FromMinutes(20), withRecentEvent: false, fenceEpoch: 1);
+        var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
+
+        // Reclaim the run for re-attach WITHOUT touching the native record plane at all — exactly what
+        // AgentRunReconcilerService.ReattachAsync does before dispatching a fresh observer: the process is alive, so
+        // the attempt stays Running while a new worker resumes tailing it.
+        long reclaimedEpoch;
+        using (var reclaim = _fixture.BeginScope())
+            reclaimedEpoch = (await reclaim.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+
+        reclaimedEpoch.ShouldBe(handle.WorkerFenceEpoch + 1, "the premise: the run moved to a fresh generation the stale worker never saw");
+
+        using (var precondition = _fixture.BeginScope())
+            (await precondition.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId)).State
+                .ShouldBe(HarnessProcessAttemptState.Running, "the reclaim itself must not close the attempt — that is exactly the state a re-attach expects to find");
+
+        // The STALE worker: unaware of the reclaim, it reaches its ordinary happy-path close under the epoch it
+        // originally launched at — which the CURRENT code must refuse rather than stamp over the live re-attach.
+        using (var staleScope = _fixture.BeginScope())
+            await staleScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, handle.WorkerFenceEpoch, CancellationToken.None);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+            attempt.State.ShouldBe(HarnessProcessAttemptState.Running, "a stale-epoch close must not stamp the attempt the reattached worker is still observing");
+            attempt.ExitCode.ShouldBeNull("a superseded worker's exit code must never land on a re-attached attempt");
+        }
+
+        // The CURRENT (reattached) owner's own close, at the epoch it actually holds, must still land normally.
+        using (var currentScope = _fixture.BeginScope())
+            await currentScope.Resolve<INativeRecordPlane>().CloseAsync(handle, exitCode: 0, reclaimedEpoch, CancellationToken.None);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var attempt = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunHarnessProcessAttempt.AsNoTracking().SingleAsync(a => a.Id == handle.AttemptId);
+            attempt.State.ShouldBe(HarnessProcessAttemptState.Exited, "the CURRENT owner's close, at its own live fence, must still be able to land");
+            attempt.ExitCode.ShouldBe(0);
+        }
     }
 
     // The sibling of the six tests above, for the kill-wave's own parent-terminal Running sweep

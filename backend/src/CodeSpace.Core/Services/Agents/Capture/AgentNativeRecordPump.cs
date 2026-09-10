@@ -443,8 +443,8 @@ internal sealed class AgentNativeRecordPump
         await reductions.WriteReducedAsync(batch, checkpoint, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Flush, then record how this round's physical process ended. Best-effort on both halves — the Agent Run's own outcome is decided elsewhere and is not affected by either.</summary>
-    internal async Task CloseAsync(int? exitCode, CancellationToken cancellationToken)
+    /// <summary>Flush, then record how this round's physical process ended — fenced on <paramref name="expectedEpoch"/> (the caller's OWN current fence, read fresh from its owner token, not this handle's launch-time one). Best-effort on both halves — the Agent Run's own outcome is decided elsewhere and is not affected by either.</summary>
+    internal async Task CloseAsync(int? exitCode, long expectedEpoch, CancellationToken cancellationToken)
     {
         await FlushAsync(cancellationToken).ConfigureAwait(false);
 
@@ -452,7 +452,7 @@ internal sealed class AgentNativeRecordPump
 
         try
         {
-            await _plane.CloseAsync(handle, exitCode, cancellationToken).ConfigureAwait(false);
+            await _plane.CloseAsync(handle, exitCode, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {

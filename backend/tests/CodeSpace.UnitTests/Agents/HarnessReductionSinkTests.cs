@@ -226,7 +226,7 @@ public sealed class HarnessReductionSinkTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) => Task.FromResult(_stored);
 
@@ -239,7 +239,7 @@ public sealed class HarnessReductionSinkTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task<HarnessReductionCheckpointV1?> ReadCheckpointAsync(Guid teamId, Guid executionId, string reducerKind, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("the stored reduction could not be read");
@@ -253,6 +253,6 @@ public sealed class HarnessReductionSinkTests
 
         public Task WriteAsync(NativeRecordBatch batch, CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task CloseAsync(NativeRecordCaptureHandle handle, int? exitCode, long expectedEpoch, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

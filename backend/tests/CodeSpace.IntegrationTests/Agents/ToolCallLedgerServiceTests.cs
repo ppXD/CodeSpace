@@ -2,6 +2,8 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -333,6 +335,37 @@ public class ToolCallLedgerServiceTests
 
         reclaim.Outcome.ShouldBe(ToolCallClaimOutcome.Duplicate, "the reaped row is terminal → a re-call dedups (replays), never re-runs the side effect");
         reclaim.PriorStatus.ShouldBe(ToolCallLedgerStatus.Failed);
+    }
+
+    // P07/P09 3a: TryClaimAsync's own FenceEpoch column is recorded but was never validated against the owning
+    // AgentRun's LIVE epoch — a superseded worker's MCP connection (its McpRequestHandler caches the epoch it
+    // claimed with once, for the connection's whole lifetime) could still claim + execute a brand-new side-effecting
+    // tool call after a reconciler reclaim, because neither the unique-key dedup above nor the upstream authority
+    // gate (ExecutionAuthorityService.EnsureAgentActionAsync) checks WHICH owner is calling. Counterexample for the
+    // claim before it fenced on the run's live epoch: a stale-epoch claim would have proceeded and inserted a row.
+    [Fact]
+    public async Task A_stale_epoch_claim_after_a_reclaim_is_refused_and_the_current_epoch_can_still_claim()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        await SeedAgentRunAsync(teamId, runId, AgentRunStatus.Running, DateTimeOffset.UtcNow - TimeSpan.FromHours(1));   // lapsed lease, FenceEpoch defaults to 0
+
+        long reclaimedEpoch;
+        using (var reclaim = _fixture.BeginScope())
+            reclaimedEpoch = (await reclaim.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+
+        reclaimedEpoch.ShouldBe(1, "the premise: the reclaim moved the run to a fresh epoch the stale caller never saw");
+
+        using (var stale = _fixture.BeginScope())
+            await Should.ThrowAsync<AgentRunOwnershipLostException>(() => Svc(stale).TryClaimAsync(runId, teamId, "git.open_pr", Key, InputHash, 0, CancellationToken.None));
+
+        using (var verify = _fixture.BeginScope())
+            (await verify.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().AnyAsync(l => l.AgentRunId == runId)).ShouldBeFalse("a superseded worker's refused claim must never create a row — the side effect it gates must never run");
+
+        using var current = _fixture.BeginScope();
+        (await Svc(current).TryClaimAsync(runId, teamId, "git.open_pr", Key, InputHash, reclaimedEpoch, CancellationToken.None)).Outcome
+            .ShouldBe(ToolCallClaimOutcome.Proceed, "the CURRENT owner's claim, at its own live fence, must still proceed");
     }
 
     private async Task SeedAgentRunAsync(Guid teamId, Guid runId, AgentRunStatus status, DateTimeOffset leaseExpiresAt)
