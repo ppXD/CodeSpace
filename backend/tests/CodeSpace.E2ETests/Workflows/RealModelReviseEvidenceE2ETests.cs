@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -129,7 +130,8 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
             var toolCount = native.Count(item => item.Kind is AgentEventKind.ToolCall or AgentEventKind.CommandExecuted);
             var payload = Path.Combine(workspace, "payload.txt");
             var actual = File.Exists(payload) ? (await File.ReadAllTextAsync(payload, cancellationToken)).TrimEnd('\r', '\n') : "";
-            var firstObserved = File.Exists(firstPath) && await File.ReadAllTextAsync(firstPath, cancellationToken) == "INITIAL";
+            var firstRaw = File.Exists(firstPath) ? await File.ReadAllTextAsync(firstPath, cancellationToken) : "<no first observation>";
+            var firstObserved = firstRaw == "INITIAL";
             SHA256.HashData(await File.ReadAllBytesAsync(oraclePath, cancellationToken)).ShouldBe(oracleHash, "the native CLI must not rewrite its evaluator");
             if (result.Model is { Length: > 0 }) RealModelGate.ObserveModel(result.Model);
             var met = MeetsWitness(new Witness { Result = result, Actual = actual, Expected = expected, NativeStarts = starts, NativeTools = toolCount, InitialWasObserved = firstObserved });
@@ -137,13 +139,49 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
             Console.WriteLine($"[live-outer-revise] run={runId}; status={run.Status}; met={met}; reviseRounds={result.ReviseRounds}; nativeStarts={starts}; nativeTools={toolCount}; firstInitial={firstObserved}; outputTokens={result.TokenUsage?.OutputTokens}; stopHookBudget=0; exit={result.ExitReason}");
             return met
                 ? (RealModelOutcome.Drove, "The actual CLI submitted INITIAL, then a second native invocation used the server oracle's new diagnosis and passed its independent regrade.")
-                : (RealModelOutcome.CapabilityMiss, $"The live outer-revise witness was not met: status={run.Status}; rounds={result.ReviseRounds}; starts={starts}; tools={toolCount}; firstInitial={firstObserved}; exit={result.ExitReason}.");
+                : (RealModelOutcome.CapabilityMiss, $"The live outer-revise witness was not met: status={run.Status}; rounds={result.ReviseRounds}; starts={starts}; tools={toolCount}; firstInitial={firstObserved}; exit={result.ExitReason}. {await DescribeMissAsync(run.TeamId, result, native, firstRaw, cancellationToken)}");
         }
         finally
         {
             await CancelFixtureRunsAsync(teamId);
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    /// <summary>Attribution-only detail for a missed witness: the RAW first oracle observation (so a <c>firstInitial=False</c> round-0 anomaly names what the oracle actually read), the native tool/command lines, and the tail of the captured CLI stream. Bounded, single-line, and never consulted by <see cref="MeetsWitness"/>.</summary>
+    private async Task<string> DescribeMissAsync(Guid teamId, AgentRunResult result, IReadOnlyList<AgentRunEvent> native, string firstRaw, CancellationToken cancellationToken)
+    {
+        var tools = native.Where(item => item.Kind is AgentEventKind.ToolCall or AgentEventKind.CommandExecuted).Select(item => $"{item.Kind}:{Bounded(item.Text, 160)}");
+        var stream = await ReadCapturedStreamAsync(teamId, result, cancellationToken).ConfigureAwait(false);
+
+        return $"firstObservation='{Bounded(firstRaw, 120)}'; acceptanceDetail='{Bounded(result.AcceptanceDetail, 240)}'; summary='{Bounded(result.Summary, 240)}'; toolEvents=[{Bounded(string.Join(" || ", tools), 800)}]; streamTail='{Bounded(stream, 600, tail: true)}'";
+    }
+
+    /// <summary>The faithful captured CLI stream — inline when small, otherwise resolved through the artifact the executor offloaded it to. A diagnostic read must never turn a CapabilityMiss into an unattributable crash, so a failed resolve degrades to a named marker.</summary>
+    private async Task<string> ReadCapturedStreamAsync(Guid teamId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (result.TranscriptArtifactId is not { } artifactId) return result.Transcript;
+
+        try
+        {
+            using var scope = fixture.BeginScope();
+            var bytes = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, cancellationToken).ConfigureAwait(false);
+            return bytes is null ? $"<transcript artifact {artifactId} absent>" : Encoding.UTF8.GetString(bytes.Bytes);
+        }
+        catch (Exception ex)
+        {
+            return $"<transcript artifact {artifactId} unreadable: {ex.GetType().Name}>";
+        }
+    }
+
+    private static string Bounded(string? text, int max, bool tail = false)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+
+        var single = text.ReplaceLineEndings("\\n");
+        if (single.Length <= max) return single;
+
+        return tail ? "…" + single[^max..] : single[..max] + "…";
     }
 
     private async Task<Guid> SeedCredentialAsync(Guid teamId, LiveCase live, CancellationToken cancellationToken)
