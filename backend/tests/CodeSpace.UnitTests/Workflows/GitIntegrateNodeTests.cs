@@ -80,6 +80,32 @@ public class GitIntegrateNodeTests
     }
 
     [Fact]
+    public async Task Conflicts_sorts_the_real_failure_before_a_skipped_survivor_so_conflicts_0_never_names_a_bystander()
+    {
+        // Pins ProjectOutputs' `.OrderBy(o => o.Skipped)` + the `skipped` output key: a consumer that reads only
+        // conflicts[0] (the footer's compact digest) must always see the actual culprit, never a "not attempted"
+        // bystander swept in only because a DIFFERENT contribution's failure stopped the whole set.
+        var integrator = new FakeIntegrator
+        {
+            Result = IntegrationResult.Build(IntegrationStatus.Conflicted, null, new[]
+            {
+                new ContributionOutcome { Label = "a", Disposition = ContributionDisposition.Applied },
+                new ContributionOutcome { Label = "b", Disposition = ContributionDisposition.Conflicted, Skipped = true, Reason = "not attempted — the set was refused before integration began" },
+                new ContributionOutcome { Label = "c", Disposition = ContributionDisposition.Unintegrable, Skipped = false, Reason = "no recorded base revision (re-attached run — its work was not captured)" },
+            }, "a contribution conflicted while integrating"),
+        };
+
+        var result = await new GitIntegrateNode(integrator, new FakeResolver()).RunAsync(Context(TwoContributions()), CancellationToken.None);
+
+        var conflicts = result.Outputs["conflicts"];
+        conflicts.GetArrayLength().ShouldBe(2, "only the non-applied contributions are reported");
+        conflicts[0].GetProperty("label").GetString().ShouldBe("c", "the real failure sorts first, never a skipped bystander");
+        conflicts[0].GetProperty("skipped").GetBoolean().ShouldBeFalse();
+        conflicts[1].GetProperty("label").GetString().ShouldBe("b");
+        conflicts[1].GetProperty("skipped").GetBoolean().ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task An_infrastructure_failure_is_a_node_failure()
     {
         var integrator = new FakeIntegrator { Throw = new WorkspaceException("git push failed: *** rejected") };

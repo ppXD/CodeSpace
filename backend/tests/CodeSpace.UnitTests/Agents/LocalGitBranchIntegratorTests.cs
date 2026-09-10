@@ -36,12 +36,14 @@ public class LocalGitBranchIntegratorTests
     {
         // The reported gap: a real `git apply --index --3way` failure is routinely multi-line, and the raw text used
         // to land verbatim in the decider prompt's indented block / the recipe bullet / the timeline one-liner —
-        // a continuation line lost its indent and read as a top-level instruction.
-        const string stderr = "error: patch failed: f.txt:1\nerror: f.txt: patch does not apply\nU f.txt\n";
+        // a continuation line lost its indent and read as a top-level instruction. A RUN of whitespace (a CRLF pair,
+        // a doubled blank line) collapses to ONE space, not one space per character, so no extra padding survives.
+        const string stderr = "error: patch failed: f.txt:1\r\n\r\nerror: f.txt: patch does not apply\nU f.txt\n";
 
         var detail = LocalGitBranchIntegrator.RedactedConflictDetail(stderr, "/work", null);
 
         detail.ShouldNotContain("\n");
+        detail.ShouldNotContain("\r");
         detail.ShouldBe("error: patch failed: f.txt:1 error: f.txt: patch does not apply U f.txt");
     }
 

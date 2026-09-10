@@ -50,6 +50,26 @@ describe("pipelineDigest — git.integrate outcomes", () => {
     expect(text).toContain("base SHA mismatch");
   });
 
+  it("Conflicted with every entry skipped (e.g. a missing base commit) → falls back to outputs.reason, never a bystander's label", () => {
+    const digest = pipelineDigest("git.integrate", rowWith({
+      status: "Conflicted",
+      integratedBranch: null,
+      appliedCount: 0,
+      reason: "base revision a1b2c3d4 not found in the repository",
+      conflicts: [
+        { label: "agent-a", disposition: "Unintegrable", reason: "not attempted — the set was refused before integration began", skipped: true },
+        { label: "agent-b", disposition: "Unintegrable", reason: "not attempted — the set was refused before integration began", skipped: true },
+      ],
+    }));
+    expect(digest?.tone).toBe("warn");
+
+    const text = labelText(digest);
+    expect(text).toContain("base revision a1b2c3d4 not found in the repository");
+    expect(text).not.toContain("agent-a");
+    expect(text).not.toContain("agent-b");
+    expect(text).toContain("Conflict");
+  });
+
   it("Empty → muted 'Nothing to integrate'", () => {
     const digest = pipelineDigest("git.integrate", rowWith({ status: "Empty", appliedCount: 0, conflicts: [] }));
     expect(labelText(digest)).toContain("Nothing to integrate");

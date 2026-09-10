@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
@@ -537,8 +538,8 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
     private static string Summarize(string stderr) => string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : CollapseWhitespace(stderr);
 
-    /// <summary>Trim + fold every embedded newline to a single space — shared by <see cref="Summarize"/> (a whole-command stderr) and <see cref="RedactedConflictDetail"/> (a per-conflict detail) so a multi-line git message never reaches either surface with raw line breaks.</summary>
-    private static string CollapseWhitespace(string text) => text.Trim().Replace("\n", " ");
+    /// <summary>Trim + fold every RUN of whitespace (newline, CR, tab, repeated blank lines) to a single space — shared by <see cref="Summarize"/> (a whole-command stderr) and <see cref="RedactedConflictDetail"/> (a per-conflict detail) so a multi-line git message never reaches either surface with raw line breaks or doubled padding.</summary>
+    private static string CollapseWhitespace(string text) => Regex.Replace(text.Trim(), @"\s+", " ");
 
     private static void TryDeleteFile(string path)
     {
