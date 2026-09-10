@@ -16,6 +16,7 @@ using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
@@ -166,6 +167,80 @@ public class RoomProjectorFlowTests
         var block = await DeliverablesOfAsync(runId, teamId);
 
         block.Files.ShouldHaveSingleItem().SizeBytes.ShouldBe(4096);
+    }
+
+    [Fact]
+    public async Task A_reattached_runs_recapture_is_the_rooms_only_current_deliverable()
+    {
+        // The gap this closes: a reconciler reattach bumps agent_run.fence_epoch (N → N+1) after a mid-run capture
+        // at N already landed a manifest row. The store used to supersede same-epoch rows only, so the epoch-N row
+        // and the reattached epoch-(N+1) row both read current — the Room showed the stale copy next to the real
+        // one, from an ordinary reattach, no zombie writer required.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Reattached mid-run");
+        var workflowRunId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report", resultSummary: "done");
+        var agentRunId = Guid.NewGuid();
+        await SeedRunningAgentRunAsync(teamId, agentRunId, fenceEpoch: 1);
+
+        using var workspace = new TempWorkspace();
+        workspace.Write("report.md", "epoch one draft");
+        var task = DeliverableTask("report.md");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, workflowRunId, teamId, fenceEpoch: 1, CancellationToken.None);
+
+        long reattachedEpoch;
+        using (var reclaim = _fixture.BeginScope())
+            reattachedEpoch = (await reclaim.Resolve<IAgentRunService>().ReserveReattachAsync(agentRunId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+
+        reattachedEpoch.ShouldBe(2, "the premise: the reconciler moved the run to a fresh epoch after the epoch-1 capture already landed");
+
+        var finalDraft = "epoch two — the reattached attempt's final draft";
+        workspace.Write("report.md", finalDraft);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, workflowRunId, teamId, reattachedEpoch, CancellationToken.None);
+
+        var block = await DeliverablesOfAsync(workflowRunId, teamId);
+
+        var file = block.Files.ShouldHaveSingleItem("the Room must show exactly one current copy of the reattached run's deliverable, not the stale epoch-1 row alongside it");
+        file.SizeBytes.ShouldBe(System.Text.Encoding.UTF8.GetByteCount(finalDraft));
+    }
+
+    private async Task SeedRunningAgentRunAsync(Guid teamId, Guid runId, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = fenceEpoch,
+            LeaseExpiresAt = DateTimeOffset.UtcNow - TimeSpan.FromHours(1), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private static AgentTask DeliverableTask(params string[] paths) => new()
+    {
+        Goal = "produce the declared deliverables", Harness = "codex-cli",
+        Acceptance = new SupervisorAcceptanceSpec { Command = paths, Kind = BenchmarkGradingKind.ArtifactPresent },
+    };
+
+    private sealed class TempWorkspace : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cs-room-deliverable-flow-" + Guid.NewGuid().ToString("N"));
+
+        public TempWorkspace() => Directory.CreateDirectory(Path);
+
+        public void Write(string relativePath, string content)
+        {
+            var full = System.IO.Path.Combine(Path, relativePath);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+
+        public void Dispose() { try { Directory.Delete(Path, recursive: true); } catch { /* best-effort cleanup */ } }
     }
 
     [Fact]

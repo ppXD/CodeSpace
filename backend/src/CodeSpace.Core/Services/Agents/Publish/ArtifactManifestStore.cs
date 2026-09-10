@@ -18,9 +18,9 @@ public interface IArtifactManifestStore
     /// <summary>
     /// Capture the run's DECLARED deliverable paths (a non-<c>TestsPass</c> acceptance's <c>Command</c> list is
     /// literally the workspace-relative deliverable list) from the workspace into the CAS store, minting one typed
-    /// <see cref="ArtifactManifest"/> row per path — idempotent per <c>(attempt, epoch, path)</c>: a re-capture of
-    /// the same coordinates supersedes the prior row (a pointer, never a rewrite). Best-effort by contract: a
-    /// missing/escaping path is skipped (the ACCEPTANCE oracle is the one that fails the run over it — this layer
+    /// <see cref="ArtifactManifest"/> row per path — idempotent per <c>(attempt, path)</c>: a re-capture of the
+    /// same path, at this epoch or a later one (a reclaimed re-attach), supersedes the prior row (a pointer, never
+    /// a rewrite). Best-effort by contract: a missing/escaping path is skipped (the ACCEPTANCE oracle is the one that fails the run over it — this layer
     /// only preserves what exists), and the caller treats any throw as a capture hiccup, never a run failure.
     /// Returns how many artifacts were captured — what was OWED is not this method's to answer. The capture promise
     /// states the declared list at intent time and its facts re-derive that count from the SAME acceptance, so a
@@ -311,7 +311,16 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         _ => "the workspace guard refused to read it",
     };
 
-    /// <summary>Idempotent per <c>(attempt, epoch, path)</c>: an existing CURRENT row for the same coordinates is superseded by the fresh one — a pointer, never a rewrite (the #1352 discipline), so history stays intact and consumers follow the unsuperseded row.</summary>
+    /// <summary>
+    /// Idempotent per <c>(attempt, path)</c> — NOT per <c>(attempt, epoch, path)</c>: the fence epoch is the
+    /// producing ATTEMPT, not a separate identity axis, so a reclaimed re-attach's fresh capture at epoch N+1 also
+    /// supersedes whatever epoch-N row still reads current for the same path, not only an epoch-N+1 predecessor. A
+    /// write whose epoch is BELOW a row this identity already has is refused outright — never inserted, never
+    /// superseding anything — because a live attempt can only ever move an epoch forward (<c>AgentRunService
+    /// .AssertOwnershipAsync</c>, asserted before <c>VerifyProducedWorkAsync</c> calls this store, already stops a
+    /// reclaimed worker from reaching here at all; this is the belt to that fence's braces for any caller that
+    /// skips it).
+    /// </summary>
     private async Task UpsertAsync(ArtifactManifest fresh, CancellationToken cancellationToken)
     {
         // Blob placement and its retention declaration have already completed. Only the pointer replacement holds
@@ -326,19 +335,30 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         {
             // Namespace 122 is the manifest ledger's original migration. The canonical key and seed must remain
             // stable across rolling versions. A collision only serializes unrelated paths; it never merges rows.
-            var key = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"artifact_manifest/{fresh.AgentRunId:N}/{fresh.FenceEpoch}/{fresh.LogicalPath}");
+            // Epoch is deliberately OUT of this key (unlike the row lookup below, which spans every epoch): two
+            // captures of the same path a fence apart must serialize against EACH OTHER, not run under independent
+            // locks that both read "no current row yet" and both insert.
+            var key = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"artifact_manifest/{fresh.TeamId:N}/{fresh.AgentRunId:N}/{fresh.LogicalPath}");
             await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 122))", cancellationToken).ConfigureAwait(false);
-            // Lock even an identical-content read: a caller's older repeatable-read snapshot must not treat a
-            // concurrently superseded row as current and report a false deduplication success.
-            var prior = await _db.ArtifactManifest.FromSqlInterpolated($"""
+            // Every row this run ever captured at this path, across every epoch — locked even an identical-content
+            // read: a caller's older repeatable-read snapshot must not treat a concurrently superseded row as
+            // current and report a false deduplication success.
+            var identity = await _db.ArtifactManifest.FromSqlInterpolated($"""
                 SELECT * FROM artifact_manifest
-                WHERE team_id = {fresh.TeamId} AND agent_run_id = {fresh.AgentRunId} AND fence_epoch = {fresh.FenceEpoch}
-                    AND logical_path = {fresh.LogicalPath} AND superseded_by_manifest_id IS NULL
+                WHERE team_id = {fresh.TeamId} AND agent_run_id = {fresh.AgentRunId} AND logical_path = {fresh.LogicalPath}
                 FOR UPDATE
-                """).AsNoTracking().SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                """).AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
 
-            if (prior == null || prior.Sha256 != fresh.Sha256)
-                await ReplaceCurrentAsync(prior, fresh, cancellationToken).ConfigureAwait(false);
+            if (identity.Any(row => row.FenceEpoch > fresh.FenceEpoch))
+                NoticeStaleEpoch(fresh, identity.Max(row => row.FenceEpoch));
+            else
+            {
+                var prior = identity.SingleOrDefault(row => row.FenceEpoch == fresh.FenceEpoch && row.SupersededByManifestId == null);
+                var stale = identity.Where(row => row.FenceEpoch < fresh.FenceEpoch && row.SupersededByManifestId == null).ToList();
+
+                if (prior == null || prior.Sha256 != fresh.Sha256 || stale.Count > 0)
+                    await ReplaceCurrentAsync(prior, stale, fresh, cancellationToken).ConfigureAwait(false);
+            }
 
             if (owned != null) await owned.CommitAsync(cancellationToken).ConfigureAwait(false);
             else await ambient!.ReleaseSavepointAsync(savepoint!, cancellationToken).ConfigureAwait(false);
@@ -353,24 +373,47 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         }
     }
 
-    private async Task ReplaceCurrentAsync(ArtifactManifest? prior, ArtifactManifest fresh, CancellationToken cancellationToken)
+    /// <summary>A write whose epoch a later attempt has already moved past — refused, not inserted: the fence in front of this store should already have stopped the caller (see <see cref="UpsertAsync"/>), so reaching here at all is itself the anomaly worth naming.</summary>
+    private void NoticeStaleEpoch(ArtifactManifest fresh, long currentEpoch) =>
+        _logger.LogWarning("Agent run {RunId}: discarded a manifest write for '{Path}' at fence epoch {StaleEpoch} — epoch {CurrentEpoch} already recorded this deliverable", fresh.AgentRunId, fresh.LogicalPath, fresh.FenceEpoch, currentEpoch);
+
+    /// <summary>
+    /// Retire <paramref name="prior"/> (this same epoch's current row, when its content changed) and every
+    /// <paramref name="stalePriorEpoch"/> row (an earlier attempt's current row this fresh capture now supersedes),
+    /// then append the fresh row — unless nothing actually changed at this epoch, in which case the prior row stays
+    /// canonical and the stale rows point at IT instead of a fresh row that was never inserted.
+    /// </summary>
+    private async Task ReplaceCurrentAsync(ArtifactManifest? prior, IReadOnlyList<ArtifactManifest> stalePriorEpoch, ArtifactManifest fresh, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var actorId = _currentUser?.Id ?? SystemUsers.SeederId;
-        if (prior != null)
-        {
-            var retired = await _db.ArtifactManifest.Where(m => m.Id == prior.Id && m.SupersededByManifestId == null)
-                .ExecuteUpdateAsync(set => set.SetProperty(m => m.SupersededByManifestId, fresh.Id).SetProperty(m => m.LastModifiedDate, now).SetProperty(m => m.LastModifiedBy, actorId), cancellationToken).ConfigureAwait(false);
-            if (retired != 1) throw new DbUpdateConcurrencyException("The current artifact manifest changed before replacement.");
-        }
+        var insertFresh = prior == null || prior.Sha256 != fresh.Sha256;
+        var supersedingId = insertFresh ? fresh.Id : prior!.Id;
 
+        if (prior != null && insertFresh)
+            await RetireAsync(prior.Id, supersedingId, now, actorId, cancellationToken).ConfigureAwait(false);
+
+        foreach (var stale in stalePriorEpoch)
+            await RetireAsync(stale.Id, supersedingId, now, actorId, cancellationToken).ConfigureAwait(false);
+
+        if (insertFresh)
+            await InsertAsync(fresh, now, actorId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task RetireAsync(Guid priorId, Guid supersedingId, DateTimeOffset now, Guid actorId, CancellationToken cancellationToken)
+    {
+        var retired = await _db.ArtifactManifest.Where(m => m.Id == priorId && m.SupersededByManifestId == null)
+            .ExecuteUpdateAsync(set => set.SetProperty(m => m.SupersededByManifestId, supersedingId).SetProperty(m => m.LastModifiedDate, now).SetProperty(m => m.LastModifiedBy, actorId), cancellationToken).ConfigureAwait(false);
+        if (retired != 1) throw new DbUpdateConcurrencyException("The current artifact manifest changed before replacement.");
+    }
+
+    private async Task InsertAsync(ArtifactManifest fresh, DateTimeOffset now, Guid actorId, CancellationToken cancellationToken) =>
         await _db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO artifact_manifest (id, team_id, agent_run_id, workflow_run_id, fence_epoch, kind, logical_path,
                 content_artifact_id, sha256, size_bytes, content_type, created_date, created_by, last_modified_date, last_modified_by)
             VALUES ({fresh.Id}, {fresh.TeamId}, {fresh.AgentRunId}, {fresh.WorkflowRunId}, {fresh.FenceEpoch}, {fresh.Kind.ToString()}, {fresh.LogicalPath},
                 {fresh.ContentArtifactId}, {fresh.Sha256}, {fresh.SizeBytes}, {fresh.ContentType}, {now}, {actorId}, {now}, {actorId})
             """, cancellationToken).ConfigureAwait(false);
-    }
 
     // Set-based publication deliberately leaves existing tracked instances as caller-owned snapshots. These
     // public reads query the database afresh; callers needing to refresh their own instance must explicitly reload.
