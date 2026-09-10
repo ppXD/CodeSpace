@@ -233,10 +233,21 @@ public static class SupervisorDecisionTimelineMap
                 ? integration.Reason ?? "The agents' work conflicted while integrating."
                 : $"Conflicted while integrating: {string.Join(", ", integration.ConflictedFiles)}";
 
-            return integration.FailingContributions.Count == 0 ? headline : $"{headline} ({string.Join("; ", integration.FailingContributions)})";
+            return AppendContributionDetail(headline, integration);
         }
 
         return IsIntegrationFailed(integration) ? integration.Reason : null;
+    }
+
+    /// <summary>Append the failing (and, when present, skipped) contribution detail behind its OWN label — a survivor blocked only by a different contribution's failure must never read as an equal failure in this one-line summary.</summary>
+    private static string AppendContributionDetail(string headline, SupervisorIntegrationOutcome integration)
+    {
+        var parts = new List<string>();
+
+        if (integration.FailingContributions.Count > 0) parts.Add(string.Join("; ", integration.FailingContributions));
+        if (integration.SkippedContributions.Count > 0) parts.Add($"not attempted: {string.Join("; ", integration.SkippedContributions)}");
+
+        return parts.Count == 0 ? headline : $"{headline} ({string.Join("; ", parts)})";
     }
 
     /// <summary>An unverified resolution explains the build/tests didn't pass on the reconciliation; a verified / in-flight resolve carries none.</summary>

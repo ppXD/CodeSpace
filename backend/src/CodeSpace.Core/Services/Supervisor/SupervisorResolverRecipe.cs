@@ -101,6 +101,13 @@ public static class SupervisorResolverRecipe
             sb.AppendLine();
         }
 
+        if (conflict.SkippedContributions.Count > 0)
+        {
+            sb.AppendLine("The contribution(s) not attempted — blocked only because a different contribution's failure stopped the set before their turn:");
+            foreach (var skipped in conflict.SkippedContributions) sb.AppendLine($"  - {skipped}");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("Steps:");
         sb.AppendLine("  1. Fetch each branch from origin and merge them together in this working copy.");
         sb.AppendLine("  2. Resolve every conflict so the combined change is coherent and complete — reconcile the two sides, do NOT discard either agent's intent.");

@@ -1845,6 +1845,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
 
         if (integration.FailingContributions.Count > 0) builder.AppendLine($"    failing contribution(s): {string.Join("; ", integration.FailingContributions)}");
+        if (integration.SkippedContributions.Count > 0) builder.AppendLine($"    not attempted — blocked only by another contribution's failure: {string.Join("; ", integration.SkippedContributions)}");
         if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {integration.Reason}");
         if (integration.PreservedBranches.Count > 0) builder.AppendLine($"    the agents' work is PRESERVED on branches: {string.Join(", ", integration.PreservedBranches)}");
 

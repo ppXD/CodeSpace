@@ -1345,6 +1345,42 @@ public class SupervisorDeciderTests
         integration.FailingContributions.ShouldBe(new[] { "agent-b: textual conflict" }, "the failing contribution is named in its own words — the applied agent-a is not");
     }
 
+    /// <summary>
+    /// A conflicted integration where agent-b GENUINELY failed (a real textual conflict) and agent-c was merely
+    /// SKIPPED — it never got a turn because agent-b's conflict aborted the set first — shaped exactly as
+    /// <c>RealSupervisorActionExecutor.ProjectOutcomes</c> now emits it, with the <c>skipped</c> tag riding each
+    /// outcome. The reported gap: before the typed split, agent-c's "not integrated — an earlier contribution
+    /// conflicted" was indistinguishable from agent-b's real defect once both landed in one FailingContributions list.
+    /// </summary>
+    private const string ConflictedMergeOutcomeWithASkippedSurvivor = """
+        {"integration":{"status":"Conflicted","integratedBranch":null,"appliedCount":1,"reason":"a contribution conflicted while integrating","excludedAgents":[],"outcomes":[
+          {"label":"agent-a","disposition":"Applied","reason":null,"conflictedFiles":[],"fallbackBranch":null,"skipped":false},
+          {"label":"agent-b","disposition":"Conflicted","reason":"textual conflict","conflictedFiles":["src/Foo.cs"],"fallbackBranch":"codespace/agent/bbb","skipped":false},
+          {"label":"agent-c","disposition":"Conflicted","reason":"not integrated — an earlier contribution conflicted","conflictedFiles":[],"fallbackBranch":"codespace/agent/ccc","skipped":true}
+        ]}}
+        """;
+
+    [Fact]
+    public void ReadIntegration_splits_a_real_failure_from_a_merely_skipped_survivor()
+    {
+        var integration = SupervisorOutcome.ReadIntegration(ConflictedMergeOutcomeWithASkippedSurvivor);
+
+        integration.ShouldNotBeNull();
+        integration!.FailingContributions.ShouldBe(new[] { "agent-b: textual conflict" }, "only the genuine defect is a failing contribution");
+        integration.SkippedContributions.ShouldBe(new[] { "agent-c: not integrated — an earlier contribution conflicted" }, "a survivor blocked only by another contribution's failure is skipped, not failing");
+        integration.PreservedBranches.ShouldBe(new[] { "codespace/agent/bbb", "codespace/agent/ccc" }, "both non-applied contributions' branches are still preserved for review, whichever list names them");
+    }
+
+    [Fact]
+    public void The_user_prompt_renders_the_skipped_survivor_under_its_own_header_distinct_from_the_failing_one()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision(ConflictedMergeOutcomeWithASkippedSurvivor)));
+
+        prompt.ShouldContain("failing contribution(s): agent-b: textual conflict", Case.Insensitive, "the real failure is named under its own header");
+        prompt.ShouldContain("not attempted", Case.Insensitive, "the skipped survivor gets its OWN header, not folded into the failing list");
+        prompt.ShouldContain("agent-c: not integrated — an earlier contribution conflicted", Case.Insensitive);
+    }
+
     [Fact]
     public void ReadIntegration_reads_a_clean_integration_as_not_conflicted()
     {

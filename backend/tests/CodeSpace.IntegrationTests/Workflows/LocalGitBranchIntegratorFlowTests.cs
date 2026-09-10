@@ -282,6 +282,35 @@ public sealed class LocalGitBranchIntegratorFlowTests
         (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse("a conflict NEVER produces a corrupt half-merged branch on the remote");
         ctx.Outcome(result, "agent-b").ConflictedFiles.ShouldContain("f.txt", "the conflicting file is named for human review");
         ctx.Outcome(result, "agent-b").Reason.ShouldContain("f.txt", customMessage: "git's own conflict detail names the path, not just a static message");
+        ctx.Outcome(result, "agent-b").Reason.ShouldNotContain("\n", customMessage: "a real git apply --index --3way failure is routinely multi-line — the reason must collapse it before it reaches a one-line prompt/recipe/timeline surface");
+    }
+
+    /// <summary>
+    /// The other "not attempted" shape (contrast the preflight-triggered one above): a contribution positioned AFTER
+    /// the one that conflicted during the APPLY loop. agent-c's own patch is perfectly fine — an unrelated file from
+    /// the same base — but it never gets a turn because agent-b's conflict aborted the set first. It must be tagged
+    /// <see cref="ContributionOutcome.Skipped"/>, distinct from agent-b's REAL failure.
+    /// </summary>
+    [Fact]
+    public async Task A_contribution_positioned_after_the_conflict_is_marked_skipped_not_a_second_failure()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["shared.txt"] = "shared-line\n", ["c.txt"] = "c" });
+
+        var a = await ctx.MakeContributionAsync("agent-a", baseSha, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "A-change\n"));
+        var b = await ctx.MakeContributionAsync("agent-b", baseSha, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "B-change\n"));
+        var c = await ctx.MakeContributionAsync("agent-c", baseSha, d => File.WriteAllText(Path.Combine(d, "c.txt"), "c-edited"));
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, a, b, c), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Conflicted);
+        result.AppliedCount.ShouldBe(1, "agent-a applied before agent-b conflicted");
+        ctx.Outcome(result, "agent-b").Skipped.ShouldBeFalse("the genuine textual conflict is a real failure, not a skip");
+        ctx.Outcome(result, "agent-c").Reason.ShouldBe("not integrated — an earlier contribution conflicted");
+        ctx.Outcome(result, "agent-c").Skipped.ShouldBeTrue("agent-c never got a turn — agent-b's conflict aborted the set first, even though agent-c's own unrelated patch would have applied cleanly");
+        (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse();
     }
 
     // ── Crown jewel: idempotent re-run reproduces the SAME single branch ─────────────
@@ -430,6 +459,35 @@ public sealed class LocalGitBranchIntegratorFlowTests
 
         result.Status.ShouldBe(IntegrationStatus.Conflicted);
         ctx.Outcome(result, "agent-lost").Disposition.ShouldBe(ContributionDisposition.Unintegrable, "no patch + no branch → unrecoverable, never a silent skip");
+        (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// The reported gap: a PREFLIGHT refusal (never even clones — pure, before <c>AbortedBeforeApply</c>'s survivor
+    /// loop runs) blocked an untouched sibling with "not attempted — the set was refused before integration began"
+    /// and that string was indistinguishable from a REAL failure once folded into <c>FailingContributions</c>. The
+    /// healthy contribution here has no defect of its own — it simply never got a turn because its sibling's own
+    /// base was missing — so it must be tagged <see cref="ContributionOutcome.Skipped"/>, while the sibling with the
+    /// actual defect must NOT be.
+    /// </summary>
+    [Fact]
+    public async Task A_preflight_refusal_marks_the_untouched_sibling_skipped_not_a_second_failure()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var ctx = new IntegratorTestContext();
+        var baseSha = await ctx.SeedBaseAsync(new() { ["a.txt"] = "a" });
+
+        var healthy = await ctx.MakeContributionAsync("agent-healthy", baseSha, d => File.WriteAllText(Path.Combine(d, "a.txt"), "a-edited"));
+        var noBase = new BranchContribution { Label = "agent-no-base", BaseSha = null, Patch = "", ProducedBranch = null };   // re-attached: no recorded base
+
+        var result = await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, healthy, noBase), CancellationToken.None);
+
+        result.Status.ShouldBe(IntegrationStatus.Conflicted, "the whole set is refused before the apply loop ever runs — this never reaches CloneApplyAndPushAsync");
+        ctx.Outcome(result, "agent-no-base").Reason.ShouldContain("no recorded base revision", customMessage: "the contribution with its own defect is named for that defect");
+        ctx.Outcome(result, "agent-no-base").Skipped.ShouldBeFalse("a real defect in ITS OWN patch/base is a failure, not a skip");
+        ctx.Outcome(result, "agent-healthy").Reason.ShouldBe("not attempted — the set was refused before integration began");
+        ctx.Outcome(result, "agent-healthy").Skipped.ShouldBeTrue("never individually attempted — a sibling's own defect stopped the whole set before this contribution's turn");
         (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse();
     }
 

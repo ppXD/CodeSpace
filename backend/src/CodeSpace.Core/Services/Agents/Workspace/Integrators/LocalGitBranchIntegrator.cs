@@ -303,7 +303,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
             r.Conflict(ConflictReason(stderr, directory, token), conflictedFiles);
 
-            for (var j = i + 1; j < resolved.Count; j++) resolved[j].Block("not integrated — an earlier contribution conflicted");
+            for (var j = i + 1; j < resolved.Count; j++) resolved[j].Skip("not integrated — an earlier contribution conflicted");
 
             return "a contribution conflicted while integrating";
         }
@@ -339,15 +339,35 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         return detail.Length == 0 ? "textual conflict applying the patch" : $"textual conflict applying the patch: {detail}";
     }
 
-    /// <summary>Git's stderr made safe to persist/display: the workspace's absolute clone directory rewritten repo-relative, any credential token redacted (the class's existing hygiene, reused), trimmed, and capped to <see cref="ConflictDetailCapChars"/> so one verbose git error can never bloat a durable outcome. Empty input (or all-whitespace) yields empty output — the caller falls back to the generic message.</summary>
-    private static string RedactedConflictDetail(string stderr, string directory, string? token)
+    /// <summary>
+    /// Git's stderr made safe to persist/display: the workspace's absolute clone directory rewritten repo-relative,
+    /// any credential token redacted (the class's existing hygiene, reused), every run of whitespace — a
+    /// <c>git apply --index --3way</c> failure is routinely MULTI-LINE — collapsed to a single space BEFORE the cap
+    /// (so a raw newline never lands in a one-line prompt/recipe/timeline surface, where a continuation line would
+    /// lose its indent and read as a top-level instruction), and capped to <see cref="ConflictDetailCapChars"/>
+    /// Rune-safe (never splitting a surrogate pair) so one verbose git error can never bloat a durable outcome.
+    /// Empty input (or all-whitespace) yields empty output — the caller falls back to the generic message. Internal
+    /// so the cap/redaction/collapse contract is unit-pinned directly (InternalsVisibleTo).
+    /// </summary>
+    internal static string RedactedConflictDetail(string stderr, string directory, string? token)
     {
         if (string.IsNullOrWhiteSpace(stderr)) return "";
 
         var relative = stderr.Replace(directory, ".", StringComparison.Ordinal);
-        var redacted = LocalGitWorkspaceProvider.Redact(relative, token).Trim();
+        var redacted = CollapseWhitespace(LocalGitWorkspaceProvider.Redact(relative, token));
 
-        return redacted.Length <= ConflictDetailCapChars ? redacted : redacted[..ConflictDetailCapChars] + "…";
+        return Cap(redacted, ConflictDetailCapChars);
+    }
+
+    /// <summary>Cap <paramref name="text"/> to <paramref name="maxChars"/> UTF-16 code units, Rune-safe: never slices between a high and low surrogate — a boundary landing on one instead drops the whole surrogate pair rather than emitting an unpaired half.</summary>
+    private static string Cap(string text, int maxChars)
+    {
+        if (text.Length <= maxChars) return text;
+
+        var length = maxChars;
+        if (length > 0 && char.IsHighSurrogate(text[length - 1])) length--;
+
+        return text[..length] + "…";
     }
 
     /// <summary>Best-effort: the unmerged paths after a failed 3-way apply; falls back to the patch's target paths so a conflict always names at least the files involved.</summary>
@@ -494,7 +514,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     private static IntegrationResult AbortedBeforeApply(IReadOnlyList<ResolvedContribution> resolved, string reason)
     {
         foreach (var r in resolved)
-            if (!r.IsBlocked) r.Block("not attempted — the set was refused before integration began");
+            if (!r.IsBlocked) r.Skip("not attempted — the set was refused before integration began");
 
         return Aborted(resolved, reason);
     }
@@ -515,7 +535,10 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
     private static string Short(string? sha) => string.IsNullOrEmpty(sha) ? "(none)" : sha.Length <= 8 ? sha : sha[..8];
 
-    private static string Summarize(string stderr) => string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
+    private static string Summarize(string stderr) => string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : CollapseWhitespace(stderr);
+
+    /// <summary>Trim + fold every embedded newline to a single space — shared by <see cref="Summarize"/> (a whole-command stderr) and <see cref="RedactedConflictDetail"/> (a per-conflict detail) so a multi-line git message never reaches either surface with raw line breaks.</summary>
+    private static string CollapseWhitespace(string text) => text.Trim().Replace("\n", " ");
 
     private static void TryDeleteFile(string path)
     {
@@ -542,12 +565,20 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
         private ContributionDisposition _disposition = ContributionDisposition.Applied;
         private string? _reason;
+        private bool _skipped;
         private IReadOnlyList<string> _conflictedFiles = Array.Empty<string>();
 
         public void Block(string reason)
         {
             _disposition = string.IsNullOrEmpty(Contribution.ProducedBranch) ? ContributionDisposition.Unintegrable : ContributionDisposition.Conflicted;
             _reason = reason;
+        }
+
+        /// <summary>Block this contribution for a reason that is NOT its own defect — it was never individually attempted because a DIFFERENT contribution's problem stopped the whole set (an earlier apply conflicted, or the set was refused before the apply loop began). Tags <see cref="ContributionOutcome.Skipped"/> so a downstream reader never counts a mere survivor as a real failure.</summary>
+        public void Skip(string reason)
+        {
+            Block(reason);
+            _skipped = true;
         }
 
         public void Conflict(string reason, IReadOnlyList<string> conflictedFiles)
@@ -565,6 +596,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             FallbackBranch = _disposition == ContributionDisposition.Applied ? null : Contribution.ProducedBranch,
             ConflictedFiles = _conflictedFiles,
             Reason = _reason,
+            Skipped = _skipped,
         };
     }
 }

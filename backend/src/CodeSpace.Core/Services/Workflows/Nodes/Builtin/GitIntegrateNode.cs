@@ -142,7 +142,13 @@ public sealed class GitIntegrateNode : INodeRuntime
             ? $"codespace/integration/{v.GetString()}"
             : $"codespace/integration/{context.NodeId}";
 
-    /// <summary>The one projection of an <see cref="IntegrationResult"/> into node outputs — shared with <c>git.integrate_run</c> so the two integrate nodes can never drift on the output contract.</summary>
+    /// <summary>
+    /// The one projection of an <see cref="IntegrationResult"/> into node outputs — shared with <c>git.integrate_run</c>
+    /// so the two integrate nodes can never drift on the output contract. <c>conflicts[]</c> sorts a real failure
+    /// (<see cref="ContributionOutcome.Skipped"/> false) before a survivor merely caught in another contribution's
+    /// blast radius (stable — ties keep outcome order), so a consumer that reads only <c>conflicts[0]</c> (the
+    /// footer's compact digest) always names the culprit, never a "not attempted" bystander.
+    /// </summary>
     internal static Dictionary<string, JsonElement> ProjectOutputs(IntegrationResult result) => new()
     {
         ["status"] = JsonSerializer.SerializeToElement(result.Status.ToString()),
@@ -152,7 +158,8 @@ public sealed class GitIntegrateNode : INodeRuntime
         ["conflicts"] = JsonSerializer.SerializeToElement(
             result.Outcomes
                 .Where(o => o.Disposition != ContributionDisposition.Applied)
-                .Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch })),
+                .OrderBy(o => o.Skipped)
+                .Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch, skipped = o.Skipped })),
     };
 
     private static IReadOnlyList<BranchContribution> ReadContributions(NodeRunContext context)

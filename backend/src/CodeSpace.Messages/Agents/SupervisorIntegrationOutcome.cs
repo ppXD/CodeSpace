@@ -24,8 +24,18 @@ public sealed record SupervisorIntegrationOutcome
     /// <summary>The branches of the CONFLICTING contributions the integrator preserved for review (its <c>fallbackBranch</c>es — set only on contributions that could NOT be cleanly applied; a cleanly-applied agent's branch is not surfaced here). Empty when the integration was clean / skipped / failed-without-branches.</summary>
     public IReadOnlyList<string> PreservedBranches { get; init; } = Array.Empty<string>();
 
-    /// <summary>Every contribution that did NOT apply, in its own words — "{label}: {reason}" (or the bare label when the outcome carried no reason), in outcome order, deduped. Names WHICH agent/branch/subtask failed and why, beside the aggregated <see cref="ConflictedFiles"/>/<see cref="PreservedBranches"/> above. Empty when clean/skipped or the outcomes carried no label.</summary>
+    /// <summary>Every contribution that genuinely FAILED to integrate — its own defect (a real textual conflict, a bad base, an unresolved patch), never a survivor merely caught in another contribution's blast radius — in its own words: "{label}: {reason}" (or the bare label when the outcome carried no reason), in outcome order, deduped. Names WHICH agent/branch/subtask failed and why, beside the aggregated <see cref="ConflictedFiles"/>/<see cref="PreservedBranches"/> above. Empty when clean/skipped or the outcomes carried no label. Distinct from <see cref="SkippedContributions"/> (Rule 18.1's typed split).</summary>
     public IReadOnlyList<string> FailingContributions { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Every contribution that was never individually attempted — blocked ONLY because a DIFFERENT contribution's
+    /// failure stopped the whole set before its turn (an earlier apply conflicted, or the set was refused before the
+    /// apply loop began) — "{label}: {reason}", in outcome order, deduped. A survivor here has no defect of its
+    /// own; it simply never got the chance, so it must never read as an equal failure beside
+    /// <see cref="FailingContributions"/>. Empty when clean/skipped, the outcomes carried no label, or nothing was
+    /// merely skipped.
+    /// </summary>
+    public IReadOnlyList<string> SkippedContributions { get; init; } = Array.Empty<string>();
 
     /// <summary>The integrator's one-line reason for a non-clean status (e.g. "a contribution conflicted while integrating"), or null when clean.</summary>
     public string? Reason { get; init; }
