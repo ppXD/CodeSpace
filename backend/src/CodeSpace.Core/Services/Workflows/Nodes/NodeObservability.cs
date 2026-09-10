@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Runtime;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes;
@@ -100,16 +101,19 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
             // We still want to leave a trace so the timeline shows "this call was in flight when
             // we cancelled" — emit failed with the cancellation message, then re-throw.
             var duration = DateTimeOffset.UtcNow - startedAt;
-            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", duration, CancellationToken.None).ConfigureAwait(false);
+            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", duration, category: null, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
         {
             var duration = DateTimeOffset.UtcNow - startedAt;
-            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External call failed.", duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External call failed.", duration, CategoryOf(ex), cancellationToken).ConfigureAwait(false);
             throw;
         }
     }
+
+    /// <summary>The transport's classified <c>LlmErrorCategory</c> name for an external-call failure, or null when <paramref name="ex"/> isn't a classified <see cref="LlmApiException"/> — so a gateway/transport fault (a 429/5xx) is told apart from a genuine code regression WITHOUT sniffing the redacted error message's prose. Never the raw message.</summary>
+    private static string? CategoryOf(Exception ex) => ex is LlmApiException llm ? llm.Category.ToString() : null;
 
     public async IAsyncEnumerable<TEvent> TraceExternalStreamAsync<TEvent>(string target, string method, JsonElement? requestPayload, Func<CancellationToken, IAsyncEnumerable<TEvent>> stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -129,12 +133,12 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", DateTimeOffset.UtcNow - startedAt, CancellationToken.None).ConfigureAwait(false);
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", DateTimeOffset.UtcNow - startedAt, category: null, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
             catch (Exception ex)
             {
-                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External stream failed.", DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, _redactor.Redact(ex.Message).Value ?? "External stream failed.", DateTimeOffset.UtcNow - startedAt, CategoryOf(ex), cancellationToken).ConfigureAwait(false);
                 throw;
             }
 

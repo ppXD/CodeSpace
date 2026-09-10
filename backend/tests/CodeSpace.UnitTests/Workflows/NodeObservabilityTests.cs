@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using Shouldly;
@@ -13,13 +14,17 @@ namespace CodeSpace.UnitTests.Workflows;
 /// recording double instead of a mocking library so the call sequence is readable in plain
 /// assertions.
 ///
-/// The four invariants pinned here:
+/// The five invariants pinned here:
 ///   1. <c>TraceExternalCallAsync</c> emits started → completed on success.
 ///   2. <c>TraceExternalCallAsync</c> emits started → failed on throw, AND re-throws.
 ///   3. The started + completed/failed records share one correlation id (so the run-detail
 ///      UI can pair them).
 ///   4. <c>PersistArtifactAsync</c> delegates to <see cref="IArtifactStore.PutAsync"/> with
 ///      the bound team id + returns the canonical ref shape.
+///   5. A failed call's <c>category</c> is the thrown <see cref="LlmApiException"/>'s classified
+///      category name, or null for any other exception — never sniffed from the (possibly
+///      redacted) message — so a consumer (the real-model gate) can tell a gateway/transport
+///      fault apart from a genuine regression.
 /// </summary>
 [Trait("Category", "Unit")]
 public class NodeObservabilityTests
@@ -80,6 +85,67 @@ public class NodeObservabilityTests
 
         logger.FailedCalls[0].Error.ShouldBe("boom",
             "external_call.failed payload MUST surface the original exception message");
+    }
+
+    [Theory]
+    [InlineData(LlmErrorCategory.Transient)]
+    [InlineData(LlmErrorCategory.RateLimited)]
+    [InlineData(LlmErrorCategory.AuthFailed)]
+    [InlineData(LlmErrorCategory.BadRequest)]
+    [InlineData(LlmErrorCategory.ContextLengthExceeded)]
+    [InlineData(LlmErrorCategory.ContentFiltered)]
+    [InlineData(LlmErrorCategory.Malformed)]
+    public async Task TraceExternalCallAsync_records_the_thrown_LlmApiExceptions_category_on_the_failed_call(LlmErrorCategory category)
+    {
+        var logger = new RecordingLogger();
+        var store = new RecordingArtifactStore();
+        var observability = new NodeObservability(logger, store, RunId, NodeId, TeamId, ParentRecordId);
+
+        await Should.ThrowAsync<LlmApiException>(() => observability.TraceExternalCallAsync<int>(
+            target: "https://api.example.com",
+            method: "POST",
+            requestPayload: null,
+            action: _ => throw new LlmApiException("TestProvider", null, category, "boom"),
+            cancellationToken: CancellationToken.None));
+
+        logger.FailedCalls.Single().Category.ShouldBe(category.ToString(),
+            "a classified LLM transport fault's category rides on the failed record as a structured field — never sniffed from the message");
+    }
+
+    [Fact]
+    public async Task TraceExternalCallAsync_records_no_category_for_an_unclassified_exception()
+    {
+        var logger = new RecordingLogger();
+        var store = new RecordingArtifactStore();
+        var observability = new NodeObservability(logger, store, RunId, NodeId, TeamId, ParentRecordId);
+
+        await Should.ThrowAsync<InvalidOperationException>(() => observability.TraceExternalCallAsync<int>(
+            target: "https://api.example.com",
+            method: "POST",
+            requestPayload: null,
+            action: _ => throw new InvalidOperationException("boom"),
+            cancellationToken: CancellationToken.None));
+
+        logger.FailedCalls.Single().Category.ShouldBeNull("a non-LlmApiException fault is not a classified transport failure — never a guessed category");
+    }
+
+    [Fact]
+    public async Task TraceExternalCallAsync_records_no_category_on_a_cancellation()
+    {
+        var logger = new RecordingLogger();
+        var store = new RecordingArtifactStore();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var observability = new NodeObservability(logger, store, RunId, NodeId, TeamId, ParentRecordId);
+
+        await Should.ThrowAsync<OperationCanceledException>(() => observability.TraceExternalCallAsync<int>(
+            target: "https://api.example.com",
+            method: "POST",
+            requestPayload: null,
+            action: ct => throw new OperationCanceledException(ct),
+            cancellationToken: cts.Token));
+
+        logger.FailedCalls.Single().Category.ShouldBeNull("our own cancellation carries no transport classification");
     }
 
     [Fact]
@@ -178,7 +244,7 @@ public class NodeObservabilityTests
     {
         public List<(Guid RecordId, Guid CorrelationId, string Target, string Method, JsonElement? RequestPayload, Guid? ParentRecordId)> StartedCalls { get; } = new();
         public List<(Guid CorrelationId, int? StatusCode, JsonElement? Payload)> CompletedCalls { get; } = new();
-        public List<(Guid CorrelationId, string Target, string Error)> FailedCalls { get; } = new();
+        public List<(Guid CorrelationId, string Target, string Error, string? Category)> FailedCalls { get; } = new();
 
         public Task<(Guid RecordId, Guid CorrelationId)> ExternalCallStartedAsync(Guid runId, string? nodeId, string target, string method, JsonElement? requestPayload, Guid? parentRecordId, CancellationToken cancellationToken)
         {
@@ -194,9 +260,9 @@ public class NodeObservabilityTests
             return Task.CompletedTask;
         }
 
-        public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken cancellationToken)
+        public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, string? category, CancellationToken cancellationToken)
         {
-            FailedCalls.Add((correlationId, target, error));
+            FailedCalls.Add((correlationId, target, error, category));
             return Task.CompletedTask;
         }
 

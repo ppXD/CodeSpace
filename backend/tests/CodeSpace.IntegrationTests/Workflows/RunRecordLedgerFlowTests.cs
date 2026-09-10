@@ -230,8 +230,10 @@ public class RunRecordLedgerFlowTests
         callCompleted.ParentRecordId.ShouldBeNull("only the .started carries the parent link; completed pairs via correlation_id");
     }
 
-    [Fact]
-    public async Task External_call_failed_emits_with_correlation_pairing()
+    [Theory]
+    [InlineData(null)]           // an unclassified failure (e.g. cancellation, or a non-LlmApiException fault) — category absent
+    [InlineData("RateLimited")]  // a classified LLM transport fault — category rides as a structured field, never sniffed from prose
+    public async Task External_call_failed_emits_with_correlation_pairing(string? category)
     {
         var runId = await SeedRunAsync();
 
@@ -245,7 +247,7 @@ public class RunRecordLedgerFlowTests
 
         await logger.ExternalCallFailedAsync(runId, nodeId: "n1", correlationId,
             target: "https://api.example.com", error: "connection refused",
-            duration: TimeSpan.FromMilliseconds(10), cancellationToken: CancellationToken.None);
+            duration: TimeSpan.FromMilliseconds(10), category: category, cancellationToken: CancellationToken.None);
 
         var failedRecord = await db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.ExternalCallFailed)
@@ -257,6 +259,10 @@ public class RunRecordLedgerFlowTests
         payload.GetProperty("error").GetString().ShouldBe("connection refused");
         payload.GetProperty("target").GetString().ShouldBe("https://api.example.com");
         payload.GetProperty("duration_ms").GetInt64().ShouldBeGreaterThanOrEqualTo(0);
+
+        var categoryProp = payload.GetProperty("category");
+        if (category is null) categoryProp.ValueKind.ShouldBe(JsonValueKind.Null, "an unclassified failure persists no category — never a guessed one");
+        else categoryProp.GetString().ShouldBe(category, "a classified transport fault's category rides on the record as a structured field a consumer reads directly");
     }
 
     [Fact]

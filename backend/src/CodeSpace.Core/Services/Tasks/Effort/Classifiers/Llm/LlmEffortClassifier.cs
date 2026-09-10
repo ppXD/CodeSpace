@@ -50,11 +50,17 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
 
     public async Task<EffortDecision> ClassifyAsync(EffortRouteRequest request, CancellationToken ct)
     {
-        var classification = await TryClassifyWithModelAsync(request, ct).ConfigureAwait(false);
+        var attempt = await TryClassifyWithModelAsync(request, ct).ConfigureAwait(false);
 
         // No structured provider / no pool model / a degraded reply → the deterministic heuristic baseline (兜底): a real
-        // model-derived decision when a model is available, an always-confirm guess when it is not.
-        if (classification is null) return await _heuristic.ClassifyAsync(request, ct).ConfigureAwait(false);
+        // model-derived decision when a model is available, an always-confirm guess when it is not. The fallback rides
+        // the caught exception's CLASSIFICATION (never null when one was caught) so a consumer (a real-model gate) can
+        // tell a gateway/transport fault apart from a genuine classification miss without sniffing prose.
+        if (attempt.Classification is not { } classification)
+        {
+            var fallback = await _heuristic.ClassifyAsync(request, ct).ConfigureAwait(false);
+            return fallback with { FallbackReason = attempt.FallbackReason };
+        }
 
         var signals = ToSignals(classification);
         var tier = EffortPolicy.Decide(signals, requestedEffort: null);
@@ -70,20 +76,20 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
         };
     }
 
-    /// <summary>The model's classification, or null when no structured provider has a team pool model, or the model path missed for ANY reason (a keyless credential the client rejects, a transport / gateway fault, a malformed reply) — the caller then falls to the heuristic baseline. Resolves a structured client + model that MATCH (so an all-Custom pool classifies on the Custom client), the same as the planner.</summary>
-    private async Task<LlmEffortClassification?> TryClassifyWithModelAsync(EffortRouteRequest request, CancellationToken ct)
+    /// <summary>The model's classification attempt: no provider/pool model resolves to a null classification and a null reason (a deployment fact, not a fault); a miss on the model path (a keyless credential, a transport/gateway fault, a malformed reply) resolves to a null classification and the caught exception's classification. The caller falls to the heuristic baseline on either. Resolves a structured client + model that MATCH (so an all-Custom pool classifies on the Custom client), the same as the planner.</summary>
+    private async Task<ModelClassificationAttempt> TryClassifyWithModelAsync(EffortRouteRequest request, CancellationToken ct)
     {
         try
         {
             var options = new InProcessStructuredModelOptions(request.Seed.TeamId) { TierCeiling = InProcessStructuredModel.CheapBrainCeiling, Logger = _logger };
             if (await InProcessStructuredModel.ResolveAsync(_clients, _models, options, ct).ConfigureAwait(false) is not { } resolved)
-                return null;
+                return new ModelClassificationAttempt(null, null);
 
             var (structured, pick) = resolved;
 
             var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), ct).ConfigureAwait(false);
 
-            return completion.Json.Deserialize<LlmEffortClassification>(LlmEffortClassifierSchema.Options);
+            return new ModelClassificationAttempt(completion.Json.Deserialize<LlmEffortClassification>(LlmEffortClassifierSchema.Options), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -91,9 +97,15 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
             // gateway fault (LlmApiException), a malformed reply (JsonException / a parse fault) — degrades to the
             // heuristic baseline. The effort classifier is a launch-time BEST-EFFORT enhancement; it must NEVER crash the
             // launch (the documented 兜底). A genuine cancellation (the caller's token) propagates — never swallowed.
-            return null;
+            return new ModelClassificationAttempt(null, ClassifyFallbackReason(ex));
         }
     }
+
+    /// <summary>The classified reason a model-path exception fell back — the transport's <see cref="LlmErrorCategory"/> name for a classified <see cref="LlmApiException"/> (so a gateway/transport/auth infra fault is distinguishable from a model-capability one), else the exception's TYPE name. NEVER the raw message: it can carry prompt/response content, and a bare type name is enough for a consumer to tell "some other bug" apart from a classified transport fault. Mirrors <c>NodeObservability</c>'s identical non-message classification for an <c>external_call.failed</c> record.</summary>
+    private static string ClassifyFallbackReason(Exception ex) => ex is LlmApiException llm ? llm.Category.ToString() : ex.GetType().Name;
+
+    /// <summary>One attempt at classifying with the model: the parsed reply, or null with the caught exception's <see cref="ClassifyFallbackReason"/> when the attempt fell back — never both null AND non-null members set for a real exception.</summary>
+    private readonly record struct ModelClassificationAttempt(LlmEffortClassification? Classification, string? FallbackReason);
 
     private static StructuredLLMCompletionRequest BuildRequest(EffortRouteRequest request, ModelPoolPick pick) => new()
     {

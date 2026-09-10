@@ -45,10 +45,14 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <para><b>Gate policy:</b> both arms produce near-deterministic data (a length-forced completion streams; a
 /// file-create-then-<c>ls</c> goal drives tool/file/command events), so each GATES the blessed Anthropic wire via
 /// <see cref="RealModelGate.AssessLiveBestOfNAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{bool, string}}}, int?)"/> —
-/// a persistent absence of the footer's own data REDs main. A GATEWAY/transport fault is a non-gating LOUD skip
-/// (classified by <see cref="RealModelGate.IsGatewayInfraError"/> for the engine run / <see cref="RealModelRunClassifier.IsGatewayInfra"/>
-/// for the agent run); a completed run MISSING the records is a REAL miss the gate REDs on. A no-creds / no-CLI run
-/// self-skips LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the real-model lane.</para>
+/// a persistent absence of the footer's own data REDs main. A GATEWAY/transport fault is a non-gating LOUD skip,
+/// classified by <see cref="RealModelGate.IsGatewayInfraError"/> for a run that reached <c>Failure</c> (an
+/// auth fault, non-parkable), by <see cref="RealModelGate.IsGatewayInfraCategory"/> reading the
+/// <c>external_call.failed</c> record's structured <c>category</c> field for a run that instead PARKED on a
+/// transient/rate-limited fault (<c>InfraPark</c>, A2 — the run never reaches <c>Failure</c> at all), and by
+/// <see cref="RealModelRunClassifier.IsGatewayInfra"/> for the agent run; a completed run MISSING the records, or a
+/// started call with NO terminal record at all, is a REAL miss the gate REDs on. A no-creds / no-CLI run self-skips
+/// LOUDLY (skip ≠ pass). POSIX-only. <c>[Category=RealModel]</c> so it runs ONLY on the real-model lane.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -128,6 +132,22 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         // ── B1: the external_call.* pair the footer's externalCall card reads ──
         var extStarted = records.Where(r => r.RecordType == WorkflowRunRecordTypes.ExternalCallStarted).ToList();
         var extCompleted = records.Where(r => r.RecordType == WorkflowRunRecordTypes.ExternalCallCompleted).ToList();
+        var extFailed = records.Where(r => r.RecordType == WorkflowRunRecordTypes.ExternalCallFailed).ToList();
+
+        // A transient/rate-limited LLM fault PARKS the llm.complete node (InfraPark, A2) rather than failing the run —
+        // the run never reaches WorkflowRunStatus.Failure, so the branch above never sees it. The external_call.failed
+        // record itself is the only place this shows up, so read ITS classified `category` field (never the run status)
+        // to tell a gateway/transport fault apart from a real regression. A started call with NO terminal record at
+        // all (neither completed nor failed) is NOT covered here — that stays a real footer bug below.
+        if (extStarted.Count == 1 && extFailed.Count == 1 && extCompleted.Count == 0)
+        {
+            var category = ReadCategory(extFailed[0].PayloadJson);
+
+            if (RealModelGate.IsGatewayInfraCategory(category))
+                throw new TimeoutException($"the llm.complete external call failed with a classified gateway-infra category '{category}' (NON-GATING infra skip): {extFailed[0].PayloadJson}");
+
+            return (false, $"{Provider} '{model}': the llm.complete external call FAILED and its category ('{category ?? "none"}') is NOT a gateway-infra signature — a real regression: {extFailed[0].PayloadJson}");
+        }
 
         if (extStarted.Count != 1 || extCompleted.Count != 1)
             return (false, $"{Provider} '{model}': expected exactly one external_call.started + one .completed, saw {extStarted.Count}/{extCompleted.Count}");
@@ -188,6 +208,13 @@ public sealed class RealModelFooterSignalsE2ETests : IDisposable
         var verdict = $"{Provider} '{model}': the engine-driven llm.complete recorded the footer's B1 external_call pair (target={target}, method={method}) AND B2 streamed interaction feed (started + {deltas.Count} interaction.delta rows, monotonic ordinals, completed usage.outputTokens={outTok.GetInt32()}), all attributed to kind 'llm.complete'";
         Console.WriteLine($"[footer-signals-e2e] llm.complete: {verdict}");
         return (true, verdict);
+    }
+
+    /// <summary>The <c>category</c> field an <c>external_call.failed</c> payload carries — the transport's classified <c>LlmErrorCategory</c> name when the throw was a classified LLM fault, else null (an unclassified failure, or the field is absent on an older record).</summary>
+    private static string? ReadCategory(string payloadJson)
+    {
+        using var doc = JsonDocument.Parse(payloadJson);
+        return doc.RootElement.TryGetProperty("category", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
     }
 
     /// <summary>An interaction.delta carried real text iff its <c>text</c> field is a non-empty inline string OR an offloaded <c>$artifact_id</c> ref (a large coalesced fragment rides as an artifact, still proving non-empty text).</summary>

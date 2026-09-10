@@ -630,6 +630,27 @@ public sealed class RealModelGateTests
         RealModelGate.IsGatewayInfraFailure(ex).ShouldBe(isInfra);
     }
 
+    [Theory]
+    [InlineData("Transient", true)]
+    [InlineData("RateLimited", true)]
+    [InlineData("AuthFailed", true)]
+    [InlineData("Malformed", false)]
+    [InlineData("BadRequest", false)]
+    [InlineData("ContextLengthExceeded", false)]
+    [InlineData("ContentFiltered", false)]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("NotARealCategory", false)]
+    public void IsGatewayInfraCategory_matches_the_exception_based_classification_for_a_bare_category_name(string? category, bool isInfra)
+    {
+        // A consumer that holds only a classified STRING (a persisted external_call.failed record's `category` field,
+        // or an effort classifier's FallbackReason) — not the exception, and possibly from a sibling test assembly that
+        // cannot see this class's internal members — must classify identically to the exception path via a throwaway
+        // LlmApiException, so the two vocabularies can never drift apart. An unparseable/null/blank name gates (the
+        // same "an unrecognised failure gates" default every other classifier here uses).
+        RealModelGate.IsGatewayInfraCategory(category).ShouldBe(isInfra);
+    }
+
     [Fact]
     public void A_typed_transient_LlmApiException_nested_in_an_aggregate_is_still_infra()
     {

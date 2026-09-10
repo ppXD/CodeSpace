@@ -439,7 +439,7 @@ public class LlmStructuredCriticTests
         public Task IterationCompletedAsync(Guid runId, string nodeId, int itemCount, TimeSpan duration, CancellationToken ct) => throw new NotSupportedException();
         public Task<(Guid RecordId, Guid CorrelationId)> ExternalCallStartedAsync(Guid runId, string? nodeId, string target, string method, JsonElement? requestPayload, Guid? parentRecordId, CancellationToken ct) => throw new NotSupportedException();
         public Task ExternalCallCompletedAsync(Guid runId, string? nodeId, Guid correlationId, int? statusCode, JsonElement? responsePayload, TimeSpan duration, CancellationToken ct) => throw new NotSupportedException();
-        public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, CancellationToken ct) => throw new NotSupportedException();
+        public Task ExternalCallFailedAsync(Guid runId, string? nodeId, Guid correlationId, string target, string error, TimeSpan duration, string? category, CancellationToken ct) => throw new NotSupportedException();
         public Task LogAsync(Guid runId, string? nodeId, Core.Services.Workflows.Lifecycle.LogLevel level, string message, CancellationToken ct) => throw new NotSupportedException();
         public Task WaitReissuedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, Guid waitId, Guid byUserId, CancellationToken ct) => throw new NotSupportedException();
     }

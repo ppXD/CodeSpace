@@ -90,6 +90,7 @@ public class LlmEffortClassifierTests
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "no structured client → the heuristic floor");
         decision.Confidence.ShouldBeLessThan(EffortPolicy.ConfirmConfidenceFloor, "the heuristic always asks the operator to confirm");
+        decision.FallbackReason.ShouldBeNull("no provider is a deployment fact, not a caught fault — nothing to classify");
     }
 
     [Fact]
@@ -98,14 +99,23 @@ public class LlmEffortClassifierTests
         var decision = await Classifier(new CannedClient(Reply(confidence: 0.9)), pick: null).ClassifyAsync(Request(), CancellationToken.None);
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "no credentialed pool model → the heuristic floor (never a guessed model)");
+        decision.FallbackReason.ShouldBeNull("no pool model is a deployment fact, not a caught fault — nothing to classify");
     }
 
-    [Fact]
-    public async Task A_transport_miss_falls_back_to_the_heuristic_baseline()
+    [Theory]
+    [InlineData(LlmErrorCategory.Transient)]
+    [InlineData(LlmErrorCategory.RateLimited)]
+    [InlineData(LlmErrorCategory.AuthFailed)]
+    [InlineData(LlmErrorCategory.BadRequest)]
+    [InlineData(LlmErrorCategory.ContextLengthExceeded)]
+    [InlineData(LlmErrorCategory.ContentFiltered)]
+    [InlineData(LlmErrorCategory.Malformed)]
+    public async Task A_transport_miss_falls_back_to_the_heuristic_baseline_and_records_the_category_as_the_fallback_reason(LlmErrorCategory category)
     {
-        var decision = await Classifier(new ThrowingClient(), Pick()).ClassifyAsync(Request(), CancellationToken.None);
+        var decision = await Classifier(new ThrowingClient(category), Pick()).ClassifyAsync(Request(), CancellationToken.None);
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "an LLM transport/model error never crashes the launch — it degrades to the heuristic");
+        decision.FallbackReason.ShouldBe(category.ToString(), "the caught exception's classification rides on the decision so a consumer can tell a gateway fault apart from a real miss WITHOUT sniffing prose");
     }
 
     [Fact]
@@ -116,6 +126,7 @@ public class LlmEffortClassifierTests
         var decision = await Classifier(new RawClient(notAnObject), Pick()).ClassifyAsync(Request(), CancellationToken.None);
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "a reply that doesn't bind to the schema → the heuristic floor");
+        decision.FallbackReason.ShouldBe(nameof(JsonException), "a schema-mismatched reply throws a JsonException on deserialize — its TYPE name is the fallback reason, never the raw message");
     }
 
     [Fact]
@@ -127,6 +138,7 @@ public class LlmEffortClassifierTests
         var decision = await Classifier(new RawThrowingClient(), Pick()).ClassifyAsync(Request(), CancellationToken.None);
 
         decision.ClassifierKind.ShouldBe(HeuristicEffortClassifier.ClassifierKind, "a raw client exception degrades to the heuristic — the launch never crashes (the 兜底 contract)");
+        decision.FallbackReason.ShouldBe(nameof(InvalidOperationException), "a non-LlmApiException fallback still records SOME classification — the exception's type name, never its message");
     }
 
     // ── D2: the classifier is a CHEAP call — it declares a cost ceiling ──
@@ -353,8 +365,10 @@ public class LlmEffortClassifierTests
 
     private sealed class ThrowingClient : BaseClient
     {
+        private readonly LlmErrorCategory _category;
+        public ThrowingClient(LlmErrorCategory category = LlmErrorCategory.Malformed) => _category = category;
         public override Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) =>
-            throw new LlmApiException("TestEffort", null, LlmErrorCategory.Malformed, "boom");
+            throw new LlmApiException("TestEffort", null, _category, "boom");
     }
 
     /// <summary>Throws a RAW InvalidOperationException — what the real Anthropic/OpenAI client throws on a keyless credential or an unparseable 200 tool-arg, BEFORE/around the transport's LlmApiException wrapping.</summary>

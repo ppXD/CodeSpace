@@ -848,6 +848,19 @@ public static class RealModelGate
     /// </summary>
     internal static bool IsGatewayInfraFailure(Exception ex) => Unwrap(ex).Any(IsTransientTransport);
 
+    /// <summary>
+    /// The PUBLIC, string-based sibling of <see cref="IsGatewayInfraFailure(Exception)"/> — for a consumer that holds
+    /// only a classified CATEGORY NAME (e.g. a structured <c>external_call.failed</c> record's <c>category</c> field,
+    /// or an effort classifier's <c>FallbackReason</c>) rather than the exception itself, possibly from a sibling test
+    /// assembly that cannot see this class's <c>internal</c> members. Reuses the EXACT SAME category list via a
+    /// throwaway <see cref="LlmApiException"/> routed through <see cref="IsGatewayInfraFailure(Exception)"/> so the two
+    /// can never drift apart. An unparseable/null/blank name (a non-LlmApiException fallback reason, e.g. a bare
+    /// exception TYPE name) is NOT infra — the same "an unrecognised failure gates" default every other classifier here
+    /// uses.
+    /// </summary>
+    public static bool IsGatewayInfraCategory(string? category) =>
+        Enum.TryParse<LlmErrorCategory>(category, out var parsed) && IsGatewayInfraFailure(new LlmApiException("", null, parsed, ""));
+
     private static bool IsTransientTransport(Exception e) => e switch
     {
         TimeoutException => true,

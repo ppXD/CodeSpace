@@ -27,4 +27,14 @@ public sealed record EffortDecision
 
     /// <summary>Which classifier produced this decision (an open kind string, e.g. <c>"heuristic"</c>). Defaults empty.</summary>
     public string ClassifierKind { get; init; } = "";
+
+    /// <summary>
+    /// Why a classifier that ASKED for a stronger one (e.g. the structured-LLM auto path) fell back to this decision
+    /// instead — the caught exception's classification (a transport fault's category name, or else its exception TYPE
+    /// name), NEVER the raw message. Null when no fallback occurred (this decision IS the classifier it names in
+    /// <see cref="ClassifierKind"/>) or when the fallback had no exception to classify (e.g. no model configured).
+    /// Lets a consumer (a real-model gate) tell a gateway/transport fault apart from a genuine classification miss
+    /// without sniffing prose.
+    /// </summary>
+    public string? FallbackReason { get; init; }
 }
