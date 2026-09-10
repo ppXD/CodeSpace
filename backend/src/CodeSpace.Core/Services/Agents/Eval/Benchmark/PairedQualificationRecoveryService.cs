@@ -62,7 +62,9 @@ public sealed class PairedQualificationRecoveryService : IPairedQualificationRec
             ObservationGroupId = observationGroupId, CodeRevision = protocol.CodeRevision, Suite = suite, Manifest = manifest,
             Spec = Spec(protocol), Control = control, Candidate = candidate, Sessions = sessions,
         }) with { ProtocolDigest = protocol.ProtocolDigest };
-        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = observationGroupId, Manifest = manifest, Outcome = outcome }, cancellationToken).ConfigureAwait(false);
+        // Replay, not execution: every row reduced above is an already-paid, already-gated observation and this
+        // path makes no model call, so the seal does not consult the live runtime — see PairedQualificationSealSource.
+        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = observationGroupId, Manifest = manifest, Outcome = outcome, Source = PairedQualificationSealSource.Replay }, cancellationToken).ConfigureAwait(false);
     }
 
     private static void ValidateCensus(PairedQualificationProtocol protocol, EvalSuiteManifest manifest, IReadOnlyList<BenchmarkResultRecord> observations)

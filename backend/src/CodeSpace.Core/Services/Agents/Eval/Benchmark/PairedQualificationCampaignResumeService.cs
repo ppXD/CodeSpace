@@ -24,14 +24,16 @@ public sealed class PairedQualificationCampaignResumeService : IPairedQualificat
     private readonly CodeSpaceDbContext _db;
     private readonly PairedQualificationRecoveryService _recovery;
     private readonly IPairedQualificationCampaignLock _campaignLock;
+    private readonly IQualificationRuntimeGate _runtimeGate;
 
-    public PairedQualificationCampaignResumeService(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, PairedQualificationRecoveryService recovery, IPairedQualificationCampaignLock campaignLock)
+    public PairedQualificationCampaignResumeService(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, PairedQualificationRecoveryService recovery, IPairedQualificationCampaignLock campaignLock, IQualificationRuntimeGate runtimeGate)
     {
         _suite = suite;
         _corpus = corpus;
         _db = db;
         _recovery = recovery;
         _campaignLock = campaignLock;
+        _runtimeGate = runtimeGate;
     }
 
     public async Task<PairedQualificationOutcome> ResumeAsync(Guid observationGroupId, CancellationToken cancellationToken)
@@ -51,7 +53,11 @@ public sealed class PairedQualificationCampaignResumeService : IPairedQualificat
 
         var observations = await ObservationsAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
         ValidateSubset(protocol, manifest, observations, control, candidate);
-        foreach (var target in Missing(protocol, manifest, observations))
+        var missing = Missing(protocol, manifest, observations);
+
+        await EnsureRuntimeUnchangedForExecutionAsync(observationGroupId, missing, cancellationToken).ConfigureAwait(false);
+
+        foreach (var target in missing)
         {
             if (await ExistsAsync(observationGroupId, target, cancellationToken).ConfigureAwait(false)) continue;
             await _corpus.RunPairedAsync(new PairedCorpusBenchmarkRequest
@@ -65,6 +71,18 @@ public sealed class PairedQualificationCampaignResumeService : IPairedQualificat
         }
 
         return await _recovery.RecoverClaimedAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Verify the campaign's frozen runtime before this process pays for a single absent cell. Gated on there being
+    /// absent cells AT ALL: an adoption that finds the census already complete executes nothing and falls through to
+    /// replay, and refusing that would strand a fully-paid campaign on a host whose runtime moved after its last cell.
+    /// </summary>
+    private async Task EnsureRuntimeUnchangedForExecutionAsync(Guid observationGroupId, IReadOnlyList<MissingCell> missing, CancellationToken cancellationToken)
+    {
+        if (missing.Count == 0) return;
+
+        await _runtimeGate.EnsureUnchangedAsync(observationGroupId, QualificationRuntimeStage.Resume, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ValidateCurrentModelsAsync(PairedQualificationProtocol protocol, BenchmarkAgentSelection control, BenchmarkAgentSelection candidate, CancellationToken cancellationToken)

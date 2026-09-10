@@ -240,7 +240,10 @@ public sealed class QualificationRuntimeManifestTests
         OrderingSeed = "frozen-order",
     };
 
-    private static QualificationRuntimeManifest Mutate(QualificationRuntimeManifest manifest, string group) => group switch
+    // Internal (not private) so QualificationRuntimeGateTests compares the SAME fixture and the SAME per-group
+    // mutations this file's digest/Compare contract is pinned against — a gate proven against a second, drifting
+    // copy of the fixture would prove nothing about the manifest actually persisted.
+    internal static QualificationRuntimeManifest Mutate(QualificationRuntimeManifest manifest, string group) => group switch
     {
         "harnesses" => manifest with { Harnesses = manifest.Harnesses.Select((harness, index) => index == 0 ? harness with { BinarySha256 = new string('b', 64) } : harness).ToList() },
         "runner" => manifest with { Runner = manifest.Runner with { BubblewrapAvailable = !manifest.Runner.BubblewrapAvailable } },
@@ -250,7 +253,7 @@ public sealed class QualificationRuntimeManifestTests
         _ => throw new ArgumentOutOfRangeException(nameof(group), group, "Every frozen group needs a mutation here — a group with none would be untested."),
     };
 
-    private static QualificationRuntimeManifest Manifest() => new()
+    internal static QualificationRuntimeManifest Manifest() => new()
     {
         Harnesses =
         [

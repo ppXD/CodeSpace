@@ -260,12 +260,12 @@ public sealed record QualificationRuntimeManifest
         return FirstDifference(frozenDocument.RootElement, observedDocument.RootElement, RootField);
     }
 
-    /// <summary>Refuse an observation that drifted from the frozen bundle, naming the field. Pure — no I/O, no logging.</summary>
-    public static void EnsureNoDrift(QualificationRuntimeManifest frozen, QualificationRuntimeManifest observed)
+    /// <summary>Refuse an observation that drifted from the frozen bundle, naming the field and — when the comparison belongs to one of the campaign's gated stages — where it was caught. Pure: no I/O, no logging.</summary>
+    public static void EnsureNoDrift(QualificationRuntimeManifest frozen, QualificationRuntimeManifest observed, QualificationRuntimeStage? stage = null)
     {
         if (Compare(frozen, observed) is not { } field) return;
 
-        throw new RuntimeManifestDriftException(field, frozen.ManifestDigest(), observed.ManifestDigest());
+        throw new RuntimeManifestDriftException(field, frozen.ManifestDigest(), observed.ManifestDigest(), stage);
     }
 
     private static string? FirstDifference(JsonElement frozen, JsonElement observed, string path)

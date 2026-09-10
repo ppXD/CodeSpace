@@ -9,6 +9,8 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -341,7 +343,7 @@ public sealed class PairedQualificationRunnerFlowTests
         var crash = new CrashBeforeSeal();
         using (var runScope = _fixture.BeginScope())
         {
-            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash, runScope.Resolve<IPairedQualificationCampaignLock>());
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash, runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
             await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
             {
                 TeamId = teamId, CodeRevision = new string('c', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
@@ -391,7 +393,7 @@ public sealed class PairedQualificationRunnerFlowTests
         using (var runScope = _fixture.BeginScope())
         {
             var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), runScope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance, runScope.Resolve<IPairedQualificationCellAdmissionStore>());
-            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>());
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
             await Should.ThrowAsync<OperationCanceledException>(() => runner.RunAsync(new PairedQualificationRequest
             {
                 TeamId = teamId, CodeRevision = new string('d', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
@@ -436,7 +438,7 @@ public sealed class PairedQualificationRunnerFlowTests
         using (var runScope = _fixture.BeginScope())
         {
             var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), runScope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance, runScope.Resolve<IPairedQualificationCellAdmissionStore>());
-            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>());
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
             await Should.ThrowAsync<OperationCanceledException>(() => runner.RunAsync(new PairedQualificationRequest
             {
                 TeamId = teamId, CodeRevision = new string('e', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
@@ -519,6 +521,274 @@ public sealed class PairedQualificationRunnerFlowTests
         failure.ConstraintName.ShouldBe("ck_paired_qualification_protocol_runtime_manifest", "a manifest without its digest, or a digest without its manifest, can never be verified");
     }
 
+
+    [Theory]
+    [InlineData(QualificationRuntimeStage.Admission)]
+    [InlineData(QualificationRuntimeStage.Execution)]
+    [InlineData(QualificationRuntimeStage.Resume)]
+    [InlineData(QualificationRuntimeStage.Seal)]
+    public async Task An_unchanged_host_passes_every_paid_stage(QualificationRuntimeStage stage)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+        await FreezeLiveRuntimeAsync(groupId, teamId, controlRow, candidateRow);
+
+        using var scope = _fixture.BeginScope();
+
+        // The frozen manifest and this comparison are two INDEPENDENT observations of one host, taken through the
+        // production collector in two different scopes. A single non-deterministic field anywhere in the bundle
+        // (an unsorted collection, a timestamp, a re-encrypted secret) would refuse every honest campaign here.
+        await Should.NotThrowAsync(() => scope.Resolve<IQualificationRuntimeGate>().EnsureUnchangedAsync(groupId, stage, CancellationToken.None));
+    }
+
+    /// <summary>A protocol committed before the runtime bundle existed keeps running: the gate short-circuits BEFORE observing, so a legacy campaign is not even measured against today's host.</summary>
+    [Theory]
+    [InlineData(QualificationRuntimeStage.Admission)]
+    [InlineData(QualificationRuntimeStage.Execution)]
+    [InlineData(QualificationRuntimeStage.Resume)]
+    [InlineData(QualificationRuntimeStage.Seal)]
+    public async Task A_legacy_protocol_that_froze_no_runtime_passes_every_paid_stage(QualificationRuntimeStage stage)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+
+        using (var writeScope = _fixture.BeginScope())
+        {
+            var db = writeScope.Resolve<CodeSpaceDbContext>();
+            db.PairedQualificationProtocol.Add(RuntimeManifestProtocol(groupId, teamId, controlRow, candidateRow, null));
+            await db.SaveChangesAsync();
+        }
+
+        using var scope = _fixture.BeginScope();
+
+        await Should.NotThrowAsync(() => Gate(scope, new UnobservableRuntime()).EnsureUnchangedAsync(groupId, stage, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_substituted_runtime_refuses_cell_admission_and_leaves_no_row()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+        await FreezeLiveRuntimeAsync(groupId, teamId, controlRow, candidateRow);
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+
+        using var scope = _fixture.BeginScope();
+        var store = new PairedQualificationCellAdmissionStore(scope.Resolve<CodeSpaceDbContext>(), Gate(scope, substituted));
+
+        var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => store.AdmitAsync(new PairedQualificationCellAdmissionRequest
+        {
+            ObservationGroupId = groupId, ObservationSession = 0, ObservationArm = "control",
+            TaskId = "generic-task", Mode = BenchmarkMode.TaskLaunchQuick, ModelCredentialModelId = controlRow,
+        }, CancellationToken.None));
+
+        AssertRefused(refusal, QualificationRuntimeStage.Admission);
+        substituted.Observations.ShouldBe(1, "admission must consult the live runtime, not a cached verdict from an earlier cell");
+        (await scope.Resolve<CodeSpaceDbContext>().PairedQualificationCellAdmission.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId))
+            .ShouldBe(0, "an admission row is the point a cell becomes payable — a substituted runtime must leave none, not one nothing can ever settle");
+    }
+
+    [Fact]
+    public async Task A_substituted_runtime_refuses_cell_execution_before_anything_is_staged_or_launched()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+        await FreezeLiveRuntimeAsync(groupId, teamId, controlRow, candidateRow);
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+        var stager = new CountingStager();
+        var workspace = Path.Combine(Path.GetTempPath(), "cs-runtime-drift-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+
+        try
+        {
+            using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(substituted).As<IQualificationRuntimeManifestCollector>());
+            var context = new BenchmarkExecutionContext
+            {
+                WorkspaceDirectory = workspace, TeamId = teamId, ObservationGroupId = groupId,
+                Selection = Selection(controlRow), FixtureStager = stager,
+            };
+
+            var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => scope.Resolve<ITaskLaunchBenchmarkCellRunner>()
+                .RunAsync(Suite().Tasks.Single(), BenchmarkMode.TaskLaunchQuick, context, CancellationToken.None));
+
+            AssertRefused(refusal, QualificationRuntimeStage.Execution);
+            stager.Calls.ShouldBe(0, "the refusal must land before the fixture is staged — everything after it costs a model call");
+            (await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().CountAsync(row => row.TeamId == teamId))
+                .ShouldBe(0, "no agent run may exist for a cell whose runtime was refused: that row is what a model call would have produced");
+            (await scope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(0);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_substituted_runtime_refuses_a_resume_that_would_execute_an_absent_cell()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var instrument = new SettlingInterruptingBenchmarkRunner(4);
+        Guid groupId;
+        using (var runScope = _fixture.BeginScope())
+        {
+            var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), runScope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance, runScope.Resolve<IPairedQualificationCellAdmissionStore>());
+            await Should.ThrowAsync<OperationCanceledException>(() => Runner(runScope, corpus).RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('f', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+            groupId = await runScope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking().Where(row => row.CodeRevision == new string('f', 40)).Select(row => row.ObservationGroupId).SingleAsync();
+        }
+
+        instrument.Calls.Count.ShouldBe(4, "the fourth cell settled its terminal result and then the process vanished before appending it");
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+
+        using var resumeScope = _fixture.BeginScope();
+        var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => Resumer(resumeScope, instrument, Gate(resumeScope, substituted)).ResumeAsync(groupId, CancellationToken.None));
+
+        AssertRefused(refusal, QualificationRuntimeStage.Resume);
+        instrument.Calls.Count.ShouldBe(4, "a resume that would execute an absent cell must refuse before that cell starts");
+        (await resumeScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(3);
+        (await resumeScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(row => row.ObservationGroupId == groupId)).ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// The distinction the whole gate rests on, over ONE campaign and ONE substituted runtime: sealing work this
+    /// process executed is refused, while replaying the same campaign's already-paid rows still seals — and does so
+    /// without consulting the live runtime at all.
+    /// </summary>
+    [Fact]
+    public async Task A_substituted_runtime_refuses_an_executing_seal_but_never_a_replay()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var corpus = new FakePairedCorpus { AfterRun = PersistFakePairAsync };
+        var crash = new CrashBeforeSeal();
+        using (var runScope = _fixture.BeginScope())
+        {
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash, runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
+            await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('b', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+        }
+
+        var groupId = corpus.Requests.Select(request => request.ObservationGroupId).Distinct().Single();
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+        var manifest = EvalSuite.ManifestFor(Suite().Tasks, "sha256:hidden");
+
+        using (var sealScope = _fixture.BeginScope())
+        {
+            var store = new PairedQualificationResultStore(sealScope.Resolve<CodeSpaceDbContext>(), Gate(sealScope, substituted));
+            var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => store.SealAsync(new PairedQualificationSealRequest
+            {
+                ObservationGroupId = groupId, Manifest = manifest, Outcome = crash.Attempted!, Source = PairedQualificationSealSource.Execution,
+            }, CancellationToken.None));
+
+            AssertRefused(refusal, QualificationRuntimeStage.Seal);
+            (await sealScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(row => row.ObservationGroupId == groupId))
+                .ShouldBeFalse("the seal is what mints the capability claim — a substituted runtime must leave no result row at all");
+        }
+
+        var observationsBeforeReplay = substituted.Observations;
+        PairedQualificationOutcome recovered;
+        using (var replayScope = _fixture.BeginScope())
+        {
+            var replayStore = new PairedQualificationResultStore(replayScope.Resolve<CodeSpaceDbContext>(), Gate(replayScope, substituted));
+            var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), replayScope.Resolve<CodeSpaceDbContext>(), replayStore, replayScope.Resolve<IPairedQualificationCampaignLock>());
+            recovered = await recovery.RecoverAsync(groupId, CancellationToken.None);
+        }
+
+        recovered.QualifiedForCapabilityClaim.ShouldBeTrue("replay is not execution: every row it reduces was already paid for and already gated when it was produced");
+        recovered.ResultDigest.ShouldNotBeNull().Length.ShouldBe(64);
+        corpus.Requests.Count.ShouldBe(2, "the replay must seal with zero model calls even while the live runtime differs");
+        substituted.Observations.ShouldBe(observationsBeforeReplay, "a replay must not consult the live runtime at all — otherwise a redeploy after the last cell strands a fully-paid campaign forever");
+    }
+
+    private const string SubstitutedBinarySha256 = "00000000000000000000000000000000000000000000000000000000deadbeef";
+    private const string SubstitutedField = "manifest.harnesses[0].binarySha256";
+
+    private static void AssertRefused(RuntimeManifestDriftException refusal, QualificationRuntimeStage stage)
+    {
+        refusal.Stage.ShouldBe(stage);
+        refusal.Field.ShouldBe(SubstitutedField, "the refusal must name the substitution an operator has to undo, not just that something moved");
+        refusal.Kind.ShouldBe(FailureKind.Conflict, "state moved underneath the campaign — an operator decides whether to restore the frozen runtime or abandon it");
+        refusal.ObservedDigest.ShouldNotBe(refusal.FrozenDigest);
+        refusal.Message.ShouldNotContain(SubstitutedBinarySha256, Case.Sensitive, "a refusal message reaches logs and response bodies, so it names fields and digests — never observed values");
+    }
+
+    private static QualificationRuntimeGate Gate(ILifetimeScope scope, IQualificationRuntimeManifestCollector collector) =>
+        new(scope.Resolve<CodeSpaceDbContext>(), collector, NullLogger<QualificationRuntimeGate>.Instance);
+
+    /// <summary>Pre-register a campaign that froze THIS host's real runtime, exactly as <c>PairedTaskLaunchQualificationRunner</c> does, without running a cell.</summary>
+    private async Task FreezeLiveRuntimeAsync(Guid groupId, Guid teamId, Guid controlRow, Guid candidateRow)
+    {
+        using var scope = _fixture.BeginScope();
+        var live = await scope.Resolve<IQualificationRuntimeManifestCollector>().ObserveAsync(new QualificationRuntimeCollectRequest
+        {
+            ObservationGroupId = groupId, TeamId = teamId, ControlModelRowId = controlRow, CandidateModelRowId = candidateRow,
+        }, CancellationToken.None);
+
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.PairedQualificationProtocol.Add(RuntimeManifestProtocol(groupId, teamId, controlRow, candidateRow, live));
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The campaign's own frozen manifest with ONE field moved — the host it pre-registered on, with a different <c>claude</c> binary under an unchanged version string.</summary>
+    private async Task<SubstitutedRuntime> SubstitutedRuntimeAsync(Guid groupId)
+    {
+        using var scope = _fixture.BeginScope();
+        var stored = await scope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking()
+            .Where(row => row.ObservationGroupId == groupId).Select(row => row.RuntimeManifestJson).SingleAsync();
+
+        stored.ShouldNotBeNull();
+
+        return new SubstitutedRuntime(QualificationRuntimeManifest.Parse(stored));
+    }
+
+    private sealed class SubstitutedRuntime : IQualificationRuntimeManifestCollector
+    {
+        private readonly QualificationRuntimeManifest _substituted;
+
+        public SubstitutedRuntime(QualificationRuntimeManifest frozen)
+        {
+            frozen.Harnesses.ShouldNotBeEmpty("this host drives no harness binary, so it cannot express the substitution these tests exist to refuse");
+            _substituted = frozen with { Harnesses = [.. frozen.Harnesses.Select((harness, index) => index == 0 ? harness with { BinarySha256 = SubstitutedBinarySha256, UnobservedReason = null } : harness)] };
+        }
+
+        public int Observations { get; private set; }
+
+        public Task<QualificationRuntimeManifest> ObserveAsync(QualificationRuntimeCollectRequest request, CancellationToken cancellationToken)
+        {
+            Observations++;
+            return Task.FromResult(_substituted);
+        }
+    }
+
+    /// <summary>A host that must never be asked: being asked at all is the failure this stands in to catch.</summary>
+    private sealed class UnobservableRuntime : IQualificationRuntimeManifestCollector
+    {
+        public Task<QualificationRuntimeManifest> ObserveAsync(QualificationRuntimeCollectRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("A campaign that froze no runtime must not be measured against this host at all.");
+    }
+
+    private sealed class CountingStager : IBenchmarkFixtureStager
+    {
+        public int Calls { get; private set; }
+        public void Stage(string fixtureRef, string directory) => Calls++;
+    }
+
     private const string RuntimeManifestSecret = "sk-test-live-0f1e2d3c-DO-NOT-PERSIST";
 
     private static PairedQualificationProtocol RuntimeManifestProtocol(Guid groupId, Guid teamId, Guid controlRow, Guid candidateRow, QualificationRuntimeManifest? manifest)
@@ -561,12 +831,12 @@ public sealed class PairedQualificationRunnerFlowTests
         },
     };
 
-    private static PairedQualificationCampaignResumeService Resumer(ILifetimeScope scope, IBenchmarkRunner instrument)
+    private static PairedQualificationCampaignResumeService Resumer(ILifetimeScope scope, IBenchmarkRunner instrument, IQualificationRuntimeGate? runtimeGate = null)
     {
         var suite = new SuiteSource(Suite());
         var corpus = new CorpusBenchmarkRunner(instrument, new NoopStager(), scope.Resolve<IBenchmarkResultStore>(), NullLogger<CorpusBenchmarkRunner>.Instance, scope.Resolve<IPairedQualificationCellAdmissionStore>());
         var recovery = new PairedQualificationRecoveryService(suite, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>());
-        return new PairedQualificationCampaignResumeService(suite, corpus, scope.Resolve<CodeSpaceDbContext>(), recovery, scope.Resolve<IPairedQualificationCampaignLock>());
+        return new PairedQualificationCampaignResumeService(suite, corpus, scope.Resolve<CodeSpaceDbContext>(), recovery, scope.Resolve<IPairedQualificationCampaignLock>(), runtimeGate ?? scope.Resolve<IQualificationRuntimeGate>());
     }
 
     private static async Task<ResumeAttempt> TryResumeAsync(PairedQualificationCampaignResumeService resumer, Guid groupId)
@@ -741,7 +1011,7 @@ public sealed class PairedQualificationRunnerFlowTests
 
     private static BenchmarkAgentSelection Selection(Guid rowId) => new() { Harness = "claude-code", Model = "caller-forged", ModelCredentialId = Guid.NewGuid(), ModelCredentialModelId = rowId };
 
-    private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>());
+    private static PairedTaskLaunchQualificationRunner Runner(ILifetimeScope scope, IPairedCorpusBenchmarkRunner corpus) => new(new SuiteSource(Suite()), corpus, scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>(), scope.Resolve<IQualificationRuntimeManifestCollector>());
 
     private static HiddenSuite Suite()
     {

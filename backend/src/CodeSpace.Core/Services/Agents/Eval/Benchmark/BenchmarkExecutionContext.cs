@@ -6,6 +6,10 @@ public sealed record BenchmarkExecutionContext
 {
     public required string WorkspaceDirectory { get; init; }
     public required Guid TeamId { get; init; }
+
+    /// <summary>The pre-registered campaign this cell belongs to, when it belongs to one. Carried so the cell runner can verify the campaign's FROZEN runtime before it launches anything; null for an ordinary corpus run, which pre-registers no runtime to verify against.</summary>
+    public Guid? ObservationGroupId { get; init; }
+
     public BenchmarkAgentSelection? Selection { get; init; }
     public IBenchmarkFixtureStager? FixtureStager { get; init; }
     public IBenchmarkCellCompletionSink? Completion { get; init; }
