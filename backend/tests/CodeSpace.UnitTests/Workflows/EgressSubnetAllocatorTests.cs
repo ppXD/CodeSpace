@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Settings;
 using Shouldly;
@@ -14,8 +15,9 @@ namespace CodeSpace.UnitTests.Workflows;
 /// contend on is the same one two real processes would, which is the whole point: an in-memory set only made runs
 /// inside ONE worker disjoint while the nft chain they collide in is shared by every process on the host.</para>
 ///
-/// <para>Also pins the two postures of a host that holds no reservations, which are deliberately NOT the same: an
-/// unusable DIRECTORY refuses the launch by name, an unenforced LOCK degrades to process-local uniqueness.</para>
+/// <para>Also pins the three postures of a host that cannot take a reservation, which are deliberately NOT the same:
+/// an unusable DIRECTORY refuses the launch by name, a lock unenforced ACROSS PROCESSES degrades to process-local
+/// uniqueness, and a single unopenable <c>.lease</c> (another uid's, on a shared directory) is merely walked past.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class EgressSubnetAllocatorTests : IDisposable
@@ -154,38 +156,93 @@ public class EgressSubnetAllocatorTests : IDisposable
     }
 
     [Theory]
-    [InlineData(true, null)]
-    [InlineData(false, "exclusive file locking is not enforced there")]
-    public void The_allocator_probes_whether_this_host_enforces_the_lock_instead_of_assuming_it(bool locksAreEnforced, string? expectedReason)
+    [InlineData(true, nameof(CrossProcessLockProbe.Verdict.Unenforced), null, 0)]
+    [InlineData(false, nameof(CrossProcessLockProbe.Verdict.Enforced), null, 1)]
+    [InlineData(false, nameof(CrossProcessLockProbe.Verdict.Unenforced), "exclusive file locking is not enforced there", 1)]
+    [InlineData(false, nameof(CrossProcessLockProbe.Verdict.Unproven), "exclusive file locking could not be proven across processes", 1)]
+    public void The_allocator_proves_locking_across_PROCESSES_instead_of_assuming_it(bool refusedInProcess, string fromChild, string? expectedReason, int childAsks)
     {
-        // THE defect: "reserved" was inferred from an open that SUCCEEDED. .NET emulates FileShare.None on Unix with
-        // an advisory flock(fd, LOCK_EX|LOCK_NB) and ignores every error but EWOULDBLOCK — so on a filesystem whose
-        // flock answers ENOTSUP/EACCES (an NFS/RWX mount is exactly the shape this design recommends), or in a process
-        // where .NET's file-locking switch is off, the handle came back UNLOCKED, two workers both "reserved" the same
-        // /30, and HostReservationsUsable still read true. The allocator must find that out itself, at first use.
-        var allocator = new EgressSubnetAllocator(_reservations, locksAreEnforced ? null : OpenerThatEnforcesNoLock);
+        // THE defect, in both halves. (1) "reserved" was inferred from an open that SUCCEEDED: .NET emulates
+        // FileShare.None on Unix with an advisory flock(fd, LOCK_EX|LOCK_NB) and ignores every error but EWOULDBLOCK,
+        // so wherever that call cannot lock the handle came back UNLOCKED, two workers both "reserved" the same /30,
+        // and HostReservationsUsable still read true. (2) A SECOND OPEN FROM THIS PROCESS cannot settle it either: on
+        // a Linux NFS client flock() is emulated with per-PROCESS fcntl byte-range locks (flock(2) NOTES), which never
+        // conflict with their own process — so the in-process answer libels exactly the NFS/RWX mount this design
+        // recommends, whose CROSS-process locking works. It is the free FAST PATH (row 1: refused in-process ⇒ flock
+        // proper ⇒ no child at all) and nothing more; a real second process settles the rest.
+        var verdict = Verdict(fromChild);
+        var childAsked = 0;
+        var allocator = new EgressSubnetAllocator(_reservations, refusedInProcess ? null : OpenerThatEnforcesNoLock, _ => { childAsked++; return verdict; });
 
         var cidrs = Enumerable.Range(0, 8).Select(_ => allocator.Acquire(Guid.NewGuid().ToString("N")).Cidr).ToList();
 
-        allocator.HostReservationsUsable.ShouldBe(locksAreEnforced, "the flag must report what the host PROVED under a second open, not what the first open implied");
-        allocator.UnusableReason.ShouldBe(expectedReason);
-        cidrs.Distinct().Count().ShouldBe(8, "this is the ONE cause that degrades rather than refusing: the directory is writable and the runs are healthy, so the launch falls back to process-local uniqueness instead of taking every filtered-egress run on an NFS/RWX host down");
+        allocator.HostReservationsUsable.ShouldBe(expectedReason is null, "the flag must report what a SECOND PROCESS proved, not what this one's own second open implied");
+        allocator.UnusableReason.ShouldBe(expectedReason, "a mount that does not lock and a probe that could not run are the same posture but not the same operator fix, so they are not the same sentence");
+        childAsked.ShouldBe(childAsks, "the child is asked ONCE per worker, and only where the in-process fast path came back unrefused");
+        cidrs.Distinct().Count().ShouldBe(8, "these are the causes that degrade rather than refusing: the directory is writable and the runs are healthy, so the launch falls back to process-local uniqueness instead of taking every filtered-egress run on the host down");
     }
 
-    [Fact]
-    public void A_rights_error_on_a_reservation_file_is_never_counted_as_another_workers_contention()
+    [Theory]
+    [InlineData(true, nameof(CrossProcessLockProbe.Verdict.Enforced))]
+    [InlineData(false, nameof(CrossProcessLockProbe.Verdict.Unenforced))]
+    public void The_cross_process_probe_really_spawns_a_second_process_and_reports_what_it_was_told(bool heldByThisProcess, string expected)
     {
-        // flock(2) refuses with EWOULDBLOCK, which surfaces as an IOException sharing violation — never as a rights
-        // error. So a UnauthorizedAccessException on a .lease means the directory turned unwritable under us (a
-        // remount AFTER the probe), and counting it as "held" would again lose all 4096 candidates and report the
-        // wrong cause. Staged through the opener seam because a mid-life remount cannot be staged in-process.
-        var allocator = new EgressSubnetAllocator(_reservations, OpenerThatRefusesReservations);
+        // HIGH-fidelity (Rule 12.4): the real bundled bootstrap, resolved the way the durable launch resolves it, its
+        // real argv contract, its real token, and the real kernel answer — everything the seam above can only assume.
+        // Both rows matter: "enforced" has to be earned from a lock this process actually holds, not returned by a
+        // child that answers the same way whatever it finds.
+        Directory.CreateDirectory(_reservations);
+
+        var path = Path.Combine(_reservations, ".probe-real-" + Guid.NewGuid().ToString("N"));
+
+        File.WriteAllText(path, "");
+
+        using var held = heldByThisProcess ? new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
+
+        CrossProcessLockProbe.Ask(path).ShouldBe(Verdict(expected),
+            customMessage: $"the bundled bootstrap did not answer as expected for '{path}' (held by this process: {heldByThisProcess}). Run it by hand: <output>/runner-host/codespace-runner-host --probe-lock <path> — it prints lock-refused / lock-granted / lock-unknown");
+    }
+
+    /// <summary>The verdict a row names. Carried through <c>InlineData</c> as its NAME because the seam's enum is internal to the assembly under test and cannot appear in a public test signature; a typo throws here rather than passing something else.</summary>
+    private static CrossProcessLockProbe.Verdict Verdict(string name) => Enum.Parse<CrossProcessLockProbe.Verdict>(name);
+
+    [Fact]
+    public void A_reservation_file_this_worker_cannot_open_is_SKIPPED_not_read_as_a_host_that_cannot_reserve()
+    {
+        // A rights error on ONE .lease is neither contention (flock refuses with EWOULDBLOCK, an IOException sharing
+        // violation) nor a host that cannot reserve. On a shared reservation directory whose workers run under
+        // different uids — the deployment TryPrepareDirectory deliberately protects — another worker's 0600 .lease
+        // fails EACCES at open(2), before flock is even reached. Refusing there took THIS worker out for its entire
+        // process lifetime, on its first acquire, over a file somebody else legitimately holds. Over-holding is the
+        // safe direction: walk past it. Staged through the opener seam because a second uid cannot be staged in-process.
+        var opener = new OpenerThatRefusesAnotherUidsLeases();
+        var allocator = new EgressSubnetAllocator(_reservations, opener.Open, NeverAskedForAChild);
+
+        allocator.Acquire(Guid.NewGuid().ToString("N")).Cidr.ShouldBe("10.1.1.8/30", "the two unopenable candidates are walked past — the probe walks 10.1.1.0/30, 10.1.1.4/30, 10.1.1.8/30");
+        allocator.Acquire(Guid.NewGuid().ToString("N")).Cidr.ShouldBe("10.1.1.12/30", "and it is not sticky: the next run reserves the next free /30 instead of being refused a host-wide reservation");
+
+        allocator.HostReservationsUsable.ShouldBeTrue("a file THIS uid cannot open is not this HOST failing to hold reservations");
+        opener.Refusals.ShouldBe(4, "the staging must actually have fired — twice per acquire, since a foreign file is re-attempted rather than remembered");
+    }
+
+    [Theory]
+    [InlineData(true)]    // EACCES → UnauthorizedAccessException
+    [InlineData(false)]   // EROFS  → IOException (a remount-ro is NOT a rights error, and reading only for the rights error left the misreport reachable)
+    public void A_directory_that_turns_unwritable_after_the_probe_names_the_MOUNT_not_4096_live_runs(bool rightsError)
+    {
+        // Every candidate lost the same way can be 4096 live /30s — or a mount that went read-only after the probe.
+        // Indistinguishable from inside the loop, and guessing "contention" reported "this host already holds 4096
+        // filtered-egress /30s": a true sentence about nothing, pointing an operator at concurrency instead of at the
+        // mount. So the bottom of the loop re-probes with a FRESH file, which nothing else can hold, and reports what
+        // that proves — for either errno, since a remount-ro arrives as EROFS rather than EACCES.
+        var allocator = new EgressSubnetAllocator(_reservations, new OpenerThatBreaksAfterTheProbe(rightsError).Open, NeverAskedForAChild);
 
         var refusal = Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N")));
 
-        refusal.Reason.ShouldBe("the reservation directory cannot be written");
-        refusal.InnerException.ShouldBeOfType<UnauthorizedAccessException>("the OS error an operator needs is carried, not swallowed");
-        allocator.HostReservationsUsable.ShouldBeFalse();
+        refusal.Reason.ShouldBe("the reservation directory cannot be written", "the cause named must be the mount, not imaginary contention");
+        refusal.ReservationDirectory.ShouldBe(_reservations, "the actionable fact is WHICH directory an operator has to fix");
+        refusal.InnerException.ShouldBeOfType(rightsError ? typeof(UnauthorizedAccessException) : typeof(IOException), "the OS error an operator needs is carried, not swallowed");
+        allocator.HostReservationsUsable.ShouldBeFalse("the re-probe's verdict is recorded, so a host that has genuinely gone read-only refuses immediately from here on");
     }
 
     [Fact]
@@ -204,9 +261,54 @@ public class EgressSubnetAllocatorTests : IDisposable
     /// <summary>Stands in for a filesystem whose <c>flock(2)</c> refuses nobody — the share mode is simply not exclusive, which is what .NET silently leaves behind when flock answers anything but EWOULDBLOCK.</summary>
     private static FileStream OpenerThatEnforcesNoLock(string path) => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
 
-    /// <summary>Stands in for a directory that passed the probe and then turned unwritable: the probe file opens, every <c>.lease</c> is refused for RIGHTS.</summary>
-    private static FileStream OpenerThatRefusesReservations(string path) =>
-        path.EndsWith(".lease", StringComparison.Ordinal) ? throw new UnauthorizedAccessException(path) : new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    /// <summary>A real exclusive open — what every worker process on the host issues.</summary>
+    private static FileStream Exclusive(string path) => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+    /// <summary>The cross-process probe as it must be seen by a test whose in-process second open is already refused: never spawned. Failing loudly beats a silent child.</summary>
+    private static CrossProcessLockProbe.Verdict NeverAskedForAChild(string path) =>
+        throw new ShouldAssertException($"the in-process fast path answered for {path}; no child process should have been spawned");
+
+    /// <summary>
+    /// Stands in for the multi-uid shared reservation directory: the first two <c>.lease</c> files it is asked for
+    /// belong to ANOTHER uid — 0600, so <c>open(2)</c> fails EACCES before flock — and stay unopenable for the rest
+    /// of this worker's life. Stateful because "whose file is this" is not a property of the path, and a mid-life
+    /// second uid cannot be staged in-process.
+    /// </summary>
+    private sealed class OpenerThatRefusesAnotherUidsLeases
+    {
+        private readonly HashSet<string> _anotherUids = new(StringComparer.Ordinal);
+
+        /// <summary>How often a foreign file was actually refused, so a green cannot come from staging that never fired.</summary>
+        public int Refusals { get; private set; }
+
+        public FileStream Open(string path)
+        {
+            if (!path.EndsWith(".lease", StringComparison.Ordinal)) return Exclusive(path);
+
+            if (_anotherUids.Count < 2) _anotherUids.Add(path);
+
+            if (!_anotherUids.Contains(path)) return Exclusive(path);
+
+            Refusals++;
+
+            throw new UnauthorizedAccessException(path);
+        }
+    }
+
+    /// <summary>Stands in for a directory that passed the probe and then went read-only under us: the first probe file opens, and every open from the first <c>.lease</c> onwards — the later probe files included — fails for rights (EACCES) or because the mount is read-only (EROFS).</summary>
+    private sealed class OpenerThatBreaksAfterTheProbe(bool rightsError)
+    {
+        private bool _remounted;
+
+        public FileStream Open(string path)
+        {
+            if (path.EndsWith(".lease", StringComparison.Ordinal)) _remounted = true;
+
+            if (!_remounted) return Exclusive(path);
+
+            throw rightsError ? new UnauthorizedAccessException(path) : (Exception)new IOException(path);
+        }
+    }
 
     /// <summary>
     /// A reservation directory this process cannot hold reservations in, in one of the two shapes an operator can

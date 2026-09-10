@@ -17,6 +17,10 @@ internal static class Program
         {
             return args[0] switch
             {
+                // Not a launch: the app's EgressSubnetAllocator asks this bootstrap whether a SECOND process is
+                // refused an exclusive open, because an in-process second open cannot answer that on a Linux NFS
+                // client (flock is emulated with per-PROCESS fcntl locks there). No spool, no receipt, no secrets.
+                ExclusiveLockProbeChild.Argument => ExclusiveLockProbeChild.RunChild(args[1]),
                 "broker" => await BrokerAsync(args[1]).ConfigureAwait(false),
                 "exec" => await ExecAsync(args[1]).ConfigureAwait(false),
                 "guardian" => await GuardianAsync(args[1]).ConfigureAwait(false),
