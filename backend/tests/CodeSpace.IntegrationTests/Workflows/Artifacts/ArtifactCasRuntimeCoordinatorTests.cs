@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -2031,6 +2032,55 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
         result.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.ProviderTimeout);
     }
 
+    /// <summary>
+    /// The database names the temporary object BEFORE the bytes go anywhere near it, and stops naming it once the
+    /// driver has answered.
+    ///
+    /// <para>Both halves have to be observed at the right instant, which is why the upload is blocked mid-flight
+    /// rather than inspected afterwards. A record written after the upload would be worthless: the window it exists
+    /// for is the one where the process is killed DURING the upload, and a record that lands after the bytes do leaves
+    /// exactly that window uncovered. The row is therefore read while the provider call is still inside the driver.</para>
+    ///
+    /// <para>The second half matters just as much and in the other direction. A driver's staging cleanup is a
+    /// <c>finally</c>, so a call that RETURNS has already run it — and a row that kept naming a temporary object which
+    /// no longer exists would hand every later sweep a phantom to chase, on every successful write in the
+    /// deployment.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_write_names_its_temporary_object_before_uploading_and_stops_naming_it_once_the_driver_answers()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState { BlockNextPut = true };
+        var bytes = Encoding.UTF8.GetBytes("bytes whose staging object has to be findable");
+        var request = Request(world, new MemoryStream(bytes), bytes, "staging-record");
+
+        using var scope = Scope(storage);
+        var writer = scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, CancellationToken.None);
+        await AwaitBlockedCallAsync(storage.BlockedPutEntered.Task, writer, "FakeStorageState.BlockedPutEntered (the provider upload this write is suspended inside)");
+
+        var uploading = await IntentByScopeAsync(world, request.IdempotencyScope);
+        storage.ReleaseBlockedPut.TrySetResult();
+        var committed = (await writer).ShouldBeOfType<ArtifactCasTransferResult.Committed>();
+
+        storage.PutStagingObjectKey.ShouldNotBeNull("a driver that can reclaim its own staging object must be told which one to occupy, or its leftovers are unnameable");
+        uploading.TemporaryObjectKey.ShouldBe(storage.PutStagingObjectKey,
+            "the row has to name the very key the upload is writing to at this instant — a killed writer leaves that object behind and this record is the only thing that will ever find it");
+        uploading.State.ShouldBe(ArtifactTransferState.Uploading);
+        uploading.WorkerLeaseExpiresAt.ShouldNotBeNull("the record is written under the same live lease the upload holds, which is what stops it racing a worker that took the row over");
+
+        (await IntentAsync(committed.IntentId)).TemporaryObjectKey.ShouldBeNull(
+            "the driver answered, so its own cleanup has already run; a row still naming that object would send every later sweep after bytes that are gone");
+    }
+
+    /// <summary>The intent a write is CURRENTLY driving, found the only way a caller can before its result arrives: by the key it minted the intent under.</summary>
+    private async Task<ArtifactTransferIntent> IntentByScopeAsync(World world, string idempotencyScope)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking()
+            .SingleAsync(value => value.TeamId == world.TeamId && value.IdempotencyKey == idempotencyScope);
+    }
+
     private async Task<ArtifactCasTransferResult> PutAsync(World world, FakeStorageState storage, ArtifactCasTransferRequest request, TimeProvider? clock = null)
     {
         using var scope = Scope(storage, clock);
@@ -2361,6 +2411,13 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
 
     private sealed class FakeStorageState
     {
+        /// <summary>Where this double stages, a SIBLING of the object namespace exactly as a remote driver's reserved staging area is.</summary>
+        public const string StagingArea = "fake-staging/";
+
+        /// <summary>The staging key the last upload was told to occupy. Null would mean the coordinator asked the driver to pick its own, which is the shape whose leftovers nothing can find.</summary>
+        public string? PutStagingObjectKey;
+
+        public ConcurrentBag<string> DiscardedStaging { get; } = [];
         public ConcurrentDictionary<string, byte[]> Objects { get; } = new(StringComparer.Ordinal);
         public ConcurrentQueue<ArtifactStorageError> PutErrors { get; } = new();
         public ConcurrentQueue<ArtifactStorageError> HeadErrors { get; } = new();
@@ -2412,15 +2469,30 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
         public int FactoryProfileRevision;
     }
 
-    private sealed class FakeStorageDriver(FakeStorageState state) : IArtifactStorageDriver
+    /// <summary>A double that publishes through a temporary object, so the write path's record-then-reclaim of one is exercised by every case in this class rather than by one test.</summary>
+    private sealed class FakeStorageDriver(FakeStorageState state) : IArtifactStorageDriver, IArtifactStorageStagingReclaimer
     {
         public const int BufferSize = 32 * 1024;
 
         public StorageProviderCapabilities Capabilities => state.Capabilities;
 
+        public string MintStagingObjectKey() => FakeStorageState.StagingArea + Guid.NewGuid().ToString("N");
+
+        public ValueTask<ArtifactStorageDeleteResult> DiscardStagingAsync(string stagingObjectKey, CancellationToken cancellationToken)
+        {
+            if (!stagingObjectKey.StartsWith(FakeStorageState.StagingArea, StringComparison.Ordinal))
+                return ValueTask.FromResult(ArtifactStorageDeleteResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.InvalidRequest, "not this driver's staging area")));
+
+            state.DiscardedStaging.Add(stagingObjectKey);
+            state.Objects.TryRemove(stagingObjectKey, out _);
+
+            return ValueTask.FromResult(ArtifactStorageDeleteResult.Removed());
+        }
+
         public async ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref state.PutCalls);
+            state.PutStagingObjectKey = request.StagingObjectKey;
             if (state.BlockIgnoringCancellationNextPut)
             {
                 state.BlockIgnoringCancellationNextPut = false;

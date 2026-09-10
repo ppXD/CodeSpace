@@ -79,6 +79,15 @@ public sealed record ArtifactStoragePutRequest(string ObjectKey, Stream Content)
     public ArtifactStorageWriteCondition Condition { get; init; }
     public string? ExpectedETag { get; init; }
     public IReadOnlyDictionary<string, string> Metadata { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Which temporary object a staged publish must occupy, from
+    /// <see cref="IArtifactStorageStagingReclaimer.MintStagingObjectKey"/>. Set it only to a key the caller has already
+    /// recorded durably: the point is that the orphan candidate is named in the database before any byte lands, so a
+    /// killed writer's staging object is still reclaimable. Null lets the driver mint its own, which is what a caller
+    /// that keeps no such record gets, and what a driver that stages nothing ignores.
+    /// </summary>
+    public string? StagingObjectKey { get; init; }
 }
 
 public sealed record ArtifactStorageHeadRequest(string ObjectKey);

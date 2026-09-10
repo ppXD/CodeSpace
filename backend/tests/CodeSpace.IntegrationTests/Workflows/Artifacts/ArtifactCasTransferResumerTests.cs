@@ -338,6 +338,149 @@ public sealed class ArtifactCasTransferResumerTests
     }
 
     /// <summary>
+    /// The orphan a remote staged publish leaves when its worker is KILLED: bytes at a temporary key that no
+    /// <c>artifact_location</c>, <c>artifact_object</c> or verifier can reach, because the driver's own cleanup lives
+    /// in a <c>finally</c> and a <c>finally</c> does not run when the process dies.
+    ///
+    /// <para>Both rows are the same accident an instant apart, and both must end with the row naming nothing. Killed
+    /// BEFORE the cleanup ran, the bytes are still there and this sweep is the only thing that will ever delete them.
+    /// Killed AFTER it ran, they are already gone — and the record must still be cleared, or every ordinary write in
+    /// the deployment leaves a phantom that each later pass re-asks the destination about forever.</para>
+    ///
+    /// <para>The final object is asserted ABSENT throughout. The reclaim's whole risk is deleting the wrong thing, and
+    /// a transfer whose publish never happened is the case where the published key is empty and must stay so.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_killed_writers_staging_object_is_discarded_and_stops_being_named(bool bytesStillStaged)
+    {
+        var world = await SeedWorldAsync();
+        var storage = new ResumeStorage();
+        var scope = $"resume-staging-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes($"bytes staged but never published {scope}");
+        var staging = ResumeStorage.StagingArea + Guid.NewGuid().ToString("N");
+        if (bytesStillStaged) storage.Objects[staging] = bytes;
+        var intentId = await SeedAbandonedAsync(world, scope, bytes, ArtifactTransferState.Uploading, staging);
+
+        var warnings = new RecordedWarnings();
+        await ResumeAsync(storage, warnings);
+
+        var swept = await IntentAsync(intentId);
+        swept.TemporaryObjectKey.ShouldBeNull("the bytes are gone, so the row must stop naming them — a record that outlives its object is a phantom every later pass chases");
+        storage.DiscardedStaging.ShouldContain(staging, "the sweep has to actually ask the destination; clearing the row without asking is how bytes become unreachable AND unbilled-for by nobody");
+        storage.Objects.ShouldNotContainKey(staging, "a killed writer's staging object is the one thing this sweep exists to delete");
+        storage.Objects.ShouldNotContainKey(ObjectKey(scope), "this transfer never published, so the destination key must still be empty — a reclaim may never invent or touch the final object");
+
+        // The tally nobody reads at 3am is not the receipt. This warning is where an operator is handed the coordinates
+        // of bytes that were being paid for and nothing named, so deleting it must fail this test.
+        warnings.About(intentId).ShouldContain(record => Equals(record.GetValueOrDefault("TemporaryObjectKey"), staging));
+        swept.State.ShouldBe(ArtifactTransferState.Failed, "reclaiming the staging object changes nothing about the transfer's own verdict: a resumer holds no bytes, so an unpublished object is still terminal for it");
+        swept.LastErrorCode.ShouldBe(nameof(ArtifactCasProblemCode.TargetMissing));
+    }
+
+    /// <summary>
+    /// A staging object whose worker is still alive is not an orphan, and nothing here may touch it. The fence is the
+    /// evidence and the only evidence: a live lease means those bytes are mid-upload, and deleting them would break a
+    /// write that was about to succeed.
+    /// </summary>
+    [Fact]
+    public async Task A_live_workers_staging_object_is_left_exactly_where_it_is()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new ResumeStorage();
+        var scope = $"resume-staging-live-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes($"bytes a live worker is still uploading {scope}");
+        var staging = ResumeStorage.StagingArea + Guid.NewGuid().ToString("N");
+        storage.Objects[staging] = bytes;
+        var intentId = await StageAbandonedAsync(world, scope, bytes, ArtifactTransferState.Uploading, leaseSeconds: 120, staging);
+
+        await ResumeAsync(storage);
+
+        var untouched = await IntentAsync(intentId);
+        untouched.WorkerFenceEpoch.ShouldBe(SeededFence, "a live lease is not claimable, so this row was never even selected");
+        untouched.TemporaryObjectKey.ShouldBe(staging, "the record belongs to the worker that is still using it");
+        storage.DiscardedStaging.ShouldNotContain(staging, "asking the destination to delete a live worker's staging object would break a write that is about to succeed");
+        storage.Objects.ShouldContainKey(staging);
+    }
+
+    /// <summary>
+    /// A sweep may only ever discard the temporary object its own ROW names. Everything else at the destination —
+    /// another transfer's staging object included — is somebody else's, and a pass that swept the staging AREA rather
+    /// than the recorded key would delete bytes a live writer is mid-upload with.
+    ///
+    /// <para>Doubles as the adoption path this change must not disturb: a worker killed after its publish but before
+    /// its commit still gets driven to a committed placement, with nothing recorded to reclaim.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_transfer_that_recorded_no_temporary_object_leaves_every_other_object_alone()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new ResumeStorage();
+        var scope = $"resume-staging-none-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes($"bytes the dead worker already published {scope}");
+        var stranger = ResumeStorage.StagingArea + Guid.NewGuid().ToString("N");
+        storage.Objects[ObjectKey(scope)] = bytes;
+        storage.Objects[stranger] = Encoding.UTF8.GetBytes("another transfer's staging object");
+        var intentId = await SeedAbandonedAsync(world, scope, bytes, ArtifactTransferState.Uploading);
+
+        await ResumeAsync(storage);
+
+        (await IntentAsync(intentId)).State.ShouldBe(ArtifactTransferState.Committed, "the bytes were already published, so the abandoned transfer still had nothing left to do but be finished");
+        storage.DiscardedStaging.ShouldNotContain(stranger, "the recorded key is the whole licence to delete; sweeping the staging area instead would destroy a live writer's upload");
+        storage.Objects.ShouldContainKey(stranger);
+    }
+
+    /// <summary>
+    /// Discard first, clear second — and a discard the destination refuses clears nothing. Clearing a record whose
+    /// bytes are still there is how an orphan becomes one nobody will ever look for again; keeping it costs one
+    /// re-ask on the next pass, which the reclaim contract makes free by answering an absent object as success.
+    /// </summary>
+    [Fact]
+    public async Task A_staging_object_this_pass_could_not_discard_stays_named_for_a_later_one()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new ResumeStorage { RefuseStagingDiscard = true };
+        var scope = $"resume-staging-refused-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes($"bytes the destination would not delete {scope}");
+        var staging = ResumeStorage.StagingArea + Guid.NewGuid().ToString("N");
+        storage.Objects[staging] = bytes;
+        var intentId = await SeedAbandonedAsync(world, scope, bytes, ArtifactTransferState.Uploading, staging);
+
+        await ResumeAsync(storage);
+
+        (await IntentAsync(intentId)).TemporaryObjectKey.ShouldBe(staging,
+            "the bytes are still at the destination, and the row is the only record of where — dropping it here turns a reclaimable orphan into a permanent one");
+        storage.Objects.ShouldContainKey(staging);
+    }
+
+    /// <summary>
+    /// What stops a wrong record from destroying a published object: the boundary is the DRIVER's, not the sweep's.
+    /// A reclaim is handed a persisted value, so it may be stale, hand-edited or simply wrong — and the one value that
+    /// must never be obeyed is the transfer's own destination key, since the staging area is a sibling of the object
+    /// area rather than a parent of it. The sweep asks; the destination refuses; the placement survives.
+    /// </summary>
+    [Fact]
+    public async Task A_record_naming_the_final_object_is_refused_by_the_destination_rather_than_obeyed()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new ResumeStorage();
+        var scope = $"resume-staging-wrong-{Guid.NewGuid():N}";
+        var bytes = Encoding.UTF8.GetBytes($"a published object a wrong record points at {scope}");
+        var objectKey = ObjectKey(scope);
+        storage.Objects[objectKey] = bytes;
+        var intentId = await SeedAbandonedAsync(world, scope, bytes, ArtifactTransferState.Uploading, objectKey);
+
+        await ResumeAsync(storage);
+
+        storage.DiscardedStaging.ShouldContain(objectKey, "the sweep does ask — putting the boundary in the driver is what makes a wrong record safe rather than trusting every caller of it");
+        storage.Objects.ShouldContainKey(objectKey, "a key outside the driver's own staging area must be refused, or one stale record deletes a placement the ledger says is Available");
+        var kept = await IntentAsync(intentId);
+        kept.TemporaryObjectKey.ShouldBe(objectKey, "a refused discard clears nothing, so the wrong record stays visible to an operator instead of being quietly forgotten");
+        kept.State.ShouldBe(ArtifactTransferState.Committed, "and the transfer itself is unaffected: its object is where it says it is");
+    }
+
+    /// <summary>
     /// That a refused transfer comes back to the sweep, and comes back on its LEASE rather than on its state alone.
     ///
     /// <para>Both sides of the instant are asserted because only the pair says anything. Evaluating the sweep's
@@ -399,9 +542,9 @@ public sealed class ArtifactCasTransferResumerTests
     /// that is genuinely in the future — and the lease is then WAITED out rather than backdated, because the trigger
     /// refuses a lease that moves backwards and a backdated one would prove nothing about a live worker anyway.
     /// </summary>
-    private async Task<Guid> SeedAbandonedAsync(World world, string scope, byte[] bytes, ArtifactTransferState state)
+    private async Task<Guid> SeedAbandonedAsync(World world, string scope, byte[] bytes, ArtifactTransferState state, string? temporaryObjectKey = null)
     {
-        var intentId = await StageAbandonedAsync(world, scope, bytes, state, leaseSeconds: 3);
+        var intentId = await StageAbandonedAsync(world, scope, bytes, state, leaseSeconds: 3, temporaryObjectKey);
 
         (await LeaseExpiredAsync(intentId)).ShouldBeFalse("the seeded worker must still look alive here, or the wait below would prove nothing");
         await WaitForExpiredLeaseAsync(intentId);
@@ -414,19 +557,24 @@ public sealed class ArtifactCasTransferResumerTests
     /// offset is what fixes each row's place in the sweep's oldest-first ordering: a row staged with a SHORTER offset
     /// than another lapses earlier and is therefore selected ahead of it, whichever order the two were inserted in.
     /// </summary>
-    private async Task<Guid> StageAbandonedAsync(World world, string scope, byte[] bytes, ArtifactTransferState state, int leaseSeconds)
+    private async Task<Guid> StageAbandonedAsync(World world, string scope, byte[] bytes, ArtifactTransferState state, int leaseSeconds, string? temporaryObjectKey = null)
     {
         var intentId = Guid.NewGuid();
         var objectKey = ObjectKey(scope);
         using var seed = _fixture.BeginScope();
         var db = seed.Resolve<CodeSpaceDbContext>();
+
+        // temporary_object_key is written at INSERT because it is the only place the seeding CAN write it: the claim
+        // below is a fence advance, which 0131 makes claim-only, and the ladder's steps are saga transitions that this
+        // seeding keeps to one field each. A killed writer's row looks exactly like this either way — claimed, part
+        // way up the ladder, naming the temporary object its upload was occupying.
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO artifact_transfer_intent (
                 id, team_id, storage_profile_revision_id, idempotency_key, expected_digest_algorithm, expected_digest,
-                expected_size_bytes, target_locator, target_object_key, state, revision, retry_count,
+                expected_size_bytes, target_locator, target_object_key, temporary_object_key, state, revision, retry_count,
                 created_date, created_by, last_modified_date, last_modified_by)
             VALUES ({intentId}, {world.TeamId}, {world.ProfileRevisionId}, {scope}, 'Sha256', {SHA256.HashData(bytes)},
-                {bytes.LongLength}, {objectKey}, {objectKey}, 'Intended', 1, 0,
+                {bytes.LongLength}, {objectKey}, {objectKey}, NULLIF({temporaryObjectKey ?? string.Empty}, ''), 'Intended', 1, 0,
                 clock_timestamp(), {world.ActorId}, clock_timestamp(), {world.ActorId})
             """);
         await db.Database.ExecuteSqlInterpolatedAsync($"""
@@ -623,11 +771,20 @@ public sealed class ArtifactCasTransferResumerTests
     /// <summary>One destination shared by every driver a pass opens, so two concurrent passes see the same objects and the same call counts.</summary>
     private sealed class ResumeStorage
     {
+        /// <summary>Where this destination stages, a SIBLING of the object namespace exactly as a remote driver's reserved area is — so a key from one can never name an object in the other.</summary>
+        public const string StagingArea = "resume-staging/";
+
         private readonly ConcurrentDictionary<string, int> _reads = new(StringComparer.Ordinal);
         private readonly TaskCompletionSource _rendezvous = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _arrivals;
 
         public ConcurrentDictionary<string, byte[]> Objects { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Every key a reclaim was ATTEMPTED for, refusals included — so a test can tell "the sweep did not ask" from "the sweep asked and was told no".</summary>
+        public ConcurrentBag<string> DiscardedStaging { get; } = [];
+
+        /// <summary>A destination that will not delete right now. Retryable, because a discard that cannot happen is a fact about this minute and never about the bytes.</summary>
+        public bool RefuseStagingDiscard { get; set; }
 
         /// <summary>The key whose readers wait for each other, so a second resumer that should never arrive is given every chance to.</summary>
         public string? RendezvousObjectKey { get; set; }
@@ -647,10 +804,27 @@ public sealed class ArtifactCasTransferResumerTests
         }
     }
 
-    private sealed class ResumeStorageDriver(ResumeStorage storage) : IArtifactStorageDriver
+    /// <summary>A destination that publishes through a temporary object, which is the only kind that can leave a staging orphan behind for this sweep to find.</summary>
+    private sealed class ResumeStorageDriver(ResumeStorage storage) : IArtifactStorageDriver, IArtifactStorageStagingReclaimer
     {
         public StorageProviderCapabilities Capabilities =>
             StorageProviderCapabilities.StreamingWrite | StorageProviderCapabilities.StreamingRead | StorageProviderCapabilities.ConditionalCreate;
+
+        public string MintStagingObjectKey() => ResumeStorage.StagingArea + Guid.NewGuid().ToString("N");
+
+        /// <summary>Absent is success, as the reclaim contract requires — and a key outside the staging area is refused, because that is the only thing standing between a stale record and a published object.</summary>
+        public ValueTask<ArtifactStorageDeleteResult> DiscardStagingAsync(string stagingObjectKey, CancellationToken cancellationToken)
+        {
+            storage.DiscardedStaging.Add(stagingObjectKey);
+            if (!stagingObjectKey.StartsWith(ResumeStorage.StagingArea, StringComparison.Ordinal))
+                return ValueTask.FromResult(ArtifactStorageDeleteResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.InvalidRequest, "not this driver's staging area")));
+            if (storage.RefuseStagingDiscard)
+                return ValueTask.FromResult(ArtifactStorageDeleteResult.Failed(new ArtifactStorageError(ArtifactStorageErrorCode.Unavailable, "destination refused the discard", IsRetryable: true)));
+
+            storage.Objects.TryRemove(stagingObjectKey, out _);
+
+            return ValueTask.FromResult(ArtifactStorageDeleteResult.Removed());
+        }
 
         public ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("The resumer holds no content stream and must never upload.");

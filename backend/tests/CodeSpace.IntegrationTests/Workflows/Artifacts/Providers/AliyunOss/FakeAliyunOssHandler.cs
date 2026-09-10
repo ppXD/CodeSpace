@@ -65,6 +65,16 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
     /// <summary>Empties the bucket without touching the recorded calls — the shape of an object deleted outside CodeSpace.</summary>
     public void EmptyBucket() => _objects.Clear();
 
+    /// <summary>
+    /// Puts an object in the bucket without a request — the shape of bytes CodeSpace is not in the middle of writing.
+    /// A staging object whose writer was KILLED between its upload and its publish is exactly that: the process that
+    /// would have deleted it is gone, so nothing is in flight and only the bucket knows it is there.
+    /// </summary>
+    public void Stash(string key, byte[] bytes)
+    {
+        lock (_gate) _objects[key] = new StoredObject(bytes, ETag(bytes), VersionId(), null, DateTimeOffset.UnixEpoch.AddSeconds(1_700_000_000), []);
+    }
+
     public IReadOnlyCollection<string> Keys { get { lock (_gate) return _objects.Keys.ToList(); } }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

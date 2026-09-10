@@ -554,6 +554,92 @@ public sealed class ArtifactCasV2PersistenceTests
         }
     }
 
+    /// <summary>
+    /// The update kind 0226 adds, and the only one that can write <c>temporary_object_key</c> at the instant worth
+    /// writing it: the fence holder naming the temporary object its upload is ABOUT to occupy, with the saga standing
+    /// still. Before 0226 every write of that column was classified as a saga transition, whose whitelist admits no
+    /// same-state pair — which is why the column shipped in 0127 with no writer anywhere and a remote driver's staging
+    /// orphan had nothing in the database naming it.
+    ///
+    /// <para>Its fence is the live lease, asserted at both ends. A record is admitted while the claim is live and
+    /// refused the moment it lapses, so a process the sweep has already taken the row over from cannot reach back and
+    /// name — or un-name — anything. The renewal the production statement performs alongside is deliberately NOT
+    /// required here: an unchanged live lease is enough, so the two facts stay independent.</para>
+    /// </summary>
+    [Fact]
+    public async Task Transfer_may_name_and_clear_its_temporary_object_only_while_its_claim_is_live()
+    {
+        var world = await SeedWorldAsync();
+        var artifact = Object(world.TeamId, 21, 0x61);
+        var location = PendingLocation(world, artifact, "objects/61/staging.bin");
+        var transfer = Transfer(world, artifact, location, $"staging-record-{Guid.NewGuid():N}");
+        transfer.WorkerFenceEpoch = null;
+        var staging = $".codespace/staging/{Guid.NewGuid():N}";
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.ArtifactTransferIntent.Add(transfer);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var claimed = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == transfer.Id);
+            claimed.WorkerFenceEpoch = 1;
+            claimed.WorkerLeaseExpiresAt = DateTimeOffset.UtcNow.AddMilliseconds(1500);
+            claimed.Revision = 2;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var naming = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == transfer.Id);
+            naming.TemporaryObjectKey = staging;
+            naming.Revision = 3;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var named = await db.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.Id == transfer.Id);
+            named.TemporaryObjectKey.ShouldBe(staging, "a claim holder must be able to name its temporary object without moving the saga, or the name can only be written after the bytes are already there");
+            named.State.ShouldBe(ArtifactTransferState.Intended, "naming a temporary object is not a saga step and must not be allowed to smuggle one");
+            named.WorkerFenceEpoch.ShouldBe(1);
+            named.RetryCount.ShouldBe(0);
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var clearing = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == transfer.Id);
+            clearing.TemporaryObjectKey = null;
+            clearing.Revision = 4;
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var cleared = await scope.Resolve<CodeSpaceDbContext>().ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.Id == transfer.Id);
+            cleared.TemporaryObjectKey.ShouldBeNull("the same kind of write has to be able to say the temporary object is gone, or every successful upload leaves a phantom behind");
+        }
+
+        await Task.Delay(1700);
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var lapsed = await db.ArtifactTransferIntent.SingleAsync(value => value.Id == transfer.Id);
+            lapsed.TemporaryObjectKey = staging;
+            lapsed.Revision = 5;
+            var refused = await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>();
+            refused.ToString().ShouldContain("unexpired worker lease", Case.Sensitive,
+                "a lapsed claim is exactly what lets the sweep take this row over, so the process it replaced must not be able to write the record the sweep is acting on");
+        }
+    }
+
     [Fact]
     public async Task Transfer_transition_without_claim_is_rejected_for_system_owned_intent()
     {

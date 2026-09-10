@@ -14,6 +14,9 @@ namespace CodeSpace.UnitTests.Workflows.Artifacts.Providers.AliyunOss;
 [Trait("Category", "Unit")]
 public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorageDriverConformanceTests, IDisposable
 {
+    /// <summary>Where this fixture's profile stages, spelled out rather than derived, so a change to either half of the key is visible here as a diff.</summary>
+    private const string StagingArea = "codespace/.codespace/staging/";
+
     private readonly FakeAliyunOssHandler _oss = new();
 
     [Fact]
@@ -94,6 +97,98 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
 
         result.Error!.Code.ShouldBe(ArtifactStorageErrorCode.IntegrityMismatch);
         _oss.Keys.ShouldBeEmpty("a failed checksum must leave neither the destination object nor its staging upload behind");
+    }
+
+    /// <summary>
+    /// The write stages at the key its CALLER minted, not one the driver keeps to itself. That is what makes a killed
+    /// writer's leftover findable: the caller records that key durably before the upload starts, so bytes that reach
+    /// the bucket are named in the database whether or not the process survives to clean them up.
+    /// </summary>
+    [Fact]
+    public async Task A_staged_write_occupies_the_temporary_object_its_caller_minted()
+    {
+        await using var driver = await CreateDriverAsync();
+        var staging = ((IArtifactStorageStagingReclaimer)driver).MintStagingObjectKey();
+        await using var input = new MemoryStream(Encoding.UTF8.GetBytes("staged where the caller said"));
+
+        var stored = await driver.PutAsync(new ArtifactStoragePutRequest("staging/caller-minted", input) { StagingObjectKey = staging }, CancellationToken.None);
+
+        stored.IsSuccess.ShouldBeTrue(stored.Error?.Message);
+        staging.ShouldStartWith(StagingArea, Case.Sensitive, "a minted key must sit under the profile's own prefix in a reserved area that is a SIBLING of the published-object area, never inside it");
+        _oss.Calls.ShouldContain($"PUT /{staging}", "the upload must go to the key the caller recorded, or the record names bytes that were never written");
+        _oss.Keys.ShouldHaveSingleItem().ShouldBe("codespace/objects/staging/caller-minted", "a write that returns has already run its own cleanup, so only the published object may survive it");
+    }
+
+    /// <summary>
+    /// Both surfaces that take a staging key hold to one predicate, because a persisted value is what they are handed
+    /// and it may be wrong. The published-object row is the one that matters: <c>objects/</c> is a sibling of the
+    /// staging area, so a reclaimer told to delete a published object must refuse rather than obey — and it must
+    /// refuse without a wire call, since a DELETE that reaches OSS has already destroyed the object.
+    /// </summary>
+    [Theory]
+    [InlineData("codespace/objects/victim")]
+    [InlineData("codespace/.codespace/staging/")]
+    [InlineData("codespace/.codespace/staging/not-hex-and-far-too-short")]
+    [InlineData("codespace/.codespace/staging/00112233445566778899aabbccddeeff/deeper")]
+    [InlineData("someone-else/.codespace/staging/00112233445566778899aabbccddeeff")]
+    public async Task A_temporary_object_key_this_destination_never_minted_is_refused_by_both_surfaces(string foreign)
+    {
+        await using var driver = await CreateDriverAsync();
+        _oss.Stash(foreign, Encoding.UTF8.GetBytes("someone else's bytes"));
+        _oss.Calls.Clear();
+        await using var input = new MemoryStream(Encoding.UTF8.GetBytes("refused"));
+
+        var written = await driver.PutAsync(new ArtifactStoragePutRequest("staging/foreign", input) { StagingObjectKey = foreign }, CancellationToken.None);
+        var discarded = await ((IArtifactStorageStagingReclaimer)driver).DiscardStagingAsync(foreign, CancellationToken.None);
+
+        written.Error!.Code.ShouldBe(ArtifactStorageErrorCode.InvalidRequest);
+        discarded.Error!.Code.ShouldBe(ArtifactStorageErrorCode.InvalidRequest);
+        _oss.Calls.ShouldBeEmpty("a key outside this driver's own staging area must be refused before it reaches the wire — a DELETE that arrives has already destroyed whatever was there");
+        _oss.Keys.ShouldContain(foreign);
+    }
+
+    /// <summary>
+    /// The reclaim itself, over the two states a recorded key can be in when a sweep reaches it: the writer was killed
+    /// before its own cleanup ran and the bytes are still there, or the cleanup did run and they are not. Both must
+    /// answer success, because the caller's next act is to clear the record — and a reclaim that reported the second
+    /// case as a failure would leave every ordinary write's row naming a temporary object forever.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Reclaiming_a_temporary_object_succeeds_whether_or_not_its_bytes_are_still_there(bool stillStaged)
+    {
+        await using var driver = await CreateDriverAsync();
+        var reclaimer = (IArtifactStorageStagingReclaimer)driver;
+        var staging = reclaimer.MintStagingObjectKey();
+        if (stillStaged) _oss.Stash(staging, Encoding.UTF8.GetBytes("bytes a killed writer never published"));
+
+        var discarded = await reclaimer.DiscardStagingAsync(staging, CancellationToken.None);
+
+        discarded.IsSuccess.ShouldBeTrue(discarded.Error?.Message);
+        _oss.Keys.ShouldNotContain(staging);
+    }
+
+    /// <summary>
+    /// A minted key's shape, pinned directly. Nothing enforces it at the destination — OSS accepts any key — so the
+    /// nonce length and alphabet ARE the guard that a persisted value cannot walk out of the staging area, and a
+    /// widening here silently widens what <see cref="Reclaiming_a_temporary_object_succeeds_whether_or_not_its_bytes_are_still_there"/>
+    /// is allowed to delete.
+    /// </summary>
+    [Fact]
+    public async Task A_minted_temporary_object_key_is_one_unguessable_segment_under_the_reserved_area()
+    {
+        await using var driver = await CreateDriverAsync();
+        var reclaimer = (IArtifactStorageStagingReclaimer)driver;
+
+        var minted = Enumerable.Range(0, 8).Select(_ => reclaimer.MintStagingObjectKey()).ToList();
+        var nonces = minted.Select(key => key.Substring(StagingArea.Length)).ToList();
+
+        AliyunOssArtifactStorageDriver.StagingNonceLength.ShouldBe(32, "a GUID in N format; shortening it shortens the only thing keeping a recorded key inside the staging area");
+        minted.Distinct(StringComparer.Ordinal).Count().ShouldBe(minted.Count, "two writes to one object key must never share a temporary object");
+        minted.ShouldAllBe(key => key.StartsWith(StagingArea, StringComparison.Ordinal));
+        nonces.ShouldAllBe(nonce => nonce.Length == AliyunOssArtifactStorageDriver.StagingNonceLength);
+        nonces.ShouldAllBe(nonce => nonce.All(character => char.IsAsciiDigit(character) || (character >= 'a' && character <= 'f')));
     }
 
     [Fact]
