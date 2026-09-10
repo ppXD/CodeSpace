@@ -244,6 +244,11 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     /// <para>Minted BEFORE the upload and recorded before it, which is the entire point: the driver's own cleanup runs
     /// in a <c>finally</c>, and a <c>finally</c> does not run when the process is killed. A recorded key is what turns
     /// those bytes from an object nobody knows about into one the abandoned-transfer sweep can reclaim.</para>
+    ///
+    /// <para>Not called from <see cref="ReplaceObjectAsync"/> or <see cref="PlaceObjectAsync"/> — a revive's staged
+    /// upload therefore still goes through the driver with no key recorded, so a worker killed mid-revive leaves an
+    /// orphan this sweep cannot find. The revive path holds no lease to record under, since the intent it re-drives is
+    /// terminally Committed and 0226 refuses this write once the lease has lapsed.</para>
     /// </summary>
     private static string? StagingObjectKeyOf(IArtifactStorageDriver driver) => (driver as IArtifactStorageStagingReclaimer)?.MintStagingObjectKey();
 
@@ -1129,7 +1134,13 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         if (affected == 1) return true;
         var intent = await db.ArtifactTransferIntent.AsNoTracking().SingleAsync(value => value.TeamId == claim.TeamId && value.Id == claim.Id, cancellationToken).ConfigureAwait(false);
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
-        return LeaseIsCurrent(intent, claim.Fence, now) && intent.State is not (ArtifactTransferState.Committed or ArtifactTransferState.Failed or ArtifactTransferState.Cancelled);
+        var leaseCurrent = LeaseIsCurrent(intent, claim.Fence, now) && intent.State is not (ArtifactTransferState.Committed or ArtifactTransferState.Failed or ArtifactTransferState.Cancelled);
+
+        // A live lease alone does not mean THIS statement's write landed: the fenced UPDATE can miss the row for a
+        // reason having nothing to do with losing the lease (e.g. a concurrent renewal already moved
+        // worker_lease_expires_at past what this statement would set). For a staging write the caller only cares
+        // whether its key is now on the row, so the fallback must see it there before reporting "recorded".
+        return leaseCurrent && (staging == null || intent.TemporaryObjectKey == staging.Key);
     }
 
     private async Task<IntentSnapshot> TransitionAsync(IntentSnapshot claim, ArtifactTransferState state, Guid actorId, CancellationToken cancellationToken)

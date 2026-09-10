@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +15,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
@@ -2070,6 +2072,72 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
 
         (await IntentAsync(committed.IntentId)).TemporaryObjectKey.ShouldBeNull(
             "the driver answered, so its own cleanup has already run; a row still naming that object would send every later sweep after bytes that are gone");
+    }
+
+    /// <summary>
+    /// The fenced UPDATE that records a staging key can miss the row for a reason having nothing to do with losing
+    /// the lease: a concurrent statement can advance <c>worker_lease_expires_at</c> past what THIS call would set,
+    /// so the app-side WHERE (which demands the new expiry be strictly later than the old one) matches zero rows
+    /// while the lease it is fencing on stays live throughout.
+    ///
+    /// <para>The fallback that re-reads the row on a zero-row UPDATE answers "is the lease still mine" — correct for
+    /// a plain renewal, but for a staging write the row can be exactly that AND still never have received the key,
+    /// because the statement that would have written it never landed. Reporting "recorded" there hands the caller a
+    /// green light to upload bytes nobody can find if it is killed mid-upload — the whole gap this PR closes,
+    /// reopened one layer down.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_staging_record_whose_fenced_update_misses_the_row_is_not_reported_recorded()
+    {
+        var world = await SeedWorldAsync();
+        var storage = new FakeStorageState();
+        var bytes = Encoding.UTF8.GetBytes("bytes whose staging record must not be claimed unwritten");
+        var request = Request(world, new MemoryStream(bytes), bytes, "staging-race");
+        var race = new StagingRaceInterceptor(_fixture.ConnectionString, world.TeamId);
+
+        using var scope = Scope(storage, interceptor: race);
+        var result = await scope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, CancellationToken.None);
+
+        race.Raced.ShouldBeTrue("the interceptor never saw the staging-record statement it exists to race — the test proves nothing if this is false");
+        result.ShouldBeOfType<ArtifactCasTransferResult.Deferred>().Problem.Code.ShouldBe(ArtifactCasProblemCode.StaleWorker,
+            "a fenced update that missed the row must not be reported as having recorded a staging key it never wrote");
+
+        var intent = await IntentByScopeAsync(world, request.IdempotencyScope);
+        intent.TemporaryObjectKey.ShouldBeNull("the fenced update never ran, so the column this pin protects must still be unwritten");
+        intent.State.ShouldBe(ArtifactTransferState.Uploading, "the caller must stop here rather than upload bytes nobody recorded the staging key for");
+    }
+
+    /// <summary>
+    /// Extends the live lease past what the coordinator's own renewal would set, the instant the coordinator tries to
+    /// record a staging key — so the fenced UPDATE's app-side WHERE misses the row while the lease it fences on stays
+    /// live throughout. Fires exactly once, and only on the statement carrying the boolean parameter that names it a
+    /// staging record rather than a plain renewal, so it races the ONE write this pin is about and not the ordinary
+    /// renewal that precedes it or the clearing write that follows.
+    /// </summary>
+    private sealed class StagingRaceInterceptor(string connectionString, Guid teamId) : SaveChangesInterceptor, IDbCommandInterceptor
+    {
+        private int _armed = 1;
+
+        public bool Raced { get; private set; }
+
+        public async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var isStagingRecord = command.CommandText.Contains("temporary_object_key = CASE", StringComparison.Ordinal)
+                && command.Parameters.Cast<DbParameter>().Any(parameter => parameter.Value is bool value && value);
+
+            if (isStagingRecord && Interlocked.Exchange(ref _armed, 0) == 1)
+            {
+                await using var racing = new NpgsqlConnection(connectionString);
+                await racing.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await using var extend = racing.CreateCommand();
+                extend.CommandText = "UPDATE artifact_transfer_intent SET worker_lease_expires_at = clock_timestamp() + INTERVAL '1 hour', revision = revision + 1, last_modified_date = clock_timestamp() WHERE team_id = @team";
+                extend.Parameters.AddWithValue("team", teamId);
+                await extend.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                Raced = true;
+            }
+
+            return result;
+        }
     }
 
     /// <summary>The intent a write is CURRENTLY driving, found the only way a caller can before its result arrives: by the key it minted the intent under.</summary>
