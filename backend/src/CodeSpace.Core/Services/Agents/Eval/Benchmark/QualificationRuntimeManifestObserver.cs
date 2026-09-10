@@ -30,6 +30,13 @@ public interface IQualificationRuntimeManifestObserver
 /// <see cref="RuntimeSettings"/>, the live planner/supervisor prompt and schema constants — so a frozen manifest and a
 /// later observation can only differ when the runtime genuinely differed. Nothing here touches the database or the
 /// network; the two inputs it cannot derive locally are parameters.
+///
+/// <para>Ordering is part of that same seam: <see cref="HarnessBinaryObserver"/> sorts harnesses by kind and this
+/// method sorts endpoints by role then model row, specifically so an unrelated DI/collection enumeration-order
+/// difference can never look like drift. That guarantee holds only while EVERY manifest — the one frozen at
+/// campaign start and every later observation compared against it — is built through this method (and through
+/// <see cref="HarnessBinaryObserver"/> for the harness list); a manifest assembled any other way could reorder
+/// silently and misread as a substituted runtime.</para>
 /// </summary>
 public sealed class QualificationRuntimeManifestObserver : IQualificationRuntimeManifestObserver, ISingletonDependency
 {

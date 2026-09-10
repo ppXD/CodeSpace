@@ -15,10 +15,10 @@ namespace CodeSpace.Messages.Agents.Benchmark;
 /// </summary>
 public sealed record HarnessBinaryIdentity
 {
-    /// <summary>No executable resolved on this host — the bare name is absent from PATH, or the configured path does not exist.</summary>
+    /// <summary>No executable resolved on this host — the bare name is absent from PATH, the configured path does not exist, or it names a directory (<c>File.Exists</c> reports false for a directory, the same as a missing file).</summary>
     public const string ReasonNotFound = "not-found";
 
-    /// <summary>The executable resolved but its bytes could not be read (permissions, a dangling symlink, a directory).</summary>
+    /// <summary>The executable resolved but its bytes could not be read (permissions, a dangling symlink).</summary>
     public const string ReasonUnreadable = "unreadable";
 
     /// <summary>The harness's stable tag — <c>codex-cli</c>, <c>claude-code</c>.</summary>
@@ -105,8 +105,18 @@ public sealed record CredentialEndpointIdentity
     };
 
     /// <summary>Host (and non-default port) of an absolute base URL. A blank or unparseable value reads <see cref="ProviderDefaultHost"/> rather than echoing the raw string, which could itself be a path carrying a token.</summary>
-    public static string HostOf(string? baseUrl) =>
-        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) && uri.Authority.Length > 0 ? uri.Authority : ProviderDefaultHost;
+    public static string HostOf(string? baseUrl)
+    {
+        // A scheme-less "host:port" (or bare host) is not itself invalid, but Uri parses it as a URI whose SCHEME
+        // is the host and whose PATH is the port, leaving Authority empty — "localhost:8080" would otherwise read
+        // as ProviderDefaultHost instead of its real host. Assuming https before parsing recovers the host:port;
+        // the assumed scheme is discarded immediately after and never itself frozen. Userinfo needs no such
+        // handling: Uri.Authority already excludes it (unlike the raw string), so a token in "user:token@host"
+        // never reaches this record.
+        var candidate = !string.IsNullOrEmpty(baseUrl) && !baseUrl.Contains("://", StringComparison.Ordinal) ? $"https://{baseUrl}" : baseUrl;
+
+        return Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && uri.Authority.Length > 0 ? uri.Authority : ProviderDefaultHost;
+    }
 
     /// <summary>
     /// The salted fingerprint. The campaign salt is the HMAC KEY, so the same key under a different campaign

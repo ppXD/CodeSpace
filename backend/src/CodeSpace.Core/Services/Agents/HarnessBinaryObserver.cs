@@ -12,7 +12,9 @@ namespace CodeSpace.Core.Services.Agents;
 /// given, a bare name across <c>PATH</c>), reads the file, and hashes it. No process is started — probing a CLI by
 /// running <c>--version</c> would trust the binary to describe itself, which is exactly the claim under test — and
 /// nothing reaches the network. Symlinks are followed, so the Docker worker's <c>/usr/local/bin/claude</c> shim
-/// hashes the package bytes it points at.</para>
+/// hashes the package bytes it points at. A WRAPPER SCRIPT is different from a symlink: a shell launcher that execs
+/// the real binary elsewhere by path or name hashes only its own script bytes, and an npm-style entry point
+/// (<c>cli.js</c>) hashes that one file — neither follows on to whatever it launches or requires.</para>
 ///
 /// <para>Lives beside <see cref="AgentHarnessRegistry"/> because it is a fact about the registry's members, and its
 /// pure entry point takes plain strings so it is unit-testable with no harness, no DI and no real CLI.</para>
@@ -41,7 +43,12 @@ public static class HarnessBinaryObserver
             : new HarnessBinaryIdentity { Kind = kind, Version = version, UnobservedReason = HarnessBinaryIdentity.ReasonUnreadable };
     }
 
-    /// <summary>A rooted or directory-qualified command is never searched on <paramref name="searchPath"/> — that is the shell's rule too.</summary>
+    /// <summary>
+    /// A rooted or directory-qualified command is never searched on <paramref name="searchPath"/> — that is the
+    /// shell's rule too. Resolution is existence-only: a file with no execute permission on Unix still resolves
+    /// and is hashed even though the OS would refuse to run it — this freezes the bytes AT the resolved path, not
+    /// whether they are currently runnable.
+    /// </summary>
     internal static string? ResolveOnPath(string command, string? searchPath)
     {
         if (string.IsNullOrWhiteSpace(command)) return null;

@@ -1,10 +1,13 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Exceptions;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents.Benchmark;
@@ -33,6 +36,52 @@ public sealed class QualificationRuntimeManifestTests
         drifted.ManifestDigest().ShouldNotBe(frozen.ManifestDigest(), $"a changed {group} is a different runtime bundle and must not reuse its digest");
         ProtocolDigestFor(drifted).ShouldNotBe(ProtocolDigestFor(frozen), $"a changed {group} must move the protocol identity, or a substituted runtime could rejoin the campaign");
         QualificationRuntimeManifest.Compare(frozen, drifted).ShouldNotBeNull().ShouldStartWith($"{QualificationRuntimeManifest.RootField}.{group}");
+    }
+
+    /// <summary>
+    /// A legacy protocol (committed before this manifest existed, so <c>RuntimeManifestDigest</c> is null) must
+    /// digest EXACTLY as it did on main before the manifest was added. Folding the digest into <c>ProtocolDigest</c>
+    /// must append it only when present — inserting a null placeholder in its slot would shift every following
+    /// field into a new array position and move the digest already stored on every pre-existing row.
+    ///
+    /// <para>The expected value was derived independently of this branch's current <c>ProtocolDigest</c>: a
+    /// standalone script reproduced main's field array — <c>git diff</c> against the merge-base
+    /// (<c>b705febf3a130182b955a0bab64f5ad1704eb4ff</c>, which this branch forked from and which is unchanged on
+    /// origin/main today) shows this PR's only change to that method is inserting the
+    /// <c>RuntimeManifestDigest</c> line, confirming main's array is this file's array with that one line removed
+    /// — over the same fixture values as <see cref="Protocol"/> below (with a null manifest, so the two runtime
+    /// manifest fields are absent exactly as they are on main's entity), serialized with the same options
+    /// (<c>JsonSerializerDefaults.Web</c> + <c>JsonStringEnumConverter</c>, matching <c>AgentJson.Options</c>)
+    /// under net10.0 (this repo's TFM), then SHA-256 / upper-hex exactly as <c>ProtocolDigest</c> does.</para>
+    /// </summary>
+    [Fact]
+    public void A_legacy_protocol_with_no_frozen_manifest_reproduces_mains_pre_manifest_digest()
+    {
+        PairedTaskLaunchQualificationRunner.ProtocolDigest(Protocol(null))
+            .ShouldBe("E405F8362099F4BE6FCE68E1D622743AF77C98339B5A63F4F97C3F951C47422B",
+                "a protocol with no frozen runtime manifest must digest exactly as it did on main before the manifest was added, or every pre-existing protocol's identity moves");
+    }
+
+    [Theory]
+    [InlineData(typeof(QualificationRuntimeManifest))]
+    [InlineData(typeof(HarnessBinaryIdentity))]
+    [InlineData(typeof(RunnerProfile))]
+    [InlineData(typeof(CredentialEndpointIdentity))]
+    [InlineData(typeof(ReviewerResolution))]
+    [InlineData(typeof(ExecutionSettings))]
+    public void Every_public_property_of_each_frozen_record_reaches_the_canonical_json(Type recordType)
+    {
+        var json = Manifest().CanonicalJson();
+        var properties = recordType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+        properties.ShouldNotBeEmpty($"{recordType.Name} should have at least one frozen property to cover");
+
+        foreach (var property in properties)
+        {
+            var key = JsonNamingPolicy.CamelCase.ConvertName(property.Name);
+
+            json.ShouldContain($"\"{key}\":", Case.Sensitive, $"{recordType.Name}.{property.Name} must reach CanonicalJson — an unreached property could change with no digest movement and no test catching it");
+        }
     }
 
     [Fact]
@@ -110,6 +159,8 @@ public sealed class QualificationRuntimeManifestTests
     [InlineData(null, CredentialEndpointIdentity.ProviderDefaultHost)]
     [InlineData("", CredentialEndpointIdentity.ProviderDefaultHost)]
     [InlineData("not a url", CredentialEndpointIdentity.ProviderDefaultHost)]
+    [InlineData("https://user:token@gateway.example.com/", "gateway.example.com")]
+    [InlineData("gateway.example.com:9090", "gateway.example.com:9090")]
     public void An_endpoint_identity_keeps_the_host_and_never_a_path_or_query(string? baseUrl, string expected)
     {
         CredentialEndpointIdentity.HostOf(baseUrl).ShouldBe(expected);
@@ -144,6 +195,7 @@ public sealed class QualificationRuntimeManifestTests
         failure.FrozenDigest.ShouldBe(frozen.ManifestDigest());
         failure.ObservedDigest.ShouldBe(drifted.ManifestDigest());
         failure.Message.ShouldNotContain(Secret);
+        failure.Kind.ShouldBe(FailureKind.Conflict, "a runtime substitution is a designed, operator-actionable refusal — state moved underneath the campaign — not an internal invariant violation, and Internal would mask this deliberately-safe message behind a generic one");
     }
 
     [Fact]
@@ -158,7 +210,9 @@ public sealed class QualificationRuntimeManifestTests
     private static string ProtocolDigestFor(QualificationRuntimeManifest manifest) =>
         PairedTaskLaunchQualificationRunner.ProtocolDigest(Protocol(manifest));
 
-    private static PairedQualificationProtocol Protocol(QualificationRuntimeManifest manifest) => new()
+    // A null manifest reproduces a legacy protocol committed before the runtime bundle existed — both runtime
+    // manifest fields stay null, exactly as they are on a pre-existing row.
+    private static PairedQualificationProtocol Protocol(QualificationRuntimeManifest? manifest) => new()
     {
         ObservationGroupId = Guid.Parse("11111111-1111-1111-1111-111111111111"),
         TeamId = Guid.Parse("22222222-2222-2222-2222-222222222222"),
@@ -167,8 +221,8 @@ public sealed class QualificationRuntimeManifestTests
         CodeRevision = new string('a', 40),
         ControlModelRowId = Guid.Parse("33333333-3333-3333-3333-333333333333"),
         CandidateModelRowId = Guid.Parse("44444444-4444-4444-4444-444444444444"),
-        RuntimeManifestJson = manifest.CanonicalJson(),
-        RuntimeManifestDigest = manifest.ManifestDigest(),
+        RuntimeManifestJson = manifest?.CanonicalJson(),
+        RuntimeManifestDigest = manifest?.ManifestDigest(),
         RequiresCellAdmission = true,
         RequiresResultDigest = true,
         StatisticsVersion = PairedQualificationOutcome.StatisticsVersion,
