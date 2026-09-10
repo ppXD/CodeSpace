@@ -496,7 +496,12 @@ public class AgentMcpEndpointFlowTests
         await ExecuteAsync(runId, new ScriptedHarness("printf 'done\\n'"));
 
         connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "the read-only endpoint is torn down on the harness's exit — the seam must not resolve a completed run");
-        File.Exists(LocalProcessRunner.McpSocketPathFor(runId.ToString("N"))).ShouldBeFalse(customMessage: "dispose must unlink the per-run socket file");
+
+        // The address is reached through the run's own handle: it is no longer computable from the run id, which is
+        // exactly what this change bought, so a test that recomputed it would be testing a derivation nothing has.
+        var handle = await ReadHandleAsync(runId);
+        handle.McpSocketPath.ShouldNotBeNullOrEmpty("a run whose endpoint opened must record where it bound");
+        File.Exists(handle.McpSocketPath!).ShouldBeFalse(customMessage: "dispose must unlink the per-run socket file");
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
@@ -557,9 +562,24 @@ public class AgentMcpEndpointFlowTests
         var server = doc.RootElement.GetProperty("mcpServers").GetProperty("codespace");
         server.GetProperty("command").GetString().ShouldBe(StandInProxyPath(), customMessage: "the declaration command is the ABSOLUTE resolved proxy path, not a bare PATH name");
 
+        var handle = await ReadHandleAsync(runId);
+
         var env = server.GetProperty("env");
-        env.GetProperty("CODESPACE_MCP_SOCKET").GetString().ShouldBe(LocalProcessRunner.McpSocketPathFor(runId.ToString("N")),
-            customMessage: "the declaration must point at the SAME socket path the executor's listener binds");
+        env.GetProperty("CODESPACE_MCP_SOCKET").GetString().ShouldBe(handle.McpSocketPath,
+            customMessage: "the declaration must point at the SAME socket path the executor's listener binds — and the handle is the only record of it");
+
+        // THE property this run's isolation rests on: the address is not a function of the run id. The run id travels
+        // in URLs, events and artifacts, so anything that could recompute the address from it could address this run's
+        // endpoint directly — with only the token left in the way, and on a host where bubblewrap is unavailable
+        // (the posture Sandbox:RequireConfinement leaves permitted) nothing at all stopping a sibling process reaching
+        // the path. Nothing but the handle can now name it.
+        var spoolDirectory = LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N"));
+        handle.McpSocketPath!.ShouldNotBe(Path.Combine(spoolDirectory, "mcp", "mcp.sock"), customMessage: "the pre-hardening address was exactly this — derived, and so nameable by anything holding the run id");
+        Path.GetFileName(Path.GetDirectoryName(handle.McpSocketPath))!.Length.ShouldBeGreaterThan(16, customMessage: "the socket's parent directory carries the run's unguessable id — a short or empty segment means the id stopped reaching the path");
+
+        if (!OperatingSystem.IsWindows())
+            File.GetUnixFileMode(Path.Combine(spoolDirectory, "agent-home"))
+                .ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, customMessage: "the config-home holding the token-bearing declaration must be 0700, not whatever the umask happened to be");
         env.GetProperty("CODESPACE_RUN_TOKEN").GetString().ShouldNotBeNullOrEmpty(customMessage: "the declaration carries the run token the proxy authenticates with");
 
         // 0600: the token lives in this file, so it must not be group/other-readable.
@@ -602,12 +622,18 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
 
-        // PRE-OCCUPY the exact socket path the executor will bind with a DIRECTORY (not a live socket): the endpoint
-        // ctor's stale-socket File.Delete can't remove a directory, so Bind fails on it → the A10 fail-soft kicks in.
-        // (A live socket file would be unlinked by that File.Delete and the rebind would succeed, so a directory is the
-        // platform-robust way to force the bind failure.) The endpoint is optional infra, so the run still runs.
-        var occupiedPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
-        Directory.CreateDirectory(occupiedPath);
+        // A short spool root pins the CANONICAL socket shape: with the default (long) root the socket falls back to a
+        // temp path, and the parent this test occupies would not be the one the endpoint tries to create.
+        var spoolRoot = Path.Combine("/tmp", "csb-" + Guid.NewGuid().ToString("N")[..8]);
+        using var settings = CodeSpace.Core.Settings.RuntimeSettings.Override(current => current with { AgentRunSpoolDirectory = spoolRoot });
+
+        // PRE-OCCUPY the socket's PARENT with a FILE: the run's own socket directory can then never be created (a path
+        // component is not a directory), so the bind is doomed before it starts → the A10 fail-soft kicks in. The exact
+        // socket path is deliberately no longer computable from the run id, so the test occupies the part of it that
+        // still is. The endpoint is optional infra, so the run still runs.
+        var occupiedPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "mcp");
+        Directory.CreateDirectory(Path.GetDirectoryName(occupiedPath)!);
+        File.WriteAllText(occupiedPath, "");
 
         try
         {
@@ -625,7 +651,7 @@ public class AgentMcpEndpointFlowTests
             (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded,
                 customMessage: "the endpoint is optional infra; a bind failure does not fail the run");
         }
-        finally { try { Directory.Delete(occupiedPath, recursive: true); } catch { /* best-effort */ } }
+        finally { try { Directory.Delete(spoolRoot, recursive: true); } catch { /* best-effort */ } }
     }
 
     [Fact]
@@ -1108,6 +1134,17 @@ public class AgentMcpEndpointFlowTests
         }
 
         throw new TimeoutException($"The MCP endpoint for run {runId} did not register within 15s — check that ExecuteAsync opened it before the harness.");
+    }
+
+    /// <summary>The run's persisted launch handle. It is the ONLY record of the address this run's endpoint bound — the socket path is no longer derivable from the run id — so every assertion about that address reads it from here, exactly as a re-attaching worker does.</summary>
+    private async Task<SandboxHandle> ReadHandleAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var json = (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).RunnerHandleJson;
+        json.ShouldNotBeNullOrEmpty("the durable launch persists its handle before it observes");
+
+        return JsonSerializer.Deserialize<SandboxHandle>(json!, AgentJson.Options)!;
     }
 
     /// <summary>Wait until the run's durable handle has been persisted WITH the McpRunToken — production only re-attaches runs whose handle was written, so the test must not race the cancel ahead of SetRunnerHandleAsync (the endpoint registers earlier, in OpenMcpEndpointIfEnabledAsync).</summary>

@@ -35,10 +35,10 @@ public sealed partial class LocalProcessRunner
     private static readonly TimeSpan ProducerExitWait = TimeSpan.FromSeconds(2);
     private const int SourceQuiescenceChecks = 2;
 
-    /// <summary>The per-run MCP listener socket file. Single source of truth so the executor's listener and the harness/proxy's connect path agree by construction on the same path.</summary>
-    internal const string McpSocketFile = "mcp.sock";
+    /// <summary>The per-run MCP listener socket file — a single character, because every byte it costs comes out of the <c>AF_UNIX</c> path budget the run's unguessable directory segment now also spends. The NAME carries no secret; the directory holding it does.</summary>
+    internal const string McpSocketFile = "s";
 
-    /// <summary>A DEDICATED socket-only subdir under the spool dir (<c>&lt;spool&gt;/mcp/</c>) that holds ONLY the socket. The bwrap bind binds THIS dir, never the spool dir itself — so the agent never sees the spool's <c>out.log</c> / <c>err.log</c> / <c>exit</c> / <c>pid</c> artifacts (it could otherwise read its own transcript or forge the <c>exit</c> marker — design §3b / Attack 4).</summary>
+    /// <summary>A DEDICATED socket-only subdir under the spool dir (<c>&lt;spool&gt;/mcp/</c>) whose per-run child holds ONLY the socket. The bwrap bind binds THAT child, never the spool dir itself — so the agent never sees the spool's <c>out.log</c> / <c>err.log</c> / <c>exit</c> / <c>pid</c> artifacts (it could otherwise read its own transcript or forge the <c>exit</c> marker — design §3b / Attack 4).</summary>
     internal const string McpSocketDir = "mcp";
 
     /// <summary>The usable <c>AF_UNIX</c> path maximum — 103 on macOS/BSD, 107 on Linux; use the LOWER so the short-path fallback fires on every host that would overflow either. Pinned by a test: a spool path longer than this would overflow <c>Bind</c> (empirically, .NET's <c>UnixDomainSocketEndPoint</c> binds at length 103 and throws at 104 on macOS), so <see cref="McpSocketPathFor"/> falls back to a short temp path.</summary>
@@ -49,6 +49,22 @@ public sealed partial class LocalProcessRunner
 
     /// <summary>The per-run config-home directory for a handle's <paramref name="spoolDirectory"/> — where the CLI wrote its dotfiles (incl. the resumable session transcript). The executor reads the session file here BEFORE the spool is reaped (P3); encapsulates <see cref="AgentConfigHomeDir"/> so the layout stays the runner's.</summary>
     public static string ConfigHomePath(string spoolDirectory) => Path.Combine(spoolDirectory, AgentConfigHomeDir);
+
+    /// <summary>
+    /// Create the per-run config-home restricted to the owner (0700) — the same treatment the non-durable command path
+    /// already gives its own config home. It holds the MCP declaration, which carries the run's live capability token,
+    /// so leaving it at whatever the umask happened to be made that token readable to every other local user on the
+    /// host. A no-op without a config home, and on Windows where unix modes don't apply.
+    /// </summary>
+    private static void CreateOwnerOnlyConfigHome(string? configHome)
+    {
+        if (configHome is null) return;
+
+        Directory.CreateDirectory(configHome);
+
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(configHome, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
 
     /// <summary>
     /// Operator override for the <c>codespace-mcp</c> proxy binary's ABSOLUTE path (e.g. an air-gapped mirror, a
@@ -752,13 +768,13 @@ public sealed partial class LocalProcessRunner
         // sandbox's writable HOME + a writable bind, so compute + create it BEFORE building the command. Created
         // here (before launch) so bwrap's --bind source exists when the process starts.
         var configHome = spec.ConfigHomeEnvVars.Count > 0 ? Path.Combine(spoolDir, AgentConfigHomeDir) : null;
-        if (configHome is not null) Directory.CreateDirectory(configHome);
+        CreateOwnerOnlyConfigHome(configHome);
 
         // Write the run-scoped MCP server declaration (0600 — it carries the run token) into the config-home BEFORE
         // launch so the harness reads it on start. No-op when the run has no tool fabric (spec.Mcp null) or no
         // config-home (the declaration has nowhere harness-isolated to live). The path it WROTE is what a harness that
         // must be POINTED at its declaration (Claude Code) gets on its argv — one value, so the two cannot drift.
-        var mcpDeclarationPath = WriteMcpDeclaration(spec.Mcp, configHome);
+        var mcpDeclarationPath = WriteMcpDeclaration(spec, configHome);
 
         // Materialize the harness's projected config-home files (e.g. skills/<slug>/SKILL.md) so the CLI discovers
         // them on start. PURE (task-derived) + not secret, so — unlike the MCP declaration — the harness's
@@ -900,45 +916,53 @@ public sealed partial class LocalProcessRunner
     internal static string SpoolDirectoryFor(string spoolKey) => Path.Combine(SpoolRoot(), spoolKey);
 
     /// <summary>
-    /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp/mcp.sock</c> (a DEDICATED socket-only
-    /// subdir, so the bwrap bind of its parent dir never exposes the spool's <c>out.log</c> / <c>exit</c> / etc. to the
-    /// agent — design §3b / Attack 4) so it's reaped with the spool and the runner binds the SAME path. BUT an
-    /// <c>AF_UNIX</c> address can't exceed <see cref="UnixSocketPathCap"/> bytes, and the spool root (a temp dir + a
-    /// 32-hex run key + <c>/mcp/mcp.sock</c>) can overflow that on macOS — so when the canonical path is too long this
-    /// falls back to a SHORT, still-unique temp path keyed by the run's FULL 32-hex run key whose parent (<c>cs-mcp/&lt;key&gt;</c>)
-    /// also holds only the socket. Single source of truth: both the executor's listener and the harness/proxy's connect
-    /// path call this, so they agree by construction.
+    /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp/&lt;socketId&gt;/s</c> so it is reaped
+    /// with the spool and the runner binds the SAME path. BUT an <c>AF_UNIX</c> address can't exceed
+    /// <see cref="UnixSocketPathCap"/> bytes, and a long spool root can overflow that on macOS — so when the canonical
+    /// path is too long this falls back to a SHORT temp path, <c>&lt;temp&gt;/cs-mcp/&lt;socketId&gt;/s</c>. Both
+    /// shapes obey the same two rules: the socket's parent directory belongs to ONE run and holds ONLY the socket (the
+    /// bwrap bind of that parent therefore exposes nothing else — design §3b / Attack 4), and its name is
+    /// <paramref name="socketId"/>.
+    ///
+    /// <para><b>Why the caller must supply <paramref name="socketId"/>.</b> This used to be a pure function of the run
+    /// id, which made the listener's address computable by anything that knew the id — and the run id is not a secret
+    /// (it travels in URLs, events and artifacts). A sibling process under the same uid could therefore address another
+    /// run's endpoint directly, with only the token left between it and that run's team-scoped tools; and on a host
+    /// where bwrap is unavailable — the posture <c>Sandbox:RequireConfinement</c> leaves permitted — nothing stopped it
+    /// reaching the path at all. <paramref name="socketId"/> is a 128-bit CSPRNG id minted per run
+    /// (<c>McpRunToken.MintPathId</c>) and carried on the run's own durable handle, so the ONLY way to the path is
+    /// through the handle. There is deliberately no overload that derives one from a run id.</para>
     /// </summary>
-    internal static string McpSocketPathFor(string spoolKey)
+    internal static string McpSocketPathFor(string spoolKey, string socketId)
     {
-        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketDir, McpSocketFile);
+        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketDir, socketId, McpSocketFile);
 
         if (canonical.Length <= UnixSocketPathCap) return canonical;
 
         // Intentionally temp-rooted: the canonical path overflowed BECAUSE the spool root is long, so the short socket
-        // must live elsewhere. Keyed by the FULL run key (~temp+42 ≈ 90 chars < cap on macOS), unlinked on dispose; if
-        // even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
-        return Path.Combine(Path.GetTempPath(), "cs-mcp", spoolKey, "s");
+        // must live elsewhere. Still per-run and still unguessable (~temp+30 chars < cap on macOS), unlinked on dispose;
+        // if even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
+        return Path.Combine(Path.GetTempPath(), "cs-mcp", socketId, McpSocketFile);
     }
 
     /// <summary>
     /// Write the harness-rendered MCP server declaration 0600 into the config-home (it carries the run token, so it must
     /// never be group/other-readable). The harness owns the FORMAT — it already rendered <see cref="McpServerWiring.Content"/>
     /// — so the runner stays dumb: it writes the bytes verbatim, no render. No-op when the run has no tool fabric
-    /// (<paramref name="wiring"/> null) or no config-home (nowhere harness-isolated to put it — a run without config
-    /// isolation can't host the proxy declaration without leaking it into a shared dir). The relative path is joined onto
-    /// the config-home; on POSIX the file is then chmod'd 0600 (a no-op on Windows where unix modes don't apply — the
-    /// per-run dir + token are the gate).
+    /// (<c>spec.Mcp</c> null) or no config-home (nowhere harness-isolated to put it — a run without config
+    /// isolation can't host the proxy declaration without leaking it into a shared dir). The name is resolved by
+    /// <see cref="DeclarationFileName"/>; on POSIX the file is then chmod'd 0600 (a no-op on Windows where unix modes
+    /// don't apply — the per-run dir + token are the gate).
     ///
     /// <para>Returns the ABSOLUTE path it wrote, or null when it wrote nothing. That return is the ONLY source of the
     /// path <see cref="ArgsWithMcpDeclaration"/> puts on the argv of a harness that must be pointed at its declaration
     /// — write and argv cannot name different files.</para>
     /// </summary>
-    internal static string? WriteMcpDeclaration(McpServerWiring? wiring, string? configHome)
+    internal static string? WriteMcpDeclaration(SandboxSpec spec, string? configHome)
     {
-        if (wiring is null || configHome is null) return null;
+        if (spec.Mcp is not { } wiring || configHome is null) return null;
 
-        var path = Path.Combine(configHome, wiring.RelativeFileName);
+        var path = Path.Combine(configHome, DeclarationFileName(spec, wiring));
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -949,6 +973,18 @@ public sealed partial class LocalProcessRunner
 
         return path;
     }
+
+    /// <summary>
+    /// Where the declaration lands inside the config-home. A harness that DISCOVERS its declaration by a fixed name
+    /// (Codex reads <c>CODEX_HOME/config.toml</c>) has no choice — that name is its contract, so it is used verbatim.
+    /// A harness that is POINTED at the file (<see cref="SandboxSpec.McpDeclarationArgs"/>, Claude Code's
+    /// <c>--mcp-config</c>) can be pointed anywhere, so the name gets a 128-bit CSPRNG segment: the file carries the
+    /// run's live capability token, and a fixed name inside a run-id-derived directory is a location anything that
+    /// knows the run id can name. The extension is preserved — the CLI is handed a real path either way, and a rename
+    /// must not change what the file looks like to it.
+    /// </summary>
+    private static string DeclarationFileName(SandboxSpec spec, McpServerWiring wiring) =>
+        spec.McpDeclarationArgs.Count == 0 ? wiring.RelativeFileName : $"mcp-{Mcp.McpRunToken.MintPathId()}{Path.GetExtension(wiring.RelativeFileName)}";
 
     /// <summary>
     /// The child's argv: the harness's <see cref="SandboxSpec.McpDeclarationArgs"/> — its own flags for LOADING the

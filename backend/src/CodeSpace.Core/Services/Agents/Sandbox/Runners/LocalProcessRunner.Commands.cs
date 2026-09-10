@@ -32,7 +32,7 @@ public sealed partial class LocalProcessRunner
                 foreach (var name in spec.ConfigHomeEnvVars) invocation.StartInfo.Environment[name] = invocation.ConfigHome;
             }
 
-            var declaration = WriteMcpDeclaration(spec.Mcp, invocation.ConfigHome);
+            var declaration = WriteMcpDeclaration(spec, invocation.ConfigHome);
             WriteConfigHomeFiles(spec.ConfigHomeFiles, invocation.ConfigHome);
             var argv = new Collection<string>();
             AppendChildCommand(argv, new CommandIsolationContext(spec, invocation.ConfigHome, declaration, egress.ExecPrefix, cgroup.ExecPrefix));

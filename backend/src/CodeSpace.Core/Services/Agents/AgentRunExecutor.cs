@@ -419,7 +419,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var runContext = new HarnessRunContext
             {
                 Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
-                Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, Redactor = redactor,
+                Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
@@ -2760,10 +2760,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The run's per-run UDS socket path + a freshly-minted capability token, computed once so the endpoint listener,
     /// the harness's declaration file, and the durable handle (for a re-attach) all agree on the same pair. The socket
     /// path uses the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner binds, so they match by
-    /// construction. On a re-attach the token is NOT re-minted — see <see cref="ReopenMcpEndpointForReattach"/>.
+    /// construction — but its unguessable segment is minted HERE and exists only in this pair and on the handle it is
+    /// stamped onto, so no reader of the run id can reconstruct the address. On a re-attach neither the token nor the
+    /// path is re-minted — see <see cref="ReopenMcpEndpointForReattach"/>.
     /// </summary>
     private static (string SocketPath, string Token) MintMcpConnect(Guid runId) =>
-        (LocalProcessRunner.McpSocketPathFor(runId.ToString("N")), McpRunToken.Mint());
+        (LocalProcessRunner.McpSocketPathFor(runId.ToString("N"), McpRunToken.MintPathId()), McpRunToken.Mint());
 
     /// <summary>
     /// Open the run's per-run UDS MCP endpoint on the given socket + token. The endpoint opens for EVERY run; what it
@@ -2809,18 +2811,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>
     /// Re-open the run's MCP endpoint after a re-attach using the SAME socket + token the launch recorded on the handle.
     /// The in-process listener died with the original worker, but the setsid-detached agent keeps running with its 0600
-    /// declaration file pointing at THIS socket+token — a fresh token would lock it out. The socket path is reconstructed
-    /// from the run id (the single-source-of-truth <see cref="LocalProcessRunner.McpSocketPathFor"/>, the SAME the
-    /// launch bound). Null — no re-open — only when the run had no fabric (the handle carries no token, e.g. a pre-fabric
-    /// run); the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
-    /// it regardless). The catalog mode is re-resolved from the SAME task, so the re-opened endpoint serves the SAME
-    /// slice the launch did. Fail-soft via <see cref="OpenMcpEndpoint"/>.
+    /// declaration file pointing at THIS socket+token — a fresh token would lock it out. BOTH come off the handle: the
+    /// socket path can no longer be recomputed from the run id (its unguessable segment is the point), so the handle is
+    /// the only route back to the address the launch bound. Null — no re-open — when the run had no fabric, and equally
+    /// when the handle predates the stamped path: a worker that cannot name the launch's address must serve the run
+    /// tool-less rather than bind a different socket nobody is connected to. The wiring flag is NOT re-checked here (the
+    /// agent's declaration already exists, so the endpoint must serve it regardless). The catalog mode is re-resolved
+    /// from the SAME task, so the re-opened endpoint serves the SAME slice the launch did. Fail-soft via
+    /// <see cref="OpenMcpEndpoint"/>.
     /// </summary>
     private AgentMcpEndpoint? ReopenMcpEndpointForReattach(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
         if (handle.McpRunToken is not { Length: > 0 } token) return null;
 
-        var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
+        if (handle.McpSocketPath is not { Length: > 0 } socketPath)
+        {
+            _logger.LogWarning("Agent run {RunId}: the durable handle carries an MCP token but no socket path, so this re-attach cannot re-open the run's tool fabric; the run continues without it", runId);
+
+            return null;
+        }
 
         // The reopened endpoint redacts tool-result text with a redactor the caller resolved fresh from the run's
         // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
@@ -3375,7 +3384,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var identity = LaunchIdentityOf(sinks);
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
-            InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken,
+            InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
             ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(context.RunId),
         };
@@ -3660,6 +3669,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public required ISandboxRunner Runner { get; init; }
         public required SandboxSpec Spec { get; init; }
         public string? McpToken { get; init; }
+
+        /// <summary>The address this run's endpoint bound, minted with an unguessable segment at launch. Carried here so the durable handle can be stamped with it — the only route a re-attach has back to it.</summary>
+        public string? McpSocketPath { get; init; }
         public required SecretRedactor Redactor { get; init; }
         public required string SpoolKey { get; init; }
 

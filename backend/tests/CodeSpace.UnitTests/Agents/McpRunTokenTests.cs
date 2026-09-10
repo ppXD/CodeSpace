@@ -12,19 +12,24 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class McpRunTokenTests
 {
-    [Fact]
-    public void Mint_yields_unique_url_safe_tokens()
+    [Theory]
+    // The capability token: 256-bit, and it rides an env var and a single wire line, so it must be url-safe.
+    [InlineData(false, 43)]
+    // The path id: 128-bit, and it becomes a FILENAME inside an AF_UNIX path whose total length is capped — so it is
+    // shorter on purpose, and the same url-safe alphabet keeps it filename-safe on every platform.
+    [InlineData(true, 22)]
+    public void Mint_yields_unique_url_safe_values(bool pathId, int expectedLength)
     {
-        var tokens = Enumerable.Range(0, 100).Select(_ => McpRunToken.Mint()).ToArray();
+        var minted = Enumerable.Range(0, 100).Select(_ => pathId ? McpRunToken.MintPathId() : McpRunToken.Mint()).ToArray();
 
-        tokens.Distinct().Count().ShouldBe(100, customMessage: "every mint must be unique (256-bit CSPRNG)");
+        minted.Distinct().Count().ShouldBe(100, customMessage: "every mint must be unique (CSPRNG)");
 
-        foreach (var token in tokens)
+        foreach (var value in minted)
         {
-            token.ShouldNotBeNullOrEmpty();
-            token.ShouldNotContain("+", customMessage: "base64url must not contain '+'");
-            token.ShouldNotContain("/", customMessage: "base64url must not contain '/'");
-            token.ShouldNotContain("=", customMessage: "base64url must be unpadded");
+            value.Length.ShouldBe(expectedLength, customMessage: "a shorter value than the pinned length means fewer random bits than the doc claims");
+            value.ShouldNotContain("+", customMessage: "base64url must not contain '+'");
+            value.ShouldNotContain("/", customMessage: "base64url must not contain '/' — a path id containing one would silently split into two path segments");
+            value.ShouldNotContain("=", customMessage: "base64url must be unpadded");
         }
     }
 

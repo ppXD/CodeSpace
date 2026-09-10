@@ -1223,12 +1223,20 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         SocketPath = socketPath,
     };
 
+    /// <summary>A spec carrying only what the declaration writer reads: the wiring, and whether the harness is POINTED at its declaration (Claude Code's --mcp-config) — which is what decides whether the file's name may be randomised.</summary>
+    private static SandboxSpec SpecWith(McpServerWiring? wiring, bool pointedAtDeclaration = false) => new()
+    {
+        Command = "agent",
+        Mcp = wiring,
+        McpDeclarationArgs = pointedAtDeclaration ? new[] { "--mcp-config", SandboxSpec.McpDeclarationPathToken } : Array.Empty<string>(),
+    };
+
     [Fact]
     public void WriteMcpDeclaration_writes_the_rendered_server_into_the_config_home()
     {
         var configHome = TempDir();
 
-        LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), configHome);
+        LocalProcessRunner.WriteMcpDeclaration(SpecWith(Wiring("/tmp/cs/mcp.sock")), configHome);
 
         var path = Path.Combine(configHome, ".mcp.json");
         File.Exists(path).ShouldBeTrue("the declaration is written at its config-home-relative path");
@@ -1255,10 +1263,11 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         };
         var spec = new ClaudeCodeHarness().BuildInvocation(task) with { Mcp = Wiring("/tmp/cs/mcp.sock") };
 
-        var written = LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome);
+        var written = LocalProcessRunner.WriteMcpDeclaration(spec, configHome);
         var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, written);
 
-        written.ShouldBe(Path.Combine(configHome, ".mcp.json"));
+        Path.GetDirectoryName(written).ShouldBe(configHome, "the declaration still lands in the per-run config-home");
+        written.ShouldNotBe(Path.Combine(configHome, ".mcp.json"), "a harness POINTED at its declaration gets an unguessable name — a fixed one inside a run-id-derived directory is a location anything holding the run id can name");
 
         var at = argv.ToList().IndexOf("--mcp-config");
         at.ShouldBeGreaterThanOrEqualTo(0, "the claude CLI never discovers a declaration inside CLAUDE_CONFIG_DIR — it has to be pointed at it");
@@ -1288,7 +1297,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         };
         var spec = new ClaudeCodeHarness().BuildInvocation(task);
 
-        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome));
+        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, LocalProcessRunner.WriteMcpDeclaration(spec, configHome));
 
         argv.ShouldBe(spec.Args, "no declaration written ⇒ argv byte-identical to the harness's own");
     }
@@ -1315,8 +1324,10 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         spec.McpDeclarationArgs.ShouldBeEmpty("Codex loads CODEX_HOME/config.toml natively — pointing at it would be a second, driftable source");
 
-        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, LocalProcessRunner.WriteMcpDeclaration(spec.Mcp, configHome));
+        var written = LocalProcessRunner.WriteMcpDeclaration(spec, configHome);
+        var argv = LocalProcessRunner.ArgsWithMcpDeclaration(spec, written);
 
+        written.ShouldBe(Path.Combine(configHome, "config.toml"), "a harness that DISCOVERS its declaration by a fixed name owns that name — randomising it would simply hide the file from the CLI");
         argv.ShouldBe(spec.Args, "the codex invocation is byte-identical — this fix touches only the harness that must be pointed at its declaration");
     }
 
@@ -1327,7 +1338,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var configHome = TempDir();
 
-        LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), configHome);
+        LocalProcessRunner.WriteMcpDeclaration(SpecWith(Wiring("/tmp/cs/mcp.sock")), configHome);
 
         // The token lives in this file, so it must NOT be group/other-readable.
         var mode = File.GetUnixFileMode(Path.Combine(configHome, ".mcp.json"));
@@ -1340,11 +1351,30 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var configHome = TempDir();
 
         // No wiring → nothing written (a run without the tool fabric).
-        LocalProcessRunner.WriteMcpDeclaration(null, configHome);
+        LocalProcessRunner.WriteMcpDeclaration(SpecWith(null), configHome);
         File.Exists(Path.Combine(configHome, ".mcp.json")).ShouldBeFalse("no wiring → no declaration");
 
         // No config-home → nowhere harness-isolated to put it → no-op (must not throw).
-        Should.NotThrow(() => LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), null));
+        Should.NotThrow(() => LocalProcessRunner.WriteMcpDeclaration(SpecWith(Wiring("/tmp/cs/mcp.sock")), null));
+    }
+
+    [Fact]
+    public void A_pointed_at_declaration_gets_an_unguessable_name_a_second_launch_never_repeats()
+    {
+        // The declaration carries the run's LIVE capability token. Its directory is derived from the run id — which is
+        // not a secret (it travels in URLs, events and artifacts) — so a fixed name inside it is a path anything holding
+        // the id can name and read. Two launches into the SAME config-home must therefore produce two different names,
+        // and neither may be the harness's own literal.
+        var configHome = TempDir();
+
+        var first = LocalProcessRunner.WriteMcpDeclaration(SpecWith(Wiring("/tmp/cs/a"), pointedAtDeclaration: true), configHome);
+        var second = LocalProcessRunner.WriteMcpDeclaration(SpecWith(Wiring("/tmp/cs/b"), pointedAtDeclaration: true), configHome);
+
+        first.ShouldNotBe(second, "a name that repeats across launches is a name that can be predicted from a previous one");
+        Path.GetFileName(first).ShouldNotBe(".mcp.json", "the harness's literal name is exactly the predictable one this replaces");
+        Path.GetExtension(first).ShouldBe(".json", "the extension is preserved — the CLI is handed a real path either way");
+        File.Exists(first!).ShouldBeTrue();
+        File.Exists(second!).ShouldBeTrue();
     }
 
     [Fact]
@@ -1412,9 +1442,29 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var info = LocalProcessRunner.BuildDurableStartInfo(
             new SandboxSpec { Command = "claude", ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring("/tmp/cs/mcp.sock") }, spool);
 
-        // The declaration lands in the SAME per-run home the config-dir env var points at.
+        // The declaration lands in the SAME per-run home the config-dir env var points at. This spec declares no
+        // McpDeclarationArgs, so the harness DISCOVERS its declaration by name and keeps the literal one — only a
+        // harness that is POINTED at the file gets the unguessable name.
         var home = info.Environment["CLAUDE_CONFIG_DIR"];
-        File.Exists(Path.Combine(home, ".mcp.json")).ShouldBeTrue("the runner writes the declaration into the per-run config-home before launch");
+        File.Exists(Path.Combine(home!, ".mcp.json")).ShouldBeTrue("the runner writes the declaration into the per-run config-home before launch");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_creates_the_per_run_config_home_owner_only_0700()
+    {
+        if (OperatingSystem.IsWindows()) return;   // unix file modes don't apply
+
+        // The config-home holds the MCP declaration, which carries the run's live capability token. Leaving the
+        // DIRECTORY at whatever the umask happened to be made that token reachable by every other local user on the
+        // host — the file's own 0600 does not help if the directory above it is world-readable and the name is known.
+        var spool = Path.Combine(Path.GetTempPath(), "codespace-home-mode-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(spool);
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "claude", ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring("/tmp/cs/mcp.sock") }, spool);
+
+        File.GetUnixFileMode(info.Environment["CLAUDE_CONFIG_DIR"]!)
+            .ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, customMessage: "the token-bearing config-home must be 0700, exactly as the non-durable command path already makes its own");
     }
 
     [Fact]
@@ -1435,7 +1485,8 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // And concretely: nothing references the dedicated socket subdir or a proxy bind.
         a.ArgumentList.ShouldNotContain(Path.Combine(spool, "mcp"), customMessage: "Mcp=null must not bind the socket dir");
-        File.Exists(Path.Combine(spool, "agent-home", ".mcp.json")).ShouldBeFalse("Mcp=null must write no declaration");
+        Directory.Exists(Path.Combine(spool, "agent-home")).ShouldBeTrue("the config-home itself is still created for a fabric-less run");
+        Directory.EnumerateFiles(Path.Combine(spool, "agent-home")).ShouldBeEmpty("Mcp=null must write no declaration");
     }
 
     // ─── B3.2b: the filtered-egress netns prefix wraps the whole supervisor chain ────────────────────────────────
@@ -1675,8 +1726,10 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     [Fact]
     public void Mcp_socket_path_constants_are_pinned()
     {
-        // The executor's listener and the runner/proxy connect path agree on these literals — a rename silently breaks the link.
-        LocalProcessRunner.McpSocketFile.ShouldBe("mcp.sock");
+        // The executor's listener and the runner/proxy connect path agree on these literals — a rename silently breaks
+        // the link. One character, because every byte the socket's file name costs comes out of the AF_UNIX path budget
+        // the run's unguessable directory segment now also spends.
+        LocalProcessRunner.McpSocketFile.ShouldBe("s");
 
         // The dedicated socket-only subdir (FIX 1): a rename re-exposes the spool artifacts to the bwrap bind.
         LocalProcessRunner.McpSocketDir.ShouldBe("mcp");
@@ -1696,11 +1749,35 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/tmp/cs" });
 
         var key = Guid.NewGuid().ToString("N");
-        var path = LocalProcessRunner.McpSocketPathFor(key);
+        var socketId = McpRunToken.MintPathId();
+        var path = LocalProcessRunner.McpSocketPathFor(key, socketId);
 
-        // FIX 1: the socket lives in the DEDICATED <spool>/mcp/ subdir, not directly in the spool dir.
-        path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp", "mcp.sock"));
+        // FIX 1: the socket lives in the DEDICATED <spool>/mcp/ subdir, not directly in the spool dir. Its own leaf is
+        // the run's unguessable socket id, so the bwrap bind of the socket's parent still exposes only the socket.
+        path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp", socketId, "s"));
         path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
+    }
+
+    [Fact]
+    public void Mcp_socket_path_cannot_be_reached_from_the_run_key_alone()
+    {
+        // The defect this pins: the address used to be a pure function of the run id, so anything holding that id — a
+        // URL, an event, an artifact — could compute another run's listener address, leaving only the token between it
+        // and that run's team-scoped tools. On a host where bubblewrap is unavailable (the posture
+        // Sandbox:RequireConfinement leaves permitted) a sibling process could then reach the socket directly. The id
+        // now decides nothing: the same run key with two socket ids yields two unrelated paths.
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/tmp/cs" });
+
+        var key = Guid.NewGuid().ToString("N");
+
+        LocalProcessRunner.McpSocketPathFor(key, McpRunToken.MintPathId())
+            .ShouldNotBe(LocalProcessRunner.McpSocketPathFor(key, McpRunToken.MintPathId()), "the run key alone must not determine the address");
+
+        // …and the socket id is what carries the difference, so the same pair is stable — a re-attach reading the id
+        // off the run's handle lands on exactly the address the launch bound.
+        var socketId = McpRunToken.MintPathId();
+
+        LocalProcessRunner.McpSocketPathFor(key, socketId).ShouldBe(LocalProcessRunner.McpSocketPathFor(key, socketId), "the (key, socketId) pair is the address — a re-attach must reproduce it exactly");
     }
 
     [Fact]
@@ -1709,10 +1786,12 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/" + new string('x', 120) });
 
         var key = Guid.NewGuid().ToString("N");
-        var path = LocalProcessRunner.McpSocketPathFor(key);
+        var socketId = McpRunToken.MintPathId();
+        var path = LocalProcessRunner.McpSocketPathFor(key, socketId);
 
         path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, customMessage: "an overflowing canonical path must fall back to a short path that fits the sun_path cap");
-        path.ShouldContain(key, customMessage: "the fallback must stay unique per run via the FULL run key (matching the canonical path's uniqueness)");
+        path.ShouldContain(socketId, customMessage: "the fallback must stay per-run AND unguessable via the socket id (matching the canonical path)");
+        path.ShouldNotContain(key, customMessage: "and it must not fall back to a run-key-derived path — that is the derivability this replaced");
     }
 
     [Fact]
@@ -1761,7 +1840,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = "/" + new string('x', 120) });
 
         var key = Guid.NewGuid().ToString("N");
-        var path = LocalProcessRunner.McpSocketPathFor(key);
+        var path = LocalProcessRunner.McpSocketPathFor(key, McpRunToken.MintPathId());
         path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, "the fallback must fit the sun_path cap");
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);

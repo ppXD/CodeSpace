@@ -77,7 +77,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         // disposes the dedicated scope and fail-softs (so a degraded host is a logged Warning, not a failed run).
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(socketPath)!);
+            CreateOwnerOnlyDirectory(Path.GetDirectoryName(socketPath)!, logger);
 
             // Clear a stale socket file from a crashed prior incarnation. CONCURRENCY NOTE: a second reattach racing the
             // first could unlink a LIVE socket the first just bound — bounded today by the reconciler's single-flight
@@ -222,6 +222,23 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         var presented = await reader.ReadLineAsync(ct).ConfigureAwait(false);
 
         return presented is not null && McpRunToken.Matches(_token, presented);
+    }
+
+    /// <summary>
+    /// Create the run's socket directory restricted to the owner (0700), so another local user can neither enter it nor
+    /// LIST the unguessable name inside it — without the 0700 the random directory name would be readable to anyone who
+    /// could stat the parent, and an unguessable path nobody can enumerate is the whole point. Best-effort on the mode
+    /// (a chmod failure is a Warning, not a failed endpoint: the token remains the authoritative gate); a no-op on
+    /// Windows, where unix modes don't apply.
+    /// </summary>
+    private void CreateOwnerOnlyDirectory(string directory, ILogger logger)
+    {
+        Directory.CreateDirectory(directory);
+
+        if (OperatingSystem.IsWindows()) return;
+
+        try { File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket directory to 0700; its name may be listable by another local user on this host", _runId); }
     }
 
     /// <summary>Restrict the socket file to the owner (0600) so another local user can't connect to the run's endpoint. A no-op on Windows where unix file modes don't apply. Best-effort — a chmod failure must NOT fail the endpoint (the 256-bit token is the authoritative gate), but it's logged as a Warning so it isn't fully silent.</summary>
