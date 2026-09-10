@@ -277,7 +277,7 @@ public sealed class EgressSubnetAllocator
 
         _warnedUnopenableLease = true;
 
-        Log.Warning(cause, "Filtered-egress /30 reservation {ReservationPath} cannot be opened by this worker; treating that subnet as held and walking on. Expected where the shared reservation directory's workers run under different uids; if EVERY candidate fails this way the directory itself is the fault and the launch is refused by name", path);
+        Log.Warning(cause, "Filtered-egress /30 reservation {ReservationPath} cannot be opened by this worker; treating that subnet as held and walking on. Expected where the shared reservation directory's workers run under different uids; if EVERY candidate fails this way the exhaustion re-probe still finds the directory writable, so the walk ends in the 4096-held exhaustion message, not a named refusal", path);
     }
 
     /// <summary>
@@ -301,19 +301,20 @@ public sealed class EgressSubnetAllocator
     /// RECORDS: the refusal is thrown by <see cref="EnsureHostCanReserve"/>, so reading
     /// <see cref="HostReservationsUsable"/> can probe without throwing at a caller that only asked a question.
     ///
-    /// <para>Under the instance lock, deliberately: the probe can cost a child process (~35ms warm, ~1s cold, capped
-    /// at <see cref="CrossProcessLockProbe.ChildTimeoutMs"/>), and paying it once with concurrent acquires waiting is
-    /// worth more than two probes racing to record different verdicts.</para>
+    /// <para>Under the instance lock, deliberately: the probe can cost a child process (~35ms warm, ~1s cold; worst
+    /// case is two 10 s waits — <see cref="CrossProcessLockProbe.ChildTimeoutMs"/> each for exit and for the token —
+    /// ≤20 s, once per process), and paying it once with concurrent acquires waiting is worth more than two probes
+    /// racing to record different verdicts.</para>
     /// </summary>
     private void EnsureProbed()
     {
         if (_probed) return;
 
-        _probed = true;
-
         var directory = ReservationDirectory;
 
         if (TryPrepareDirectory(directory)) ProbeExclusiveLocking(directory);
+
+        _probed = true;   // only after the probe completes — a throwing probe re-throws on every acquire, fail-closed
     }
 
     /// <summary>Create the reservation directory (0700 when this process is the one creating it). Its absence and its unwritability are the same fact to an operator, so both refuse.</summary>
@@ -385,7 +386,8 @@ public sealed class EgressSubnetAllocator
     private bool SecondOpenIsRefused(string path)
     {
         try { using var second = _open(path); }
-        catch { return true; }
+        catch (IOException) { return true; }   // a sharing violation is the only proof the lock refused it
+        catch { return false; }                // anything else proves nothing — ask the child rather than assume Enforced
 
         return false;
     }

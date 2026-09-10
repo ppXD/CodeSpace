@@ -22,7 +22,8 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 ///
 /// <para>The child is the BUNDLED BOOTSTRAP (<c>codespace-runner-host</c>), which every deployment and test output
 /// already carries beside the app, answering <see cref="ExclusiveLockProbeChild.Argument"/> before it reads anything
-/// else. It is asked ONCE per worker process, only when the in-process fast path came back unrefused, and it prints
+/// else. It is asked once per worker process, plus once per exhaustion re-probe (<c>EgressSubnetAllocator</c>'s
+/// <c>ExhaustionOrRefusal</c>), only when the in-process fast path came back unrefused, and it prints
 /// one token in ~30-40ms. Everything else — a bootstrap that is missing, a start that fails, a child that hangs or
 /// prints something else — is <see cref="Verdict.Unproven"/>: nothing was proven, which is the answer that DEGRADES
 /// rather than the optimistic one. A probe must never fail a launch, so nothing here throws.</para>
@@ -78,7 +79,7 @@ internal static class CrossProcessLockProbe
     private static ProcessStartInfo StartInfoFor(string probeFilePath)
     {
         // The SAME resolver the durable launch uses, so an operator who relocates the bootstrap relocates this too.
-        var info = new ProcessStartInfo(LocalProcessRunner.RunnerHostBinaryPath()) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        var info = new ProcessStartInfo(LocalProcessRunner.RunnerHostBinaryPath()) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = false };
 
         info.ArgumentList.Add(ExclusiveLockProbeChild.Argument);
         info.ArgumentList.Add(probeFilePath);
