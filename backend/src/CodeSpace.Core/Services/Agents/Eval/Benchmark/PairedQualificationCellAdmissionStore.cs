@@ -41,12 +41,22 @@ public sealed class PairedQualificationCellAdmissionStore : IPairedQualification
     private const string CheckpointUniqueConstraint = "uq_paired_qualification_cell_checkpoint_kind";
     private const int MaxCheckpointBytes = 65_536;
     private readonly CodeSpaceDbContext _db;
+    private readonly IQualificationRuntimeGate _runtimeGate;
 
-    public PairedQualificationCellAdmissionStore(CodeSpaceDbContext db) => _db = db;
+    public PairedQualificationCellAdmissionStore(CodeSpaceDbContext db, IQualificationRuntimeGate runtimeGate)
+    {
+        _db = db;
+        _runtimeGate = runtimeGate;
+    }
 
     public async Task<PairedQualificationCellAdmissionOutcome> AdmitAsync(PairedQualificationCellAdmissionRequest request, CancellationToken cancellationToken)
     {
         Validate(request);
+
+        // The cell becomes payable the moment this row commits, so the campaign's frozen runtime is verified
+        // FIRST: a drifted host leaves no admission row at all, rather than one whose cell can never be settled.
+        await _runtimeGate.EnsureUnchangedAsync(request.ObservationGroupId, QualificationRuntimeStage.Admission, cancellationToken).ConfigureAwait(false);
+
         var row = new PairedQualificationCellAdmission
         {
             Id = Guid.NewGuid(), ObservationGroupId = request.ObservationGroupId, ObservationSession = request.ObservationSession,

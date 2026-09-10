@@ -153,7 +153,7 @@ public sealed class RealModelQualificationRehearsalE2ETests
             List<BenchmarkResultRecord> durable;
             using (var scope = _fixture.BeginScope())
             {
-                var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>());
+                var runner = new PairedTaskLaunchQualificationRunner(new FixedHiddenSuiteSource(input.Suite), scope.Resolve<IPairedCorpusBenchmarkRunner>(), scope.Resolve<CodeSpaceDbContext>(), scope.Resolve<IPairedQualificationResultStore>(), scope.Resolve<IPairedQualificationCampaignLock>(), scope.Resolve<IQualificationRuntimeManifestCollector>());
                 outcome = await runner.RunAsync(request, CancellationToken.None);
             }
             using (var scope = _fixture.BeginScope())

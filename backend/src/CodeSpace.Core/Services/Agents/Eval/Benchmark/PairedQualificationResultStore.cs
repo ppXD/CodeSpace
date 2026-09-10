@@ -10,11 +10,24 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
+/// <summary>How the sealing caller came by the observations it is sealing. A FACT about the path, not a switch: it decides whether this seal must re-verify the live runtime, and getting it wrong in either direction is a real failure (a paid campaign sealed on a substituted runtime, or a fully-paid one stranded).</summary>
+public enum PairedQualificationSealSource
+{
+    /// <summary>The caller executed this campaign's paid cells in this process. The live runtime is re-verified: the campaign could have been redeployed underneath its own last cell, and the seal is what mints the capability claim.</summary>
+    Execution = 0,
+
+    /// <summary>The caller only replayed durable observation rows — no model call, no new measurement. NOT re-verified: every row it reduces was already gated at admission and execution when it was produced, and the seal binds the protocol digest those cells ran under, so refusing here would strand a fully-paid campaign on a host whose runtime moved after its last cell.</summary>
+    Replay = 1,
+}
+
 public sealed record PairedQualificationSealRequest
 {
     public required Guid ObservationGroupId { get; init; }
     public required EvalSuiteManifest Manifest { get; init; }
     public required PairedQualificationOutcome Outcome { get; init; }
+
+    /// <summary>Required, with no default, so every caller states which path it is on rather than inheriting an assumption.</summary>
+    public required PairedQualificationSealSource Source { get; init; }
 }
 
 public interface IPairedQualificationResultStore
@@ -26,10 +39,18 @@ public interface IPairedQualificationResultStore
 public sealed class PairedQualificationResultStore : IPairedQualificationResultStore, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
-    public PairedQualificationResultStore(CodeSpaceDbContext db) => _db = db;
+    private readonly IQualificationRuntimeGate _runtimeGate;
+
+    public PairedQualificationResultStore(CodeSpaceDbContext db, IQualificationRuntimeGate runtimeGate)
+    {
+        _db = db;
+        _runtimeGate = runtimeGate;
+    }
 
     public async Task<PairedQualificationOutcome> SealAsync(PairedQualificationSealRequest request, CancellationToken cancellationToken)
     {
+        await EnsureRuntimeUnchangedAsync(request, cancellationToken).ConfigureAwait(false);
+
         var protocol = await _db.PairedQualificationProtocol.AsNoTracking().SingleOrDefaultAsync(row => row.ObservationGroupId == request.ObservationGroupId, cancellationToken).ConfigureAwait(false)
             ?? throw Invalid("protocol-not-found");
         var outcome = request.Outcome;
@@ -49,6 +70,14 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
         });
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return sealedOutcome with { ResultDigest = resultDigest };
+    }
+
+    /// <summary>Verify the frozen runtime before the terminal row commits, so a seal minted on a substituted runtime leaves no result at all. Exempt for a replay — see <see cref="PairedQualificationSealSource"/>.</summary>
+    private async Task EnsureRuntimeUnchangedAsync(PairedQualificationSealRequest request, CancellationToken cancellationToken)
+    {
+        if (request.Source == PairedQualificationSealSource.Replay) return;
+
+        await _runtimeGate.EnsureUnchangedAsync(request.ObservationGroupId, QualificationRuntimeStage.Seal, cancellationToken).ConfigureAwait(false);
     }
 
     private static void Validate(PairedQualificationSealRequest request, PairedQualificationProtocol protocol, IReadOnlyList<BenchmarkResultRecord> observations)

@@ -134,14 +134,16 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
     private readonly CodeSpaceDbContext _db;
     private readonly IPairedQualificationResultStore _results;
     private readonly IPairedQualificationCampaignLock _campaignLock;
+    private readonly IQualificationRuntimeManifestCollector _runtime;
 
-    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, IPairedQualificationResultStore results, IPairedQualificationCampaignLock campaignLock)
+    public PairedTaskLaunchQualificationRunner(IHiddenSuiteSource suite, IPairedCorpusBenchmarkRunner corpus, CodeSpaceDbContext db, IPairedQualificationResultStore results, IPairedQualificationCampaignLock campaignLock, IQualificationRuntimeManifestCollector runtime)
     {
         _suite = suite;
         _corpus = corpus;
         _db = db;
         _results = results;
         _campaignLock = campaignLock;
+        _runtime = runtime;
     }
 
     public async Task<PairedQualificationOutcome> RunAsync(PairedQualificationRequest request, CancellationToken cancellationToken)
@@ -155,7 +157,9 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
         var groupId = Guid.NewGuid();
         var control = await CanonicalizeAsync(request.TeamId, request.Control, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
         var candidate = await CanonicalizeAsync(request.TeamId, request.Candidate, request.Spec.MaxCostUsdPerLaunch, cancellationToken).ConfigureAwait(false);
-        var protocol = BuildProtocol(groupId, request, manifest, suite, control, candidate);
+        var runtime = await _runtime.ObserveAsync(Collect(groupId, request.TeamId, control, candidate), cancellationToken).ConfigureAwait(false);
+        var protocol = Freeze(BuildProtocol(groupId, request, manifest, suite, control, candidate), runtime);
+
         await using var claim = await _campaignLock.AcquireAsync(groupId, cancellationToken).ConfigureAwait(false);
         _db.PairedQualificationProtocol.Add(protocol);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -176,7 +180,28 @@ public sealed class PairedTaskLaunchQualificationRunner : IPairedTaskLaunchQuali
             ObservationGroupId = groupId, CodeRevision = request.CodeRevision, Suite = suite, Manifest = manifest,
             Spec = request.Spec, Control = control, Candidate = candidate, Sessions = sessions,
         }) with { ProtocolDigest = protocol.ProtocolDigest };
-        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = protocol.ObservationGroupId, Manifest = manifest, Outcome = outcome }, cancellationToken).ConfigureAwait(false);
+        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = protocol.ObservationGroupId, Manifest = manifest, Outcome = outcome, Source = PairedQualificationSealSource.Execution }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Observe the runtime for THIS campaign's own identity: the group id doubles as the per-campaign HMAC salt, so the same key fingerprints differently under every campaign and no cross-campaign table of key hashes can be built.</summary>
+    private static QualificationRuntimeCollectRequest Collect(Guid groupId, Guid teamId, BenchmarkAgentSelection control, BenchmarkAgentSelection candidate) => new()
+    {
+        ObservationGroupId = groupId, TeamId = teamId,
+        ControlModelRowId = control.ModelCredentialModelId!.Value, CandidateModelRowId = candidate.ModelCredentialModelId!.Value,
+    };
+
+    /// <summary>
+    /// Bind the observed runtime into the campaign's pre-outcome identity, before the row commits and therefore
+    /// before the first paid cell. The digest is re-stamped BECAUSE the manifest is now part of the composition —
+    /// a protocol whose digest predated its own frozen runtime could be reused by a substituted one.
+    /// </summary>
+    private static PairedQualificationProtocol Freeze(PairedQualificationProtocol protocol, QualificationRuntimeManifest runtime)
+    {
+        protocol.RuntimeManifestJson = runtime.CanonicalJson();
+        protocol.RuntimeManifestDigest = runtime.ManifestDigest();
+        protocol.ProtocolDigest = ProtocolDigest(protocol);
+
+        return protocol;
     }
 
     private static PairedQualificationProtocol BuildProtocol(Guid groupId, PairedQualificationRequest request, EvalSuiteManifest manifest, HiddenSuite suite, BenchmarkAgentSelection control, BenchmarkAgentSelection candidate)

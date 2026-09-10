@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Exceptions;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using System.Text;
@@ -177,7 +178,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
             }
 
             completion = admission is null ? null : new AdmissionCompletionSink(_admissions, admission.AdmissionId);
-            var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, Selection = request.Selection, FixtureStager = stager, Completion = completion, Checkpoints = admission?.Checkpoints ?? new Dictionary<string, BenchmarkExecutionCheckpoint>(), CheckpointSink = completion };
+            var context = new BenchmarkExecutionContext { WorkspaceDirectory = workspace, TeamId = request.TeamId, ObservationGroupId = request.ObservationGroupId, Selection = request.Selection, FixtureStager = stager, Completion = completion, Checkpoints = admission?.Checkpoints ?? new Dictionary<string, BenchmarkExecutionCheckpoint>(), CheckpointSink = completion };
             var result = await _runner.RunAsync(task, mode, context, cancellationToken).ConfigureAwait(false);
             if (completion is not null) await completion.CompleteAsync(result, CancellationToken.None).ConfigureAwait(false);
 
@@ -191,6 +192,13 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
         }
         catch (DurableBenchmarkObservationException)
         {
+            throw;
+        }
+        catch (RuntimeManifestDriftException)
+        {
+            // A substituted runtime is a REFUSAL, never this corpus's per-cell infra fault: recording it as one
+            // would let the loop continue paying for cells on a runtime the campaign never measured, and the
+            // whole census would silently pool two experiments.
             throw;
         }
         catch (Exception) when (completion?.CompletedResult is not null)
@@ -225,7 +233,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IPairedCorpu
                 TaskId = task.Id, Mode = mode, ModelCredentialModelId = modelRowId,
             }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException and not DurableBenchmarkObservationException)
+        catch (Exception exception) when (exception is not OperationCanceledException and not DurableBenchmarkObservationException and not RuntimeManifestDriftException)
         {
             throw new DurableBenchmarkObservationException($"Durable paired benchmark admission {task.Id}/{mode} could not be committed.", exception);
         }

@@ -44,6 +44,9 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
     {
         var durable = context.CheckpointSink is not null || context.Checkpoints.Count > 0;
         if (durable && (context.CheckpointSink is null || context.Completion is null)) throw new DurableBenchmarkObservationException("TaskLaunch durable recovery requires checkpoint and completion sinks.");
+
+        await EnsureCampaignRuntimeUnchangedAsync(context, cancellationToken).ConfigureAwait(false);
+
         var fixture = await StageFixtureRepositoryAsync(task, context, cancellationToken).ConfigureAwait(false);
         LaunchTaskResult? launched = null;
         var resultSettled = false;
@@ -78,6 +81,22 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
         {
             if (!durable || resultSettled) await RetireFixtureResourcesAsync(fixture, launched?.SessionId, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Verify the campaign's FROZEN runtime before this cell touches anything — first statement of the pipeline, so
+    /// a substituted CLI binary, a rotated key or a repointed gateway is refused before the fixture is staged, before
+    /// Launch is called, and therefore before the first model call this cell would have paid for.
+    ///
+    /// <para>A no-op for a cell outside a pre-registered campaign (an ordinary corpus run froze no runtime to compare
+    /// against). The gate resolves in its OWN fresh scope like every other DB-touching operation here — see the
+    /// scope-discipline note on the class.</para>
+    /// </summary>
+    private Task EnsureCampaignRuntimeUnchangedAsync(BenchmarkExecutionContext context, CancellationToken cancellationToken)
+    {
+        if (context.ObservationGroupId is not { } observationGroupId) return Task.CompletedTask;
+
+        return InFreshScopeAsync(scope => scope.Resolve<IQualificationRuntimeGate>().EnsureUnchangedAsync(observationGroupId, QualificationRuntimeStage.Execution, cancellationToken));
     }
 
     /// <summary>The cell's whole drive budget: the task's own agent timeout plus a fixed grace margin absorbing Launch's routing/projection/dispatch overhead — this runner drives the engine itself (see <see cref="DriveToTerminalAsync"/>), so no external background worker's latency needs a separate allowance.</summary>

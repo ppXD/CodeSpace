@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Messages.Exceptions;
@@ -15,16 +16,19 @@ namespace CodeSpace.Messages.Exceptions;
 /// </summary>
 public sealed class RuntimeManifestDriftException : InvalidOperationException, IFailure
 {
-    public RuntimeManifestDriftException(string field, string frozenDigest, string observedDigest)
-        : base($"The qualification runtime manifest drifted at '{field}': the campaign froze {frozenDigest} but this host observes {observedDigest}. The campaign cannot continue on a runtime it did not measure.")
+    public RuntimeManifestDriftException(string field, string frozenDigest, string observedDigest, QualificationRuntimeStage? stage = null) : base(Refusal(field, frozenDigest, observedDigest, stage))
     {
         Field = field;
         FrozenDigest = frozenDigest;
         ObservedDigest = observedDigest;
+        Stage = stage;
     }
 
     /// <summary>Canonical JSON path of the first drifted field — e.g. <c>manifest.harnesses[1].binarySha256</c>.</summary>
     public string Field { get; }
+
+    /// <summary>Where the substitution was caught. Null only for a comparison taken outside the campaign's gated stages (a diagnostic <c>Compare</c>, a test).</summary>
+    public QualificationRuntimeStage? Stage { get; }
 
     /// <summary>The manifest digest frozen on the protocol row.</summary>
     public string FrozenDigest { get; }
@@ -36,5 +40,11 @@ public sealed class RuntimeManifestDriftException : InvalidOperationException, I
 
     public string Code => FailureCodes.Internal;
 
-    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["field"] = Field, ["frozenDigest"] = FrozenDigest, ["observedDigest"] = ObservedDigest };
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["field"] = Field, ["frozenDigest"] = FrozenDigest, ["observedDigest"] = ObservedDigest, ["stage"] = Stage?.ToString() };
+
+    // The stage is named FIRST because it decides what the operator does next (nothing was paid for yet, versus a
+    // complete campaign waiting on its own host), and it is omitted rather than spelled "unknown" when a
+    // comparison was taken outside the gated stages — an invented stage name in a log would be worse than none.
+    private static string Refusal(string field, string frozenDigest, string observedDigest, QualificationRuntimeStage? stage) =>
+        $"The qualification runtime manifest drifted{(stage is { } named ? $" at {named}" : string.Empty)} on '{field}': the campaign froze {frozenDigest} but this host observes {observedDigest}. The campaign cannot continue on a runtime it did not measure.";
 }
