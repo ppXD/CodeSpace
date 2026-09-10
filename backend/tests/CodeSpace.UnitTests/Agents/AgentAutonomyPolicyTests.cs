@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
@@ -218,4 +219,33 @@ public class AgentAutonomyPolicyTests
             }
         }
     }
+
+    [Fact]
+    public void DescribeNetwork_discloses_a_host_whose_filtered_egress_subnet_reservation_went_process_local()
+    {
+        // The allocator's degradation had no consumer: it warned once into the log and HostReservationsUsable was
+        // read by nothing, so an operator reading "Network: on" on a host whose /30 reservations had fallen back to
+        // process-local uniqueness could not learn that two workers there can hand out the same /30 (and the two
+        // netns then co-evaluate each other's packets in the host-global nft chain). A network-granting posture is
+        // the one that can carry an allowlist — SandboxEgressPolicy.Derive reads one only when network is granted —
+        // so that is the line the disclosure belongs on.
+        using (EgressSubnetAllocator.OverrideObservedHostDegradation("exclusive file locking is not enforced there"))
+        {
+            AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, Unbounded)
+                .ShouldBe("Network: on (Trusted)" + AgentAutonomyPolicy.ProcessLocalSubnetCaveat, "a run WITH network must be told its /30 is only unique inside one worker");
+
+            AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, Unbounded)
+                .ShouldNotContain(AgentAutonomyPolicy.ProcessLocalSubnetCaveat, customMessage: "a severed run reserves no /30 at all, so the sentence must not carry a caveat about one");
+        }
+
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, Unbounded)
+            .ShouldBe("Network: on (Trusted)", "a host that has proved nothing says nothing — reading a posture must not probe, and must not invent a degradation");
+    }
+
+    [Theory]
+    [InlineData(null, "Network: on (Trusted)")]
+    [InlineData("exclusive file locking could not be proven across processes", "Network: on (Trusted)" + AgentAutonomyPolicy.ProcessLocalSubnetCaveat)]
+    public void The_host_subnet_posture_is_appended_only_when_this_host_proved_a_degradation(string? degradation, string expected) =>
+        AgentAutonomyPolicy.WithHostSubnetPosture("Network: on (Trusted)", degradation).ShouldBe(expected,
+            customMessage: "the caveat is keyed on the allocator's OWN recorded cause, so both degradation reasons disclose and no reason invents one");
 }
