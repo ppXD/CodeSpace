@@ -140,7 +140,7 @@ public class EgressSubnetAllocatorTests : IDisposable
         // mount. Degrading instead would be no better: the directory sits under the SAME spool root this run's out.log
         // and exit marker need, so the run was already doomed — and the whole point of the host-level reservation is
         // that two runs must not co-evaluate each other's packets. So the launch is refused, by name.
-        if (UnusableDirectory(directoryExists) is not { } directory) return;   // 0500 does not bite here (root / no POSIX modes) — unstageable
+        if (UnusableDirectory(directoryExists) is not { } directory) return;   // vacuous pass, not a skip: 0500 never bites root / no-POSIX-modes hosts (e.g. CI running as root)
 
         var allocator = new EgressSubnetAllocator(directory);
 
@@ -182,22 +182,41 @@ public class EgressSubnetAllocatorTests : IDisposable
         cidrs.Distinct().Count().ShouldBe(8, "these are the causes that degrade rather than refusing: the directory is writable and the runs are healthy, so the launch falls back to process-local uniqueness instead of taking every filtered-egress run on the host down");
     }
 
+    [Fact]
+    public void A_non_IOException_on_the_second_open_is_not_read_as_the_lock_refusing_it()
+    {
+        // SecondOpenIsRefused proves "refused" only for a SHARING VIOLATION (IOException) — the OS actually saying
+        // the lock is held. Before this fix any exception at all was read the same way, so a second open that fails
+        // for an unrelated reason (an UnauthorizedAccessException, say) declared Enforced without a second PROCESS
+        // ever being asked — the exact optimism this whole probe exists to refuse.
+        var childAsked = 0;
+        var opener = new OpenerThatFailsTheProbesSecondOpenWithANonIOException();
+        var allocator = new EgressSubnetAllocator(_reservations, opener.Open, _ => { childAsked++; return CrossProcessLockProbe.Verdict.Unproven; });
+
+        allocator.Acquire(Guid.NewGuid().ToString("N"));
+
+        childAsked.ShouldBe(1, "a non-IOException on the second open proves nothing — the child must still be asked rather than declaring Enforced on faith");
+        allocator.UnusableReason.ShouldBe("exclusive file locking could not be proven across processes");
+    }
+
     [Theory]
     [InlineData(true, nameof(CrossProcessLockProbe.Verdict.Enforced))]
     [InlineData(false, nameof(CrossProcessLockProbe.Verdict.Unenforced))]
-    public void The_cross_process_probe_really_spawns_a_second_process_and_reports_what_it_was_told(bool heldByThisProcess, string expected)
+    [InlineData(null, nameof(CrossProcessLockProbe.Verdict.Unproven))]   // the probed path does not exist — the child cannot even attempt the open
+    public void The_cross_process_probe_really_spawns_a_second_process_and_reports_what_it_was_told(bool? heldByThisProcess, string expected)
     {
         // HIGH-fidelity (Rule 12.4): the real bundled bootstrap, resolved the way the durable launch resolves it, its
         // real argv contract, its real token, and the real kernel answer — everything the seam above can only assume.
-        // Both rows matter: "enforced" has to be earned from a lock this process actually holds, not returned by a
-        // child that answers the same way whatever it finds.
+        // All three rows matter: "enforced" has to be earned from a lock this process actually holds, not returned by
+        // a child that answers the same way whatever it finds — and a path that was never created must come back
+        // Unproven, not an optimistic guess in either direction.
         Directory.CreateDirectory(_reservations);
 
         var path = Path.Combine(_reservations, ".probe-real-" + Guid.NewGuid().ToString("N"));
 
-        File.WriteAllText(path, "");
+        if (heldByThisProcess is not null) File.WriteAllText(path, "");
 
-        using var held = heldByThisProcess ? new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
+        using var held = heldByThisProcess == true ? new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
 
         CrossProcessLockProbe.Ask(path).ShouldBe(Verdict(expected),
             customMessage: $"the bundled bootstrap did not answer as expected for '{path}' (held by this process: {heldByThisProcess}). Run it by hand: <output>/runner-host/codespace-runner-host --probe-lock <path> — it prints lock-refused / lock-granted / lock-unknown");
@@ -267,6 +286,20 @@ public class EgressSubnetAllocatorTests : IDisposable
     /// <summary>The cross-process probe as it must be seen by a test whose in-process second open is already refused: never spawned. Failing loudly beats a silent child.</summary>
     private static CrossProcessLockProbe.Verdict NeverAskedForAChild(string path) =>
         throw new ShouldAssertException($"the in-process fast path answered for {path}; no child process should have been spawned");
+
+    /// <summary>Stands in for a second open that fails for a reason UNRELATED to the lock (e.g. an UnauthorizedAccessException from something else touching the probe file) rather than the sharing violation (IOException) that actually proves refusal. Only the probe's own file behaves this way, so a real reservation open still succeeds.</summary>
+    private sealed class OpenerThatFailsTheProbesSecondOpenWithANonIOException
+    {
+        private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+
+        public FileStream Open(string path)
+        {
+            if (!path.Contains(".probe-", StringComparison.Ordinal)) return Exclusive(path);
+            if (_seen.Add(path)) return Exclusive(path);
+
+            throw new UnauthorizedAccessException(path);
+        }
+    }
 
     /// <summary>
     /// Stands in for the multi-uid shared reservation directory: the first two <c>.lease</c> files it is asked for

@@ -249,8 +249,10 @@ public static class AgentAutonomyPolicy
     /// an exclusive lock across processes, or that could not be proven). The /30 is what keeps two concurrently-active
     /// allowlisted runs out of each other's host-global nftables forward chain, so an operator reading an allowlisted
     /// posture has to know when its uniqueness stops covering the other workers on the host. Unlike
-    /// <see cref="ConfinementCaveat"/> it is NOT mirrored in the Launch composer's fixture: the composer speaks before
-    /// a run exists and cannot know a host fact this one only learns by probing.
+    /// <see cref="ConfinementCaveat"/> it is NOT mirrored in the Launch composer's fixture: the FRONTEND composer
+    /// never calls <see cref="DescribeNetwork"/>. The backend route preview DOES, before a run exists too
+    /// (<c>TaskRoutePreviewService.DescribePosture</c>), and it DOES carry this caveat once this worker has proved a
+    /// degradation — reading it costs no probe.
     /// </summary>
     public const string ProcessLocalSubnetCaveat = "; filtered-egress subnet reservation is process-local on this host";
 }
