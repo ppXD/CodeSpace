@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -871,6 +872,22 @@ public class McpRequestHandlerTests
             throw new NotImplementedException();
     }
 
+    /// <summary>Captures every Warning-level log line the handler emits — the seam for pinning the dispatch-catch's log-before-degrade behavior.</summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<string> Warnings { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning) Warnings.Add(formatter(state, exception));
+        }
+
+        private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
+    }
+
     private static McpRequestHandler GovernedHandler(SpyLedger ledger, bool governanceEnabled, params IAgentTool[] tools) =>
         new(new FakeRegistry(tools), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 7, governanceEnabled: governanceEnabled);
 
@@ -1072,9 +1089,11 @@ public class McpRequestHandlerTests
         // (the tool never runs: the claim gate never passed), NOT a JSON-RPC protocol error.
         var ledger = new SpyLedger { OnClaimThrow = () => new InvalidOperationException("transient Npgsql connection reset") };
         var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var logger = new CapturingLogger();
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 7, governanceEnabled: true, logger: logger);
 
         JsonElement resp = default;
-        await Should.NotThrowAsync(async () => resp = await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}")));
+        await Should.NotThrowAsync(async () => resp = await Respond(handler, Call("git.merge_pr", "{}")));
 
         resp.TryGetProperty("error", out _).ShouldBeFalse("a governance fault is a tool result, not a JSON-RPC protocol error");
         var result = resp.GetProperty("result");
@@ -1083,6 +1102,7 @@ public class McpRequestHandlerTests
         tool.CallCount.ShouldBe(0, "a claim fault means the gate never passed — the side effect must NOT run (not fail-open)");
         ledger.Claims.ShouldHaveSingleItem("the claim was attempted (it threw); no terminal was recorded");
         ledger.Terminals.ShouldBeEmpty();
+        logger.Warnings.ShouldHaveSingleItem("the swallowed claim exception must be logged, not silently absorbed — otherwise a 3/3 real-model lane red is indistinguishable from the model never calling a tool at all");
     }
 
     [Fact]

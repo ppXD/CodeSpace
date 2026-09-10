@@ -14,6 +14,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.E2ETests.Workflows;
@@ -107,7 +108,13 @@ public sealed class RealModelPublishManifestE2ETests
             var manifest = (await read.Resolve<IPublishManifestStore>().ListForAgentRunAsync(runId, teamId, CancellationToken.None)).FirstOrDefault();
 
             if (manifest is null)
-                return (false, $"{Provider} '{live.Model}': the run Succeeded but NO PublishManifest row was recorded — I1 (record) violated");
+            {
+                var db = read.Resolve<CodeSpaceDbContext>();
+                var ledgerRows = await db.ToolCallLedger.AsNoTracking().CountAsync(item => item.AgentRunId == runId, CancellationToken.None);
+                var toolEvents = await db.AgentRunEvent.AsNoTracking().CountAsync(item => item.AgentRunId == runId && (item.Kind == AgentEventKind.ToolCall || item.Kind == AgentEventKind.CommandExecuted), CancellationToken.None);
+
+                return (false, $"{Provider} '{live.Model}': the run Succeeded but NO PublishManifest row was recorded — I1 (record) violated (status={run.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(run)}; error={run.Error ?? "(none)"}; toolCallLedgerRows={ledgerRows}; toolEvents={toolEvents})");
+            }
 
             if (manifest.PublishStateValue != PublishState.Pushed || manifest.Branch != expectedBranch)
                 return (false, $"{Provider} '{live.Model}': the manifest row did not resolve to Pushed/{expectedBranch} (state={manifest.PublishStateValue}, branch={manifest.Branch ?? "(none)"}, error={manifest.PublishError ?? "(none)"})");

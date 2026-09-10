@@ -8,6 +8,8 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
 
@@ -94,8 +96,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     // run that did NOT opt into the side-effecting fabric) serves only read-only tools — they are the only ones listed,
     // allow-listed, and callable. Full (the existing opt-in) serves the whole registry, byte-identical to before.
     private readonly McpCatalogMode _catalogMode;
+    private readonly ILogger _logger;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null, ILogger? logger = null)
     {
         _registry = registry;
         _autonomy = autonomy;
@@ -111,6 +114,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         _waiters = waiters;
         _components = components;
         _catalogMode = catalogMode;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>True when this run's catalog mode serves <paramref name="tool"/>: Full serves the whole registry; ReadOnly serves only read-only tools. The ONE predicate every catalog surface (tools/list, tools/call resolve, the allow-list) consults so they agree by construction.</summary>
@@ -166,9 +170,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            _logger.LogWarning(ex, "Agent run {RunId}: tools/call dispatch threw for tool {ToolName}; degrading to a retryable governed-error result", _runId, ReadToolNameOrNull(request) ?? "(unknown)");
+
             return JsonRpcResponse.Ok(id, ToolResult(isError: true, "This tool call could not be governed right now; retry shortly."));
         }
     }
+
+    /// <summary>The tool name off the <c>tools/call</c> request's <c>params.name</c>, for the dispatch-catch log — best-effort, since the request may be malformed enough that <see cref="HandleToolCallAsync"/> never got far enough to parse it itself.</summary>
+    private static string? ReadToolNameOrNull(JsonElement request) =>
+        request.TryGetProperty("params", out var prms) && prms.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+            ? nameEl.GetString()
+            : null;
 
     private async Task<JsonRpcResponse> HandleToolCallAsync(JsonElement id, JsonElement request, CancellationToken cancellationToken)
     {
