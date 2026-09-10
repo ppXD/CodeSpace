@@ -112,7 +112,7 @@ public sealed class RealModelAgentInjectionE2ETests
 
         await RealModelGate.AssessLiveBestOfNAsync(Provider, async () =>
         {
-            var marker = "LESSON-APPLIED-" + Guid.NewGuid().ToString("N")[..10];
+            var marker = "skyline-" + Guid.NewGuid().ToString("N")[..8];
             var unrelatedMarker = "UNRELATED-LESSON-" + Guid.NewGuid().ToString("N")[..10];
             var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting that follows this team's previously learned greeting response convention. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
             var lesson = await SeedLessonAsync(live.TeamId, marker);
@@ -359,9 +359,9 @@ public sealed class RealModelAgentInjectionE2ETests
         var lesson = new Lesson
         {
             Id = Guid.NewGuid(), TeamId = teamId, Mode = TaskProjectionKinds.SingleAgent, FailureClass = relevant ? "response-format" : "database-migration",
-            WhatFailed = relevant ? "A prior greeting violated the team's learned greeting response convention" : "A prior sharded time-series database migration used an unsafe retention window",
-            Why = relevant ? "the reusable team greeting convention was not applied" : "the partition retention policy was not validated",
-            HowToApply = relevant ? $"The team's greeting response convention is to begin the short greeting with the exact marker {marker}" : $"During a sharded time-series database migration, include the audit marker {marker} in the retention manifest",
+            WhatFailed = relevant ? "A prior greeting reply left out the team's current sign-off codeword, so it did not follow the team's greeting response convention" : "A prior sharded time-series database migration used an unsafe retention window",
+            Why = relevant ? "the team rotates a sign-off codeword that every greeting reply must state, and it was left out" : "the partition retention policy was not validated",
+            HowToApply = relevant ? $"This team's greeting response convention is to state the current sign-off codeword, {marker}, as the first word of the greeting" : $"During a sharded time-series database migration, include the audit marker {marker} in the retention manifest",
             SourceRunIds = [Guid.NewGuid()],
             SuccessfulExposureRunIds = [Guid.NewGuid(), Guid.NewGuid()], QualifiedAt = now,
             DistilledByModel = "real-model-lesson-probe", ValidFrom = now, ExpiresAt = now.AddHours(1),
