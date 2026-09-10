@@ -240,6 +240,7 @@ public class GitIntegrateRunNodeFlowTests
 
         result.Status.ShouldBe(NodeStatus.Success, "an authored graph without the opt-in keeps the conflict a branchable outcome — byte-identical to before the park existed");
         result.Outputs["status"].GetString().ShouldBe("Conflicted");
+        result.Outputs["appliedCount"].GetInt32().ShouldBe(1, "agent#map#0 applied before agent#map#1 conflicted — the log line's (Applied/Total) must never read 0 when something really did apply");
     }
 
     private static IntegrationResult ConflictedResult() =>

@@ -117,9 +117,11 @@ public sealed class LocalGitBranchIntegratorFlowTests
 
         result.Status.ShouldBe(IntegrationStatus.Conflicted, "all-or-nothing: one base-mismatched contribution blocks the whole set");
         result.IntegratedBranch.ShouldBeNull();
+        result.AppliedCount.ShouldBe(0, "the set never reached the apply loop at all — agent-good never got the chance, so it must NOT be counted as applied");
         (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse("nothing is pushed when the set cannot be cleanly integrated");
         ctx.Outcome(result, "agent-stale").Disposition.ShouldNotBe(ContributionDisposition.Applied);
         ctx.Outcome(result, "agent-stale").Reason.ShouldContain("base SHA mismatch");
+        ctx.Outcome(result, "agent-good").Disposition.ShouldNotBe(ContributionDisposition.Applied, "never attempted is not the same as applied");
     }
 
     // ── Crown jewel: dependency-staged work (a base DOWNSTREAM of the request base) integrates ──
@@ -276,8 +278,10 @@ public sealed class LocalGitBranchIntegratorFlowTests
 
         result.Status.ShouldBe(IntegrationStatus.Conflicted, "two edits to the same line cannot be auto-integrated");
         result.IntegratedBranch.ShouldBeNull();
+        result.AppliedCount.ShouldBe(1, "agent-a really did apply before agent-b conflicted — the true count survives the coercion to Conflicted");
         (await ctx.RemoteHasBranchAsync(ctx.IntegrationBranch)).ShouldBeFalse("a conflict NEVER produces a corrupt half-merged branch on the remote");
         ctx.Outcome(result, "agent-b").ConflictedFiles.ShouldContain("f.txt", "the conflicting file is named for human review");
+        ctx.Outcome(result, "agent-b").Reason.ShouldContain("f.txt", customMessage: "git's own conflict detail names the path, not just a static message");
     }
 
     // ── Crown jewel: idempotent re-run reproduces the SAME single branch ─────────────

@@ -19,7 +19,13 @@ public sealed record IntegrationResult
     /// <summary>The run-id-derived branch the clean integration published. Null on any non-clean outcome. The publish is fail-safe against clobbering foreign work: a plain push when the branch is absent (git's own non-fast-forward rejection catches a concurrent create), and when the branch already exists it is reused as a no-op ONLY if its tree byte-equals ours — a differing tree is refused as "advanced", never overwritten.</summary>
     public string? IntegratedBranch { get; init; }
 
-    /// <summary>How many contributions were applied into the integrated branch (equals the contribution count on <see cref="IntegrationStatus.Clean"/>; 0 on a fail-safe abort).</summary>
+    /// <summary>
+    /// How many contributions actually applied — equals the contribution count on <see cref="IntegrationStatus.Clean"/>;
+    /// on a fail-safe abort, the TRUE count of contributions that applied before the one that made the set abort (0
+    /// when nothing did). Diagnostic only: it never implies anything is on a branch — <see cref="IntegratedBranch"/>
+    /// stays null on every non-Clean status, and the integrator resets its clone to base on any abort, so a nonzero
+    /// count here can NEVER be misread as a partial publish.
+    /// </summary>
     public int AppliedCount { get; init; }
 
     /// <summary>A human-readable note on the whole-set outcome (e.g. the abort reason: "contributions span multiple repositories", "remote integration branch advanced"). Null when nothing extra to say.</summary>
@@ -34,6 +40,12 @@ public sealed record IntegrationResult
     /// <see cref="ContributionDisposition.Applied"/> (conflicted-with-fallback OR unintegrable), a proposed Clean is
     /// coerced to <see cref="IntegrationStatus.Conflicted"/> with the branch cleared — a Clean result that hides a
     /// not-integrated contribution is a contradiction the type refuses to emit.
+    ///
+    /// <para><see cref="AppliedCount"/> is always the true count of <see cref="ContributionDisposition.Applied"/>
+    /// outcomes, never forced to 0 on a non-Clean status — a set that conflicted after some contributions already
+    /// applied must say so (the caller is trusted to have marked every contribution that never actually applied,
+    /// including one dropped only because the set aborted before its turn — see <c>LocalGitBranchIntegrator</c>'s
+    /// <c>AbortedBeforeApply</c>).</para>
     /// </summary>
     public static IntegrationResult Build(IntegrationStatus proposedStatus, string? integratedBranch, IReadOnlyList<ContributionOutcome> outcomes, string? reason = null)
     {
@@ -47,7 +59,7 @@ public sealed record IntegrationResult
         {
             Status = status,
             IntegratedBranch = clean ? integratedBranch : null,
-            AppliedCount = clean ? outcomes.Count(o => o.Disposition == ContributionDisposition.Applied) : 0,
+            AppliedCount = outcomes.Count(o => o.Disposition == ContributionDisposition.Applied),
             Reason = reason,
             Outcomes = outcomes,
         };
@@ -79,7 +91,7 @@ public enum IntegrationStatus
     /// <summary>Every contribution applied; one integrated branch was pushed.</summary>
     Clean,
 
-    /// <summary>The integration aborted fail-safe (a textual conflict, a base mismatch, a multi-repo set, a diverged remote branch refused as "advanced", or an unintegrable contribution). No branch published; the clone tree was reset to base; the K agent branches/patches remain intact.</summary>
+    /// <summary>The integration aborted fail-safe (a textual conflict, a base mismatch, a multi-repo set, a diverged remote branch refused as "advanced", or an unintegrable contribution). No branch published; the clone tree was reset to base; the K agent branches/patches remain intact. <see cref="AppliedCount"/> may still be nonzero (some contributions applied before the one that aborted the set) — that count is diagnostic only, never a partial publish: nothing from this set reached a branch.</summary>
     Conflicted,
 
     /// <summary>FORWARD-COMPAT (not produced by the default all-or-nothing policy): some contributions applied, others were reported. Reserved for a future partial-integrate mode.</summary>

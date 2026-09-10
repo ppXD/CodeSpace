@@ -170,7 +170,7 @@ public sealed class GitIntegrateRunNodeRealGitFlowTests
         var result = await RunNodeAsync(remote, repositoryId, teamId, runId);
 
         result.Outputs["status"].GetString().ShouldBe("Conflicted", "two edits to the same line really cannot auto-integrate");
-        result.Outputs["appliedCount"].GetInt32().ShouldBe(0);
+        result.Outputs["appliedCount"].GetInt32().ShouldBe(1, "agent-a applied before agent-b conflicted — the true count must never be forced to 0 on a non-Clean status");
         (await remote.HasBranchAsync($"codespace/integration/{runId:N}")).ShouldBeFalse();
     }
 

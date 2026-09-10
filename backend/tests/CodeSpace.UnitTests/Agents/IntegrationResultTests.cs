@@ -36,8 +36,21 @@ public sealed class IntegrationResultTests
 
         result.Status.ShouldBe(IntegrationStatus.Conflicted, "a Clean result with a dropped contribution is a contradiction the type refuses");
         result.IntegratedBranch.ShouldBeNull("no branch is published when the set is not clean");
-        result.AppliedCount.ShouldBe(0, "nothing was integrated");
+        result.AppliedCount.ShouldBe(1, "'a' really did apply — only 'b-dropped' failed to integrate, and the count must stay true even when the proposed Clean is coerced to Conflicted");
         result.Outcomes.ShouldContain(o => o.Label == "b-dropped" && o.Disposition == ContributionDisposition.Unintegrable, "the dropped agent is loudly named");
+    }
+
+    [Fact]
+    public void Conflicted_preserves_the_true_applied_count_and_names_the_failing_contribution()
+    {
+        // The honesty fix: a Conflicted result must NEVER be forced to AppliedCount=0 regardless of how many
+        // contributions actually applied before a later one aborted the set — a reader must be able to tell
+        // "everything failed" from "two applied, the third conflicted".
+        var result = IntegrationResult.Build(IntegrationStatus.Conflicted, "should-be-dropped", new[] { Applied("a"), Applied("b"), Conflicted("c") }, "a contribution conflicted while integrating");
+
+        result.AppliedCount.ShouldBe(2, "'a' and 'b' applied before 'c' conflicted");
+        result.IntegratedBranch.ShouldBeNull();
+        result.Outcomes.Single(o => o.Label == "c").Reason.ShouldBe("textual conflict", "the failing contribution is named, in its own words, among the outcomes");
     }
 
     [Fact]

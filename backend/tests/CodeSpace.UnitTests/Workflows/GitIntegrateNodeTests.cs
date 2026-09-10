@@ -71,6 +71,7 @@ public class GitIntegrateNodeTests
         result.Status.ShouldBe(NodeStatus.Success, "a conflict is a valid outcome the workflow branches on, not a node crash");
         result.Outputs["status"].GetString().ShouldBe("Conflicted");
         result.Outputs["integratedBranch"].ValueKind.ShouldBe(JsonValueKind.Null);
+        result.Outputs["appliedCount"].GetInt32().ShouldBe(1, "'a' really did apply before 'b' conflicted — the count must never be forced to 0 on a non-Clean status");
 
         var conflicts = result.Outputs["conflicts"];
         conflicts.GetArrayLength().ShouldBe(1, "only the non-applied contribution is reported");

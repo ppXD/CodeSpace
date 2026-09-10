@@ -30,6 +30,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 {
     private const int GitTimeoutSeconds = 300;
     private const string TruncationMarker = "... diff truncated";
+    private const int ConflictDetailCapChars = 512;
 
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IArtifactOffloader _offloader;
@@ -54,7 +55,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         var preflightBlock = Preflight(resolved);
 
         if (preflightBlock is not null)
-            return Aborted(resolved, preflightBlock);
+            return AbortedBeforeApply(resolved, preflightBlock);
 
         return await CloneApplyAndPushAsync(request, resolved, cancellationToken).ConfigureAwait(false);
     }
@@ -170,14 +171,14 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             await CloneAsync(request, directory, cancellationToken).ConfigureAwait(false);
 
             if (!await CheckoutBaseAsync(directory, request, cancellationToken).ConfigureAwait(false))
-                return Aborted(resolved, $"base revision {Short(request.BaseSha)} not found in the repository");
+                return AbortedBeforeApply(resolved, $"base revision {Short(request.BaseSha)} not found in the repository");
 
             if (await BlockStaleBasesAsync(directory, request, resolved, cancellationToken).ConfigureAwait(false) is { } staleBaseBlock)
-                return Aborted(resolved, staleBaseBlock);
+                return AbortedBeforeApply(resolved, staleBaseBlock);
 
             var ordered = await InAncestryOrderAsync(directory, resolved, cancellationToken).ConfigureAwait(false);
 
-            var applyBlock = await ApplyAllAsync(directory, ordered, cancellationToken).ConfigureAwait(false);
+            var applyBlock = await ApplyAllAsync(directory, ordered, request.Token, cancellationToken).ConfigureAwait(false);
 
             if (applyBlock is not null)
             {
@@ -286,7 +287,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     }
 
     /// <summary>Apply each clean (preflight-passed) contribution in order. Returns a set-level abort reason on the FIRST textual conflict (marking the rest not-attempted), else null when all applied.</summary>
-    private async Task<string?> ApplyAllAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, CancellationToken cancellationToken)
+    private async Task<string?> ApplyAllAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, string? token, CancellationToken cancellationToken)
     {
         for (var i = 0; i < resolved.Count; i++)
         {
@@ -294,11 +295,13 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
             if (string.IsNullOrWhiteSpace(r.Patch)) continue; // a true no-op (base matched, empty diff) — nothing to apply
 
-            if (await TryApplyAsync(directory, r, cancellationToken).ConfigureAwait(false)) continue;
+            var (applied, stderr) = await TryApplyAsync(directory, r, cancellationToken).ConfigureAwait(false);
+
+            if (applied) continue;
 
             var conflictedFiles = await ReadConflictedFilesAsync(directory, r, cancellationToken).ConfigureAwait(false);
 
-            r.Conflict("textual conflict applying the patch", conflictedFiles);
+            r.Conflict(ConflictReason(stderr, directory, token), conflictedFiles);
 
             for (var j = i + 1; j < resolved.Count; j++) resolved[j].Block("not integrated — an earlier contribution conflicted");
 
@@ -308,7 +311,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         return null;
     }
 
-    private async Task<bool> TryApplyAsync(string directory, ResolvedContribution r, CancellationToken cancellationToken)
+    private async Task<(bool Success, string Stderr)> TryApplyAsync(string directory, ResolvedContribution r, CancellationToken cancellationToken)
     {
         var patchFile = Path.Combine(directory, ".codespace-integrate.patch");
         await File.WriteAllTextAsync(patchFile, r.Patch, cancellationToken).ConfigureAwait(false);
@@ -320,12 +323,31 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             // under it) does git reconstruct the pre-image blobs and 3-way merge. A failure here is a GENUINE textual
             // conflict — which the caller must keep surfacing as Conflicted, since the resolve arc acts on it.
             var result = await RunGitAsync(new[] { "-C", directory, "apply", "--index", "--3way", patchFile }, directory, cancellationToken).ConfigureAwait(false);
-            return result.Status == SandboxStatus.Success;
+            return (result.Status == SandboxStatus.Success, result.Stderr);
         }
         finally
         {
             TryDeleteFile(patchFile);
         }
+    }
+
+    /// <summary>The conflicting contribution's own reason: the generic message alone when git reported nothing usable, else git's own stderr (which names the conflicting path in every git version observed) appended — bounded and redacted so the diagnosis survives without a re-read of the original run.</summary>
+    private static string ConflictReason(string stderr, string directory, string? token)
+    {
+        var detail = RedactedConflictDetail(stderr, directory, token);
+
+        return detail.Length == 0 ? "textual conflict applying the patch" : $"textual conflict applying the patch: {detail}";
+    }
+
+    /// <summary>Git's stderr made safe to persist/display: the workspace's absolute clone directory rewritten repo-relative, any credential token redacted (the class's existing hygiene, reused), trimmed, and capped to <see cref="ConflictDetailCapChars"/> so one verbose git error can never bloat a durable outcome. Empty input (or all-whitespace) yields empty output — the caller falls back to the generic message.</summary>
+    private static string RedactedConflictDetail(string stderr, string directory, string? token)
+    {
+        if (string.IsNullOrWhiteSpace(stderr)) return "";
+
+        var relative = stderr.Replace(directory, ".", StringComparison.Ordinal);
+        var redacted = LocalGitWorkspaceProvider.Redact(relative, token).Trim();
+
+        return redacted.Length <= ConflictDetailCapChars ? redacted : redacted[..ConflictDetailCapChars] + "…";
     }
 
     /// <summary>Best-effort: the unmerged paths after a failed 3-way apply; falls back to the patch's target paths so a conflict always names at least the files involved.</summary>
@@ -459,6 +481,23 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     /// <summary>The whole set aborted: nothing pushed, base restored. Each contribution reflects whether ITS work is preserved (a pushed branch) or lost.</summary>
     private static IntegrationResult Aborted(IReadOnlyList<ResolvedContribution> resolved, string reason) =>
         IntegrationResult.Build(IntegrationStatus.Conflicted, null, resolved.Select(r => r.ToOutcome()).ToList(), reason);
+
+    /// <summary>
+    /// The whole set aborted BEFORE <see cref="ApplyAllAsync"/> ever ran (a preflight refusal, a missing base commit,
+    /// or the stale-base integrity guard) — so a <see cref="ResolvedContribution"/> nobody individually blocked did
+    /// NOT quietly apply, it simply never got the chance. Block every such survivor as not-attempted first, so
+    /// <see cref="IntegrationResult.AppliedCount"/> (which trusts every <see cref="ContributionDisposition.Applied"/>
+    /// disposition at face value) can never count a contribution git never touched. Contrast <see cref="Aborted"/>,
+    /// used once real apply attempts began (there, an untouched survivor genuinely did apply — the loop processes
+    /// contributions in order and only marks failures at/after the one that broke the set).
+    /// </summary>
+    private static IntegrationResult AbortedBeforeApply(IReadOnlyList<ResolvedContribution> resolved, string reason)
+    {
+        foreach (var r in resolved)
+            if (!r.IsBlocked) r.Block("not attempted — the set was refused before integration began");
+
+        return Aborted(resolved, reason);
+    }
 
     private static bool IsNonFastForward(string output) =>
         output.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase)

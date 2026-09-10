@@ -94,6 +94,13 @@ public static class SupervisorResolverRecipe
             sb.AppendLine();
         }
 
+        if (conflict.FailingContributions.Count > 0)
+        {
+            sb.AppendLine("The contribution(s) that failed to integrate, and why:");
+            foreach (var failure in conflict.FailingContributions) sb.AppendLine($"  - {failure}");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("Steps:");
         sb.AppendLine("  1. Fetch each branch from origin and merge them together in this working copy.");
         sb.AppendLine("  2. Resolve every conflict so the combined change is coherent and complete — reconcile the two sides, do NOT discard either agent's intent.");
