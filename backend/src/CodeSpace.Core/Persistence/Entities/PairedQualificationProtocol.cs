@@ -14,6 +14,12 @@ public class PairedQualificationProtocol : IAuditable
     public string? CandidateSelectionJson { get; set; }
     public bool RequiresCellAdmission { get; set; }
     public bool RequiresResultDigest { get; set; }
+    /// <summary>The frozen <c>QualificationRuntimeManifest</c> as canonical JSON — harness binary bytes, runner profile, credential endpoint identities, reviewer resolution, execution settings. Never secret material. Null on a legacy protocol committed before the runtime bundle was frozen.</summary>
+    public string? RuntimeManifestJson { get; set; }
+
+    /// <summary>SHA-256 of the frozen runtime manifest's canonical bytes, folded into <see cref="ProtocolDigest"/>. Null exactly when <see cref="RuntimeManifestJson"/> is null.</summary>
+    public string? RuntimeManifestDigest { get; set; }
+
     public string StatisticsVersion { get; set; } = string.Empty;
     public string Criterion { get; set; } = string.Empty;
     public int SessionsPerCell { get; set; }

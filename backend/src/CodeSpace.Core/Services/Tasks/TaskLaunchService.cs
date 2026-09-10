@@ -377,7 +377,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     }
 
     /// <summary>The deep tier's default agent wall-clock, in seconds — deep exists for hours-long work, and the record's 1h default killed exactly the long builds/test suites that tier dispatches. An operator override always wins; other tiers keep the bounded 1h record default (null).</summary>
-    private const int DeepAgentTimeoutSeconds = 7200;
+    internal const int DeepAgentTimeoutSeconds = 7200;
 
     /// <summary>The tier-aware agent wall-clock default when the operator set none: deep → <see cref="DeepAgentTimeoutSeconds"/>; every other tier → null (the record's bounded 1h default downstream).</summary>
     private static int? DefaultTimeoutSeconds(RoutePlan route) =>
