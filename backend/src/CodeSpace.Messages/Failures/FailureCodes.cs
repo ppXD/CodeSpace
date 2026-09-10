@@ -103,4 +103,7 @@ public static class FailureCodes
     /// <summary>A command observation is incomplete for a full-output consumer. Recover the observation without replaying the command's side effects.</summary>
     public const string SandboxOutputIncomplete = "sandbox_output_incomplete";
     public const string NativeLaunchUnavailable = "native_launch_unavailable";
+
+    /// <summary>This host cannot reserve a filtered-egress run's own /30 subnet, so the run is refused rather than handed one nothing reserved. Remedy: make the reservation directory under the agent-run spool root writable by the worker — a retry on the same host cannot help.</summary>
+    public const string SandboxEgressReservationUnavailable = "sandbox_egress_reservation_unavailable";
 }

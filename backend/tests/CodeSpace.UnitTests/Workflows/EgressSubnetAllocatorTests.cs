@@ -13,6 +13,9 @@ namespace CodeSpace.UnitTests.Workflows;
 /// inside one. Two allocator instances over one directory stand in for two worker processes — the OS file lock they
 /// contend on is the same one two real processes would, which is the whole point: an in-memory set only made runs
 /// inside ONE worker disjoint while the nft chain they collide in is shared by every process on the host.</para>
+///
+/// <para>Also pins the two postures of a host that holds no reservations, which are deliberately NOT the same: an
+/// unusable DIRECTORY refuses the launch by name, an unenforced LOCK degrades to process-local uniqueness.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class EgressSubnetAllocatorTests : IDisposable
@@ -123,19 +126,108 @@ public class EgressSubnetAllocatorTests : IDisposable
         allocator.ActiveCount.ShouldBe(1, "re-acquiring the same run reserves no second /30");
     }
 
-    [Fact]
-    public void A_host_that_cannot_hold_reservations_degrades_to_process_local_uniqueness_rather_than_failing_the_launch()
+    [Theory]
+    [InlineData(false, "the reservation directory cannot be created")]   // its parent is a file — mkdir can never succeed
+    [InlineData(true, "the reservation directory cannot be written")]    // it EXISTS and is 0500 — the case mkdir reported as success
+    public void A_host_whose_reservation_directory_is_unusable_REFUSES_the_launch_rather_than_blaming_4096_live_runs(bool directoryExists, string expectedReason)
     {
-        // bwrap / nft absent is the ordinary case on a dev host, and a reservation directory that cannot be created
-        // (a read-only mount, no rights) is not the run's fault. The no-op path must stay exactly as it was: runs
-        // inside THIS process still get distinct /30s, and nothing throws.
-        var unwritable = Path.Combine(TempFile(), "cannot", "exist");
-        var allocator = new EgressSubnetAllocator(unwritable);
+        // FAIL-CLOSED, and it is the read-only case that forced the decision: Directory.CreateDirectory is a NO-OP on a
+        // directory that already exists, so it reported success and every /30 probe then failed on the open — read as
+        // "held by another live process". All 4096 candidates lost, and Acquire threw "this host already holds 4096
+        // filtered-egress /30s": a true statement about nothing, pointing an operator at concurrency instead of at the
+        // mount. Degrading instead would be no better: the directory sits under the SAME spool root this run's out.log
+        // and exit marker need, so the run was already doomed — and the whole point of the host-level reservation is
+        // that two runs must not co-evaluate each other's packets. So the launch is refused, by name.
+        if (UnusableDirectory(directoryExists) is not { } directory) return;   // 0500 does not bite here (root / no POSIX modes) — unstageable
+
+        var allocator = new EgressSubnetAllocator(directory);
+
+        var refusal = Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N")));
+
+        refusal.Reason.ShouldBe(expectedReason, "the cause named must be the mount, not imaginary contention");
+        refusal.ReservationDirectory.ShouldBe(directory, "the actionable fact is WHICH directory an operator has to fix");
+        allocator.HostReservationsUsable.ShouldBeFalse("asking the question must not answer an optimistic true the host has not earned");
+        allocator.UnusableReason.ShouldBe(expectedReason);
+
+        Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N")))
+            .Reason.ShouldBe(expectedReason, "the refusal is sticky: a later acquire refuses with the SAME named cause rather than re-discovering it");
+    }
+
+    [Theory]
+    [InlineData(true, null)]
+    [InlineData(false, "exclusive file locking is not enforced there")]
+    public void The_allocator_probes_whether_this_host_enforces_the_lock_instead_of_assuming_it(bool locksAreEnforced, string? expectedReason)
+    {
+        // THE defect: "reserved" was inferred from an open that SUCCEEDED. .NET emulates FileShare.None on Unix with
+        // an advisory flock(fd, LOCK_EX|LOCK_NB) and ignores every error but EWOULDBLOCK — so on a filesystem whose
+        // flock answers ENOTSUP/EACCES (an NFS/RWX mount is exactly the shape this design recommends), or in a process
+        // where .NET's file-locking switch is off, the handle came back UNLOCKED, two workers both "reserved" the same
+        // /30, and HostReservationsUsable still read true. The allocator must find that out itself, at first use.
+        var allocator = new EgressSubnetAllocator(_reservations, locksAreEnforced ? null : OpenerThatEnforcesNoLock);
 
         var cidrs = Enumerable.Range(0, 8).Select(_ => allocator.Acquire(Guid.NewGuid().ToString("N")).Cidr).ToList();
 
-        cidrs.Distinct().Count().ShouldBe(8, "process-local uniqueness — the pre-existing behaviour — must survive a host that cannot hold reservations");
-        allocator.HostReservationsUsable.ShouldBeFalse("the degradation is recorded, so 'two workers may collide here' is assertable rather than silent");
+        allocator.HostReservationsUsable.ShouldBe(locksAreEnforced, "the flag must report what the host PROVED under a second open, not what the first open implied");
+        allocator.UnusableReason.ShouldBe(expectedReason);
+        cidrs.Distinct().Count().ShouldBe(8, "this is the ONE cause that degrades rather than refusing: the directory is writable and the runs are healthy, so the launch falls back to process-local uniqueness instead of taking every filtered-egress run on an NFS/RWX host down");
+    }
+
+    [Fact]
+    public void A_rights_error_on_a_reservation_file_is_never_counted_as_another_workers_contention()
+    {
+        // flock(2) refuses with EWOULDBLOCK, which surfaces as an IOException sharing violation — never as a rights
+        // error. So a UnauthorizedAccessException on a .lease means the directory turned unwritable under us (a
+        // remount AFTER the probe), and counting it as "held" would again lose all 4096 candidates and report the
+        // wrong cause. Staged through the opener seam because a mid-life remount cannot be staged in-process.
+        var allocator = new EgressSubnetAllocator(_reservations, OpenerThatRefusesReservations);
+
+        var refusal = Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N")));
+
+        refusal.Reason.ShouldBe("the reservation directory cannot be written");
+        refusal.InnerException.ShouldBeOfType<UnauthorizedAccessException>("the OS error an operator needs is carried, not swallowed");
+        allocator.HostReservationsUsable.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void The_reservation_directory_is_0700_and_a_reservation_file_is_0600()
+    {
+        // A reservation file names the pid + runId holding a /30, and the directory lists every /30 this host holds.
+        // Neither is another local user's business, so neither is left at whatever the umask happened to be.
+        if (OperatingSystem.IsWindows()) return;
+
+        NewWorker().Acquire(Guid.NewGuid().ToString("N"));
+
+        File.GetUnixFileMode(_reservations).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, "the reservation directory must be 0700, not whatever the umask happened to be");
+        File.GetUnixFileMode(Directory.GetFiles(_reservations).ShouldHaveSingleItem()).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite, "a reservation file must be 0600");
+    }
+
+    /// <summary>Stands in for a filesystem whose <c>flock(2)</c> refuses nobody — the share mode is simply not exclusive, which is what .NET silently leaves behind when flock answers anything but EWOULDBLOCK.</summary>
+    private static FileStream OpenerThatEnforcesNoLock(string path) => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+
+    /// <summary>Stands in for a directory that passed the probe and then turned unwritable: the probe file opens, every <c>.lease</c> is refused for RIGHTS.</summary>
+    private static FileStream OpenerThatRefusesReservations(string path) =>
+        path.EndsWith(".lease", StringComparison.Ordinal) ? throw new UnauthorizedAccessException(path) : new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+    /// <summary>
+    /// A reservation directory this process cannot hold reservations in, in one of the two shapes an operator can
+    /// produce: one that can never be CREATED (its parent is a file), and one that already EXISTS and cannot be
+    /// WRITTEN (0500 — the read-only mount, and the shape <c>Directory.CreateDirectory</c> reports success for). Null
+    /// for the second shape on a host where the mode does not bite (running as root, a filesystem without POSIX
+    /// modes), where it is unstageable and the test skips.
+    /// </summary>
+    private string? UnusableDirectory(bool exists)
+    {
+        if (!exists) return Path.Combine(TempFile(), "cannot", "exist");
+        if (OperatingSystem.IsWindows()) return null;
+
+        var directory = Path.Combine(_reservations, "read-only");
+        Directory.CreateDirectory(directory);
+        File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+
+        try { File.WriteAllText(Path.Combine(directory, "probe"), ""); }
+        catch (UnauthorizedAccessException) { return directory; }
+
+        return null;
     }
 
     [Fact]
