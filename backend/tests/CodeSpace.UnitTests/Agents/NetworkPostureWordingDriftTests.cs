@@ -82,6 +82,22 @@ public class NetworkPostureWordingDriftTests
     }
 
     [Fact]
+    public void The_shared_fixture_says_cross_team_isolation_went_with_the_confinement()
+    {
+        // Egress is the loudest thing an unconfined run loses, not the only one. Without bubblewrap the agent keeps
+        // the worker's own filesystem view, so nothing at the OS level holds one team's run out of another team's
+        // workspace, spool or per-run secrets — the per-run socket + declaration paths are hardened against being
+        // GUESSED, but a process free to walk the filesystem is not stopped by an unguessable name. Pinned in the
+        // SHARED fixture (not just in the backend) so the frontend keeps asserting the same sentence.
+        var unconfined = ReadConfinementFixture().Where(c => c.Confinement.Outcome != SandboxConfinementOutcome.Confined).ToList();
+
+        unconfined.ShouldNotBeEmpty($"{FixturePath} pins no unconfined case, so it pins nothing about what an unconfined run loses");
+
+        foreach (var c in unconfined)
+            c.Line.ShouldEndWith(AgentAutonomyPolicy.UnconfinedIsolationCaveat, customMessage: $"the '{c.Confinement.Outcome}' case names an unenforced egress without saying cross-team isolation went with it");
+    }
+
+    [Fact]
     public void The_shared_fixture_covers_every_posture_state()
     {
         // A fixture that only sampled "on" would let the qualified "off" wordings drift freely. Assert the coverage

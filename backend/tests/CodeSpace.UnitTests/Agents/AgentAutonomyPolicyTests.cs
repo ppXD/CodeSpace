@@ -161,11 +161,11 @@ public class AgentAutonomyPolicyTests
     [InlineData(SandboxConfinementOutcome.Confined, null, false, "Network: off (Standard) — confined, but egress was NOT severed")]
     // The whole point: the host could NOT confine, so the tier's "off" was never enforced. Stated LOUDLY and with
     // the reason — a reader must not be able to skim this as a milder flavour of "severed".
-    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)")]
-    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)")]
-    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux); cross-team isolation not enforced")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap); cross-team isolation not enforced")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns); cross-team isolation not enforced")]
     // A runner that attempts no confinement at all is in the same honest bucket as one that could not.
-    [InlineData(SandboxConfinementOutcome.NotApplicable, null, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement")]
+    [InlineData(SandboxConfinementOutcome.NotApplicable, null, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement; cross-team isolation not enforced")]
     public void DescribeNetwork_resolves_the_hedge_from_the_runs_own_confinement_record(SandboxConfinementOutcome outcome, string? reason, bool severed, string expected)
     {
         var confinement = new SandboxConfinement { Outcome = outcome, Reason = reason, NetworkSevered = severed };
@@ -207,6 +207,13 @@ public class AgentAutonomyPolicyTests
 
                     line.ShouldContain("UNCONFINED", customMessage: $"'{effective}'/'{ceiling}' hides an unenforced 'off' behind quiet wording");
                     line.ShouldNotContain(AgentAutonomyPolicy.ConfinementCaveat, customMessage: "the resolved sentence must REPLACE the hedge, not stack on it");
+
+                    // Egress is the loudest thing an unconfined run loses, not the only one: without bubblewrap the
+                    // agent keeps the worker's filesystem view, so one team's run is not held out of another team's
+                    // workspace, spool or per-run secrets by anything at the OS level. A sentence that named only
+                    // egress would let a reader assume the rest of the sandbox held.
+                    line.ShouldEndWith(AgentAutonomyPolicy.UnconfinedIsolationCaveat,
+                        customMessage: $"'{effective}'/'{ceiling}' reports an unconfined run without saying that cross-team isolation went with it");
                 }
             }
         }

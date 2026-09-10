@@ -28,17 +28,17 @@
     {
       "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "not-linux", "networkSevered": false },
-      "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)"
+      "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux); cross-team isolation not enforced"
     },
     {
       "effective": "Confined", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "no-bwrap", "networkSevered": false },
-      "line": "Network: off (Confined) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap)"
+      "line": "Network: off (Confined) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap); cross-team isolation not enforced"
     },
     {
       "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed",
       "confinement": { "outcome": "Unconfined", "reason": "no-userns", "networkSevered": false },
-      "line": "Network: clamped off by policy (ceiling Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)"
+      "line": "Network: clamped off by policy (ceiling Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns); cross-team isolation not enforced"
     },
     {
       "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed",
@@ -48,7 +48,7 @@
     {
       "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "NotApplicable", "networkSevered": false },
-      "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement"
+      "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement; cross-team isolation not enforced"
     },
     {
       "effective": "Trusted", "ceiling": "Trusted", "deployment": "Unleashed",

@@ -199,15 +199,27 @@ public static class AgentAutonomyPolicy
     /// stated LOUDLY (upper case, naming the reason): "off" there is a permission the OS never enforced, which is a
     /// materially different fact from a severed namespace and must not read like a milder version of it.
     /// <see cref="SandboxConfinementOutcome.NotApplicable"/> is such a run too — no confinement was even attempted.
+    /// Both unconfined verdicts also carry <see cref="UnconfinedIsolationCaveat"/>: egress is the loudest thing an
+    /// unconfined run loses, but not the only one.
     /// </summary>
     private static string OffQualifier(SandboxConfinement? confinement) => confinement switch
     {
         null => ConfinementCaveat,
         { Outcome: SandboxConfinementOutcome.Confined, NetworkSevered: true } => " — confined: egress severed",
         { Outcome: SandboxConfinementOutcome.Confined } => " — confined, but egress was NOT severed",
-        { Outcome: SandboxConfinementOutcome.Unconfined } c => $" — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress ({c.Reason ?? "unknown"})",
-        _ => " — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement",
+        { Outcome: SandboxConfinementOutcome.Unconfined } c => $" — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress ({c.Reason ?? "unknown"}){UnconfinedIsolationCaveat}",
+        _ => $" — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement{UnconfinedIsolationCaveat}",
     };
+
+    /// <summary>
+    /// The second half of an unconfined verdict, appended to BOTH unconfined wordings. Without bubblewrap the agent
+    /// keeps the worker's own filesystem view, so nothing at the OS level keeps one team's run out of another team's
+    /// workspace, spool or per-run secrets — the run-scoped paths and tokens are hardened against being GUESSED, but a
+    /// process free to walk the filesystem is not stopped by an unguessable name. A reader who is told only about
+    /// egress will assume the rest of the sandbox held; it did not, and the sentence has to say so. It disappears the
+    /// moment a launch confines, and <c>Sandbox:RequireConfinement</c> is what refuses an unconfinable host outright.
+    /// </summary>
+    public const string UnconfinedIsolationCaveat = "; cross-team isolation not enforced";
 
     /// <summary>
     /// The qualifier an "off" posture carries when NO confinement record exists — the sandbox severs egress only
