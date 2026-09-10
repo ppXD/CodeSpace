@@ -856,10 +856,14 @@ public static class RealModelGate
     /// throwaway <see cref="LlmApiException"/> routed through <see cref="IsGatewayInfraFailure(Exception)"/> so the two
     /// can never drift apart. An unparseable/null/blank name (a non-LlmApiException fallback reason, e.g. a bare
     /// exception TYPE name) is NOT infra — the same "an unrecognised failure gates" default every other classifier here
-    /// uses.
+    /// uses. Also NOT infra: a bare numeric string (<c>Enum.TryParse</c> happily parses "0" as <c>Transient</c>) or a
+    /// comma-combined list (parsed as the OR of the underlying values, so e.g. "Transient,RateLimited" parses to the
+    /// SAME value as "RateLimited") — neither is a category a producer would ever actually persist, so the parsed
+    /// value must round-trip back to the EXACT input string.
     /// </summary>
     public static bool IsGatewayInfraCategory(string? category) =>
-        Enum.TryParse<LlmErrorCategory>(category, out var parsed) && IsGatewayInfraFailure(new LlmApiException("", null, parsed, ""));
+        Enum.TryParse<LlmErrorCategory>(category, out var parsed) && Enum.IsDefined(parsed) && parsed.ToString() == category
+        && IsGatewayInfraFailure(new LlmApiException("", null, parsed, ""));
 
     private static bool IsTransientTransport(Exception e) => e switch
     {
