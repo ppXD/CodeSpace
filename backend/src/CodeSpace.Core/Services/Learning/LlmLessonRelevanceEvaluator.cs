@@ -65,7 +65,9 @@ public sealed class LlmLessonRelevanceEvaluator : ILessonRelevanceEvaluator, ISc
 
             using var relabel = LlmCallContext.Current is { } ambient ? LlmCallContext.Push(ambient with { Kind = CallKind }) : null;
             var completion = await resolved.Client.CompleteStructuredAsync(BuildRequest(resolved.Pick, bounded), cancellationToken).ConfigureAwait(false);
-            return Project(bounded, completion.Json, completion.ObservedModel);
+            var result = Project(bounded, completion.Json, completion.ObservedModel);
+            LogAssessment(bounded, completion.Json, result);
+            return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -83,6 +85,26 @@ public sealed class LlmLessonRelevanceEvaluator : ILessonRelevanceEvaluator, ISc
         var relevant = response.Decisions.Where(decision => decision.Verdict == LessonRelevanceVerdicts.Relevant).Select(decision => Guid.Parse(decision.LessonId)).ToHashSet();
         var selected = request.Candidates.Where(lesson => relevant.Contains(lesson.Id)).Take(Math.Clamp(request.Take, 0, LessonReader.MaxTake)).ToList();
         return new(selected, candidateIds, selected.Count == 0 ? LessonRelevanceStatuses.Abstained : LessonRelevanceStatuses.Selected, observedModel, Digest(json));
+    }
+
+    /// <summary>Observability for every completed assessment — a Warning naming the defects on a failed <see cref="Project"/> (silent today), plus one Information line per assessment so verdict distribution is visible without re-deriving it from the receipt table.</summary>
+    private void LogAssessment(LessonRelevanceRequest request, JsonElement json, LessonRelevanceResult result)
+    {
+        if (result.Status == LessonRelevanceStatuses.Failed)
+        {
+            var defects = Validate(request, json);
+            _logger.LogWarning("Lesson relevance assessment for team {TeamId} returned {DefectCount} defect(s): {Defects}", request.TeamId, defects.Count, string.Join("; ", defects.Take(5)));
+        }
+
+        var decisions = TryDecodeDecisions(json);
+        _logger.LogInformation("Lesson relevance assessment for team {TeamId}: status={Status} relevant={Relevant} irrelevant={Irrelevant} uncertain={Uncertain} candidates={CandidateCount} model={ObservedModel} digest={AssessmentDigest}",
+            request.TeamId, result.Status, decisions.Count(d => d.Verdict == LessonRelevanceVerdicts.Relevant), decisions.Count(d => d.Verdict == LessonRelevanceVerdicts.Irrelevant), decisions.Count(d => d.Verdict == LessonRelevanceVerdicts.Uncertain), request.Candidates.Count, result.ObservedModel, result.AssessmentDigest);
+    }
+
+    private static IReadOnlyList<LessonRelevanceDecision> TryDecodeDecisions(JsonElement json)
+    {
+        try { return json.Deserialize<LessonRelevanceResponse>(JsonOptions)?.Decisions ?? []; }
+        catch (JsonException) { return []; }
     }
 
     internal static IReadOnlyList<string> Validate(LessonRelevanceRequest request, JsonElement json)
