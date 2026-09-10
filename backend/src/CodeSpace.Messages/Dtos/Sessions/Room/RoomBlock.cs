@@ -379,6 +379,9 @@ public sealed record DeliveryBlock : RoomBlock
 
     /// <summary>The redacted provider or policy reason when this repository failed or was skipped.</summary>
     public string? Error { get; init; }
+
+    /// <summary>THIS repository's own per-check verification truth (P21) — empty when nothing graded it. A sibling repository's verdict never appears here.</summary>
+    public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
 }
 
 /// <summary>
@@ -413,6 +416,9 @@ public sealed record DeliverableFile
 
     /// <summary>Which agent produced it, so a multi-agent turn attributes its files.</summary>
     public required Guid AgentRunId { get; init; }
+
+    /// <summary>THIS file's own per-check verification truth (P21), attributed by its producing agent — empty when nothing graded it.</summary>
+    public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
 }
 
 /// <summary>Transport-stable storage facts for a produced file. Values mirror the bounded artifact range reader without leaking provider-specific errors.</summary>

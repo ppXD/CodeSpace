@@ -2496,6 +2496,99 @@ public class RoomProjectorFlowTests
         deliveries[1].Error.ShouldBe("credential cannot create pull requests");
     }
 
+    [Fact]
+    public async Task A_two_repo_run_reports_each_repositorys_own_verification_truth_without_collapsing()
+    {
+        // P21-8a: one repository's own unit PASSED its check; the sibling's own unit was WITHHELD. The run-level
+        // fold fails the whole card (unchanged, existing behaviour) — but each repository's OWN row must still read
+        // its OWN verdict, never the other's, and never a blended/absent one.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship two repositories");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship both repositories", resultSummary: "Shipped both.");
+        var apiId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+
+        await SeedPerRepositoryUnitGradesAsync(teamId, run,
+            (Guid.NewGuid(), apiId, "api", AcceptancePassed: true),
+            (Guid.NewGuid(), webId, "web", AcceptancePassed: false));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.WorkflowRunRecord.Add(new WorkflowRunRecord
+            {
+                Id = Guid.NewGuid(), RunId = run, RecordType = WorkflowRunRecordTypes.DeliveryPullRequests, OccurredAt = DateTimeOffset.UtcNow,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    pullRequests = new object[]
+                    {
+                        new { repositoryId = apiId, alias = "api", disposition = "Opened", number = 10, url = "https://example.test/api/pull/10", error = (string?)null },
+                        new { repositoryId = webId, alias = "web", disposition = "Opened", number = 11, url = "https://example.test/web/pull/11", error = (string?)null },
+                    },
+                }, AgentJson.Options),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var deliveries = turn.Blocks.OfType<DeliveryBlock>().ToList();
+
+        deliveries.Count.ShouldBe(2, "both repositories delivered a PR — neither delivery may absorb the other's verification truth");
+
+        var api = deliveries.Single(d => d.RepositoryAlias == "api");
+        var web = deliveries.Single(d => d.RepositoryAlias == "web");
+
+        api.Verifications.ShouldHaveSingleItem();
+        api.Verifications[0].Ran.ShouldBeTrue();
+        api.Verifications[0].Passed.ShouldBe(true, "api's own unit passed its own check");
+
+        web.Verifications.ShouldHaveSingleItem();
+        web.Verifications[0].Ran.ShouldBeTrue();
+        web.Verifications[0].Passed.ShouldBe(false, "web's own unit was withheld — this must read false on web's OWN row, never blended with api's pass");
+
+        // The run-wide fold still degrades the OVERALL card (existing, unchanged behaviour) — proving the two
+        // truths coexist rather than the per-repository view replacing the run-level one.
+        turn.Blocks.OfType<FinalAnswerBlock>().Single().Degraded.ShouldBeTrue("the run-wide verdict still folds every unit; this test proves the PER-REPOSITORY view exists ALONGSIDE it, not instead of it");
+    }
+
+    /// <summary>Two independent units, each producing ITS OWN repository's delivery with ITS OWN objective acceptance grade — the P21 scenario where one repository's check passed and a sibling's failed.</summary>
+    private async Task SeedPerRepositoryUnitGradesAsync(Guid teamId, Guid runId, params (Guid AgentRunId, Guid RepositoryId, string Alias, bool AcceptancePassed)[] units)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var results = units.Select(u => new SupervisorAgentResult
+        {
+            AgentRunId = u.AgentRunId,
+            Status = u.AcceptancePassed ? "Succeeded" : "Failed",
+            ChangedFiles = new[] { $"{u.Alias}.cs" },
+            Summary = $"Edited {u.Alias}",
+            RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = u.RepositoryId, Alias = u.Alias, ChangedFiles = new[] { $"{u.Alias}.cs" } } },
+            AcceptancePassed = u.AcceptancePassed,
+            AcceptanceDetail = u.AcceptancePassed ? "tests-passed" : "tests-failed-exit-1",
+        }).ToArray();
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn, IdempotencyKey = $"spawn:{Guid.NewGuid():N}", InputHash = new string('0', 64),
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { agentCount = results.Length, agentRunIds = units.Select(u => u.AgentRunId).ToArray(), agentResults = results }, AgentJson.Options),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        foreach (var u in units)
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = u.AgentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "sup", IterationKey = "sup#turn1",
+                Harness = "codex-cli", Status = u.AcceptancePassed ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, TaskJson = "{}",
+                CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+            });
+
+        await db.SaveChangesAsync();
+    }
+
     private async Task SeedIntegrationMergeAsync(Guid teamId, Guid runId, string integratedBranch)
     {
         using var scope = _fixture.BeginScope();

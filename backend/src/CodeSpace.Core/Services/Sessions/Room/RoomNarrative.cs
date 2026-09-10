@@ -658,6 +658,7 @@ public static class RoomNarrative
             Title = d.Title, RepositoryId = d.RepositoryId, RepositoryAlias = d.RepositoryAlias, Disposition = d.Disposition,
             Reference = d.Reference, BranchHead = d.BranchHead, BranchBase = d.BranchBase,
             Checks = d.Checks, ChecksOk = d.ChecksOk, Url = d.Url, Error = d.Error,
+            Verifications = d.Verifications,
         }).ToList();
 
     // ─── summary + diagnostic ───────────────────────────────────────────────────────
