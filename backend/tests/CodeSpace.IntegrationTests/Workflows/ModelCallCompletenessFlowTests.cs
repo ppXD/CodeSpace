@@ -108,7 +108,7 @@ public sealed class ModelCallCompletenessFlowTests
     {
         var decorator = new RecordingLLMClientDecorator(new EchoingPlainClient());
         var callScope = new LlmCallScope(run.RunId, run.TeamId, "start", "start#1", "llm.complete", scope.Resolve<IRunRecordLogger>(),
-            scope.Resolve<IArtifactOffloader>(), CaptureRedactor: redactor, Completeness: writer);
+            scope.Resolve<IArtifactOffloader>(), CaptureRedactor: redactor, Completeness: writer).Unbudgeted("completeness test — budget not under test");
 
         using (LlmCallContext.Push(callScope))
         {

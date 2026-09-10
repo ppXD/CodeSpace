@@ -118,7 +118,7 @@ public class LlmCompleteNodeStreamingFlowTests
         var context = BuildContext(teamId, maxTokens);
 
         // Push the LlmCallContext scope the engine pushes per node, so the recording decorator fires interaction.*.
-        using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "llm1", "llm1#0", "llm.complete", logger, offloader)))
+        using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "llm1", "llm1#0", "llm.complete", logger, offloader).Unbudgeted("recording test — budget not under test")))
         {
             if (expectFault)
             {

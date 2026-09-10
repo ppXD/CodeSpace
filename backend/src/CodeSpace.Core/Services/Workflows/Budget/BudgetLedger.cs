@@ -20,6 +20,17 @@ public static class BudgetReservationStates
     public static readonly IReadOnlyList<string> Live = new[] { Reserved, InFlight, Indeterminate };
 }
 
+/// <summary>
+/// P15-5a: the kind PREFIX an <c>Unbudgeted</c> <c>LlmCallScope</c> records under (<c>$"{UnbudgetedPrefix}{scope.Kind}"</c>)
+/// — an intentionally uncapped observability row, never an admission claim. Excluded from every committed-sum query
+/// below so a plane with no launch cap (operator calibration, a benchmark cell's own cap) can never eat into a
+/// DIFFERENT plane's real cap on the same run.
+/// </summary>
+public static class BudgetKinds
+{
+    public const string UnbudgetedPrefix = "unbudgeted:";
+}
+
 public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal CommittedUsd, decimal CapUsd, string? Reason)
 {
     /// <summary>A lookup of an existing logical claim, never permission for a second physical provider request.</summary>
@@ -161,12 +172,12 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
     public async Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.BudgetReservation.AsNoTracking()
-            .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired)
+            .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired && !r.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix))
             .SumAsync(r => r.SettledUsd ?? r.ReservedUsd, cancellationToken).ConfigureAwait(false);
 
     private async Task<decimal> CommittedInTxAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.BudgetReservation
-            .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired)
+            .Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired && !r.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix))
             .SumAsync(r => r.SettledUsd ?? r.ReservedUsd, cancellationToken).ConfigureAwait(false);
 
     public async Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken)

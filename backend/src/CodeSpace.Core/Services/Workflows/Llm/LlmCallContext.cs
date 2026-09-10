@@ -42,8 +42,21 @@ public sealed record LlmCallScope(
     public Guid? NativeModelCallId { get; init; }
     public PersistenceSecretRedactor? NativeCredentialRedactor { get; init; }
 
+    /// <summary>
+    /// P15-5a: an explicit marker that THIS plane legitimately has no launch to meter against (operator calibration,
+    /// a benchmark cell with its own cap, a workflow node with no run-level cost cap) — set via <see cref="Unbudgeted"/>.
+    /// <see cref="LlmBudgetGuard.GuardedAsync{T}"/> passes the call through un-metered exactly like a missing
+    /// <see cref="Budget"/> always has, but LOGS the plane + reason and records the spend under an "unbudgeted:"
+    /// ledger kind (when <see cref="Budget"/> is also carried) instead of the silent passthrough this replaces. Null
+    /// on every other scope, where a missing <see cref="Budget"/> is now a thrown programming-error signal instead.
+    /// </summary>
+    public string? UnbudgetedReason { get; init; }
+
     /// <summary>This scope viewed for ONE model call: the same identity and collaborators, its own masking observation. The recording decorators take it before capturing, so a call whose prompt carried a secret cannot report the next call on the same node scope as masked.</summary>
     public LlmCallScope ForOneCall() => this with { Masking = new ModelCallCaptureMasking() };
+
+    /// <summary>Mark this scope explicitly Unbudgeted — see <see cref="UnbudgetedReason"/>. Never throws in <see cref="LlmBudgetGuard.GuardedAsync{T}"/>, regardless of whether <see cref="Budget"/> or <see cref="CapUsd"/> are set.</summary>
+    public LlmCallScope Unbudgeted(string reason) => this with { UnbudgetedReason = reason };
 }
 
 public static class LlmCallContext

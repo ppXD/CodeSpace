@@ -2491,7 +2491,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var recordLogger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
         var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
 
-        using (LlmCallContext.Push(new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", recordLogger, offloader)))
+        // P15-5a: this executor has no IBudgetLedger reference (the agent's own cost is metered separately — the
+        // quick lane's post-hoc AgentRunBudget, or the spawning supervisor's own per-turn reservation, neither
+        // reachable from this Hangfire-job scope) — Unbudgeted rather than a silent Budget-less passthrough, so
+        // LlmBudgetGuard still logs the plane by name instead of throwing. Wiring a real reservation here (and
+        // deciding whether it should share the supervisor's "agent-attempt" wave admission) is a follow-up.
+        using (LlmCallContext.Push(new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", recordLogger, offloader).Unbudgeted("agent-run output-review critic has no budget ledger reachable from this executor")))
             return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
     }
 

@@ -101,6 +101,7 @@ public class FailureTaxonomyTests
         FailureCodes.HarnessRecordUnreadable.ShouldBe("harness_record_unreadable");
         FailureCodes.SandboxOutputIncomplete.ShouldBe("sandbox_output_incomplete");
         FailureCodes.Internal.ShouldBe("internal_error");
+        FailureCodes.UnscopedModelCall.ShouldBe("unscoped_model_call");
     }
 
     [Fact]

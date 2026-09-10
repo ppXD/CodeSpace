@@ -44,7 +44,7 @@ public class RunRecordInteractionFlowTests
             var offloader = scope.Resolve<IArtifactOffloader>();
             var decorator = new RecordingStructuredLLMClientDecorator(new FakeStructuredClient());
 
-            using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "sup", "sup#turn1", "supervisor.decision", logger, offloader)))
+            using (LlmCallContext.Push(new LlmCallScope(runId, teamId, "sup", "sup#turn1", "supervisor.decision", logger, offloader).Unbudgeted("recording test — budget not under test")))
             {
                 await decorator.CompleteStructuredAsync(BuildRequest(), CancellationToken.None);
             }

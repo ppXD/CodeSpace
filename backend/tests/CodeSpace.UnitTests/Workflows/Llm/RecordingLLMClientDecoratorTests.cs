@@ -41,8 +41,11 @@ public class RecordingLLMClientDecoratorTests
         Usage = new LlmUsage { InputTokens = 10, OutputTokens = 5, FinishReason = "stop" },
     };
 
+    // P15-5a: LlmBudgetGuard now throws on a scope with no Budget ledger wired (see LlmBudgetGuardTests) — these
+    // fixtures are about RECORDING, not budget, so they mark themselves Unbudgeted rather than wiring a fake ledger
+    // nothing here exercises.
     private static IDisposable PushScope(IRunRecordLogger logger) =>
-        LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new NoopOffloader()));
+        LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new NoopOffloader()).Unbudgeted("recording test — budget not under test"));
 
     [Fact]
     public async Task A_structured_call_records_started_then_completed_with_kind_prompt_and_usage_off_the_scope()
@@ -114,7 +117,7 @@ public class RecordingLLMClientDecoratorTests
         var logger = new CapturingLogger();
         var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new OffloadingOffloader())))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new OffloadingOffloader()).Unbudgeted("recording test — budget not under test")))
         {
             await decorator.CompleteStructuredAsync(Request(), CancellationToken.None);
         }
@@ -140,7 +143,7 @@ public class RecordingLLMClientDecoratorTests
         var decorator = new RecordingStructuredLLMClientDecorator(inner);
 
         StructuredLLMCompletion result;
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new NoopOffloader(), Completeness: completeness)))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "sup", "sup#turn1", "supervisor.decision", logger, new NoopOffloader(), Completeness: completeness).Unbudgeted("recording test — budget not under test")))
         {
             result = await decorator.CompleteStructuredAsync(Request(), CancellationToken.None);   // must NOT throw
         }
@@ -182,7 +185,7 @@ public class RecordingLLMClientDecoratorTests
         var request = new LLMCompletionRequest { Model = "m", SystemPrompt = $"system {secret}", UserPrompt = $"use {secret}" };
 
         LLMCompletion result;
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]))))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret])).Unbudgeted("recording test — budget not under test")))
         {
             result = await decorator.CompleteAsync(request, CancellationToken.None);
         }
@@ -211,7 +214,7 @@ public class RecordingLLMClientDecoratorTests
         var request = Request() with { SystemPrompt = $"system {secret}", UserPrompt = $"use {secret}" };
 
         StructuredLLMCompletion result;
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.structured", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]))))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.structured", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret])).Unbudgeted("recording test — budget not under test")))
         {
             result = await decorator.CompleteStructuredAsync(request, CancellationToken.None);
         }
@@ -243,7 +246,7 @@ public class RecordingLLMClientDecoratorTests
         var logger = new CapturingLogger();
         var completeness = new CapturingCompletenessWriter { Lose = lost };
 
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), Completeness: completeness)))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), Completeness: completeness).Unbudgeted("recording test — budget not under test")))
         {
             await CallEveryFaceAsync(face);
         }
@@ -280,7 +283,7 @@ public class RecordingLLMClientDecoratorTests
         var completeness = new CapturingCompletenessWriter();
         var decorator = new RecordingLLMClientDecorator(new PlainClient());
 
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness)))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness).Unbudgeted("recording test — budget not under test")))
         {
             await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = userPrompt }, CancellationToken.None);
         }
@@ -304,7 +307,7 @@ public class RecordingLLMClientDecoratorTests
         var completeness = new CapturingCompletenessWriter();
         var decorator = new RecordingLLMClientDecorator(new PlainClient());
 
-        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness)))
+        using (LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: new PersistenceSecretRedactor([secret]), Completeness: completeness).Unbudgeted("recording test — budget not under test")))
         {
             await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = $"use {secret}" }, CancellationToken.None);
             await decorator.CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "sys", UserPrompt = "nothing sensitive" }, CancellationToken.None);
