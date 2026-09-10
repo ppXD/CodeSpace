@@ -303,6 +303,25 @@ export interface WorkPlanConfirmationOutcome { resumed: boolean; approved: boole
 /// `SupervisorAnswerDecision` declares. Sent explicitly by every gate surface so the verdict is a field, not a
 /// word the server has to find at the front of whatever language the operator typed.
 export type SupervisorAnswerDecision = "approve" | "revise" | "reject";
+/// Whether an objective check's judge program was protected from candidate tampering — read off the same Detail
+/// markers the supervisor decider prompt already decodes, never a second definition.
+export type RoomOracleProtection = "None" | "Unanchored" | "Subject" | "Protected";
+
+/// One PER-ARTIFACT / PER-REPOSITORY verification fact (Launch Extremis P21) — which check ran against THIS
+/// delivered artifact or repository, distinct from every OTHER one the same turn produced. Populated ONLY from
+/// recorded per-unit grader facts; an absent field is an honest gap, never a fabricated pass.
+export interface RoomArtifactVerification {
+  artifactOrRepositoryRef: string;
+  checkKind: string;
+  ran: boolean;
+  passed?: boolean | null;
+  detail?: string | null;
+  oracleProtection: RoomOracleProtection;
+  evidenceArtifactId?: string | null;
+  /** A fact kept SEPARATE from `passed` on purpose — an incomplete log must never silently cancel an otherwise-verified delivery. Null when the agent declared no log stream at all. */
+  logsComplete?: boolean | null;
+}
+
 /// The delivered change set (PR card).
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
@@ -317,6 +336,8 @@ export interface DeliveryBlock extends RoomBlockBase {
   checksOk?: boolean | null;
   url?: string | null;
   error?: string | null;
+  /** THIS repository's own per-check verification truth (P21) — empty when nothing graded it. A sibling repository's verdict never appears here. */
+  verifications?: RoomArtifactVerification[] | null;
 }
 /// One file a turn produced as a file. `artifactId` is what fetches its bytes.
 export interface DeliverableFile {
@@ -328,6 +349,8 @@ export interface DeliverableFile {
   agentRunId: string;
   /** Current bounded storage reachability. Reachable does not claim that the entire object was re-hashed. */
   availability: "Unknown" | "Reachable" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied";
+  /** THIS file's own per-check verification truth (P21), attributed by its producing agent — empty when nothing graded it. */
+  verifications?: RoomArtifactVerification[] | null;
 }
 /// Files a turn produced as files rather than as a repository change. Absent when it produced none — an empty
 /// list would read as "it produced nothing", which is a claim about the run rather than about this card.

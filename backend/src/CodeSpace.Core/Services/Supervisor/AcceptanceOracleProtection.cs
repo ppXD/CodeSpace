@@ -137,6 +137,12 @@ public static class AcceptanceOracleProtection
         return at < 0 ? null : acceptanceDetail![(at + SubjectDetailMarker.Length)..];
     }
 
+    /// <summary>The clause an UNPROTECTED grade's Detail carries when a judge COULD have been protected but had no base to restore from (<c>SupervisorAcceptanceGrader</c>'s <c>Unprotected</c> outcome). Mutually exclusive with <see cref="SubjectDetailMarker"/> on the same grade — <c>OracleProtectionOutcome.WithSubject</c> overwrites rather than appends when a subject account also applies.</summary>
+    public const string UnanchoredDetailMarker = "oracle: graded UNPROTECTED (";
+
+    /// <summary>Whether <paramref name="acceptanceDetail"/> carries the <see cref="UnanchoredDetailMarker"/> — the ONE reader for a Room-level protection classification, mirroring <see cref="SubjectFilesIn"/>'s role for the subject case.</summary>
+    public static bool IsUnanchored(string? acceptanceDetail) => acceptanceDetail?.Contains(UnanchoredDetailMarker, StringComparison.Ordinal) == true;
+
     /// <summary>
     /// The neutral clause a PASS carries for <paramref name="files"/> (from <see cref="SubjectFilesIn"/>) — worded
     /// so it is TRUE whichever half of <see cref="SupervisorAcceptanceGrader"/>'s collapsed list produced it: the

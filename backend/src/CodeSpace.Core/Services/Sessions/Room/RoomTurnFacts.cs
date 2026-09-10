@@ -159,6 +159,9 @@ public sealed record RoomDelivery
     public bool? ChecksOk { get; init; }
     public string? Url { get; init; }
     public string? Error { get; init; }
+
+    /// <summary>THIS repository's own per-check verification truth (P21) — see <see cref="RoomArtifactVerification"/>.</summary>
+    public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
 }
 
 /// <summary>Turn-facing reduction of one agent's durable log streams. Detail is backend-authored from persisted stream state and integrity evidence.</summary>

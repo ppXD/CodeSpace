@@ -613,7 +613,12 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .GroupBy(e => e.AgentRunId)
             .ToDictionary(g => g.Key, g => g.First().Text!.Trim());
 
-        var deliveries = await DeliveriesAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        // Each unit's own log-stream health — hoisted ahead of the deliveries/deliverables reads below (rather than
+        // gathered inline in the final RoomTurnFacts, its pre-P21 spot) because the P21 per-artifact verification
+        // fold needs it to attach alongside each unit's verdict, never gating it.
+        var agentLogs = await AgentLogsAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false);
+
+        var deliveries = await DeliveriesAsync(runId, teamId, agentResults, agentLogs, cancellationToken).ConfigureAwait(false);
 
         // The run's durable plan checklist (contract + tape-derived states) — null for pre-plan runs, which then
         // project exactly as before (the per-round plan stat rows carry the story).
@@ -644,12 +649,12 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             LatestLines = latestLines,
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
-            AgentLogs = await AgentLogsAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false),
+            AgentLogs = agentLogs,
             Budget = await BudgetAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ChangedFileIdentities = changedFileIdentities,
-            Deliverables = await DeliverablesAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            Deliverables = await DeliverablesAsync(runId, teamId, agentResults, agentLogs, cancellationToken).ConfigureAwait(false),
             ToolCalls = toolCalls,
             ToolHistogram = toolHistogram,
             ReasoningCount = reasoningCount,
@@ -1016,7 +1021,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// </summary>
     internal static (bool? Passed, IReadOnlyList<string> Failed) UnitGrades(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, string> labels)
     {
-        var graded = results.Where(r => r.AcceptancePassed is not null && !SupervisorOutcome.IsWaived(r) && !AgentAcceptanceContract.IsVacuousPass(r.AcceptanceDetail)).ToList();
+        var graded = results.Where(IsGradedUnit).ToList();
 
         if (graded.Count == 0) return (null, Array.Empty<string>());
 
@@ -1027,6 +1032,85 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         return (failed.Count == 0, failed);
     }
+
+    /// <summary>
+    /// Whether a unit's grade counts as a REAL objective check — the ONE predicate <see cref="UnitGrades"/> (the
+    /// run-level fold) and <see cref="ArtifactVerificationOf"/> (the per-artifact/per-repository fold, P21) both
+    /// share, so "did this unit's check actually run" can never be answered two different ways. Excludes a WAIVED
+    /// disposition (a human override, not a check outcome) and a VACUOUS pass (nothing to verify, so nothing ran).
+    /// </summary>
+    private static bool IsGradedUnit(SupervisorAgentResult result) =>
+        result.AcceptancePassed is not null && !SupervisorOutcome.IsWaived(result) && !AgentAcceptanceContract.IsVacuousPass(result.AcceptanceDetail);
+
+    // ─── P21: per-artifact / per-repository verification truth ────────────────────────
+
+    /// <summary>
+    /// THIS repository's own verification rows (P21) — one per unit that TOUCHED it, built from the SAME
+    /// <see cref="IsGradedUnit"/> predicate <see cref="UnitGrades"/> folds the run-level verdict from, so a repo's
+    /// row and the run's overall verdict can never disagree about what "graded" means. A multi-repo unit is matched
+    /// by its OWN <see cref="RepositoryRunResult"/> entries; a unit with none (a single-repo run's compat shape)
+    /// counts only when <paramref name="singleRepoRun"/> AND it actually delivered something — never for a
+    /// coordinator-only agent that touched no repository at all.
+    /// </summary>
+    internal static IReadOnlyList<RoomArtifactVerification> VerificationsForRepository(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, bool singleRepoRun, Guid? repositoryId, string? alias)
+    {
+        var reference = alias ?? repositoryId?.ToString() ?? UnnamedRepository;
+
+        return results.Where(result => TouchesRepository(result, singleRepoRun, repositoryId, alias))
+            .Select(result => ArtifactVerificationOf(result, reference, agentLogs))
+            .ToList();
+    }
+
+    /// <summary>THIS file's own verification rows (P21) — the unit that PRODUCED it, matched directly by agent run id (a file's producer is always exact, never a repo-shape guess).</summary>
+    internal static IReadOnlyList<RoomArtifactVerification> VerificationsForAgent(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, Guid agentRunId) =>
+        results.Where(result => result.AgentRunId == agentRunId)
+            .Select(result => ArtifactVerificationOf(result, agentRunId.ToString(), agentLogs))
+            .ToList();
+
+    private static bool TouchesRepository(SupervisorAgentResult result, bool singleRepoRun, Guid? repositoryId, string? alias) =>
+        result.RepositoryResults.Count > 0
+            ? result.RepositoryResults.Any(repo => RepositoryResultMatches(repo, repositoryId, alias))
+            : singleRepoRun && (result.ProducedBranch is { Length: > 0 } || result.ChangedFiles.Count > 0);
+
+    private static bool RepositoryResultMatches(RepositoryRunResult repo, Guid? repositoryId, string? alias) =>
+        repositoryId is { } id && repo.RepositoryId == id || alias is { Length: > 0 } name && string.Equals(repo.Alias, name, StringComparison.Ordinal);
+
+    /// <summary>One unit's verification row, attributed to <paramref name="reference"/> by the caller. <see cref="RoomArtifactVerification.LogsComplete"/> rides ALONGSIDE the verdict, never gating it — an incomplete log must not silently cancel an otherwise-verified delivery.</summary>
+    internal static RoomArtifactVerification ArtifactVerificationOf(SupervisorAgentResult result, string reference, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs)
+    {
+        var ran = IsGradedUnit(result);
+
+        return new RoomArtifactVerification
+        {
+            ArtifactOrRepositoryRef = reference,
+            CheckKind = AcceptanceCheckKind,
+            Ran = ran,
+            Passed = ran ? result.AcceptancePassed : null,
+            Detail = ClipVerificationDetail(result.AcceptanceDetail),
+            OracleProtection = ProtectionOf(result.AcceptanceDetail),
+            EvidenceArtifactId = result.AcceptanceEvidenceId,
+            LogsComplete = agentLogs.TryGetValue(result.AgentRunId, out var log) ? LogsAreComplete(log.Status) : null,
+        };
+    }
+
+    /// <summary>Reads the SAME Detail markers <see cref="AcceptanceOracleProtection.SubjectFilesIn"/> and <see cref="AcceptanceOracleProtection.IsUnanchored"/> already decode for the decider prompt — never a second definition of what they mean.</summary>
+    private static RoomOracleProtection ProtectionOf(string? detail)
+    {
+        if (AcceptanceOracleProtection.SubjectFilesIn(detail) is not null) return RoomOracleProtection.Subject;
+        if (AcceptanceOracleProtection.IsUnanchored(detail)) return RoomOracleProtection.Unanchored;
+
+        return RoomOracleProtection.None;
+    }
+
+    /// <summary>A stream that settled (Captured or Verified) reads complete; still Finalizing or Incomplete does not.</summary>
+    private static bool LogsAreComplete(RoomAgentLogStatus status) => status is RoomAgentLogStatus.Verified or RoomAgentLogStatus.Captured;
+
+    private static string? ClipVerificationDetail(string? detail) =>
+        string.IsNullOrEmpty(detail) ? null : detail.Length <= MaxVerificationDetailChars ? detail : detail[..MaxVerificationDetailChars].TrimEnd() + "…";
+
+    private const string AcceptanceCheckKind = "acceptance";
+    private const string UnnamedRepository = "repository";
+    private const int MaxVerificationDetailChars = 240;
 
     /// <summary>The reason line for a failed grade, naming the rejected units when the fold knows them (bounded — a wide fan-out must not turn one line into forty). Copy is authored here, like every other word on the card.</summary>
     private static string AcceptanceFailedReasonFor(IReadOnlyList<string>? failedUnits)
@@ -1382,7 +1466,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// row pointing at its successor is exactly what makes a re-capture auditable, so a reader that wants "what did
     /// this run produce" filters, and a reader that wants the chain still has it.</para>
     /// </summary>
-    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, CancellationToken cancellationToken)
     {
         var manifests = (await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
             .Where(manifest => manifest.SupersededByManifestId == null)
@@ -1401,6 +1485,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 ArtifactId = manifest.ContentArtifactId,
                 AgentRunId = manifest.AgentRunId,
                 Availability = reads.TryGetValue(manifest.ContentArtifactId, out var read) ? DeliverableAvailability(read.State) : RoomDeliverableAvailability.Unknown,
+                Verifications = VerificationsForAgent(agentResults, agentLogs, manifest.AgentRunId),
             })
             .ToList();
     }
@@ -1546,8 +1631,26 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     private sealed record ToolPayload(string? DataJson, Guid? DataArtifactId);
 
+    /// <summary>Every repository's latest durable PR disposition, each carrying ITS OWN P21 verification rows — attached last, over whichever source below produced the list, so every delivery path (recorded operation, node output, or the manifest fallback) reports the same per-repository truth.</summary>
+    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, CancellationToken cancellationToken)
+    {
+        var deliveries = await ResolveDeliveriesAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        return AttachVerifications(deliveries, agentResults, agentLogs);
+    }
+
+    /// <summary>Attaches each repository's OWN verification rows (P21) — never a run-wide fold — so a sibling repository's verdict can never bleed into this one's.</summary>
+    private static IReadOnlyList<RoomDelivery> AttachVerifications(IReadOnlyList<RoomDelivery> deliveries, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs)
+    {
+        var singleRepoRun = deliveries.Count <= 1;
+
+        return deliveries
+            .Select(delivery => delivery with { Verifications = VerificationsForRepository(agentResults, agentLogs, singleRepoRun, delivery.RepositoryId, delivery.RepositoryAlias) })
+            .ToList();
+    }
+
     /// <summary>Every repository's latest durable PR disposition. The server-authored operation record is authoritative because it retains failures and skips that cannot produce a manifest; node output and manifests remain backwards-compatible fallbacks.</summary>
-    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<RoomDelivery>> ResolveDeliveriesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
         var recorded = await _db.WorkflowRunRecord.AsNoTracking()
             .Where(record => record.RunId == runId && record.Run.TeamId == teamId && record.RecordType == WorkflowRunRecordTypes.DeliveryPullRequests)

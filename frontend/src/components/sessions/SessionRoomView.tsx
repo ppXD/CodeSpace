@@ -25,8 +25,10 @@ import type {
   PlanChecklistItem,
   RoomAction,
   RoomAgentCard,
+  RoomArtifactVerification,
   RoomAttemptDelta,
   RoomBlock,
+  RoomOracleProtection,
   RoomFilePreview,
   RoomFileIdentity,
   RoomPlanQuestion,
@@ -1952,6 +1954,34 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
   );
 }
 
+/** Backend-authored label for a check's oracle-protection state — never switched on for copy elsewhere. Null omits the tag (the dominant, silent "nothing to flag" case). */
+const PROTECTION_LABEL: Record<RoomOracleProtection, string | null> = {
+  None: null,
+  Unanchored: "unanchored",
+  Subject: "self-graded",
+  Protected: "protected",
+};
+
+/**
+ * One check's verification truth for a delivered artifact/repository (P21) — the pass/fail/unrun word (with the
+ * grader's own detail as a tooltip) plus the oracle-protection tag, so a multi-repo turn's mixed verdicts can never
+ * read as one blended chip. `logsComplete` rides as its OWN note — an incomplete log must never read as, or hide,
+ * a check that genuinely passed.
+ */
+function VerificationRow({ v }: { v: RoomArtifactVerification }) {
+  const tone = !v.ran ? "check" : v.passed === true ? "ok" : v.passed === false ? "err" : "check";
+  const word = !v.ran ? "unrun" : v.passed === true ? "passed" : v.passed === false ? "failed" : "ungraded";
+  const protectionLabel = PROTECTION_LABEL[v.oracleProtection];
+
+  return (
+    <div className="room-pr-sub room-verif">
+      <span className={`room-pchip room-pchip-${tone}`} title={v.detail ?? undefined}><Sym n="terminal" s={10} /> {v.checkKind} {word}</span>
+      {protectionLabel && <span className="room-pchip" title="How the check's judge program was protected from candidate tampering">{protectionLabel}</span>}
+      {v.logsComplete === false && <span className="room-muted">logs incomplete</span>}
+    </div>
+  );
+}
+
 /** One repository's durable delivery outcome. Failed and skipped siblings remain visible after a Room reload. */
 export function PrCard({ delivery }: { delivery: DeliveryBlock }) {
   const disposition = delivery.disposition === "AlreadyOpened" ? "Already open" : delivery.disposition;
@@ -1973,6 +2003,7 @@ export function PrCard({ delivery }: { delivery: DeliveryBlock }) {
             {delivery.error && <span className={tone === "err" ? "room-danger" : "room-muted"}>{delivery.error}</span>}
           </div>
         )}
+        {(delivery.verifications ?? []).map((v, i) => <VerificationRow key={i} v={v} />)}
       </div>
       {delivery.url && <a className="room-pr-btn" href={delivery.url} target="_blank" rel="noreferrer">View PR</a>}
     </div>
@@ -2006,14 +2037,17 @@ export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
           const unavailable = availability !== "Unknown" && availability !== "Reachable";
           const reason: StorageUnavailableReason | null = availability === "Unknown" || availability === "Reachable" ? null : availability;
           return (
-            <div className="room-pr-sub" key={file.artifactId}>
-              <button type="button" className="room-pr-btn" disabled={unavailable} onClick={() => save(file)}>{file.path}</button>
-              <span className="room-row-mid">·</span>
-              <span className="room-muted">{file.kind.toLowerCase()}</span>
-              <span className="room-row-mid">·</span>
-              <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
-              {unavailable && reason && <span className="room-danger"> · {roomFileUnavailableNote(reason)}</span>}
-            </div>
+            <Fragment key={file.artifactId}>
+              <div className="room-pr-sub">
+                <button type="button" className="room-pr-btn" disabled={unavailable} onClick={() => save(file)}>{file.path}</button>
+                <span className="room-row-mid">·</span>
+                <span className="room-muted">{file.kind.toLowerCase()}</span>
+                <span className="room-row-mid">·</span>
+                <span className="room-muted">{formatBytes(file.sizeBytes)}</span>
+                {unavailable && reason && <span className="room-danger"> · {roomFileUnavailableNote(reason)}</span>}
+              </div>
+              {(file.verifications ?? []).map((v, i) => <VerificationRow key={i} v={v} />)}
+            </Fragment>
           );
         })}
         {failed && <div className="room-pr-sub room-danger">Could not fetch {baseName(failed.path)}. {failed.reason ? roomFileUnavailableNote(failed.reason) : "The storage plane gave no reason."}</div>}
