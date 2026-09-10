@@ -124,6 +124,13 @@ public sealed class RealModelAgentInjectionE2ETests
 
             try
             {
+                // A best-of-N attempt that busts its deadline is ABANDONED, not cancelled (RealModelGate.
+                // DriveWithinDeadlineAsync's WaitAsync stops awaiting the closure but its inner calls run with
+                // CancellationToken.None, so the closure — and this method's own `finally` below — keeps running and
+                // only invalidates its lessons later, if ever). The NEXT attempt must not see that stale convention
+                // as still current, so invalidate every current lesson of the shared team before seeding this one.
+                await InvalidateAllCurrentLessonsAsync(live.TeamId);
+
                 lesson = await SeedLessonAsync(live.TeamId, marker);
                 unrelated = await SeedLessonAsync(live.TeamId, unrelatedMarker, relevant: false);
                 var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
@@ -160,19 +167,31 @@ public sealed class RealModelAgentInjectionE2ETests
                 task.SystemPrompt.ShouldNotContain(unrelatedMarker);
                 task.Goal.ShouldBe(goal);
 
-                // Receipt-aware verdict rather than a hard assert on LessonIds: an unavailable/failed relevance
-                // assessment is gateway/model-plane infra (non-gating skip, same as a gateway-failed agent run below);
-                // an abstain or a selection that missed this attempt's lesson is a real but ATTRIBUTABLE miss — it
-                // carries the relevance status/model/digest/candidates so best-of-N retries and the miss is diagnosable,
-                // never a bare Shouldly throw that would kill the whole gate on one abstain.
+                // Receipt-aware verdict rather than a hard assert on LessonIds: an abstain or a selection that missed
+                // this attempt's lesson is a real but ATTRIBUTABLE miss — it carries the relevance status/model/digest/
+                // candidates so best-of-N retries and the miss is diagnosable, never a bare Shouldly throw that would
+                // kill the whole gate on one abstain. PK is (workflow_run_id, prompt_key); Quick effort is a single
+                // agent node today, so exactly one receipt row is expected here — SingleOrDefaultAsync pins that.
                 var receipt = await db.Database.SqlQuery<LessonReceiptRow>($"""
                     SELECT relevance_status, relevance_model, assessment_digest, candidate_ids
                     FROM agent_lesson_prompt_receipt
                     WHERE workflow_run_id = {launch.RunId} AND team_id = {live.TeamId}
                     """).SingleOrDefaultAsync();
 
-                if (receipt is null || receipt.RelevanceStatus is LessonRelevanceStatuses.Unavailable or LessonRelevanceStatuses.Failed)
-                    throw new AgentExecutionInfraException($"the quick lesson run's relevance assessment did not complete cleanly — gateway/model-plane infra (non-gating skip): RelevanceStatus={receipt?.RelevanceStatus ?? "(missing receipt)"}");
+                // The receipt is written before the prompt is composed (AgentLessonInjector.InjectAsync, ~:57-69)
+                // whenever LessonArm is Injected — already hard-asserted above — so a missing receipt here is never a
+                // live-model condition; it is a CODE FAULT in the injector, not an attributable miss.
+                receipt.ShouldNotBeNull("the lesson-arm receipt is written before the prompt is composed whenever LessonArm is Injected — a missing receipt is a CODE FAULT in AgentLessonInjector, not a live-model miss");
+
+                if (receipt!.RelevanceStatus == LessonRelevanceStatuses.Unavailable)
+                    throw new AgentExecutionInfraException($"the quick lesson run's relevance assessment did not complete cleanly — gateway/model-plane infra (non-gating skip): RelevanceStatus={receipt.RelevanceStatus}");
+
+                // `failed` is a CAPABILITY defect of the relevance model itself (schema-valid JSON whose evidence
+                // spans/ids don't check out, or a gateway/parse exception folded into the same status by the catch-all
+                // in LlmLessonRelevanceEvaluator) — not gateway infra — so it consumes a best-of-N slot like any other
+                // real miss instead of being skipped, carrying the same attribution fields for diagnosis.
+                if (receipt.RelevanceStatus == LessonRelevanceStatuses.Failed)
+                    return (false, $"{Provider} '{live.Model}': the relevance assessment failed (a capability defect, not infra) — RelevanceStatus={receipt.RelevanceStatus}; RelevanceModel={receipt.RelevanceModel ?? "(none)"}; AssessmentDigest={receipt.AssessmentDigest ?? "(none)"}; Candidates={receipt.CandidateIds.Length}; LessonIds=[{string.Join(",", task.LessonIds!)}]");
 
                 if (!task.LessonIds!.Contains(lesson.Id))
                     return (false, $"{Provider} '{live.Model}': the relevance model did not select this attempt's lesson — RelevanceStatus={receipt.RelevanceStatus}; RelevanceModel={receipt.RelevanceModel ?? "(none)"}; AssessmentDigest={receipt.AssessmentDigest ?? "(none)"}; Candidates={receipt.CandidateIds.Length}; LessonIds=[{string.Join(",", task.LessonIds)}]");
@@ -407,6 +426,13 @@ public sealed class RealModelAgentInjectionE2ETests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<CodeSpaceDbContext>().Lesson.Where(lesson => lesson.Id == lessonId).ExecuteUpdateAsync(setters => setters.SetProperty(lesson => lesson.InvalidatedAt, DateTimeOffset.UtcNow));
+    }
+
+    /// <summary>Invalidates every currently-active lesson of the shared team before an attempt seeds its own — belt-and-braces for the ABANDONED-attempt case <see cref="InvalidateLessonAsync"/> alone cannot cover: a busted-deadline attempt's own invalidation runs only later (if ever), so the next attempt must not rely on it having already run.</summary>
+    private async Task InvalidateAllCurrentLessonsAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Lesson.Where(lesson => lesson.TeamId == teamId && lesson.InvalidatedAt == null).ExecuteUpdateAsync(setters => setters.SetProperty(lesson => lesson.InvalidatedAt, DateTimeOffset.UtcNow));
     }
 
     private sealed record LessonReceiptRow(string RelevanceStatus, string? RelevanceModel, string? AssessmentDigest, Guid[] CandidateIds);
