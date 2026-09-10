@@ -15,6 +15,7 @@ using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Dtos.Sessions;
@@ -46,10 +47,12 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly IArtifactRangeReader _artifacts;
     private readonly ITeamCostService _costs;
+    private readonly IBudgetLedger _budget;
+    private readonly ITeamCostCapResolver _teamCaps;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, IBudgetLedger budget, ITeamCostCapResolver teamCaps, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -62,6 +65,8 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _publishedBranches = publishedBranches;
         _artifacts = artifacts;
         _costs = costs;
+        _budget = budget;
+        _teamCaps = teamCaps;
         _db = db;
         _cache = cache;
     }
@@ -186,10 +191,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             (IReadOnlyDictionary<Guid, RoomAgentLogSummary>)group.GroupBy(row => row.AgentRunId).ToDictionary(agents => agents.Key, agents => SummarizeLogs(agents.Select(row => row.Log).ToList())));
         var ledgerByRun = reservations.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => (IReadOnlyList<BudgetLedgerRow>)group.ToList());
         var routeByRun = routes.ToDictionary(row => row.RunId, row => row.RouteJson);
+        var teamCap = await TeamCapEvidenceAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         return runIds.ToDictionary(runId => runId, runId => new TerminalEvidence(
             logsByRun.GetValueOrDefault(runId) ?? EmptyAgentLogs,
-            SummarizeBudget(costs.GetValueOrDefault(runId), ledgerByRun.GetValueOrDefault(runId) ?? Array.Empty<BudgetLedgerRow>(), routeByRun.GetValueOrDefault(runId))));
+            SummarizeBudget(costs.GetValueOrDefault(runId), ledgerByRun.GetValueOrDefault(runId) ?? Array.Empty<BudgetLedgerRow>(), routeByRun.GetValueOrDefault(runId), teamCap)));
     }
 
     private async Task<AssistantTurnBlock> BuildTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
@@ -727,6 +733,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget);
     private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd, string Kind);
     private readonly record struct RunRouteRow(Guid RunId, string? RouteJson);
+    private readonly record struct TeamCapEvidence(TeamCostCap Cap, decimal CommittedUsd);
 
     private async Task<RoomBudgetSummary?> BudgetAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -736,7 +743,21 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd, row.Kind))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var routeJson = await _db.WorkflowRun.AsNoTracking().Where(row => row.Id == runId && row.TeamId == teamId).Select(row => row.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        return SummarizeBudget(cost, reservations, routeJson);
+        return SummarizeBudget(cost, reservations, routeJson, await TeamCapEvidenceAsync(teamId, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// P15-5b-ii: the team's standing cap and what it has committed in the cap's own window — team-wide figures, so
+    /// they are read ONCE per projection and shared by every run in it. Null when no cap applies, which keeps the
+    /// row unsaid rather than rendering an absent cap as an unlimited one.
+    /// </summary>
+    private async Task<TeamCapEvidence?> TeamCapEvidenceAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        if (await _teamCaps.ResolveAsync(teamId, cancellationToken).ConfigureAwait(false) is not { } cap) return null;
+
+        var committed = await _budget.CommittedTeamUsdAsync(teamId, cap.WindowStart(DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+        return new TeamCapEvidence(cap, committed);
     }
 
     /// <summary>
@@ -746,7 +767,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// each is derived from the BUDGETED rows only. Its own spend still surfaces, as a separate figure, so a plain
     /// run with only Unbudgeted calls does not just go silent.
     /// </summary>
-    private static RoomBudgetSummary? SummarizeBudget(RunCostSummary? cost, IReadOnlyList<BudgetLedgerRow> reservations, string? routeJson)
+    private static RoomBudgetSummary? SummarizeBudget(RunCostSummary? cost, IReadOnlyList<BudgetLedgerRow> reservations, string? routeJson, TeamCapEvidence? teamCap)
     {
         var routeCap = string.IsNullOrWhiteSpace(routeJson) ? null : TryReadRoute(routeJson)?.Caps.MaxCostUsd;
         var budgeted = reservations.Where(row => !row.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix, StringComparison.Ordinal)).ToList();
@@ -757,7 +778,9 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var unbudgetedUsd = UnbudgetedUsd(reservations);
         var hasCostEvidence = cost is { } value && (value.CountedRuns > 0 || value.BrainPlaneUsd is not null || value.UnknownBrainCalls > 0);
 
-        if (!hasCostEvidence && reservations.Count == 0 && cap is null) return null;
+        // A team cap is evidence on its own: a run with no spend yet still answers to it, so it can bring the block
+        // into existence rather than only decorating one the run's own figures already earned.
+        if (!hasCostEvidence && reservations.Count == 0 && cap is null && teamCap is null) return null;
 
         return new RoomBudgetSummary
         {
@@ -765,6 +788,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             BrainPlaneUsd = cost?.BrainPlaneUsd, TotalUsd = cost?.TotalUsd, UnknownAgentRuns = cost?.UnknownCostRuns ?? 0,
             UnknownBrainCalls = cost?.UnknownBrainCalls ?? 0, CommittedUsd = budgeted.Count == 0 ? null : committedRows.Sum(row => row.SettledUsd ?? row.ReservedUsd),
             CapUsd = cap, UnresolvedClaims = unresolved, UnbudgetedUsd = unbudgetedUsd,
+            TeamCapUsd = teamCap?.Cap.CapUsd, TeamCommittedUsd = teamCap?.CommittedUsd, TeamCapGrain = teamCap?.Cap.Grain, TeamCapWindow = teamCap?.Cap.Window,
         };
     }
 

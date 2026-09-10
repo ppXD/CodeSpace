@@ -37,5 +37,8 @@ public static class TeamPermissions
     public const string StorageManage = "storage.manage";
     public const string ModelsManage = "models.manage";
     public const string MembersManage = "members.manage";
+
+    /// <summary>Set or clear the team's standing cost cap — the ceiling every run in the team is admitted against.</summary>
+    public const string BudgetManage = "budget.manage";
     public const string TeamManage = "team.manage";
 }
