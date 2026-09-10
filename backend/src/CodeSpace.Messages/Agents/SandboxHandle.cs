@@ -132,8 +132,9 @@ public sealed record SandboxHandle
     /// re-open the endpoint at the SAME address the detached agent's declaration file already points at — but it is
     /// also the ONLY way back to that address, and that is deliberate. The path used to be derived from the run id, so
     /// anything holding the id (a URL, an event, an artifact) could compute another run's listener address; it now ends
-    /// in a 128-bit CSPRNG segment that exists nowhere but here. Null on an older handle and for a run with no fabric —
-    /// and a re-attach that finds no path re-opens nothing rather than binding a guess.
+    /// in a 128-bit CSPRNG segment that exists nowhere but here. Null on a handle stamped before this field existed and
+    /// for a run with no fabric — a re-attach reading null falls back, for the one deploy generation that introduces
+    /// the field, to the address the old code DERIVED, which is the address that run's still-live agent holds.
     /// </summary>
     public string? McpSocketPath { get; init; }
 

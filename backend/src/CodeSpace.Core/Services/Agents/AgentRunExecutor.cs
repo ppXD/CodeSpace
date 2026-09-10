@@ -2808,29 +2808,40 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The in-process listener died with the original worker, but the setsid-detached agent keeps running with its 0600
     /// declaration file pointing at THIS socket+token — a fresh token would lock it out. BOTH come off the handle: the
     /// socket path can no longer be recomputed from the run id (its unguessable segment is the point), so the handle is
-    /// the only route back to the address the launch bound. Null — no re-open — when the run had no fabric, and equally
-    /// when the handle predates the stamped path: a worker that cannot name the launch's address must serve the run
-    /// tool-less rather than bind a different socket nobody is connected to. The wiring flag is NOT re-checked here (the
-    /// agent's declaration already exists, so the endpoint must serve it regardless). The catalog mode is re-resolved
-    /// from the SAME task, so the re-opened endpoint serves the SAME slice the launch did. Fail-soft via
-    /// <see cref="OpenMcpEndpoint"/>.
+    /// the only route back to the address the launch bound. Null — no re-open — when the run had no fabric.
+    ///
+    /// <para>A handle stamped BEFORE the path field existed is the one exception, and only for the deploy generation
+    /// that introduces the field: such a run's live agent holds a declaration pointing at the address the OLD code
+    /// derived, so <see cref="LocalProcessRunner.LegacyDerivedMcpSocketPathFor"/> names it exactly rather than guessing
+    /// — the fabric that agent is already connected to is re-opened instead of the run being served tool-less. It is
+    /// logged so the fallback's use is visible, and the branch is removable once no pre-field handle can still be
+    /// re-attached; nothing has launched at a derived address since.</para>
+    ///
+    /// <para>The wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
+    /// it regardless). The catalog mode is re-resolved from the SAME task, so the re-opened endpoint serves the SAME
+    /// slice the launch did. Fail-soft via <see cref="OpenMcpEndpoint"/>.</para>
     /// </summary>
     private AgentMcpEndpoint? ReopenMcpEndpointForReattach(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
         if (handle.McpRunToken is not { Length: > 0 } token) return null;
 
-        if (handle.McpSocketPath is not { Length: > 0 } socketPath)
-        {
-            _logger.LogWarning("Agent run {RunId}: the durable handle carries an MCP token but no socket path, so this re-attach cannot re-open the run's tool fabric; the run continues without it", runId);
-
-            return null;
-        }
+        var socketPath = handle.McpSocketPath is { Length: > 0 } stamped ? stamped : LegacySocketPathFor(runId);
 
         // The reopened endpoint redacts tool-result text with a redactor the caller resolved fresh from the run's
         // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
         // delicate fingerprint-gated marker-only re-tail in ReattachAndFoldAsync is left untouched. The caller degrades
         // it to SecretRedactor.None on a resolution failure, so a deleted/rotated credential never blocks the reattach.
         return OpenMcpEndpoint(task, runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, approvalConversationId, ct);
+    }
+
+    /// <summary>ONE-GENERATION fallback for a handle stamped before <c>SandboxHandle.McpSocketPath</c> existed: the derived address that run's still-live agent holds in its declaration. Logged rather than silent, so a deployment can see when the last pre-field handle has drained and the branch can go.</summary>
+    private string LegacySocketPathFor(Guid runId)
+    {
+        var socketPath = LocalProcessRunner.LegacyDerivedMcpSocketPathFor(ReviseSpoolKey(runId, round: 0));
+
+        _logger.LogInformation("Agent run {RunId}: the durable handle predates the recorded MCP socket path, so this re-attach re-opens the fabric at the address the launch DERIVED ({SocketPath}) — the one this run's live agent is already pointed at", runId, socketPath);
+
+        return socketPath;
     }
 
     /// <summary>
