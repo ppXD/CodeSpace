@@ -93,6 +93,8 @@ public sealed class AgentRunExplicitOwnershipFlowTests
     // the same instant and both call ReserveReattachAsync; exactly one must win the epoch bump, the loser must see no
     // reservation, and the ORIGINAL worker (whose epoch predates the race entirely) must lose its own fence the
     // instant either side commits — no double adoption, no split-brain.
+    // This proves the CAS's single-winner guarantee under concurrent invocation (exactly one winner; the original
+    // owner's heartbeat/assert then throw) — it does not exercise every interleaving of the underlying race window.
     [Fact]
     public async Task Two_concurrent_reclaims_of_one_stale_run_leave_exactly_one_winner_and_fence_out_the_original_owner()
     {
