@@ -137,7 +137,7 @@ public static class AcceptanceOracleProtection
         return at < 0 ? null : acceptanceDetail![(at + SubjectDetailMarker.Length)..];
     }
 
-    /// <summary>The clause an UNPROTECTED grade's Detail carries when a judge COULD have been protected but had no base to restore from (<c>SupervisorAcceptanceGrader</c>'s <c>Unprotected</c> outcome). Mutually exclusive with <see cref="SubjectDetailMarker"/> on the same grade — <c>OracleProtectionOutcome.WithSubject</c> overwrites rather than appends when a subject account also applies.</summary>
+    /// <summary>The clause an UNPROTECTED grade's <c>OracleNote</c> carries when a judge COULD have been protected but had no base to restore from (<c>SupervisorAcceptanceGrader</c>'s <c>Unprotected</c> outcome). Rides a DIFFERENT field than <see cref="SubjectDetailMarker"/> on the same grade — <c>Unprotected</c> sets <c>IntegrityNote</c>, <c>OracleProtectionOutcome.WithSubject</c> sets <c>DetailSuffix</c>; distinct fields, both carried when a subject account also applies.</summary>
     public const string UnanchoredDetailMarker = "oracle: graded UNPROTECTED (";
 
     /// <summary>Whether <paramref name="acceptanceDetail"/> carries the <see cref="UnanchoredDetailMarker"/> — the ONE reader for a Room-level protection classification, mirroring <see cref="SubjectFilesIn"/>'s role for the subject case.</summary>

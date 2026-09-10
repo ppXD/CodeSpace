@@ -1076,7 +1076,15 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         };
     }
 
-    /// <summary>Reads the SAME Detail markers <see cref="AcceptanceOracleProtection.SubjectFilesIn"/> and <see cref="AcceptanceOracleProtection.IsUnanchored"/> already decode for the decider prompt — never a second definition of what they mean.</summary>
+    /// <summary>
+    /// Reads the SAME Detail markers <see cref="AcceptanceOracleProtection.SubjectFilesIn"/> and
+    /// <see cref="AcceptanceOracleProtection.IsUnanchored"/> already decode for the decider prompt — never a
+    /// second definition of what they mean. <see cref="RoomOracleProtection.Unanchored"/> is defined but
+    /// unpopulated today: the grader writes the unanchored clause to <c>BenchmarkGrade.OracleNote</c>, which no
+    /// per-unit <c>AcceptanceDetail</c> producer copies onto <paramref name="detail"/> — so
+    /// <see cref="AcceptanceOracleProtection.IsUnanchored"/> never matches on real data and this resolves to
+    /// <see cref="RoomOracleProtection.None"/> in production.
+    /// </summary>
     private static RoomOracleProtection ProtectionOf(string? detail)
     {
         if (AcceptanceOracleProtection.SubjectFilesIn(detail) is not null) return RoomOracleProtection.Subject;
