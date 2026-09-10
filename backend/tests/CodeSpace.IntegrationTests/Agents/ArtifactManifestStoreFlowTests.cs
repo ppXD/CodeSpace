@@ -1,12 +1,16 @@
 using System.Security.Cryptography;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -112,6 +116,106 @@ public class ArtifactManifestStoreFlowTests
         rows.Count.ShouldBe(2, "a changed capture appends — never rewrites");
         rows[0].SupersededByManifestId.ShouldBe(rows[1].Id, "the prior row points at its successor (the #1352 discipline)");
         rows[1].SupersededByManifestId.ShouldBeNull("the fresh row is current");
+    }
+
+    [Fact]
+    public async Task A_reattached_runs_recapture_at_a_bumped_epoch_supersedes_the_stale_epoch_row()
+    {
+        // The gap: a reconciler reattach bumps agent_run.fence_epoch (N → N+1) after a mid-run capture at N already
+        // landed a manifest row. UpsertAsync superseded same-epoch rows only, so the epoch-N row and the fresh
+        // epoch-(N+1) row both read current — a plain ownership-fence reattach, no zombie writer required.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = Guid.NewGuid();
+        await SeedRunningAgentRunAsync(teamId, agentRunId, fenceEpoch: 1);
+
+        using var workspace = new TempWorkspace();
+        workspace.Write("report.md", "epoch one draft");
+        var task = Task("report.md");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None)).ShouldBe(1);
+
+        long reattachedEpoch;
+        using (var reclaim = _fixture.BeginScope())
+            reattachedEpoch = (await reclaim.Resolve<IAgentRunService>().ReserveReattachAsync(agentRunId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+
+        reattachedEpoch.ShouldBe(2, "the premise: the reconciler moved the run to a fresh epoch after the epoch-1 capture already landed");
+
+        workspace.Write("report.md", "epoch two — the reattached attempt's final draft");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, reattachedEpoch, CancellationToken.None)).ShouldBe(1);
+
+        using var reader = _fixture.BeginScope();
+        var rows = await reader.Resolve<CodeSpaceDbContext>().ArtifactManifest.AsNoTracking()
+            .Where(m => m.AgentRunId == agentRunId).OrderBy(m => m.FenceEpoch).ToListAsync();
+
+        rows.Count.ShouldBe(2);
+        rows[0].FenceEpoch.ShouldBe(1);
+        rows[1].FenceEpoch.ShouldBe(2);
+        rows[1].SupersededByManifestId.ShouldBeNull("the reattached epoch's row is current");
+        rows[0].SupersededByManifestId.ShouldBe(rows[1].Id, "the stale epoch-1 row must be superseded by the epoch-2 recapture — not left dangling as a second current copy");
+
+        (await reader.Resolve<IArtifactManifestStore>().ListForAgentRunAsync(agentRunId, teamId, CancellationToken.None))
+            .Count(m => m.SupersededByManifestId == null).ShouldBe(1, "exactly one current deliverable for this path, regardless of which epoch produced it");
+    }
+
+    [Fact]
+    public async Task A_stale_epoch_write_after_a_later_epoch_already_recorded_is_refused()
+    {
+        // Belt-and-braces: production can't reach this state (AgentRunService.AssertOwnershipAsync refuses a
+        // reclaimed worker before it ever calls back into this store), but the store must not compound the mistake
+        // if some caller ever bypasses that fence — a write at an epoch the identity has already moved past must be
+        // a pure no-op, never inserted and never superseding the later epoch's current row.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var agentRunId = Guid.NewGuid();
+        await SeedRunningAgentRunAsync(teamId, agentRunId, fenceEpoch: 1);
+
+        using var workspace = new TempWorkspace();
+        workspace.Write("report.md", "epoch one draft");
+        var task = Task("report.md");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None);
+
+        using (var reclaim = _fixture.BeginScope())
+            (await reclaim.Resolve<IAgentRunService>().ReserveReattachAsync(agentRunId, CancellationToken.None)).ShouldNotBeNull().Epoch.ShouldBe(2);
+
+        workspace.Write("report.md", "epoch two — the reattached attempt's final draft");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 2, CancellationToken.None);
+
+        workspace.Write("report.md", "a stale epoch-1 write arriving late");
+
+        // The returned count reflects that the bytes resolved and streamed to the CAS store (the retention
+        // declaration is unconditional, see ArtifactManifestStore.CaptureOneAsync) — the manifest pointer itself is
+        // the thing under test here, asserted on the rows below.
+        using (var stale = _fixture.BeginScope())
+            await stale.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None);
+
+        using var reader = _fixture.BeginScope();
+        var rows = await reader.Resolve<CodeSpaceDbContext>().ArtifactManifest.AsNoTracking()
+            .Where(m => m.AgentRunId == agentRunId).OrderBy(m => m.FenceEpoch).ToListAsync();
+
+        rows.Count.ShouldBe(2, "the refused stale write must not append a third row");
+        rows[1].FenceEpoch.ShouldBe(2);
+        rows[1].SupersededByManifestId.ShouldBeNull("the stale epoch-1 write must never supersede the epoch-2 row");
+        rows[0].SupersededByManifestId.ShouldBe(rows[1].Id, "the epoch-1 row's existing supersession is untouched by the refused replay");
+    }
+
+    private async Task SeedRunningAgentRunAsync(Guid teamId, Guid runId, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = fenceEpoch,
+            LeaseExpiresAt = DateTimeOffset.UtcNow - TimeSpan.FromHours(1), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     [Fact]

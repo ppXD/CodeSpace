@@ -1476,10 +1476,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// </summary>
     private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, CancellationToken cancellationToken)
     {
-        var manifests = (await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false))
-            .Where(manifest => manifest.SupersededByManifestId == null)
-            .Take(MaxChangedFiles)
-            .ToList();
+        var manifests = CurrentDeliverableManifests(await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false)).Take(MaxChangedFiles).ToList();
         if (manifests.Count == 0) return Array.Empty<DeliverableFile>();
 
         var reads = await _artifacts.ReadRangesAsync(new ArtifactRangesReadRequest(teamId, manifests.Select(manifest => manifest.ContentArtifactId).Distinct().Take(MaxDeliverableAvailabilityProbes).ToArray(), 0, 1), cancellationToken).ConfigureAwait(false);
@@ -1497,6 +1494,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             })
             .ToList();
     }
+
+    /// <summary>
+    /// Current rows only, folded to the highest <c>FenceEpoch</c> per (attempt, path) — a second line of defense
+    /// alongside <see cref="ArtifactManifestStore"/>'s own write-side supersession: that store keeps at most one
+    /// current row per identity across epochs, so this fold is a no-op against a healthy store and only matters
+    /// against a row a pre-fix capture left dangling. Pure and internal so the fold is unit-pinned directly
+    /// (InternalsVisibleTo), not only through a full projection.
+    /// </summary>
+    internal static IEnumerable<ArtifactManifest> CurrentDeliverableManifests(IReadOnlyList<ArtifactManifest> manifests) =>
+        manifests.Where(manifest => manifest.SupersededByManifestId == null)
+            .GroupBy(manifest => (manifest.AgentRunId, manifest.LogicalPath)).Select(group => group.MaxBy(manifest => manifest.FenceEpoch)!);
 
     private static RoomDeliverableAvailability DeliverableAvailability(ArtifactRangeReadState state) => state switch
     {
