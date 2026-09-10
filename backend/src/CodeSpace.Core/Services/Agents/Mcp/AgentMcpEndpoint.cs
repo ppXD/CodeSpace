@@ -225,11 +225,17 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     }
 
     /// <summary>
-    /// Create the run's socket directory restricted to the owner (0700), so another local user can neither enter it nor
-    /// LIST the unguessable name inside it — without the 0700 the random directory name would be readable to anyone who
-    /// could stat the parent, and an unguessable path nobody can enumerate is the whole point. Best-effort on the mode
-    /// (a chmod failure is a Warning, not a failed endpoint: the token remains the authoritative gate); a no-op on
-    /// Windows, where unix modes don't apply.
+    /// Create the run's socket directory restricted to the owner (0700) — AND restrict the directory that LISTS it,
+    /// which is the one that decides whether the run's random segment is enumerable at all. A directory's own mode
+    /// governs its CHILDREN; its name is listed by its parent. So 0700 on the leaf stops another local user entering
+    /// the run's directory or reaching the socket, but only 0700 on the parent (<c>&lt;spool&gt;/&lt;key&gt;/mcp/</c>,
+    /// or <c>&lt;temp&gt;/cs-mcp/</c> on the short-path fallback) stops them reading the segment out of a listing —
+    /// and the segment is on bubblewrap's <c>--bind</c> argv, so it is not secret from a same-uid reader either way.
+    /// The parent is restricted ONLY when it is one of those two directories the layout mints, never an arbitrary
+    /// ancestor: the system temp root is somebody else's.
+    ///
+    /// <para>Best-effort on the modes (a chmod failure is a Warning, not a failed endpoint: the 256-bit token remains
+    /// the authoritative gate); a no-op on Windows, where unix modes don't apply.</para>
     /// </summary>
     private void CreateOwnerOnlyDirectory(string directory, ILogger logger)
     {
@@ -237,8 +243,19 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         if (OperatingSystem.IsWindows()) return;
 
+        RestrictToOwner(directory, logger);
+
+        if (Path.GetDirectoryName(directory) is { Length: > 0 } parent && IsSocketRoot(parent)) RestrictToOwner(parent, logger);
+    }
+
+    /// <summary>True for the two directories the runner's layout mints as socket roots — the ones whose children are per-run segments and nothing else, so 0700 on them costs no other consumer anything.</summary>
+    private static bool IsSocketRoot(string parent) =>
+        Path.GetFileName(parent) is LocalProcessRunner.McpSocketDir or LocalProcessRunner.McpShortSocketRoot;
+
+    private void RestrictToOwner(string directory, ILogger logger)
+    {
         try { File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
-        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket directory to 0700; its name may be listable by another local user on this host", _runId); }
+        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket directory {SocketDirectory} to 0700; the run's socket directory name may be listable by another local user on this host", _runId, directory); }
     }
 
     /// <summary>Restrict the socket file to the owner (0600) so another local user can't connect to the run's endpoint. A no-op on Windows where unix file modes don't apply. Best-effort — a chmod failure must NOT fail the endpoint (the 256-bit token is the authoritative gate), but it's logged as a Warning so it isn't fully silent.</summary>

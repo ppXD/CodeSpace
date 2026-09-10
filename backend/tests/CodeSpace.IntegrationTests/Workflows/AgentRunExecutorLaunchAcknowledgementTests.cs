@@ -222,7 +222,7 @@ public partial class AgentRunExecutorTests
             adopted.WorkspaceBaseSha.ShouldBeNull("null exactly when WorkspaceDirectory is, which is the invariant the handle documents");
             adopted.InjectedKeyFingerprint.ShouldBeNull("the fingerprint comes from a decrypted credential the reconciler cannot decrypt, so an adopted run continues marker-only rather than re-tailing under a redactor it cannot prove it rebuilt");
             adopted.McpRunToken.ShouldBeNull("the run token is minted per launch and stamped by the write that failed, so an adopted run cannot re-open its MCP endpoint");
-            adopted.McpSocketPath.ShouldBeNull("and it could not re-open one anyway: the socket address is unguessable by construction, so a handle that never recorded it cannot name it");
+            adopted.McpSocketPath.ShouldBeNull("null exactly when McpRunToken is, which is what makes 'no fabric to re-open' one fact rather than two half-restored ones");
             adopted.AgentRunLogCaptureSessionId.ShouldBeNull("the session id is minted per launch and persisted only by the capture OPEN, which is downstream of the write that failed — recovering an earlier round's id would bind this handle to another spool's capture");
 
             Directory.Exists(handle.WorkspaceDirectory!).ShouldBeTrue("the adopted execution still owns its real clone, which now ages out through the workspace janitor rather than being reclaimed from the handle");

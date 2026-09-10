@@ -41,6 +41,9 @@ public sealed partial class LocalProcessRunner
     /// <summary>A DEDICATED socket-only subdir under the spool dir (<c>&lt;spool&gt;/mcp/</c>) whose per-run child holds ONLY the socket. The bwrap bind binds THAT child, never the spool dir itself — so the agent never sees the spool's <c>out.log</c> / <c>err.log</c> / <c>exit</c> / <c>pid</c> artifacts (it could otherwise read its own transcript or forge the <c>exit</c> marker — design §3b / Attack 4).</summary>
     internal const string McpSocketDir = "mcp";
 
+    /// <summary>The short-path fallback's socket root under the system temp dir. Shared by every run that overflows the canonical path, so — like <see cref="McpSocketDir"/> — it is the directory that LISTS the per-run segments and the one the endpoint restricts to the owner.</summary>
+    internal const string McpShortSocketRoot = "cs-mcp";
+
     /// <summary>The usable <c>AF_UNIX</c> path maximum — 103 on macOS/BSD, 107 on Linux; use the LOWER so the short-path fallback fires on every host that would overflow either. Pinned by a test: a spool path longer than this would overflow <c>Bind</c> (empirically, .NET's <c>UnixDomainSocketEndPoint</c> binds at length 103 and throws at 104 on macOS), so <see cref="McpSocketPathFor"/> falls back to a short temp path.</summary>
     internal const int UnixSocketPathCap = 103;
 
@@ -919,7 +922,8 @@ public sealed partial class LocalProcessRunner
     /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp/&lt;socketId&gt;/s</c> so it is reaped
     /// with the spool and the runner binds the SAME path. BUT an <c>AF_UNIX</c> address can't exceed
     /// <see cref="UnixSocketPathCap"/> bytes, and a long spool root can overflow that on macOS — so when the canonical
-    /// path is too long this falls back to a SHORT temp path, <c>&lt;temp&gt;/cs-mcp/&lt;socketId&gt;/s</c>. Both
+    /// path is too long this falls back to a SHORT temp path, <c>&lt;temp&gt;/cs-mcp/&lt;socketId&gt;/s</c> (see
+    /// <see cref="McpShortSocketRoot"/>). Both
     /// shapes obey the same two rules: the socket's parent directory belongs to ONE run and holds ONLY the socket (the
     /// bwrap bind of that parent therefore exposes nothing else — design §3b / Attack 4), and its name is
     /// <paramref name="socketId"/>.
@@ -942,7 +946,27 @@ public sealed partial class LocalProcessRunner
         // Intentionally temp-rooted: the canonical path overflowed BECAUSE the spool root is long, so the short socket
         // must live elsewhere. Still per-run and still unguessable (~temp+30 chars < cap on macOS), unlinked on dispose;
         // if even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
-        return Path.Combine(Path.GetTempPath(), "cs-mcp", socketId, McpSocketFile);
+        return Path.Combine(Path.GetTempPath(), McpShortSocketRoot, socketId, McpSocketFile);
+    }
+
+    /// <summary>
+    /// The address a run launched BEFORE the socket id existed is bound at — derived from the run key exactly as
+    /// <see cref="McpSocketPathFor"/> used to derive it: <c>&lt;spool&gt;/&lt;key&gt;/mcp/mcp.sock</c>, or the short
+    /// <c>&lt;temp&gt;/cs-mcp/&lt;key&gt;/s</c> when that overflowed the cap. The two leaf names are FROZEN COPIES, not
+    /// references to today's constants, because this must keep naming what the OLD code wrote however those move.
+    ///
+    /// <para>It exists for ONE deploy generation and has exactly one caller. A run in flight when the socket id ships
+    /// has a handle with no <c>SandboxHandle.McpSocketPath</c> and a live detached agent whose 0600 declaration points
+    /// at precisely this path — so a re-attach binding it re-opens the fabric that agent is already talking to, which
+    /// is not a guess. It is removable as soon as no pre-field handle can still be re-attached (the spool reaper's
+    /// window): no launch has produced a path of this shape since, so a later caller would only ever bind a socket
+    /// nobody is connected to.</para>
+    /// </summary>
+    internal static string LegacyDerivedMcpSocketPathFor(string spoolKey)
+    {
+        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketDir, "mcp.sock");
+
+        return canonical.Length <= UnixSocketPathCap ? canonical : Path.Combine(Path.GetTempPath(), McpShortSocketRoot, spoolKey, "s");
     }
 
     /// <summary>

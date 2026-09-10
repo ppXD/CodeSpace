@@ -574,12 +574,33 @@ public class AgentMcpEndpointFlowTests
         // (the posture Sandbox:RequireConfinement leaves permitted) nothing at all stopping a sibling process reaching
         // the path. Nothing but the handle can now name it.
         var spoolDirectory = LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N"));
-        handle.McpSocketPath!.ShouldNotBe(Path.Combine(spoolDirectory, "mcp", "mcp.sock"), customMessage: "the pre-hardening address was exactly this — derived, and so nameable by anything holding the run id");
-        Path.GetFileName(Path.GetDirectoryName(handle.McpSocketPath))!.Length.ShouldBeGreaterThan(16, customMessage: "the socket's parent directory carries the run's unguessable id — a short or empty segment means the id stopped reaching the path");
+        var segment = Path.GetFileName(Path.GetDirectoryName(handle.McpSocketPath))!;
+
+        handle.McpSocketPath!.ShouldNotBe(LocalProcessRunner.LegacyDerivedMcpSocketPathFor(runId.ToString("N")), customMessage: "the pre-hardening address was exactly this — derived, and so nameable by anything holding the run id");
+
+        // Assert the SEGMENT, not the path: the canonical path legitimately contains the run key (the spool directory is
+        // keyed by it), so only the segment can carry the claim. And assert what the segment IS, not merely that it is
+        // long: an executor that passed the 32-hex run key as the socket id would satisfy both "not the old address"
+        // and "longer than 16" while re-deriving the address the run id names — the exact regression this pins.
+        segment.ShouldNotContain(runId.ToString("N"), customMessage: "the run key must not BE the segment — that would put the address back inside the id that travels in URLs, events and artifacts");
+        segment.Length.ShouldBe(22, customMessage: "22 base64url characters is McpRunToken.MintPathId's 128 CSPRNG bits with the padding trimmed; any other width means a different, narrower id reached the path");
 
         if (!OperatingSystem.IsWindows())
+        {
             File.GetUnixFileMode(Path.Combine(spoolDirectory, "agent-home"))
                 .ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, customMessage: "the config-home holding the token-bearing declaration must be 0700, not whatever the umask happened to be");
+
+            // BOTH directories, and the parent is the one that carries the claim: a directory's own mode governs its
+            // CHILDREN, while its NAME is listed by its parent. A 0700 socket directory inside a 0755 parent still
+            // hands the run's segment to any local reader who lists the parent, which is what "unguessable" was
+            // supposed to prevent.
+            var socketDirectory = Path.GetDirectoryName(handle.McpSocketPath)!;
+
+            File.GetUnixFileMode(socketDirectory)
+                .ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, customMessage: "the run's socket directory must be 0700 so no other local user can enter it or reach the socket");
+            File.GetUnixFileMode(Path.GetDirectoryName(socketDirectory)!)
+                .ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, customMessage: "the socket ROOT that lists the run's segments must be 0700 too — it is the directory that decides whether the unguessable name is enumerable at all");
+        }
         env.GetProperty("CODESPACE_RUN_TOKEN").GetString().ShouldNotBeNullOrEmpty(customMessage: "the declaration carries the run token the proxy authenticates with");
 
         // 0600: the token lives in this file, so it must not be group/other-readable.
@@ -654,8 +675,10 @@ public class AgentMcpEndpointFlowTests
         finally { try { Directory.Delete(spoolRoot, recursive: true); } catch { /* best-effort */ } }
     }
 
-    [Fact]
-    public async Task A_reattach_after_worker_death_re_opens_the_endpoint_with_the_PERSISTED_token()
+    [Theory]
+    [InlineData(true)]    // the ordinary run: the launch stamped its unguessable address on the handle
+    [InlineData(false)]   // a handle stamped BEFORE the field existed — in flight when this ships
+    public async Task A_reattach_after_worker_death_re_opens_the_endpoint_with_the_PERSISTED_token(bool handleRecordsTheSocketPath)
     {
         if (OperatingSystem.IsWindows()) return;
         if (!Socket.OSSupportsUnixDomainSockets) return;
@@ -692,6 +715,14 @@ public class AgentMcpEndpointFlowTests
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running, "worker death leaves the run Running for the reconciler");
 
+        // 2b. The address the re-attach must land on. Normally it comes off the handle — the only route back to an
+        //     unguessable path. A run in flight when that field shipped has no such record, but its live agent's 0600
+        //     declaration points at exactly the address the OLD code DERIVED, so stripping the field from the dead
+        //     worker's handle stands in for that pre-field handle and pins that the re-attach binds THAT address
+        //     rather than serving the run tool-less. Staged AFTER the death so the live executor cannot write the
+        //     field back over it. (Removable with the fallback itself, once no pre-field handle can be re-attached.)
+        var expectedSocketPath = handleRecordsTheSocketPath ? (await ReadHandleAsync(runId)).McpSocketPath! : await StripRecordedSocketPathAsync(runId);
+
         // 3. RECLAIM (the reconciler's atomic step) then a FRESH executor's ReattachAsync — it re-opens the endpoint on
         //    the SAME socket+token the handle recorded at launch, bounded to the re-tail span (the supervisor is still
         //    sleeping). Run it on a background task so we can drive JSON-RPC against the re-bound socket.
@@ -708,6 +739,9 @@ public class AgentMcpEndpointFlowTests
 
         var reConnect = await WaitForConnectAsync(connects, runId, reattach);
         reConnect.Token.ShouldBe(persistedToken, "the re-attach re-binds the SAME token the agent's declaration already holds — survived worker death via the persisted handle");
+        reConnect.SocketPath.ShouldBe(expectedSocketPath, customMessage: handleRecordsTheSocketPath
+            ? "the recorded address is the ONLY route back to the socket the launch bound — an unguessable segment cannot be recomputed"
+            : "a pre-field handle records no address, so the re-attach must bind the one the old code derived (which its live agent still holds) rather than serve the run tool-less");
 
         // (a) a client presenting the PERSISTED token completes initialize/tools-list against the RE-BOUND socket.
         await using (var client = await McpClient.ConnectWithRawTokenAsync(reConnect.SocketPath, persistedToken))
@@ -1145,6 +1179,25 @@ public class AgentMcpEndpointFlowTests
         json.ShouldNotBeNullOrEmpty("the durable launch persists its handle before it observes");
 
         return JsonSerializer.Deserialize<SandboxHandle>(json!, AgentJson.Options)!;
+    }
+
+    /// <summary>
+    /// Drop the recorded socket path from the run's persisted handle — the shape a worker predating that field wrote —
+    /// and return the address the old code derived from the run key, which is where such a run's still-live agent is
+    /// pointed. Removes the KEY (a jsonb <c>-</c>), not just its value, so the row is byte-shaped like the older
+    /// worker's; and it goes through SQL because <c>SetRunnerHandleAsync</c> would refuse a writer that does not own
+    /// the run, which is a guard about today's workers rather than about the shape being staged.
+    /// </summary>
+    private async Task<string> StripRecordedSocketPathAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database
+            .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET runner_handle = runner_handle - 'mcpSocketPath' WHERE id = {runId}");
+
+        (await ReadHandleAsync(runId)).McpSocketPath.ShouldBeNull("the staged handle must carry no address at all — otherwise this case pins the recorded-path branch again");
+
+        return LocalProcessRunner.LegacyDerivedMcpSocketPathFor(runId.ToString("N"));
     }
 
     /// <summary>Wait until the run's durable handle has been persisted WITH the McpRunToken — production only re-attaches runs whose handle was written, so the test must not race the cancel ahead of SetRunnerHandleAsync (the endpoint registers earlier, in OpenMcpEndpointIfEnabledAsync).</summary>
