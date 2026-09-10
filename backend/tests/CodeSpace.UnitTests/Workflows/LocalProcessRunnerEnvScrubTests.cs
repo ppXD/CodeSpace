@@ -290,6 +290,30 @@ public sealed class LocalProcessRunnerEnvScrubTests
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
     }
 
+    [Theory]
+    [InlineData("10.63.12.1", "http://10.63.12.1:41234/r0uteId")]   // inside a filtered-egress netns: its own gateway is the only address the worker has there
+    [InlineData(null, "http://127.0.0.1:41234/r0uteId")]            // sharing the host network: loopback
+    [InlineData("", "http://127.0.0.1:41234/r0uteId")]              // a netns that reported no address is treated as no netns, never left as a token
+    public void The_model_broker_host_token_is_resolved_to_the_address_this_child_can_reach(string? gatewayIp, string expected)
+    {
+        var spec = EnvSpec() with { Environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", ["ANTHROPIC_AUTH_TOKEN"] = "run-token" } };
+
+        var resolved = LocalProcessRunner.ResolveModelBrokerHost(spec, gatewayIp);
+
+        resolved.Environment["ANTHROPIC_BASE_URL"].ShouldBe(expected,
+            customMessage: "the token must never survive into a child — a base URL still carrying it is a broken URL the CLI reports as a network error, not as a refused credential");
+        resolved.Environment["ANTHROPIC_AUTH_TOKEN"].ShouldBe("run-token", "only the host is substituted; the bearer is copied through untouched");
+    }
+
+    [Fact]
+    public void A_spec_with_no_broker_token_is_returned_untouched()
+    {
+        var spec = EnvSpec();
+
+        LocalProcessRunner.ResolveModelBrokerHost(spec, "10.63.12.1").ShouldBeSameAs(spec,
+            "every run whose credential was not brokered must keep a byte-identical environment — and pay nothing for a feature it isn't using");
+    }
+
     private static SandboxSpec EnvSpec() => new()
     {
         Command = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",

@@ -14,6 +14,7 @@
     { "effective": "Standard", "ceiling": "Standard", "deployment": "Standard", "line": "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines" },
     { "effective": "Trusted", "ceiling": "Trusted", "deployment": "Standard", "line": "Network: on (Trusted)" }
   ],
+  "_credentialDoc": "A confinement record also carries what the launch did about the MODEL CREDENTIAL (modelCredentialBrokered). Absent/null means the run injected none and the sentence says nothing; false means the tenant's own provider key went into the sandbox and the line discloses it (AgentAutonomyPolicy.DirectModelCredentialCaveat), on EVERY posture branch including 'on' — that is the run whose agent can spend the key. true says nothing, because for a brokered run the sentence would be false.",
   "confinementCases": [
     {
       "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
@@ -24,6 +25,21 @@
       "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": false },
       "line": "Network: off (Standard) — confined, but egress was NOT severed"
+    },
+    {
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
+      "confinement": { "outcome": "Confined", "networkSevered": true, "modelCredentialBrokered": false },
+      "line": "Network: off (Standard) — confined: egress severed; model credential injected directly (not revocable mid-run)"
+    },
+    {
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
+      "confinement": { "outcome": "Confined", "networkSevered": true, "modelCredentialBrokered": true },
+      "line": "Network: off (Standard) — confined: egress severed"
+    },
+    {
+      "effective": "Trusted", "ceiling": "Trusted", "deployment": "Unleashed",
+      "confinement": { "outcome": "Confined", "networkSevered": false, "modelCredentialBrokered": false },
+      "line": "Network: on (Trusted); model credential injected directly (not revocable mid-run)"
     },
     {
       "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",

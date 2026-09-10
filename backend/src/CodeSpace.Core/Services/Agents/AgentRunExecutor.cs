@@ -153,9 +153,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // required to know about a configuration class, and that is the value this line hard-coded before the key existed.
     private readonly string _defaultRunnerKind;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
+    // Fronts the run's model credential so the provider key never enters the sandbox. Optional for the same reason
+    // _logCapture and _nativeRecords are — a hand-built test double must not have to know about it — and a NULL one is
+    // read exactly like a broker that could not listen: a deployment that requires confinement refuses the run, one
+    // that does not injects the key directly AND discloses that it did.
+    private readonly Credentials.IModelCredentialBroker? _credentialBroker;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -177,6 +182,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _nativeRecords = nativeRecords;
         _defaultRunnerKind = defaultRunner?.Value ?? SandboxKinds.Local;
         _completeness = completeness;
+        _credentialBroker = credentialBroker;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -213,7 +219,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = HeartbeatLoop.RunAsync(
-            ct => RenewObservationAsync(heartbeatRuns, owner, observerCts, ct),
+            ct => RenewObservationAndCredentialAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
             ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
             heartbeatCts.Token);
@@ -292,8 +298,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
             // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
             // redactor (keyed on the decrypted key) strips it from any echoed event / error before it persists.
-            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider, defaultModel, modelCredentialId) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
-            redactor = secretRedactor;
+            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider, defaultModel, modelCredentialId, brokeredCredential, brokeredPosture) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, owner, cancellationToken).ConfigureAwait(false);
+
+            // The brokered bearer is a secret of THIS launch and it exists already (unlike the MCP token, minted
+            // below), so it joins the redactor here — before anything can echo it, including the generic catch that
+            // redacts an executor error into the run's Error.
+            redactor = WithModelBrokerRunToken(secretRedactor, brokeredCredential?.RunToken);
 
             // An "auto" run (no pinned model) falls back to the resolved credential's own default model, so a custom
             // gateway runs on ITS family instead of the CLI's built-in default (e.g. codex gpt-5.5) it can't serve.
@@ -420,6 +430,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             {
                 Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
                 Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
+                ModelBrokerRunToken = brokeredCredential?.RunToken, ModelCredentialBrokered = brokeredPosture,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
@@ -580,6 +591,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             heartbeatCts.Cancel();
             await heartbeat.ConfigureAwait(false);
 
+            // The work is over (or this worker is): the credential stops being spendable now rather than at the end
+            // of a TTL nobody is renewing. Before the workspace cleanup, because it must not be skipped by a cleanup
+            // that decides to defer.
+            await RevokeBrokeredCredentialQuietlyAsync(agentRunId, "run-finished").ConfigureAwait(false);
+
             // Terminal exit (success / failure) owns the clone's cleanup; a worker tear-down leaves it for re-attach.
             if (workspace is not null && !leaveWorkspaceForReattach && await CanCleanOwnedWorkspaceAsync(owner, cancellationToken).ConfigureAwait(false))
                 await workspace.DisposeAsync().ConfigureAwait(false);
@@ -649,7 +665,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
         // Independent of ReattachAndFoldAsync's own resolution (which still owns the fingerprint-gated re-tail).
         SecretRedactor reopenRedactor;
-        try { reopenRedactor = (await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false)).Redactor; }
+        try { reopenRedactor = WithModelBrokerRunToken((await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, brokerage: null, cancellationToken).ConfigureAwait(false)).Redactor, handle.ModelBrokerRunToken); }
         catch { reopenRedactor = SecretRedactor.None; }
 
         // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
@@ -738,7 +754,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         SecretRedactor redactor;
         try
         {
-            redactor = WithMcpRunToken((await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, cancellationToken).ConfigureAwait(false)).Redactor, context.Handle.McpRunToken);
+            redactor = WithMcpRunToken(WithModelBrokerRunToken((await ResolveModelCredentialEnvAsync(context.Task, context.TeamId, context.Harness, brokerage: null, cancellationToken).ConfigureAwait(false)).Redactor, context.Handle.ModelBrokerRunToken), context.Handle.McpRunToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -2912,30 +2928,102 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// Resolve + decrypt the run's model credential (if any) just-in-time and project it onto the harness's env
-    /// vars. Empty when the harness can't authenticate (implements no projector) or no credential applies — the
-    /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
-    /// (the executor's catch lands a clean Failed), never silently using a different key.
+    /// Resolve + decrypt the run's model credential (if any) just-in-time, have it BROKERED where that is possible,
+    /// and project whatever came out onto the harness's env vars. Empty when the harness can't authenticate
+    /// (implements no projector) or no credential applies — the run then relies on whatever env the runner already
+    /// provides. A PINNED-but-unresolvable credential throws (the executor's catch lands a clean Failed), never
+    /// silently using a different key.
+    ///
+    /// <para><paramref name="brokerage"/> is what separates the two callers. A LAUNCH passes its owner token, so a
+    /// lease is opened against that run + fence and the child receives a broker address and a per-run bearer instead
+    /// of the key. A REDACTION-ONLY resolve (the re-attach paths, which re-resolve purely to rebuild the redactor for
+    /// a spool the CLI already wrote) passes null: it must not open a lease as a side effect of reading, and it must
+    /// not mint a second token — the one the launch minted is re-folded from the durable handle, which is what keeps
+    /// the two paths' fingerprints equal.</para>
     /// </summary>
-    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider, string? DefaultModel, Guid? CredentialId)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<ModelCredentialProjection> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, AgentRunOwnerToken? brokerage, CancellationToken cancellationToken)
     {
         var projector = harness as IModelCredentialProjector;
 
         var credential = await _modelCredentials.ResolveAsync(task, teamId, projector, cancellationToken).ConfigureAwait(false);
 
-        var env = projector is not null && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
+        var wouldInject = projector is not null && credential is not null;
+
+        var brokered = await OpenBrokeredCredentialAsync(harness, credential, teamId, brokerage, cancellationToken).ConfigureAwait(false);
+
+        // Fail closed BEFORE the projection that would put the key in the env — a deployment that mandates
+        // confinement refuses the run rather than handing out a credential it cannot withdraw. Skipped entirely on a
+        // redaction-only resolve: there is no launch there to refuse, and the key it is reasoning about was injected
+        // by a worker that is already gone.
+        if (brokerage is not null) Credentials.ModelCredentialBrokerage.EnsureSatisfiable(wouldInject, brokered is not null, Credentials.ModelCredentialBrokerage.IsRequired);
+
+        var env = ProjectCredentialEnv(harness, credential, brokered);
 
         // Keyed on EVERY secret this launch injects into the child — over the merged env the run actually runs with,
-        // so an author-supplied token is covered exactly like the resolved key.
-        var redactor = BuildRunRedactor(MergeEnvironment(task.Environment, env), credential);
+        // so an author-supplied token is covered exactly like the resolved key. A BROKERED launch's own env is
+        // withheld from that merge on purpose: the only secret in it is the run token, which the launch mints AFTER
+        // this point and folds in via WithModelBrokerRunToken (the same reason the MCP token is folded there), so
+        // that a re-attach rebuilding from the handle reproduces this exact fingerprint. The upstream key stays a
+        // needle either way — the broker holds it, and a broker error can echo it.
+        var redactor = BuildRunRedactor(MergeEnvironment(task.Environment, brokered is null ? env : EmptySecretEnv), credential);
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
-        // in the egress allowlist (B3.3b). DefaultModel flows out so a model-less ("auto") run falls back to one of the
-        // credential's own models instead of the CLI default. All null when no credential resolved. CredentialId
-        // names the ROW whose key is now in the environment (null for the operator-global key, which has no row) —
-        // D3 bounds an escalation's candidate models to exactly that row.
-        return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId);
+        // in the egress allowlist (B3.3b) — the UPSTREAM ones even under brokerage, deliberately: the allowlist is
+        // enforced inside the run's netns, the broker reaches the provider from the host outside it, and narrowing
+        // the allowlist to just the broker is a separate change (a brokered run keeping the provider host reachable
+        // loses nothing — the token it holds is refused there). DefaultModel flows out so a model-less ("auto") run
+        // falls back to one of the credential's own models instead of the CLI default. All null when no credential
+        // resolved. CredentialId names the ROW whose key this run authenticates with (null for the operator-global
+        // key, which has no row) — D3 bounds an escalation's candidate models to exactly that row.
+        return new ModelCredentialProjection(env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId, brokered, Credentials.ModelCredentialBrokerage.BrokeredPosture(wouldInject, brokered is not null));
     }
+
+    /// <summary>
+    /// Open the run's credential lease, or null when this launch cannot be brokered: no broker registered, no
+    /// credential to front, a harness that cannot be re-pointed at one (Rule 7 feature detection — it implements no
+    /// <see cref="IBrokeredModelCredentialProjector"/>), or a broker that declines. A THROW from the broker is
+    /// swallowed to null rather than failing the run here: whether an unbrokered credential may proceed is one
+    /// decision, taken in one place, by the fail-closed guard above.
+    /// </summary>
+    private async Task<BrokeredModelCredential?> OpenBrokeredCredentialAsync(IAgentHarness harness, ResolvedModelCredential? credential, Guid teamId, AgentRunOwnerToken? owner, CancellationToken cancellationToken)
+    {
+        if (_credentialBroker is null || owner is null || credential is null || harness is not IBrokeredModelCredentialProjector) return null;
+
+        try
+        {
+            return await _credentialBroker.OpenAsync(
+                new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Upstream = credential, Ttl = Credentials.ModelCredentialLease.Ttl },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: the model-credential broker could not open a lease; this run's credential is unbrokered", owner.RunId);
+            return null;
+        }
+    }
+
+    /// <summary>The env the child actually receives: the BROKERED projection when a lease opened (base URL + run token, never the key), else the harness's direct projection, else nothing to inject at all.</summary>
+    private static IReadOnlyDictionary<string, string> ProjectCredentialEnv(IAgentHarness harness, ResolvedModelCredential? credential, BrokeredModelCredential? brokered)
+    {
+        if (brokered is not null && harness is IBrokeredModelCredentialProjector brokeredProjector) return brokeredProjector.ProjectBrokered(brokered);
+
+        return harness is IModelCredentialProjector projector && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
+    }
+
+    /// <summary>
+    /// What one credential resolve hands back. A record rather than the seven-wide tuple it grew into (Rule 1): the
+    /// three nullable strings in the middle are indistinguishable positionally, and a caller silently swapping the
+    /// base URL for the provider tag would mis-pin an egress allowlist without failing to compile.
+    /// </summary>
+    private sealed record ModelCredentialProjection(
+        IReadOnlyDictionary<string, string> Env,
+        SecretRedactor Redactor,
+        string? ModelBaseUrl,
+        string? ModelProvider,
+        string? DefaultModel,
+        Guid? CredentialId,
+        BrokeredModelCredential? Brokered,
+        bool? BrokeredPosture);
 
     /// <summary>
     /// The shortest value usable as a redaction needle. Below this a value is a fragment, not an identifier —
@@ -3028,6 +3116,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private static SecretRedactor WithMcpRunToken(SecretRedactor redactor, string? mcpRunToken) =>
         mcpRunToken is { Length: >= MinimumNeedleLength } token ? redactor.With([token]) : redactor;
+
+    /// <summary>
+    /// A redactor widened by the run's BROKERED credential bearer — the other secret a launch mints after the
+    /// credential resolve. It rides the child's environment (an <c>ANTHROPIC_AUTH_TOKEN</c> / <c>OPENAI_API_KEY</c>
+    /// whose value is the token, not the key), so a CLI that echoes its env or a 401 body puts it into
+    /// <c>AgentRun.Error</c> and the append-only log. Folded HERE rather than inside
+    /// <see cref="BuildRunRedactor"/> for the same reason the MCP token is: the re-attach that rebuilds from
+    /// <c>SandboxHandle.ModelBrokerRunToken</c> must reproduce this fingerprint exactly, and a token folded in when
+    /// none was stamped would fail the re-attach's equality gate for a secret that never left the worker. A no-op for
+    /// a run whose credential was not brokered. <c>internal</c> only so the fold is pinned directly by a unit test —
+    /// the mistake it guards against (a token that never becomes a needle) is invisible from the outside until a run
+    /// has already frozen one into its append-only log.
+    /// </summary>
+    internal static SecretRedactor WithModelBrokerRunToken(SecretRedactor redactor, string? brokerRunToken) =>
+        brokerRunToken is { Length: >= MinimumNeedleLength } token ? redactor.With([token]) : redactor;
 
     /// <summary>
     /// The credential parts embedded IN a base URL — every userinfo segment, and each query value whose parameter
@@ -3368,6 +3471,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
+    /// Add what the launch did about the MODEL CREDENTIAL to the posture the runner recorded about the SANDBOX. The
+    /// runner cannot know it (it is handed an env, not a decision) and the executor cannot know the confinement (only
+    /// the runner reads the bwrap probe), so the two facts meet here — on the one record a reader consults before
+    /// believing anything about what a run was holding. Unchanged when the runner stamped nothing.
+    /// </summary>
+    private static SandboxConfinement? WithCredentialPosture(SandboxConfinement? confinement, bool? brokered) =>
+        confinement is null ? null : confinement with { ModelCredentialBrokered = brokered };
+
+    /// <summary>
     /// Launch the run to its durable spool, persist the returned handle (keyed by the run id) BEFORE
     /// observing, then attach + tail. Persisting first is what lets the reconciler recover this run if this
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
@@ -3395,7 +3507,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var identity = LaunchIdentityOf(sinks);
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
-            InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath,
+            InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath, ModelBrokerRunToken = context.ModelBrokerRunToken,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
             ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(context.RunId),
         };
@@ -3460,7 +3572,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-            await RecordConfinementAsync(context.Owner, handle.Confinement, cancellationToken).ConfigureAwait(false);
+            await RecordConfinementAsync(context.Owner, WithCredentialPosture(handle.Confinement, context.ModelCredentialBrokered), cancellationToken).ConfigureAwait(false);
             var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
             if (capture.Handle != handle)
                 await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
@@ -3639,6 +3751,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (AgentRunOwnershipLostException) { observer.Cancel(); throw; }
     }
 
+    /// <summary>
+    /// The launch's heartbeat: renew the observation lease AND the run's brokered credential lease, in that order.
+    /// Coupling them is the guarantee — the credential lives exactly as long as a worker that still owns the run and
+    /// can still say so. An ownership loss throws out of the first call, so the second never runs: the reclaimed
+    /// run's lease then lapses on its own TTL, which is how a superseded worker stops being able to spend the
+    /// tenant's key without anyone having to reach across processes to stop it. A run with no lease here (unbrokered,
+    /// or brokered by another worker) gets a cheap false back and is unaffected.
+    /// </summary>
+    private async Task RenewObservationAndCredentialAsync(IAgentRunService runs, AgentRunOwnerToken owner, CancellationTokenSource observer, CancellationToken cancellationToken)
+    {
+        await RenewObservationAsync(runs, owner, observer, cancellationToken).ConfigureAwait(false);
+
+        if (_credentialBroker is not null) await _credentialBroker.RenewAsync(owner.RunId, owner.Epoch, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Withdraw the run's brokered credential — best-effort, and never allowed to change the run's outcome. Called on EVERY exit from a launch, including a worker tear-down: the lease is this process's, so it is gone either way, and dropping it explicitly keeps the broker's table the size of the work actually in flight.</summary>
+    private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId, string reason)
+    {
+        if (_credentialBroker is null) return;
+
+        try { await _credentialBroker.RevokeAsync(runId, reason, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked; it lapses on its own TTL instead", runId); }
+    }
+
     private async Task<bool> CanCleanOwnedWorkspaceAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested) return false;
@@ -3683,6 +3819,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         /// <summary>The address this run's endpoint bound, minted with an unguessable segment at launch. Carried here so the durable handle can be stamped with it — the only route a re-attach has back to it.</summary>
         public string? McpSocketPath { get; init; }
+
+        /// <summary>The brokered credential's per-run bearer (null when this run's credential was not brokered). Carried so the durable handle can be stamped with it — a re-attach needs it to rebuild the launch's redactor, and nothing else.</summary>
+        public string? ModelBrokerRunToken { get; init; }
+
+        /// <summary>Whether this launch's model credential was brokered — null when it injected none. Carried so the run's confinement RECORD can state it, which is what makes the posture sentence able to disclose a directly-injected key.</summary>
+        public bool? ModelCredentialBrokered { get; init; }
         public required SecretRedactor Redactor { get; init; }
         public required string SpoolKey { get; init; }
 

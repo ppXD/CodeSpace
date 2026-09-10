@@ -312,11 +312,11 @@ public sealed partial class LocalProcessRunner
     /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner that cannot enforce it degrades
     /// to None (no netns) via <see cref="SandboxEgressPolicy"/>, and a netns whose setup fails throws.
     /// </summary>
-    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
+    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
     {
         var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported);
 
-        if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null);
+        if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null, null);
 
         // The allowlist carries host NAMES (+ IP literals); the IPv4-only netns pins IPs, so resolve at setup on the
         // host that builds the namespace. Best-effort/fail-closed: an unresolvable host is dropped (the resulting set,
@@ -329,7 +329,7 @@ public sealed partial class LocalProcessRunner
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
 
-        return (setup.ExecPrefix, spoolKey);
+        return (setup.ExecPrefix, spoolKey, setup.HostIp);
     }
 
     /// <summary>
@@ -805,6 +805,30 @@ public sealed partial class LocalProcessRunner
             foreach (var name in spec.ConfigHomeEnvVars) info.Environment[name] = configHome;
 
         return info;
+    }
+
+    /// <summary>
+    /// Resolve <see cref="SandboxSpec.ModelBrokerHostToken"/> in the spec's environment to the address THIS child can
+    /// actually reach the worker at: the filtered netns's own gateway when it runs inside one, else loopback (a run
+    /// sharing the host network). Total by construction — the token never survives into a child, because a base URL
+    /// still carrying it would be a broken URL rather than a visibly refused one.
+    ///
+    /// <para>Returns the spec UNCHANGED when no value mentions the token, which is every run whose credential was
+    /// not brokered — byte-identical env, and no allocation.</para>
+    ///
+    /// <para>A network-severed run (no netns, no shared network) resolves to loopback and cannot reach the broker —
+    /// nor could it reach the provider directly, so brokerage neither adds nor removes anything for it.</para>
+    /// </summary>
+    internal static SandboxSpec ResolveModelBrokerHost(SandboxSpec spec, string? gatewayIp)
+    {
+        if (!spec.Environment.Values.Any(value => value.Contains(SandboxSpec.ModelBrokerHostToken, StringComparison.Ordinal))) return spec;
+
+        var host = gatewayIp is { Length: > 0 } reachable ? reachable : "127.0.0.1";
+        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var (key, value) in spec.Environment) resolved[key] = value.Replace(SandboxSpec.ModelBrokerHostToken, host, StringComparison.Ordinal);
+
+        return spec with { Environment = resolved };
     }
 
     /// <summary>

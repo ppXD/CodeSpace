@@ -125,7 +125,9 @@ public sealed partial class LocalProcessRunner
             cgroupKey = cgroup.Key;
             var egress = await SetupEgressNetnsAsync(request.Spec, request.SpoolKey, cancellationToken).ConfigureAwait(false);
             egressKey = egress.Key;
-            var command = BuildDurableStartInfo(request.Spec, request.Spool, egress.ExecPrefix, cgroup.ExecPrefix, bootstrapSession: true);
+            // The child's env is built from the spec with the broker host resolved to the address THIS launch can
+            // reach the worker at — known only now, after the run's /30 was reserved above.
+            var command = BuildDurableStartInfo(ResolveModelBrokerHost(request.Spec, egress.GatewayIp), request.Spool, egress.ExecPrefix, cgroup.ExecPrefix, bootstrapSession: true);
             var invocation = new NativeLaunchInvocation
             {
                 Spec = request.Spec, ReadOnlyPaths = request.Spec.ReadOnlyPaths, CaptureBudget = request.Spec.CaptureBudget,

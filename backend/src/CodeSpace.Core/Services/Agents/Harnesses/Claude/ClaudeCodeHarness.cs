@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAgentHarnessContractGeneration, IAgentHarnessRunFactKeys, IAgentHarnessModelCallObservation, IModelCredentialProjector, IBrokeredModelCredentialProjector, IMcpHarnessDeclaration, IAgentSessionTranscript, IAgentGroundedFrameReader, IAgentModelCallFrameReader, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -448,6 +448,24 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
 
         return env;
     }
+
+    /// <summary>
+    /// Project a BROKERED credential: the broker's base URL plus the run token on <see cref="AuthTokenEnvVar"/> —
+    /// the gateway shape this harness already speaks, which is exactly what the broker is from the CLI's side. The
+    /// upstream provider key is not present in this projection because the caller is never handed one.
+    ///
+    /// <para>Always the auth-token carrier, never <see cref="ApiKeyEnvVar"/>, even when the upstream is Anthropic
+    /// itself: the token authenticates to the BROKER, and the broker exchanges it for whichever header the upstream
+    /// wants. A side effect worth naming — <see cref="AddGatewayModelTiers"/> keys off this very variable, so a
+    /// brokered run pins its background/subagent tiers to the run's own model instead of reaching for a default
+    /// Anthropic name. That is the correct posture here for the same reason it is for any gateway: the broker is the
+    /// only endpoint this run can reach, and pinning keeps every call to a model it is known to serve.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProjectBrokered(BrokeredModelCredential brokered) => new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [BaseUrlEnvVar] = StripVersionSuffix(brokered.BaseUrl),
+        [AuthTokenEnvVar] = brokered.RunToken,
+    };
 
     /// <summary>
     /// Claude Code's SDK appends <c>/v1/messages</c> to <see cref="BaseUrlEnvVar"/>, so the base must be the ROOT — a

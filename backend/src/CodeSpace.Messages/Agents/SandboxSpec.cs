@@ -150,6 +150,20 @@ public sealed record SandboxSpec
     public const string McpDeclarationPathToken = "{codespace:mcp-declaration-path}";
 
     /// <summary>
+    /// The token that stands in for the HOST ADDRESS of the model-credential broker inside an
+    /// <see cref="Environment"/> value (the base URL a brokered run's CLI calls). Only the RUNNER knows that address,
+    /// and only at launch: a deny-by-default egress run executes inside a per-run network namespace whose /30 is
+    /// reserved DURING the launch — after the broker lease was opened and its base URL was projected — so the child
+    /// reaches the worker at that namespace's own gateway IP, while a run sharing the host network reaches it on
+    /// loopback. The runner substitutes whichever applies, so the token NEVER survives into the child.
+    ///
+    /// <para>The same shape as <see cref="McpDeclarationPathToken"/>, and for the same reason: a pure
+    /// <c>IAgentHarness.BuildInvocation</c> (and, here, a pure credential projection) cannot know a per-launch
+    /// address.</para>
+    /// </summary>
+    public const string ModelBrokerHostToken = "{codespace:model-broker-host}";
+
+    /// <summary>
     /// The harness's own CLI flags for LOADING the run's <see cref="Mcp"/> declaration (Claude Code:
     /// <c>--mcp-config &lt;path&gt; --strict-mcp-config</c>), which the runner splices AHEAD of <see cref="Args"/> at
     /// launch with <see cref="McpDeclarationPathToken"/> replaced by the path it wrote the declaration to. Ahead, never
