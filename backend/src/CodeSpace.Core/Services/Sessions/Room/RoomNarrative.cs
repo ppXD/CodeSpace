@@ -509,6 +509,7 @@ public static class RoomNarrative
         if (summary.TotalUsd is { } total) headline.Add($"{Usd(total)} estimated");
         if (summary.CapUsd is { } cap) headline.Add($"{Usd(cap)} cap");
         if (partiallyPriced) headline.Add("partially priced");
+        if (summary.UnbudgetedUsd is { } unbudgeted) headline.Add($"{Usd(unbudgeted)} unbudgeted");
         if (headline.Count == 0 && summary.CommittedUsd is { } committed) headline.Add($"{Usd(committed)} committed");
 
         var items = new List<StatItem>();

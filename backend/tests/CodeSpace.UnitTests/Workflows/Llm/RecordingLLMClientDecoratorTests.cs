@@ -94,6 +94,20 @@ public class RecordingLLMClientDecoratorTests
     }
 
     [Fact]
+    public async Task A_plain_call_with_no_scope_pushed_still_records_nothing_and_returns_verbatim()
+    {
+        // F2: LlmCallContext.Current can be null not just for a genuine off-graph call, but for a call whose
+        // AsyncLocal never flowed here (a Hangfire job boundary, an unawaited Task.Run) — a truly UNSCOPED call
+        // that never even reaches LlmBudgetGuard, so it stays unmetered no matter what. The fix is visibility
+        // (a Warning naming the model), never a behaviour change: the call must still pass through untouched.
+        var inner = new FakeClient(Completion());
+
+        var result = await new RecordingLLMClientDecorator(inner).CompleteAsync(new LLMCompletionRequest { Model = "claude-x", SystemPrompt = "SYS", UserPrompt = "USR" }, CancellationToken.None);
+
+        result.Text.ShouldBe("t", "no run scope ⇒ a pure delegate, no capture, no fault — unchanged by the new logging");
+    }
+
+    [Fact]
     public async Task An_inner_throw_records_started_then_failed_and_rethrows_verbatim()
     {
         var inner = new ThrowingClient(new InvalidOperationException("gateway boom"));
@@ -622,7 +636,7 @@ public class RecordingLLMClientDecoratorTests
         public int Reserves;
         public decimal? LastSettleActual;
 
-        public Task<CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
+        public Task<CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken)
         {
             Reserves++;
             return Task.FromResult(new CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission(true, Guid.NewGuid(), 0m, capUsd, null));

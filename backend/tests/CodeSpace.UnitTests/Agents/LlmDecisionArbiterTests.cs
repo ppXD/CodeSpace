@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -174,6 +175,28 @@ public sealed class LlmDecisionArbiterTests
         verdict.Rationale.ShouldContain("could not reach the model", customMessage: "an operator reading the run log must see it was the GATEWAY, not a decision the model made");
     }
 
+    [Theory]
+    [InlineData("budget-exceeded")]
+    [InlineData("unpriced-under-cap")]
+    public async Task A_budget_refusal_from_the_arbiters_own_brain_call_escalates_with_a_distinct_cause(string exceptionKind)
+    {
+        // R1: LlmBudgetExceededException / UnpricedModelUnderCapException used to fall through to the generic catch
+        // below and log as an unremarkable Information-level "could not produce a valid decision" — indistinguishable
+        // from a genuine model-side miss. The run's OWN budget refusing this call is neither a gateway fault nor a
+        // decision the model made about the child's question, so it must carry its own distinct, ops-visible cause
+        // (and, per SupervisorTurnService.LogEscalated, a Warning rather than routine Information).
+        Exception thrown = exceptionKind == "budget-exceeded"
+            ? new LlmBudgetExceededException("supervisor.arbitrate", committedUsd: 5m, capUsd: 5m)
+            : new UnpricedModelUnderCapException("future-model", capUsd: 5m, where: "model call 'supervisor.arbitrate'");
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new ThrowingArbiterClient(thrown: thrown)), FakeSelector.WithModel());
+
+        var verdict = await arbiter.DecideAsync(Pending("x"), TeamId, Guid.NewGuid(), "goal", CancellationToken.None);
+
+        verdict.IsAnswer.ShouldBeFalse("the run's OWN budget refused the arbiter's brain call — never silently auto-answered");
+        verdict.Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+        verdict.Cause.ShouldBe(ArbiterEscalateCause.BudgetRefused);
+    }
+
     [Fact]
     public async Task Cancellation_propagates_it_is_not_swallowed_into_an_escalation()
     {
@@ -227,17 +250,19 @@ public sealed class LlmDecisionArbiterTests
     {
         private readonly bool _cancel;
         private readonly LlmErrorCategory _category;
+        private readonly Exception? _thrown;
 
-        public ThrowingArbiterClient(bool cancel = false, LlmErrorCategory category = LlmErrorCategory.Transient)
+        public ThrowingArbiterClient(bool cancel = false, LlmErrorCategory category = LlmErrorCategory.Transient, Exception? thrown = null)
         {
             _cancel = cancel;
             _category = category;
+            _thrown = thrown;
         }
 
         public string Provider => "TestArbiter";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            _cancel ? throw new OperationCanceledException() : throw new LlmApiException("TestArbiter", null, _category, "boom");
+            _cancel ? throw new OperationCanceledException() : throw _thrown ?? new LlmApiException("TestArbiter", null, _category, "boom");
     }
 
     private sealed class FakeSelector : IModelPoolSelector

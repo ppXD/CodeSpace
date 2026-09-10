@@ -24,9 +24,12 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 ///
 /// <para>It is registered over a SINGLETON client, so it holds no per-run state — it reads the run/node/turn identity
 /// AND the scoped ledger writer + artifact offloader off the ambient <see cref="LlmCallContext"/> a scoped caller
-/// pushed (absent ⇒ a call outside any run ⇒ records nothing). FAIL-OPEN by contract: the inner result is always
-/// returned/thrown verbatim, and a capture write that fails can never fault the model call or the run. Big
-/// prompts/completions offload to content-addressed (sha-deduped) artifacts; the row keeps a small <c>$artifact_id</c> ref.</para>
+/// pushed (absent ⇒ a call outside any run, or a call whose AsyncLocal never flowed here across a boundary like
+/// Hangfire/<c>Task.Run</c> ⇒ records nothing and — unlike every scoped call — cannot even reach the budget guard,
+/// so it is LOGGED at Warning naming the model, the one visibility a scope-less call can still get). FAIL-OPEN by
+/// contract: the inner result is always returned/thrown verbatim, and a capture write that fails can never fault
+/// the model call or the run. Big prompts/completions offload to content-addressed (sha-deduped) artifacts; the row
+/// keeps a small <c>$artifact_id</c> ref.</para>
 ///
 /// <para><b>It is also the producer of the <see cref="WorkflowRunDataOwnerKinds.ModelCall"/> completeness facet</b>, in
 /// the order that makes a lost accounting fail closed: the ONE record this call owes is DECLARED before the first
@@ -48,7 +51,11 @@ public class RecordingLLMClientDecorator : ILLMClient
     public async Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken)
     {
         var scope = LlmCallContext.Current?.ForOneCall();
-        if (scope is null) return await _inner.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
+        if (scope is null)
+        {
+            Log.Warning("Model call to provider {Provider} model {Model} has no LlmCallContext at all (AsyncLocal did not flow to this call site) — proceeding UNMETERED and UNRECORDED; the budget guard cannot see a call it has no scope for", Provider, request.Model);
+            return await _inner.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
+        }
 
         var correlationId = Guid.NewGuid();
         var declared = await DeclareCaptureIntentAsync(scope).ConfigureAwait(false);

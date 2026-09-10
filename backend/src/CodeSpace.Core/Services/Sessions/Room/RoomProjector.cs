@@ -178,7 +178,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var reservations = await _db.BudgetReservation.AsNoTracking()
             .Where(row => row.TeamId == teamId && runIds.Contains(row.WorkflowRunId))
-            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd))
+            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd, row.Kind))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var routes = await _db.WorkflowRun.AsNoTracking().Where(row => row.TeamId == teamId && runIds.Contains(row.Id))
             .Select(row => new RunRouteRow(row.Id, row.RoutePlanJson)).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -720,7 +720,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest);
     }
     private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget);
-    private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd);
+    private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd, string Kind);
     private readonly record struct RunRouteRow(Guid RunId, string? RouteJson);
 
     private async Task<RoomBudgetSummary?> BudgetAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -728,19 +728,28 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var cost = await _costs.ComputeRunAsync(teamId, runId, cancellationToken).ConfigureAwait(false);
         var reservations = await _db.BudgetReservation.AsNoTracking()
             .Where(row => row.WorkflowRunId == runId && row.TeamId == teamId)
-            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd))
+            .Select(row => new BudgetLedgerRow(row.WorkflowRunId, row.State, row.ReservedUsd, row.SettledUsd, row.CapUsd, row.Kind))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var routeJson = await _db.WorkflowRun.AsNoTracking().Where(row => row.Id == runId && row.TeamId == teamId).Select(row => row.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         return SummarizeBudget(cost, reservations, routeJson);
     }
 
+    /// <summary>
+    /// F1: an <c>unbudgeted:*</c> row (<see cref="BudgetKinds.UnbudgetedPrefix"/>) is an observability record for a
+    /// plane with no run-level cap — never a real admission claim (see <c>LlmBudgetGuard.UnbudgetedPassthroughAsync</c>).
+    /// It must never contribute to the CAP this run displays, its unresolved-claim count, or its committed total —
+    /// each is derived from the BUDGETED rows only. Its own spend still surfaces, as a separate figure, so a plain
+    /// run with only Unbudgeted calls does not just go silent.
+    /// </summary>
     private static RoomBudgetSummary? SummarizeBudget(RunCostSummary? cost, IReadOnlyList<BudgetLedgerRow> reservations, string? routeJson)
     {
         var routeCap = string.IsNullOrWhiteSpace(routeJson) ? null : TryReadRoute(routeJson)?.Caps.MaxCostUsd;
-        var ledgerCaps = reservations.Select(row => row.CapUsd).OfType<decimal>().Distinct().ToList();
+        var budgeted = reservations.Where(row => !row.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix, StringComparison.Ordinal)).ToList();
+        var ledgerCaps = budgeted.Select(row => row.CapUsd).OfType<decimal>().Distinct().ToList();
         var cap = routeCap ?? (ledgerCaps.Count == 1 ? ledgerCaps[0] : null);
-        var committedRows = reservations.Where(row => row.State is not BudgetReservationStates.Released and not BudgetReservationStates.Expired).ToList();
+        var committedRows = budgeted.Where(row => row.State is not BudgetReservationStates.Released and not BudgetReservationStates.Expired).ToList();
         var unresolved = committedRows.Count(row => row.SettledUsd is null && row.State is BudgetReservationStates.Reserved or BudgetReservationStates.InFlight or BudgetReservationStates.Indeterminate or BudgetReservationStates.Reconciled);
+        var unbudgetedUsd = UnbudgetedUsd(reservations);
         var hasCostEvidence = cost is { } value && (value.CountedRuns > 0 || value.BrainPlaneUsd is not null || value.UnknownBrainCalls > 0);
 
         if (!hasCostEvidence && reservations.Count == 0 && cap is null) return null;
@@ -749,9 +758,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         {
             InputTokens = cost?.SummedInputTokens ?? 0, OutputTokens = cost?.SummedOutputTokens ?? 0, AgentExecutionUsd = cost?.EstimatedCostUsd,
             BrainPlaneUsd = cost?.BrainPlaneUsd, TotalUsd = cost?.TotalUsd, UnknownAgentRuns = cost?.UnknownCostRuns ?? 0,
-            UnknownBrainCalls = cost?.UnknownBrainCalls ?? 0, CommittedUsd = reservations.Count == 0 ? null : committedRows.Sum(row => row.SettledUsd ?? row.ReservedUsd),
-            CapUsd = cap, UnresolvedClaims = unresolved,
+            UnknownBrainCalls = cost?.UnknownBrainCalls ?? 0, CommittedUsd = budgeted.Count == 0 ? null : committedRows.Sum(row => row.SettledUsd ?? row.ReservedUsd),
+            CapUsd = cap, UnresolvedClaims = unresolved, UnbudgetedUsd = unbudgetedUsd,
         };
+    }
+
+    /// <summary>The run's total Unbudgeted spend, surfaced as its own figure — null when there is none, rather than a misleading $0.</summary>
+    private static decimal? UnbudgetedUsd(IReadOnlyList<BudgetLedgerRow> reservations)
+    {
+        var unbudgeted = reservations.Where(row => row.Kind.StartsWith(BudgetKinds.UnbudgetedPrefix, StringComparison.Ordinal)).ToList();
+
+        return unbudgeted.Count == 0 ? null : unbudgeted.Sum(row => row.SettledUsd ?? row.ReservedUsd);
     }
 
     /// <summary>

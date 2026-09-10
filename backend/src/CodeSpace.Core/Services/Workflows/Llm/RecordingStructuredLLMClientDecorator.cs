@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Constants;
+using Serilog;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -25,7 +26,11 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         var scope = LlmCallContext.Current?.ForOneCall();
-        if (scope is null) return await _structuredInner.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
+        if (scope is null)
+        {
+            Log.Warning("Structured model call to provider {Provider} model {Model} has no LlmCallContext at all (AsyncLocal did not flow to this call site) — proceeding UNMETERED and UNRECORDED; the budget guard cannot see a call it has no scope for", Provider, request.Model);
+            return await _structuredInner.CompleteStructuredAsync(request, cancellationToken).ConfigureAwait(false);
+        }
 
         var native = scope is { Budget: not null, CapUsd: not null } && _structuredInner is IPhysicalStructuredLLMClient;
         using var operation = native ? PhysicalLlmCallContext.EnterOperation() : null;

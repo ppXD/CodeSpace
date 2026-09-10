@@ -34,6 +34,12 @@ public enum ArbiterEscalateCause
     /// escalates — a human can always answer, and there is no "clean stop" for one blocked child decision — but the
     /// CAUSE is the gateway being unavailable, never a decision anyone made.</summary>
     GatewayInfra,
+
+    /// <summary>The arbiter's OWN brain call was refused by the run's budget ledger (a spent cap, or an unpriced model
+    /// under a cap) — never a decision the model made about the child's question. Distinct from
+    /// <see cref="GatewayInfra"/>: the gateway was reachable and the model was priceable/affordable in principle, but
+    /// THIS run has no headroom left, or no price to enforce its cap with.</summary>
+    BudgetRefused,
 }
 
 /// <summary>
@@ -61,6 +67,9 @@ public sealed record ArbiterVerdict
 
     /// <summary>An escalate caused by a GATEWAY fault (rate limit / transient / auth) rather than a model-side reason — see <see cref="ArbiterEscalateCause.GatewayInfra"/>.</summary>
     public static ArbiterVerdict EscalateInfra(string rationale) => new() { Kind = ArbiterVerdictKinds.Escalate, Rationale = rationale, Cause = ArbiterEscalateCause.GatewayInfra };
+
+    /// <summary>An escalate caused by the run's OWN budget ledger refusing the arbiter's brain call — see <see cref="ArbiterEscalateCause.BudgetRefused"/>.</summary>
+    public static ArbiterVerdict EscalateBudgetRefused(string rationale) => new() { Kind = ArbiterVerdictKinds.Escalate, Rationale = rationale, Cause = ArbiterEscalateCause.BudgetRefused };
 
     public static ArbiterVerdict Answer(IReadOnlyList<string> selectedOptions, string? freeText, string rationale) =>
         new() { Kind = ArbiterVerdictKinds.Answer, SelectedOptions = selectedOptions, FreeText = freeText, Rationale = rationale };

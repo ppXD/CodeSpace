@@ -185,4 +185,6 @@ public sealed record RoomBudgetSummary
     public decimal? CommittedUsd { get; init; }
     public decimal? CapUsd { get; init; }
     public int UnresolvedClaims { get; init; }
+    /// <summary>Spend recorded under an <c>unbudgeted:</c> ledger kind — a plane with no run-level cap. Surfaced on its own because it never counts toward <see cref="CommittedUsd"/> or <see cref="CapUsd"/>.</summary>
+    public decimal? UnbudgetedUsd { get; init; }
 }

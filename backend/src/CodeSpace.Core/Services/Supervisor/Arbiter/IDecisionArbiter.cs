@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Decisions;
@@ -27,8 +28,10 @@ public interface IDecisionArbiter
 /// stop: a missing / unusable brain model, an empty pool, no structured provider, or a malformed verdict all mean the
 /// supervisor cannot responsibly decide, so the decision goes to a HUMAN (the safe default — a wrong auto-answer is
 /// costly; a human can always answer). WHICH kind of miss rides along on <see cref="ArbiterVerdict.Cause"/>: a gateway
-/// fault (rate limit / transient / auth) is tagged <see cref="ArbiterEscalateCause.GatewayInfra"/> so a consumer can
-/// tell "the brain was unreachable" from every other escalate reason — the ESCALATE behaviour itself never changes.
+/// fault (rate limit / transient / auth) is tagged <see cref="ArbiterEscalateCause.GatewayInfra"/>, and the run's OWN
+/// budget refusing this call (a spent cap, or an unpriced model under a cap) is tagged
+/// <see cref="ArbiterEscalateCause.BudgetRefused"/>, so a consumer can tell either apart from every other escalate
+/// reason — the ESCALATE behaviour itself never changes.
 /// </summary>
 public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
 {
@@ -75,6 +78,15 @@ public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
         catch (LlmApiException ex) when (IsGatewayInfra(ex.Category))
         {
             return ArbiterVerdict.EscalateInfra(InfraRationale(ex.Category));
+        }
+        // The run's OWN budget refused the arbiter's brain call (a spent cap, or an unpriced model under a cap) —
+        // never a decision anyone made about the child's question. Distinct from GatewayInfra: the gateway was
+        // reachable and the model was priceable/affordable in principle; THIS run just has no headroom for it.
+        // Falling through to the generic catch below used to swallow this into an unremarkable, Information-logged
+        // "could not produce a valid decision" — indistinguishable from a genuine model-side miss.
+        catch (Exception ex) when (ex is LlmBudgetExceededException or UnpricedModelUnderCapException)
+        {
+            return ArbiterVerdict.EscalateBudgetRefused($"The arbiter's own brain call was refused by the run's budget ({ex.Message}) — escalated to a human.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

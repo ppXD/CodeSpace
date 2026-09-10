@@ -1531,6 +1531,48 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task An_unbudgeted_reservation_never_poisons_the_runs_displayed_cap_committed_total_or_unresolved_count()
+    {
+        // F1: an "unbudgeted:" row is an observability record for a plane with no run-level cap — never a real
+        // admission claim. Its CapUsd (legacy rows may still carry the pre-fix decimal.MaxValue sentinel; this run
+        // seeds exactly that, so the fix is proven by KIND, never by coincidence of the value happening to be null)
+        // must never be averaged into the displayed cap, its huge ReservedUsd must never inflate CommittedUsd, and
+        // its live/unresolved state must never count toward UnresolvedClaims (which would otherwise paint an
+        // ordinary run Error-toned for a claim nobody could ever settle against).
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Unbudgeted rows stay out of the ledger truth");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: "Done.");
+        var focusRun = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Next turn", resultSummary: "Done.");
+        var now = DateTimeOffset.UtcNow;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.BudgetReservation.AddRange(
+                new BudgetReservation
+                {
+                    Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = run, Kind = "llm:supervisor.decision", ScopeKey = "real-1",
+                    State = BudgetReservationStates.Settled, ReservedUsd = 0.10m, SettledUsd = 0.05m, CapUsd = 5m, PriceVersion = "test",
+                    CreatedDate = now, LastModifiedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+                },
+                new BudgetReservation
+                {
+                    Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = run, Kind = $"{BudgetKinds.UnbudgetedPrefix}llm.complete", ScopeKey = "unbudgeted-1",
+                    State = BudgetReservationStates.Reserved, ReservedUsd = 500m, SettledUsd = null, CapUsd = decimal.MaxValue, PriceVersion = "test",
+                    CreatedDate = now, LastModifiedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var turn = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        var budget = turn.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+
+        budget.Detail.ShouldBe("$5.00 cap · $500.00 unbudgeted", "the REAL reservation's cap — never the unbudgeted row's sentinel, and never lost to a second distinct 'cap'");
+        budget.Items.Single(item => item.Text == "Budget ledger").Detail.ShouldBe("$0.0500 committed", "the unbudgeted row's $500 reserved estimate never inflates the committed total");
+        budget.Items.Single(item => item.Text == "Budget ledger").Tone.ShouldBe(NarrativeTone.Success, "the unbudgeted row is still live (Reserved) but must never count as an unresolved CLAIM — there is nothing to resolve it against");
+    }
+
+    [Fact]
     public async Task Cached_terminal_mutable_evidence_is_batched_once_for_a_long_session()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
