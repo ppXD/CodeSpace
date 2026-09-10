@@ -1,7 +1,9 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
@@ -315,11 +317,12 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
     /// Idempotent per <c>(attempt, path)</c> — NOT per <c>(attempt, epoch, path)</c>: the fence epoch is the
     /// producing ATTEMPT, not a separate identity axis, so a reclaimed re-attach's fresh capture at epoch N+1 also
     /// supersedes whatever epoch-N row still reads current for the same path, not only an epoch-N+1 predecessor. A
-    /// write whose epoch is BELOW a row this identity already has is refused outright — never inserted, never
-    /// superseding anything — because a live attempt can only ever move an epoch forward (<c>AgentRunService
-    /// .AssertOwnershipAsync</c>, asserted before <c>VerifyProducedWorkAsync</c> calls this store, already stops a
-    /// reclaimed worker from reaching here at all; this is the belt to that fence's braces for any caller that
-    /// skips it).
+    /// write whose epoch is BELOW a row this identity already has THROWS <see cref="AgentRunOwnershipLostException"/>
+    /// outright — never inserted, never superseding anything — because a live attempt can only ever move an epoch
+    /// forward (<c>AgentRunService.AssertOwnershipAsync</c>, asserted before <c>VerifyProducedWorkAsync</c> calls
+    /// this store, already stops a reclaimed worker from reaching here at all; this is the belt to that fence's
+    /// braces for any caller that skips it — mirroring <see cref="Mcp.IToolCallLedgerService.TryClaimAsync"/>'s
+    /// fence family).
     /// </summary>
     private async Task UpsertAsync(ArtifactManifest fresh, CancellationToken cancellationToken)
     {
@@ -333,32 +336,9 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
 
         try
         {
-            // Namespace 122 is the manifest ledger's original migration. The canonical key and seed must remain
-            // stable across rolling versions. A collision only serializes unrelated paths; it never merges rows.
-            // Epoch is deliberately OUT of this key (unlike the row lookup below, which spans every epoch): two
-            // captures of the same path a fence apart must serialize against EACH OTHER, not run under independent
-            // locks that both read "no current row yet" and both insert.
-            var key = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"artifact_manifest/{fresh.TeamId:N}/{fresh.AgentRunId:N}/{fresh.LogicalPath}");
-            await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 122))", cancellationToken).ConfigureAwait(false);
-            // Every row this run ever captured at this path, across every epoch — locked even an identical-content
-            // read: a caller's older repeatable-read snapshot must not treat a concurrently superseded row as
-            // current and report a false deduplication success.
-            var identity = await _db.ArtifactManifest.FromSqlInterpolated($"""
-                SELECT * FROM artifact_manifest
-                WHERE team_id = {fresh.TeamId} AND agent_run_id = {fresh.AgentRunId} AND logical_path = {fresh.LogicalPath}
-                FOR UPDATE
-                """).AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
+            var identity = await LockAndReadIdentityAsync(fresh, cancellationToken).ConfigureAwait(false);
 
-            if (identity.Any(row => row.FenceEpoch > fresh.FenceEpoch))
-                NoticeStaleEpoch(fresh, identity.Max(row => row.FenceEpoch));
-            else
-            {
-                var prior = identity.SingleOrDefault(row => row.FenceEpoch == fresh.FenceEpoch && row.SupersededByManifestId == null);
-                var stale = identity.Where(row => row.FenceEpoch < fresh.FenceEpoch && row.SupersededByManifestId == null).ToList();
-
-                if (prior == null || prior.Sha256 != fresh.Sha256 || stale.Count > 0)
-                    await ReplaceCurrentAsync(prior, stale, fresh, cancellationToken).ConfigureAwait(false);
-            }
+            await ResolveWriteAsync(fresh, identity, cancellationToken).ConfigureAwait(false);
 
             if (owned != null) await owned.CommitAsync(cancellationToken).ConfigureAwait(false);
             else await ambient!.ReleaseSavepointAsync(savepoint!, cancellationToken).ConfigureAwait(false);
@@ -373,9 +353,60 @@ public sealed class ArtifactManifestStore : IArtifactManifestStore, IScopedDepen
         }
     }
 
-    /// <summary>A write whose epoch a later attempt has already moved past — refused, not inserted: the fence in front of this store should already have stopped the caller (see <see cref="UpsertAsync"/>), so reaching here at all is itself the anomaly worth naming.</summary>
-    private void NoticeStaleEpoch(ArtifactManifest fresh, long currentEpoch) =>
-        _logger.LogWarning("Agent run {RunId}: discarded a manifest write for '{Path}' at fence epoch {StaleEpoch} — epoch {CurrentEpoch} already recorded this deliverable", fresh.AgentRunId, fresh.LogicalPath, fresh.FenceEpoch, currentEpoch);
+    /// <summary>Advisory-locks then reads every row this run ever captured at this path, across every epoch — the section <see cref="ResolveWriteAsync"/> decides over.</summary>
+    private async Task<List<ArtifactManifest>> LockAndReadIdentityAsync(ArtifactManifest fresh, CancellationToken cancellationToken)
+    {
+        // Namespace 122 is the manifest ledger's original migration. The key CHANGED in this version — it now
+        // carries team_id in place of fence_epoch, to lock this identity's rows across every epoch below in one
+        // section. During a rolling deploy, an old-binary writer (still hashing the pre-this-version key) and a
+        // new-binary writer for the same run/path therefore do NOT serialize against each other via this lock —
+        // that gap is safe: a same-epoch double insert is still refused at the DB by
+        // ux_artifact_manifest_attempt_path (0122_artifact_manifest.sql, whose key INCLUDES fence_epoch), and a
+        // cross-epoch write from either binary is refused upstream by the ownership fence
+        // (AgentRunService.AssertOwnershipAsync) before it ever reaches this method. A same-version collision only
+        // serializes unrelated paths; it never merges rows.
+        // Epoch is deliberately OUT of this key (unlike the row lookup below, which spans every epoch): two
+        // captures of the same path a fence apart must serialize against EACH OTHER, not run under independent
+        // locks that both read "no current row yet" and both insert.
+        var key = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"artifact_manifest/{fresh.TeamId:N}/{fresh.AgentRunId:N}/{fresh.LogicalPath}");
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 122))", cancellationToken).ConfigureAwait(false);
+
+        // Every row this run ever captured at this path, across every epoch — locked even an identical-content
+        // read: a caller's older repeatable-read snapshot must not treat a concurrently superseded row as current
+        // and report a false deduplication success.
+        return await _db.ArtifactManifest.FromSqlInterpolated($"""
+            SELECT * FROM artifact_manifest
+            WHERE team_id = {fresh.TeamId} AND agent_run_id = {fresh.AgentRunId} AND logical_path = {fresh.LogicalPath}
+            FOR UPDATE
+            """).AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Belt-and-braces: this guard compares against the max epoch among EXISTING rows for the path (the live <c>agent_run.fence_epoch</c> check already happens upstream in <c>AssertOwnershipAsync</c>) — refuses a write behind it outright, otherwise supersedes/inserts via <see cref="ReplaceCurrentAsync"/>.</summary>
+    private async Task ResolveWriteAsync(ArtifactManifest fresh, IReadOnlyList<ArtifactManifest> identity, CancellationToken cancellationToken)
+    {
+        if (identity.Any(row => row.FenceEpoch > fresh.FenceEpoch))
+            ThrowStaleEpoch(fresh, identity.Max(row => row.FenceEpoch));
+
+        var prior = identity.SingleOrDefault(row => row.FenceEpoch == fresh.FenceEpoch && row.SupersededByManifestId == null);
+        var stale = identity.Where(row => row.FenceEpoch < fresh.FenceEpoch && row.SupersededByManifestId == null).ToList();
+
+        if (prior == null || prior.Sha256 != fresh.Sha256 || stale.Count > 0)
+            await ReplaceCurrentAsync(prior, stale, fresh, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A write whose epoch a later attempt has already moved past — refused, never inserted: the fence in front of
+    /// this store should already have stopped the caller (<c>AgentRunService.AssertOwnershipAsync</c>), so reaching
+    /// here at all is itself the anomaly worth naming. Mirrors the merged tool-call-claim fence family's shape
+    /// (<see cref="Mcp.IToolCallLedgerService.TryClaimAsync"/>): the same <see cref="AgentRunFence.RefusalNote"/>
+    /// warning, then the same typed refusal — a superseded writer must see ownership loss, never a quiet success.
+    /// </summary>
+    private void ThrowStaleEpoch(ArtifactManifest fresh, long currentEpoch)
+    {
+        _logger.LogWarning("Agent run {RunId}: {Note}", fresh.AgentRunId, AgentRunFence.RefusalNote($"artifact manifest write for '{fresh.LogicalPath}'", currentEpoch, fresh.FenceEpoch));
+
+        throw new AgentRunOwnershipLostException(fresh.AgentRunId);
+    }
 
     /// <summary>
     /// Retire <paramref name="prior"/> (this same epoch's current row, when its content changed) and every

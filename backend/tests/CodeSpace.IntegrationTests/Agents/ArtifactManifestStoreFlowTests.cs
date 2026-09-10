@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -165,8 +166,9 @@ public class ArtifactManifestStoreFlowTests
     {
         // Belt-and-braces: production can't reach this state (AgentRunService.AssertOwnershipAsync refuses a
         // reclaimed worker before it ever calls back into this store), but the store must not compound the mistake
-        // if some caller ever bypasses that fence — a write at an epoch the identity has already moved past must be
-        // a pure no-op, never inserted and never superseding the later epoch's current row.
+        // if some caller ever bypasses that fence — a write at an epoch the identity has already moved past must
+        // THROW (an observable refusal, never a reported success), and it must never insert or supersede the later
+        // epoch's current row.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var agentRunId = Guid.NewGuid();
         await SeedRunningAgentRunAsync(teamId, agentRunId, fenceEpoch: 1);
@@ -188,11 +190,11 @@ public class ArtifactManifestStoreFlowTests
 
         workspace.Write("report.md", "a stale epoch-1 write arriving late");
 
-        // The returned count reflects that the bytes resolved and streamed to the CAS store (the retention
-        // declaration is unconditional, see ArtifactManifestStore.CaptureOneAsync) — the manifest pointer itself is
-        // the thing under test here, asserted on the rows below.
+        // The bytes still resolve and stream to the CAS store (the retention declaration is unconditional, see
+        // ArtifactManifestStore.CaptureOneAsync) — the manifest pointer itself is the thing under test here. The
+        // caller must see this refusal, not a captured count that reads like the write landed.
         using (var stale = _fixture.BeginScope())
-            await stale.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None);
+            await Should.ThrowAsync<AgentRunOwnershipLostException>(() => stale.Resolve<IArtifactManifestStore>().CaptureDeclaredAsync(task, workspace.Path, agentRunId, null, teamId, fenceEpoch: 1, CancellationToken.None));
 
         using var reader = _fixture.BeginScope();
         var rows = await reader.Resolve<CodeSpaceDbContext>().ArtifactManifest.AsNoTracking()
