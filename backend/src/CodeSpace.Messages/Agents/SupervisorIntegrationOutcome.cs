@@ -24,6 +24,9 @@ public sealed record SupervisorIntegrationOutcome
     /// <summary>The branches of the CONFLICTING contributions the integrator preserved for review (its <c>fallbackBranch</c>es — set only on contributions that could NOT be cleanly applied; a cleanly-applied agent's branch is not surfaced here). Empty when the integration was clean / skipped / failed-without-branches.</summary>
     public IReadOnlyList<string> PreservedBranches { get; init; } = Array.Empty<string>();
 
+    /// <summary>Every contribution that did NOT apply, in its own words — "{label}: {reason}" (or the bare label when the outcome carried no reason), in outcome order, deduped. Names WHICH agent/branch/subtask failed and why, beside the aggregated <see cref="ConflictedFiles"/>/<see cref="PreservedBranches"/> above. Empty when clean/skipped or the outcomes carried no label.</summary>
+    public IReadOnlyList<string> FailingContributions { get; init; } = Array.Empty<string>();
+
     /// <summary>The integrator's one-line reason for a non-clean status (e.g. "a contribution conflicted while integrating"), or null when clean.</summary>
     public string? Reason { get; init; }
 

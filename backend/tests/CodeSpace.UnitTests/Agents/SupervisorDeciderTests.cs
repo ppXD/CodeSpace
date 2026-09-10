@@ -1342,6 +1342,7 @@ public class SupervisorDeciderTests
         integration.PreservedBranches.ShouldBe(new[] { "codespace/agent/bbb" }, "only a NON-applied contribution carries a fallbackBranch (the integrator's contract); the applied agent's branch is not in this block");
         integration.Reason.ShouldBe("a contribution conflicted while integrating");
         integration.IntegratedBranch.ShouldBeNull();
+        integration.FailingContributions.ShouldBe(new[] { "agent-b: textual conflict" }, "the failing contribution is named in its own words — the applied agent-a is not");
     }
 
     [Fact]
@@ -1488,6 +1489,7 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("src/Foo.cs", Case.Insensitive);
         prompt.ShouldContain("src/Bar.cs", Case.Insensitive, "the conflicted files are named so a resolver knows what to reconcile");
         prompt.ShouldContain("codespace/agent/bbb", Case.Insensitive, "the preserved branches are named — the resolver's inputs");
+        prompt.ShouldContain("agent-b: textual conflict", Case.Insensitive, "the failing contribution is named beside the aggregated files — WHICH agent's work conflicted and why");
         // The conflict block must name the VERB, not describe the server's mechanics in another verb's words: the
         // M0 golden eval (2026-07-11) proved a model picks its verb off this copy, and a model that emits 'spawn'
         // here needs a plan-local subtask id it does not have for a reconciliation.

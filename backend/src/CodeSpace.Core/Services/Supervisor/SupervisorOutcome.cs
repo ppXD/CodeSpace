@@ -1245,6 +1245,7 @@ public static class SupervisorOutcome
 
             var conflictedFiles = new List<string>();
             var preservedBranches = new List<string>();
+            var failingContributions = new List<string>();
 
             // Multi-repo (S7-C): collect across EVERY repo's outcomes; single-repo: the top-level outcomes array. A
             // multi-repo block has no single integratedBranch — the per-repo branches live in repositories[] (S7-D).
@@ -1252,11 +1253,11 @@ public static class SupervisorOutcome
             {
                 foreach (var repo in repositories.EnumerateArray())
                     if (repo.ValueKind == JsonValueKind.Object && repo.TryGetProperty("outcomes", out var repoOutcomes))
-                        CollectOutcomeDetail(repoOutcomes, conflictedFiles, preservedBranches);
+                        CollectOutcomeDetail(repoOutcomes, conflictedFiles, preservedBranches, failingContributions);
             }
             else if (integration.TryGetProperty("outcomes", out var outcomes))
             {
-                CollectOutcomeDetail(outcomes, conflictedFiles, preservedBranches);
+                CollectOutcomeDetail(outcomes, conflictedFiles, preservedBranches, failingContributions);
             }
 
             return new SupervisorIntegrationOutcome
@@ -1266,6 +1267,7 @@ public static class SupervisorOutcome
                 IntegratedBranch = integration.TryGetProperty("integratedBranch", out var ib) && ib.ValueKind == JsonValueKind.String ? ib.GetString() : null,
                 ConflictedFiles = conflictedFiles,
                 PreservedBranches = preservedBranches,
+                FailingContributions = failingContributions,
             };
         }
         catch (JsonException)
@@ -1325,7 +1327,7 @@ public static class SupervisorOutcome
     }
 
     /// <summary>Accumulate one <c>outcomes</c> array's conflicted files + preserved fallback branches into the running aggregate (deduped, order-preserved). The single per-contribution reader both the single-repo top-level outcomes and each multi-repo repository's outcomes feed, so the two shapes can't drift.</summary>
-    private static void CollectOutcomeDetail(JsonElement outcomes, List<string> conflictedFiles, List<string> preservedBranches)
+    private static void CollectOutcomeDetail(JsonElement outcomes, List<string> conflictedFiles, List<string> preservedBranches, List<string> failingContributions)
     {
         if (outcomes.ValueKind != JsonValueKind.Array) return;
 
@@ -1340,7 +1342,22 @@ public static class SupervisorOutcome
 
             if (o.TryGetProperty("fallbackBranch", out var fb) && fb.ValueKind == JsonValueKind.String && fb.GetString() is { Length: > 0 } branch && !preservedBranches.Contains(branch))
                 preservedBranches.Add(branch);
+
+            if (FormatFailingContribution(o) is { Length: > 0 } named && !failingContributions.Contains(named))
+                failingContributions.Add(named);
         }
+    }
+
+    /// <summary>One outcome in its own words — "{label}: {reason}", or the bare label when it carries no reason — when it did NOT apply; null for an Applied contribution or one carrying no label. Read alongside the aggregated <c>conflictedFiles</c>/<c>fallbackBranch</c> above so a reader sees not just WHAT conflicted but WHICH contribution and why.</summary>
+    private static string? FormatFailingContribution(JsonElement o)
+    {
+        if (o.TryGetProperty("disposition", out var d) && d.ValueKind == JsonValueKind.String && d.GetString() == "Applied") return null;
+
+        if (!(o.TryGetProperty("label", out var l) && l.ValueKind == JsonValueKind.String && l.GetString() is { Length: > 0 } label)) return null;
+
+        return o.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } reason
+            ? $"{label}: {reason}"
+            : label;
     }
 
     /// <summary>
@@ -1699,7 +1716,7 @@ public static class SupervisorOutcome
                 if (!(repo.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String && s.GetString() == "Conflicted")) continue;
 
                 var files = new List<string>();
-                CollectOutcomeDetail(repo.TryGetProperty("outcomes", out var o) ? o : default, files, new List<string>());
+                CollectOutcomeDetail(repo.TryGetProperty("outcomes", out var o) ? o : default, files, new List<string>(), new List<string>());
 
                 conflicted.Add(new SupervisorConflictedRepo
                 {

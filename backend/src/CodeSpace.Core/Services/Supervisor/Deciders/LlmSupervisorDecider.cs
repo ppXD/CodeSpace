@@ -1844,6 +1844,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         builder.AppendLine($"- {decisionKind}: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
         builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
 
+        if (integration.FailingContributions.Count > 0) builder.AppendLine($"    failing contribution(s): {string.Join("; ", integration.FailingContributions)}");
         if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {integration.Reason}");
         if (integration.PreservedBranches.Count > 0) builder.AppendLine($"    the agents' work is PRESERVED on branches: {string.Join(", ", integration.PreservedBranches)}");
 

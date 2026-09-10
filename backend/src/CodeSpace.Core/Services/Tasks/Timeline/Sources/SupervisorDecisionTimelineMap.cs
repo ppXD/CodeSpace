@@ -220,7 +220,7 @@ public static class SupervisorDecisionTimelineMap
             ? "No agent was dispatched this round — the supervisor staged no subtask to run."
             : null;
 
-    /// <summary>A conflicted merge names the conflicting files (or its reason); a failed merge carries its git-infra reason; a clean/skipped merge carries none.</summary>
+    /// <summary>A conflicted merge names the conflicting files (or its reason) plus WHICH contribution failed and why; a failed merge carries its git-infra reason; a clean/skipped merge carries none.</summary>
     private static string? MergeSummary(SupervisorDecisionRecord d)
     {
         var integration = SupervisorOutcome.ReadIntegration(d.OutcomeJson);
@@ -228,9 +228,13 @@ public static class SupervisorDecisionTimelineMap
         if (integration == null) return null;
 
         if (integration.IsConflicted)
-            return integration.ConflictedFiles.Count == 0
+        {
+            var headline = integration.ConflictedFiles.Count == 0
                 ? integration.Reason ?? "The agents' work conflicted while integrating."
                 : $"Conflicted while integrating: {string.Join(", ", integration.ConflictedFiles)}";
+
+            return integration.FailingContributions.Count == 0 ? headline : $"{headline} ({string.Join("; ", integration.FailingContributions)})";
+        }
 
         return IsIntegrationFailed(integration) ? integration.Reason : null;
     }
