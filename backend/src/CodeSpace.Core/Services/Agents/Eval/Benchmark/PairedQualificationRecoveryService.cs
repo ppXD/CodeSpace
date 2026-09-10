@@ -33,10 +33,10 @@ public sealed class PairedQualificationRecoveryService : IPairedQualificationRec
     {
         if (observationGroupId == Guid.Empty) throw Invalid("observation-group-unbound");
         await using var claim = await _campaignLock.AcquireAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
-        return await RecoverClaimedAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
+        return await RecoverClaimedAsync(observationGroupId, PairedQualificationSealSource.Replay, cancellationToken).ConfigureAwait(false);
     }
 
-    internal async Task<PairedQualificationOutcome> RecoverClaimedAsync(Guid observationGroupId, CancellationToken cancellationToken)
+    internal async Task<PairedQualificationOutcome> RecoverClaimedAsync(Guid observationGroupId, PairedQualificationSealSource source, CancellationToken cancellationToken)
     {
         if (observationGroupId == Guid.Empty) throw Invalid("observation-group-unbound");
         var protocol = await _db.PairedQualificationProtocol.AsNoTracking().SingleOrDefaultAsync(row => row.ObservationGroupId == observationGroupId, cancellationToken).ConfigureAwait(false)
@@ -62,9 +62,10 @@ public sealed class PairedQualificationRecoveryService : IPairedQualificationRec
             ObservationGroupId = observationGroupId, CodeRevision = protocol.CodeRevision, Suite = suite, Manifest = manifest,
             Spec = Spec(protocol), Control = control, Candidate = candidate, Sessions = sessions,
         }) with { ProtocolDigest = protocol.ProtocolDigest };
-        // Replay, not execution: every row reduced above is an already-paid, already-gated observation and this
-        // path makes no model call, so the seal does not consult the live runtime — see PairedQualificationSealSource.
-        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = observationGroupId, Manifest = manifest, Outcome = outcome, Source = PairedQualificationSealSource.Replay }, cancellationToken).ConfigureAwait(false);
+        // The caller states which path produced these rows: a resume that just executed absent cells passes
+        // Execution so the seal re-verifies the live runtime, while recovering an already-complete campaign passes
+        // Replay because every row reduced above was already gated when it was produced — see PairedQualificationSealSource.
+        return await _results.SealAsync(new PairedQualificationSealRequest { ObservationGroupId = observationGroupId, Manifest = manifest, Outcome = outcome, Source = source }, cancellationToken).ConfigureAwait(false);
     }
 
     private static void ValidateCensus(PairedQualificationProtocol protocol, EvalSuiteManifest manifest, IReadOnlyList<BenchmarkResultRecord> observations)

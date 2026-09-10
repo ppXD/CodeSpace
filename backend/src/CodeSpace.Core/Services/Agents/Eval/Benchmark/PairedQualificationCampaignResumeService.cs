@@ -70,7 +70,7 @@ public sealed class PairedQualificationCampaignResumeService : IPairedQualificat
             if (!await ExistsAsync(observationGroupId, target, cancellationToken).ConfigureAwait(false)) throw Invalid("observation-not-appended");
         }
 
-        return await _recovery.RecoverClaimedAsync(observationGroupId, cancellationToken).ConfigureAwait(false);
+        return await _recovery.RecoverClaimedAsync(observationGroupId, missing.Count > 0 ? PairedQualificationSealSource.Execution : PairedQualificationSealSource.Replay, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

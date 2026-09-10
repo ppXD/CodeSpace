@@ -73,6 +73,7 @@ public sealed class PairedQualificationRunnerFlowTests
         corpus.Requests.ShouldAllBe(request => request.Candidate.Model == "candidate-model" && request.Candidate.ModelCredentialId == candidateCredential && request.Candidate.MaxCostUsd == 3m);
         corpus.Requests.Select(request => request.ObservationGroupId).Distinct().ShouldHaveSingleItem().ShouldBe(outcome.ObservationGroupId);
         await AssertProtocolImmutableAsync(outcome.ObservationGroupId);
+        await AssertRuntimeManifestFrozenAsync(outcome.ObservationGroupId);
         await AssertResultSealedAndImmutableAsync(outcome);
     }
 
@@ -568,6 +569,65 @@ public sealed class PairedQualificationRunnerFlowTests
         await Should.NotThrowAsync(() => Gate(scope, new UnobservableRuntime()).EnsureUnchangedAsync(groupId, stage, CancellationToken.None));
     }
 
+    /// <summary>
+    /// The REAL collector, not a fake, catching a DB fact that moved underneath a frozen campaign: a rotated key
+    /// re-encrypted with the same protector the fixture uses, and a repointed gateway host. Each drifts exactly one
+    /// named field of the control arm's own <c>credentialEndpoints[0]</c> entry — the candidate arm's untouched
+    /// credential is what proves the comparison is per-arm, not a whole-manifest hash.
+    /// </summary>
+    [Theory]
+    [InlineData("key", "credentialFingerprint")]
+    [InlineData("host", "endpointHost")]
+    public async Task The_real_collector_catches_a_rotated_arm_credential_against_Postgres(string rotated, string driftedField)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (controlCredential, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var groupId = Guid.NewGuid();
+        await FreezeLiveRuntimeAsync(groupId, teamId, controlRow, candidateRow);
+
+        using (var mutateScope = _fixture.BeginScope())
+        {
+            var db = mutateScope.Resolve<CodeSpaceDbContext>();
+            if (rotated == "key")
+            {
+                var reEncrypted = mutateScope.Resolve<IPayloadEncryptor>().Encrypt("sk-test-rotated-different-secret");
+                await db.ModelCredential.Where(row => row.Id == controlCredential).ExecuteUpdateAsync(update => update.SetProperty(row => row.EncryptedApiKey, reEncrypted));
+            }
+            else
+            {
+                await db.ModelCredential.Where(row => row.Id == controlCredential).ExecuteUpdateAsync(update => update.SetProperty(row => row.BaseUrl, "https://rotated.example.test"));
+            }
+        }
+
+        using var scope = _fixture.BeginScope();
+        var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => scope.Resolve<IQualificationRuntimeGate>().EnsureUnchangedAsync(groupId, QualificationRuntimeStage.Admission, CancellationToken.None));
+
+        refusal.Field.ShouldBe($"{QualificationRuntimeManifest.RootField}.credentialEndpoints[0].{driftedField}");
+        refusal.Stage.ShouldBe(QualificationRuntimeStage.Admission);
+    }
+
+    /// <summary>The real collector refuses to observe an arm credential outside its campaign's own team BEFORE it ever decrypts anything — pinned so this stays a scoping refusal, never a decrypt failure wearing the wrong message.</summary>
+    [Fact]
+    public async Task The_real_collector_throws_before_decrypt_when_an_arm_credential_belongs_to_another_team()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (candidateCredential, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+
+        using (var mutateScope = _fixture.BeginScope())
+            await mutateScope.Resolve<CodeSpaceDbContext>().ModelCredential.Where(row => row.Id == candidateCredential).ExecuteUpdateAsync(update => update.SetProperty(row => row.TeamId, foreignTeamId));
+
+        using var scope = _fixture.BeginScope();
+        var failure = await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<IQualificationRuntimeManifestCollector>().ObserveAsync(new QualificationRuntimeCollectRequest
+        {
+            ObservationGroupId = Guid.NewGuid(), TeamId = teamId, ControlModelRowId = controlRow, CandidateModelRowId = candidateRow,
+        }, CancellationToken.None));
+
+        failure.Message.ShouldBe($"Qualification {QualificationCredentialRole.Candidate} model row {candidateRow} does not belong to its campaign team, so the campaign's runtime cannot be observed.");
+    }
+
     [Fact]
     public async Task A_substituted_runtime_refuses_cell_admission_and_leaves_no_row()
     {
@@ -714,6 +774,87 @@ public sealed class PairedQualificationRunnerFlowTests
         recovered.ResultDigest.ShouldNotBeNull().Length.ShouldBe(64);
         corpus.Requests.Count.ShouldBe(2, "the replay must seal with zero model calls even while the live runtime differs");
         substituted.Observations.ShouldBe(observationsBeforeReplay, "a replay must not consult the live runtime at all — otherwise a redeploy after the last cell strands a fully-paid campaign forever");
+    }
+
+    /// <summary>
+    /// A resume that finds a missing cell PAYS for it before it ever reaches the seal, so that seal must be labeled
+    /// <c>Execution</c> and re-verify the live runtime — not inherit the <c>Replay</c> a fresh recovery uses. Without
+    /// that, the window between the resumed cell's own Execution gate and the seal would be unguarded: a runtime
+    /// substituted after the resumed cell landed but before the seal ran would mint a capability claim nobody
+    /// checked.
+    /// </summary>
+    [Fact]
+    public async Task A_substituted_runtime_refuses_the_seal_of_a_resume_that_executed_a_missing_cell()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var corpus = new FakePairedCorpus { AfterRun = PersistFakePairAsync };
+        Guid groupId;
+        using (var runScope = _fixture.BeginScope())
+        {
+            var crashingCorpus = new CrashAfterFirstSessionCorpus(corpus);
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), crashingCorpus, runScope.Resolve<CodeSpaceDbContext>(), runScope.Resolve<IPairedQualificationResultStore>(), runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
+            await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('a', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 2, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+            groupId = corpus.Requests.Select(request => request.ObservationGroupId).Distinct().Single();
+        }
+
+        corpus.Requests.Count.ShouldBe(1, "only the first session committed before the process vanished");
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+
+        using var resumeScope = _fixture.BeginScope();
+        var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), resumeScope.Resolve<CodeSpaceDbContext>(),
+            new PairedQualificationResultStore(resumeScope.Resolve<CodeSpaceDbContext>(), Gate(resumeScope, substituted)), resumeScope.Resolve<IPairedQualificationCampaignLock>());
+        var resumeService = new PairedQualificationCampaignResumeService(new SuiteSource(Suite()), corpus, resumeScope.Resolve<CodeSpaceDbContext>(),
+            recovery, resumeScope.Resolve<IPairedQualificationCampaignLock>(), resumeScope.Resolve<IQualificationRuntimeGate>());
+
+        var refusal = await Should.ThrowAsync<RuntimeManifestDriftException>(() => resumeService.ResumeAsync(groupId, CancellationToken.None));
+
+        AssertRefused(refusal, QualificationRuntimeStage.Seal);
+        corpus.Requests.Count.ShouldBe(2, "the resume executed the missing session before the seal was ever attempted");
+        (await resumeScope.Resolve<CodeSpaceDbContext>().BenchmarkResultRecord.AsNoTracking().CountAsync(row => row.ObservationGroupId == groupId)).ShouldBe(4, "the resumed session's evidence is durable even though the seal it fed was refused");
+        (await resumeScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(row => row.ObservationGroupId == groupId))
+            .ShouldBeFalse("a seal refused on a substituted runtime must leave no result row, even though this process paid for the resumed cell");
+    }
+
+    /// <summary>The mirror case: a resume that finds NOTHING missing is pure replay, so a substituted runtime must never block it and must never even be asked — exactly as a fresh recovery already proves.</summary>
+    [Fact]
+    public async Task A_substituted_runtime_never_blocks_a_pure_replay_resume_with_nothing_missing()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (_, controlRow) = await SeedModelAsync(teamId, "control-model");
+        var (_, candidateRow) = await SeedModelAsync(teamId, "candidate-model");
+        var corpus = new FakePairedCorpus { AfterRun = PersistFakePairAsync };
+        var crash = new CrashBeforeSeal();
+        using (var runScope = _fixture.BeginScope())
+        {
+            var runner = new PairedTaskLaunchQualificationRunner(new SuiteSource(Suite()), corpus, runScope.Resolve<CodeSpaceDbContext>(), crash, runScope.Resolve<IPairedQualificationCampaignLock>(), runScope.Resolve<IQualificationRuntimeManifestCollector>());
+            await Should.ThrowAsync<SimulatedCrashException>(() => runner.RunAsync(new PairedQualificationRequest
+            {
+                TeamId = teamId, CodeRevision = new string('a', 40), Control = Selection(controlRow), Candidate = Selection(candidateRow),
+                Spec = new PairedQualificationSpec { SessionsPerCell = 1, MinimumIndependentClusters = 1, MinimumStrata = 1, MinimumRequiredExecutionClusters = 1, MinimumEvaluatorHealth = 1, MaxCostUsdPerLaunch = 3m, Criterion = PairedQualificationCriterion.Quality, MinimumQualityLift = 0.05, OrderingSeed = "frozen-order" },
+            }, CancellationToken.None));
+        }
+
+        var groupId = corpus.Requests.Select(request => request.ObservationGroupId).Distinct().Single();
+        var substituted = await SubstitutedRuntimeAsync(groupId);
+
+        using var resumeScope = _fixture.BeginScope();
+        var recovery = new PairedQualificationRecoveryService(new SuiteSource(Suite()), resumeScope.Resolve<CodeSpaceDbContext>(),
+            new PairedQualificationResultStore(resumeScope.Resolve<CodeSpaceDbContext>(), Gate(resumeScope, substituted)), resumeScope.Resolve<IPairedQualificationCampaignLock>());
+        var resumeService = new PairedQualificationCampaignResumeService(new SuiteSource(Suite()), corpus, resumeScope.Resolve<CodeSpaceDbContext>(),
+            recovery, resumeScope.Resolve<IPairedQualificationCampaignLock>(), Gate(resumeScope, substituted));
+
+        var outcome = await resumeService.ResumeAsync(groupId, CancellationToken.None);
+
+        outcome.QualifiedForCapabilityClaim.ShouldBeTrue();
+        corpus.Requests.Count.ShouldBe(1, "nothing is missing, so resume must not execute a single paid cell");
+        substituted.Observations.ShouldBe(0, "a pure replay must never even ask the substituted collector — that is what makes it safe on a host whose runtime moved after the last cell");
+        (await resumeScope.Resolve<CodeSpaceDbContext>().PairedQualificationResult.AsNoTracking().AnyAsync(row => row.ObservationGroupId == groupId)).ShouldBeTrue();
     }
 
     private const string SubstitutedBinarySha256 = "00000000000000000000000000000000000000000000000000000000deadbeef";
@@ -927,6 +1068,26 @@ public sealed class PairedQualificationRunnerFlowTests
         delete.MessageText.ShouldContain("paired qualification protocol is immutable");
     }
 
+    /// <summary>
+    /// The positive half of the freeze pin: a mutation that skips <c>Freeze(...)</c> in production must go red HERE
+    /// — not only via an incidental <c>ShouldNotBeNull</c> elsewhere — because the recomputed digest over the same
+    /// row with its manifest columns nulled must differ from what production actually persisted.
+    /// </summary>
+    private async Task AssertRuntimeManifestFrozenAsync(Guid groupId)
+    {
+        using var scope = _fixture.BeginScope();
+        var protocol = await scope.Resolve<CodeSpaceDbContext>().PairedQualificationProtocol.AsNoTracking().SingleAsync(row => row.ObservationGroupId == groupId);
+        var frozenDigest = protocol.ProtocolDigest;
+
+        protocol.RuntimeManifestJson.ShouldNotBeNull();
+        protocol.RuntimeManifestDigest.ShouldNotBeNull();
+        QualificationRuntimeManifest.Parse(protocol.RuntimeManifestJson).ManifestDigest().ShouldBe(protocol.RuntimeManifestDigest);
+
+        protocol.RuntimeManifestJson = null;
+        protocol.RuntimeManifestDigest = null;
+        PairedTaskLaunchQualificationRunner.ProtocolDigest(protocol).ShouldNotBe(frozenDigest, "a mutation that skips Freeze(...) must move the protocol digest, or a substituted runtime could reuse a pre-freeze protocol's identity");
+    }
+
     private async Task PersistFakePairAsync(PairedCorpusBenchmarkRequest request, PairedCorpusBenchmarkRun run)
     {
         using var scope = _fixture.BeginScope();
@@ -1069,6 +1230,16 @@ public sealed class PairedQualificationRunnerFlowTests
             Attempted = request.Outcome;
             throw new SimulatedCrashException();
         }
+    }
+
+    /// <summary>Forwards the first session to a real corpus and vanishes before every session after it — leaving later sessions genuinely absent rather than admitted-but-unsettled.</summary>
+    private sealed class CrashAfterFirstSessionCorpus : IPairedCorpusBenchmarkRunner
+    {
+        private readonly IPairedCorpusBenchmarkRunner _inner;
+        private int _calls;
+        public CrashAfterFirstSessionCorpus(IPairedCorpusBenchmarkRunner inner) => _inner = inner;
+        public Task<PairedCorpusBenchmarkRun> RunPairedAsync(PairedCorpusBenchmarkRequest request, CancellationToken cancellationToken) =>
+            _calls++ == 0 ? _inner.RunPairedAsync(request, cancellationToken) : throw new SimulatedCrashException();
     }
 
     private sealed class SimulatedCrashException : Exception;
