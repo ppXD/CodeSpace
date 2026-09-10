@@ -115,54 +115,85 @@ public sealed class RealModelAgentInjectionE2ETests
             var marker = "skyline-" + Guid.NewGuid().ToString("N")[..8];
             var unrelatedMarker = "UNRELATED-LESSON-" + Guid.NewGuid().ToString("N")[..10];
             var goal = Enumerable.Range(0, 1000).Select(i => $"Reply with one short greeting that follows this team's previously learned greeting response convention. Assignment probe {i}.").First(value => LessonArms.Assign(live.TeamId, value) == LessonArms.Injected);
-            var lesson = await SeedLessonAsync(live.TeamId, marker);
-            var unrelated = await SeedLessonAsync(live.TeamId, unrelatedMarker, relevant: false);
-            var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
-            var jobs = ResolveJobClient();
-            jobs.Clear();
-            jobs.AutoExecute = true;
 
-            LaunchTaskResult launch;
-            using (var scope = _fixture.BeginScope())
-                launch = await scope.Resolve<ITaskLaunchService>().LaunchAsync(new TaskLaunchRequest
-                {
-                    TeamId = live.TeamId,
-                    ActorUserId = live.UserId,
-                    SurfaceKind = TaskLaunchSurfaceKinds.Chat,
-                    TaskText = goal,
-                    RequestedEffort = TaskEffortModes.Quick,
-                    Autonomy = nameof(AgentAutonomyLevel.Trusted),
-                    Overrides = new TaskExecutionOverrides { Harness = "claude-code", RunnerKind = "local", ModelCredentialId = credentialId, Model = live.Model },
-                }, CancellationToken.None);
+            // This attempt's own lessons — invalidated in the finally below so a best-of-N retry (a fresh call of this
+            // same lambda, in the SAME shared team) never sees this attempt's convention as still current alongside
+            // its own freshly-seeded one; two contradictory "current" conventions abstain the relevance model.
+            Lesson? lesson = null;
+            Lesson? unrelated = null;
 
-            using (var scope = _fixture.BeginScope())
-                await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(launch.RunId, CancellationToken.None);
-            await jobs.WaitForPendingAsync();
-
-            using var read = _fixture.BeginScope();
-            var db = read.Resolve<CodeSpaceDbContext>();
-            var agent = await db.AgentRun.AsNoTracking().Where(run => run.WorkflowRunId == launch.RunId).OrderBy(run => run.CreatedDate).FirstAsync();
-            var task = JsonSerializer.Deserialize<AgentTask>(agent.TaskJson, AgentJson.Options)!;
-            task.LessonArm.ShouldBe(LessonArms.Injected);
-            task.LessonIds.ShouldNotBeNull();
-            task.LessonIds.ShouldContain(lesson.Id, "a best-of-N retry may leave another valid current lesson in the shared team; the durable receipt must contain this attempt's lesson without pretending it was the only one");
-            task.LessonIds.ShouldNotContain(unrelated.Id, "the structured relevance model must abstain from a structurally valid lesson for an unrelated database-migration task");
-            task.SystemPrompt.ShouldNotBeNull();
-            task.SystemPrompt!.ShouldContain(marker);
-            task.SystemPrompt.ShouldNotContain(unrelatedMarker);
-            task.Goal.ShouldBe(goal);
-
-            if (!RealModelRunClassifier.HasInspectableModelReply(agent))
+            try
             {
-                var reason = $"status={agent.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(agent)}; error={agent.Error ?? "(none)"}";
-                if (RealModelRunClassifier.IsGatewayInfra(agent)) throw new AgentExecutionInfraException($"the quick lesson run did not complete — gateway/exec infra (non-gating skip): {reason}");
-                return (false, $"{Provider} '{live.Model}': TaskLaunch quick persisted the exact lesson receipt but the live CLI produced no inspectable reply ({reason})");
-            }
+                lesson = await SeedLessonAsync(live.TeamId, marker);
+                unrelated = await SeedLessonAsync(live.TeamId, unrelatedMarker, relevant: false);
+                var credentialId = await SeedAgentCredentialAsync(live.TeamId, live.BaseUrl, live.ApiKey, live.Model);
+                var jobs = ResolveJobClient();
+                jobs.Clear();
+                jobs.AutoExecute = true;
 
-            var events = await read.Resolve<IAgentRunService>().GetEventsAsync(agent.Id, live.TeamId, 0, CancellationToken.None);
-            var reply = string.Join("\n", events.Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.FinalSummary).Select(e => e.Text));
-            var applied = reply.Contains(marker, StringComparison.Ordinal);
-            return (applied, $"{Provider} '{live.Model}': TaskLaunch quick {(applied ? "APPLIED" : "did NOT apply")} the frozen cross-run lesson in the real CLI reply");
+                LaunchTaskResult launch;
+                using (var scope = _fixture.BeginScope())
+                    launch = await scope.Resolve<ITaskLaunchService>().LaunchAsync(new TaskLaunchRequest
+                    {
+                        TeamId = live.TeamId,
+                        ActorUserId = live.UserId,
+                        SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                        TaskText = goal,
+                        RequestedEffort = TaskEffortModes.Quick,
+                        Autonomy = nameof(AgentAutonomyLevel.Trusted),
+                        Overrides = new TaskExecutionOverrides { Harness = "claude-code", RunnerKind = "local", ModelCredentialId = credentialId, Model = live.Model },
+                    }, CancellationToken.None);
+
+                using (var scope = _fixture.BeginScope())
+                    await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(launch.RunId, CancellationToken.None);
+                await jobs.WaitForPendingAsync();
+
+                using var read = _fixture.BeginScope();
+                var db = read.Resolve<CodeSpaceDbContext>();
+                var agent = await db.AgentRun.AsNoTracking().Where(run => run.WorkflowRunId == launch.RunId).OrderBy(run => run.CreatedDate).FirstAsync();
+                var task = JsonSerializer.Deserialize<AgentTask>(agent.TaskJson, AgentJson.Options)!;
+                task.LessonArm.ShouldBe(LessonArms.Injected);
+                task.LessonIds.ShouldNotBeNull();
+                task.LessonIds.ShouldNotContain(unrelated.Id, "the structured relevance model must abstain from a structurally valid lesson for an unrelated database-migration task");
+                task.SystemPrompt.ShouldNotBeNull();
+                task.SystemPrompt!.ShouldContain(marker);
+                task.SystemPrompt.ShouldNotContain(unrelatedMarker);
+                task.Goal.ShouldBe(goal);
+
+                // Receipt-aware verdict rather than a hard assert on LessonIds: an unavailable/failed relevance
+                // assessment is gateway/model-plane infra (non-gating skip, same as a gateway-failed agent run below);
+                // an abstain or a selection that missed this attempt's lesson is a real but ATTRIBUTABLE miss — it
+                // carries the relevance status/model/digest/candidates so best-of-N retries and the miss is diagnosable,
+                // never a bare Shouldly throw that would kill the whole gate on one abstain.
+                var receipt = await db.Database.SqlQuery<LessonReceiptRow>($"""
+                    SELECT relevance_status, relevance_model, assessment_digest, candidate_ids
+                    FROM agent_lesson_prompt_receipt
+                    WHERE workflow_run_id = {launch.RunId} AND team_id = {live.TeamId}
+                    """).SingleOrDefaultAsync();
+
+                if (receipt is null || receipt.RelevanceStatus is LessonRelevanceStatuses.Unavailable or LessonRelevanceStatuses.Failed)
+                    throw new AgentExecutionInfraException($"the quick lesson run's relevance assessment did not complete cleanly — gateway/model-plane infra (non-gating skip): RelevanceStatus={receipt?.RelevanceStatus ?? "(missing receipt)"}");
+
+                if (!task.LessonIds!.Contains(lesson.Id))
+                    return (false, $"{Provider} '{live.Model}': the relevance model did not select this attempt's lesson — RelevanceStatus={receipt.RelevanceStatus}; RelevanceModel={receipt.RelevanceModel ?? "(none)"}; AssessmentDigest={receipt.AssessmentDigest ?? "(none)"}; Candidates={receipt.CandidateIds.Length}; LessonIds=[{string.Join(",", task.LessonIds)}]");
+
+                if (!RealModelRunClassifier.HasInspectableModelReply(agent))
+                {
+                    var reason = $"status={agent.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(agent)}; error={agent.Error ?? "(none)"}";
+                    if (RealModelRunClassifier.IsGatewayInfra(agent)) throw new AgentExecutionInfraException($"the quick lesson run did not complete — gateway/exec infra (non-gating skip): {reason}");
+                    return (false, $"{Provider} '{live.Model}': TaskLaunch quick persisted the exact lesson receipt but the live CLI produced no inspectable reply ({reason})");
+                }
+
+                var events = await read.Resolve<IAgentRunService>().GetEventsAsync(agent.Id, live.TeamId, 0, CancellationToken.None);
+                var reply = string.Join("\n", events.Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.FinalSummary).Select(e => e.Text));
+                var applied = reply.Contains(marker, StringComparison.Ordinal);
+                return (applied, $"{Provider} '{live.Model}': TaskLaunch quick {(applied ? "APPLIED" : "did NOT apply")} the frozen cross-run lesson in the real CLI reply");
+            }
+            finally
+            {
+                if (lesson is not null) await InvalidateLessonAsync(lesson.Id);
+                if (unrelated is not null) await InvalidateLessonAsync(unrelated.Id);
+            }
         });
     }
 
@@ -370,6 +401,15 @@ public sealed class RealModelAgentInjectionE2ETests
         await scope.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
         return lesson;
     }
+
+    /// <summary>Removes one attempt's seeded lesson from "current" so a best-of-N retry in the same shared team never sees it alongside its own freshly-seeded convention.</summary>
+    private async Task InvalidateLessonAsync(Guid lessonId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Lesson.Where(lesson => lesson.Id == lessonId).ExecuteUpdateAsync(setters => setters.SetProperty(lesson => lesson.InvalidatedAt, DateTimeOffset.UtcNow));
+    }
+
+    private sealed record LessonReceiptRow(string RelevanceStatus, string? RelevanceModel, string? AssessmentDigest, Guid[] CandidateIds);
 
     private InMemoryBackgroundJobClient ResolveJobClient()
     {
