@@ -205,6 +205,66 @@ public sealed class BudgetAccountingFlowTests(PostgresFixture fixture)
         replay.ReservationState.ShouldBe(BudgetReservationStates.Reserved, "legacy state remains inspectable without inventing the historical cap");
     }
 
+    [Fact]
+    public async Task Failover_hops_that_never_billed_leave_the_headroom_for_the_call_that_follows()
+    {
+        // THE defect, through the real guard and the real ledger: every failed call took the null-actual settle,
+        // which lands Indeterminate and HOLDS its estimate forever (no fact source ever settles an llm: row). So a
+        // 429 / format-fault storm across failover hops — each successor re-enters the guard with its OWN
+        // reservation — filled the run's cap with phantom estimates for calls that produced no tokens, and the next
+        // REAL call was refused with LlmBudgetExceededException. Two hops here reserve $0.20 each against a $0.50
+        // cap: held, the third call cannot fit; released, it can.
+        var scenario = await SeedAsync();
+        using var scope = fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pool-model"] = new() { InputPerMillionUsd = 1000m, OutputPerMillionUsd = 1000m },   // 64 in + 136 out tokens ⇒ a $0.20 estimate
+        };
+        var callScope = new CodeSpace.Core.Services.Workflows.Llm.LlmCallScope(scenario.RunId, scenario.TeamId, "sup", "k", "supervisor.decision",
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), ledger, 0.50m, prices);
+
+        for (var hop = 0; hop < 2; hop++)
+            await Should.ThrowAsync<CodeSpace.Core.Services.Workflows.Llm.LlmApiException>(() =>
+                CodeSpace.Core.Services.Workflows.Llm.LlmBudgetGuard.GuardedAsync<int>(callScope, "pool-model", "s", "u", 136,
+                    _ => throw new CodeSpace.Core.Services.Workflows.Llm.LlmApiException("Anthropic", 429, CodeSpace.Core.Services.Workflows.Llm.LlmErrorCategory.RateLimited, "rate limited"),
+                    _ => 0m, CancellationToken.None));
+
+        var rows = await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == scenario.RunId).ToListAsync();
+        rows.Count.ShouldBe(2, "each hop is its own physical call, so each reserves its own claim");
+        rows.ShouldAllBe(r => r.State == BudgetReservationStates.Released && r.SettledUsd == null);
+        (await ledger.CommittedUsdAsync(scenario.RunId, scenario.TeamId, CancellationToken.None)).ShouldBe(0m, "nothing was billed, so nothing is committed");
+
+        var admitted = await CodeSpace.Core.Services.Workflows.Llm.LlmBudgetGuard.GuardedAsync(callScope, "pool-model", "s", "u", 136, _ => Task.FromResult(7), _ => 0.01m, CancellationToken.None);
+
+        admitted.ShouldBe(7, "the call the phantom estimates would have refused is admitted — and it is the FIRST call of this run that actually spent anything");
+        (await ledger.CommittedUsdAsync(scenario.RunId, scenario.TeamId, CancellationToken.None)).ShouldBe(0.01m, "committed is the observed spend, not two failures' worth of estimates");
+    }
+
+    [Fact]
+    public async Task An_ambiguous_outcome_still_holds_its_claim_against_the_cap()
+    {
+        // The other direction, so the release above is a DISTINCTION and not just a weakening: a timeout may well
+        // have been served and billed after we stopped listening, so its estimate keeps holding the cap.
+        var scenario = await SeedAsync();
+        using var scope = fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        var prices = new Dictionary<string, CodeSpace.Messages.Agents.ModelPrice>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pool-model"] = new() { InputPerMillionUsd = 1000m, OutputPerMillionUsd = 1000m },
+        };
+        var callScope = new CodeSpace.Core.Services.Workflows.Llm.LlmCallScope(scenario.RunId, scenario.TeamId, "sup", "k", "supervisor.decision",
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), ledger, 0.50m, prices);
+
+        await Should.ThrowAsync<TimeoutException>(() => CodeSpace.Core.Services.Workflows.Llm.LlmBudgetGuard.GuardedAsync<int>(callScope, "pool-model", "s", "u", 136,
+            _ => throw new TimeoutException("the gateway never answered"), _ => 0m, CancellationToken.None));
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().SingleAsync(r => r.WorkflowRunId == scenario.RunId);
+        row.State.ShouldBe(BudgetReservationStates.Indeterminate);
+        row.SettledUsd.ShouldBeNull("uncertain, never invented");
+        (await ledger.CommittedUsdAsync(scenario.RunId, scenario.TeamId, CancellationToken.None)).ShouldBe(0.20m, "the estimate keeps holding the cap — the only safe direction for a call that may have billed");
+    }
+
     private async Task<Scenario> SeedAsync()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(fixture);

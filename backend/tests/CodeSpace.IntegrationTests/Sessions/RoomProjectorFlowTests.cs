@@ -1648,6 +1648,40 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_capped_runs_critic_spend_reads_as_BUDGETED_not_as_unbudgeted()
+    {
+        // The Room is where the executor's critic gap was VISIBLE: its model call carried no ledger at all, so a
+        // capped run's own review spend appeared nowhere — and the moment it did appear it had to appear on the
+        // right side of the line. Under the task's cap the row is a real admission claim: it belongs in the
+        // committed total the cap is compared against, and NOT in the separate "unbudgeted" figure that exists to
+        // say "this spend was never metered against anything".
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "A capped critic call is metered");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship it", resultSummary: "Done.");
+        var focusRun = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Next turn", resultSummary: "Done.");
+        var now = DateTimeOffset.UtcNow;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.BudgetReservation.Add(new BudgetReservation
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = run, Kind = $"llm:{LlmStructuredCritic.OutputReviewCallKind}", ScopeKey = "critic-1",
+                State = BudgetReservationStates.Settled, ReservedUsd = 0.20m, SettledUsd = 0.05m, CapUsd = 5m, PriceVersion = "realized-v1",
+                CreatedDate = now, LastModifiedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var turn = (await ProjectByRunAsync(focusRun, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == run);
+        var budget = turn.Blocks.OfType<StatBlock>().Single(block => block.Kind == "budget");
+
+        budget.Detail.ShouldContain("$5.00 cap", Case.Sensitive, "the ceiling the critic call was admitted against is the run's displayed cap");
+        budget.Detail.ShouldNotContain("unbudgeted", Case.Insensitive, "a metered critic call is NOT un-metered spend — the two figures answer different questions and must not be confused");
+        budget.Items.Single(item => item.Text == "Budget ledger").Detail.ShouldBe("$0.0500 committed", "the review's observed spend counts toward the cap like any other model call");
+    }
+
+    [Fact]
     public async Task Cached_terminal_mutable_evidence_is_batched_once_for_a_long_session()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -29,6 +29,15 @@ public static class BudgetReservationStates
 public static class BudgetKinds
 {
     public const string UnbudgetedPrefix = "unbudgeted:";
+
+    /// <summary>
+    /// The supervisor's per-attempt admission grain (<c>RealSupervisorActionExecutor</c> mints one per staged
+    /// agent, <c>BudgetSettlementService</c> settles it from the decision tape and reconciles its orphans). Named
+    /// here rather than repeated as a literal at each of those sites: a rename that reached only some of them
+    /// would silently split the ledger into two kinds — reservations nothing settles, and a sweep that finds
+    /// nothing to settle. Pinned by test, since the string is durable state in every existing row.
+    /// </summary>
+    public const string AgentAttempt = "agent-attempt";
 }
 
 public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal CommittedUsd, decimal? CapUsd, string? Reason)

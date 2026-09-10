@@ -548,6 +548,38 @@ public sealed partial class RealSupervisorActionExecutor
         };
     }
 
+    /// <summary>Grace added to an attempt's own wall-clock ceiling before its budget reservation is treated as ORPHANED — wide enough to cover staging, queueing, the acceptance grade and the settlement sweep's own cadence, so a HEALTHY attempt's reservation is never expired out from under it. Pinned by test.</summary>
+    public const int AttemptReservationGraceMinutes = 30;
+
+    /// <summary>The horizon for an attempt whose task declares NO wall-clock ceiling (an explicit null <see cref="AgentTask.TimeoutSeconds"/> — bounded only by the stall watchdog and the cost cap), and the ceiling on any computed one. Some finite deadline is strictly better than none: expiry moves the row to Indeterminate, which still HOLDS its headroom, and the tape's own settlement supersedes that with a real receipt whenever the attempt does finish. Pinned by test.</summary>
+    public const int UnboundedAttemptReservationHorizonHours = 24;
+
+    /// <summary>
+    /// When this attempt's reservation stops being credible as LIVE — the attempt's own maximum wall clock
+    /// (<see cref="AgentTask.TimeoutSeconds"/> re-armed once per revise round) plus
+    /// <see cref="AttemptReservationGraceMinutes"/>.
+    ///
+    /// <para>It used to be null, which made the row INVISIBLE to <c>IBudgetLedger.ExpireOverdueAsync</c> (that
+    /// sweep only targets rows carrying a deadline): a wave whose worker died between reserving and staging left
+    /// reservations LIVE forever, holding the run's cap headroom against every later turn of a reclaimed run with
+    /// nothing left to settle them. Expiry frees no money — Indeterminate keeps holding the claim — it just makes
+    /// the orphan reachable by the reconcile pass instead of permanent.</para>
+    /// </summary>
+    internal static DateTimeOffset AttemptReservationDeadline(AgentTask task)
+    {
+        var horizon = TimeSpan.FromHours(UnboundedAttemptReservationHorizonHours);
+
+        // Each revise round re-arms the timeout, so the attempt's ceiling is (1 + rounds) × timeout. A task with no
+        // wall clock — and any implausible value, so an operator typo cannot push the deadline past the calendar —
+        // falls back to the committed horizon; clamping only ever expires the row EARLIER, which frees no money
+        // (Indeterminate keeps holding the claim) and leaves the tape's own settlement authoritative.
+        var wallClock = task.TimeoutSeconds is { } timeoutSeconds and > 0
+            ? TimeSpan.FromSeconds((double)timeoutSeconds * (1 + Math.Max(task.MaxReviseRounds ?? 0, 0)))
+            : horizon;
+
+        return DateTimeOffset.UtcNow + (wallClock > horizon ? horizon : wallClock) + TimeSpan.FromMinutes(AttemptReservationGraceMinutes);
+    }
+
     /// <summary>
     /// Create each agent run (through the admission gate, team-inherited) + stage its AgentRun wait keyed
     /// <c>&lt;nodeId&gt;#turn{N}#{k}</c>, then record the agent-run ids + count in the outcome. The node parks
@@ -620,12 +652,12 @@ public sealed partial class RealSupervisorActionExecutor
             for (var k = 0; k < tasks.Count; k++)
             {
                 var scopeKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}#{k}";
-                var admission = await _budget.ReserveAsync(context.SupervisorRunId, context.TeamId, "agent-attempt", scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: null, cancellationToken).ConfigureAwait(false);
+                var admission = await _budget.ReserveAsync(context.SupervisorRunId, context.TeamId, Workflows.Budget.BudgetKinds.AgentAttempt, scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, AttemptReservationDeadline(tasks[k].Task), cancellationToken).ConfigureAwait(false);
 
                 if (!admission.Admitted)
                 {
                     foreach (var key in reservedKeys)
-                        await _budget.ReleaseAsync(context.SupervisorRunId, context.TeamId, "agent-attempt", key, cancellationToken).ConfigureAwait(false);
+                        await _budget.ReleaseAsync(context.SupervisorRunId, context.TeamId, Workflows.Budget.BudgetKinds.AgentAttempt, key, cancellationToken).ConfigureAwait(false);
 
                     _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: {Reason}", tasks.Count, context.SupervisorRunId, admission.Reason);
 

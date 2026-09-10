@@ -196,13 +196,19 @@ public static class WorkflowsTestSeed
         return runId;
     }
 
+    /// <summary>The launch-stamped route provenance a CAPPED run carries — the <c>route_plan_jsonb</c> column production writes at projection (<c>TaskRunSnapshotFactory</c>) and <c>RunCostCap</c> reads the run's own ceiling back from.</summary>
+    public static string RouteJsonWithCostCap(decimal capUsd) => JsonSerializer.Serialize(
+        new CodeSpace.Messages.Tasks.RoutePlan { ProjectionKind = CodeSpace.Messages.Tasks.TaskProjectionKinds.SingleAgent, Caps = new CodeSpace.Messages.Tasks.RouteCaps { MaxCostUsd = capUsd } },
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
     /// <summary>
     /// Insert a <c>workflow_run_request</c> + <c>workflow_run</c> pair simulating a manual
     /// run, return the run id. <paramref name="payloadJson"/> becomes
     /// <c>workflow_run_request.normalized_payload_json</c>; the engine sees it as
-    /// <c>{{trigger.*}}</c>.
+    /// <c>{{trigger.*}}</c>. <paramref name="routePlanJson"/> stamps the launch-stamped
+    /// route provenance the run's own cost cap is read back from.
     /// </summary>
-    public static async Task<Guid> SeedManualRunAsync(PostgresFixture fixture, Guid workflowId, Guid teamId, int workflowVersion = 1, string payloadJson = "{}")
+    public static async Task<Guid> SeedManualRunAsync(PostgresFixture fixture, Guid workflowId, Guid teamId, int workflowVersion = 1, string payloadJson = "{}", string? routePlanJson = null)
     {
         using var scope = fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -250,6 +256,9 @@ public static class WorkflowsTestSeed
             // of all-zeros, which would FK-violate).
             RunRequestId = requestId,
             SourceType = WorkflowRunSourceTypes.Manual,
+            // The launch-stamped route, when the test's run declares one (e.g. its own cost cap) — null keeps every
+            // existing caller's row byte-identical.
+            RoutePlanJson = routePlanJson,
             // NOTE: this stages a SESSION-LESS run — unlike production, where the run-staging seam (RunStarter /
             // RunFromSnapshotStarter via IWorkSessionService.ResolveForRunAsync) opens a Workflow-kind WorkSession and
             // stamps SessionId (so the run reaches its Room). The engine/ledger tests using this seed don't exercise

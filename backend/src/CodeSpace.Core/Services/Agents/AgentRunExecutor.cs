@@ -2387,7 +2387,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         async Task<CriticRequest> RequestAsync() => built ??= await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
 
         if (verdict.Failed)
-            verdict = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            verdict = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task, cancellationToken).ConfigureAwait(false);
 
         // D② approve co-sign: an AGENT reviewer's APPROVAL gets a cheap independent MODEL co-check before it counts.
         // The reviewer agent READS the produced tree — hostile committed content could try to instruct it to approve
@@ -2397,7 +2397,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // DISAPPROVING agent verdict needs no co-sign (the worst case of a wrong block is one wasted revise round).
         if (agentReviewed && verdict.Approved)
         {
-            var coSign = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+            var coSign = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task, cancellationToken).ConfigureAwait(false);
 
             if (!coSign.Failed && !coSign.Approved)
                 verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
@@ -2481,23 +2481,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// SAME <c>workflow_run_record</c> ledger as the rest of the run, keyed to the spawning agent.run node. A standalone
     /// run (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger ⇒ no scope pushed ⇒ records nothing
     /// (fail-open), and the critic runs byte-identically.
+    ///
+    /// <para>The ledger comes from the SAME fresh scope as the record logger, so this call is no longer the one
+    /// model call in the system that produced no ledger row at all: under the task's own <see cref="AgentTask.MaxCostUsd"/>
+    /// it is admitted against that ceiling (and refused once spent — the critic's contract turns a refusal into a
+    /// Failed verdict, so a spent run degrades to "unreviewed", never to a thrown job), and with no ceiling it
+    /// records an "unbudgeted:" observability row instead of nothing. The critic RE-LABELS the pushed scope's Kind
+    /// to its own call kind, so the row lands as <c>llm:critic.output</c> / <c>unbudgeted:critic.output</c> — the
+    /// identity cell is what this push contributes.</para>
     /// </summary>
-    private async Task<CriticVerdict> ReviewRecordedAsync(CriticRequest request, AgentRun run, Guid? reviewerModelId, CancellationToken cancellationToken)
+    private async Task<CriticVerdict> ReviewRecordedAsync(CriticRequest request, AgentRun run, AgentTask task, CancellationToken cancellationToken)
     {
         if (run.WorkflowRunId is not { } workflowRunId)
-            return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
+            return await _critic.ReviewAsync(request, run.TeamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
 
         using var recordingScope = _scopeFactory.CreateScope();
-        var recordLogger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
-        var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
 
-        // P15-5a: this executor has no IBudgetLedger reference (the agent's own cost is metered separately — the
-        // quick lane's post-hoc AgentRunBudget, or the spawning supervisor's own per-turn reservation, neither
-        // reachable from this Hangfire-job scope) — Unbudgeted rather than a silent Budget-less passthrough, so
-        // LlmBudgetGuard still logs the plane by name instead of throwing. Wiring a real reservation here (and
-        // deciding whether it should share the supervisor's "agent-attempt" wave admission) is a follow-up.
-        using (LlmCallContext.Push(new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", recordLogger, offloader).Unbudgeted("agent-run output-review critic has no budget ledger reachable from this executor")))
-            return await _critic.ReviewAsync(request, run.TeamId, reviewerModelId, cancellationToken).ConfigureAwait(false);
+        using (LlmCallContext.Push(await BuildCriticCallScopeAsync(recordingScope, workflowRunId, run, task, cancellationToken).ConfigureAwait(false)))
+            return await _critic.ReviewAsync(request, run.TeamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The critic call's scope: budgeted under the task's cost ceiling when it declares one — with the team's operator-typed prices, since under a cap an unpriceable reviewer model is refused (D1 fail-closed) — else Unbudgeted, which still records.</summary>
+    private async Task<LlmCallScope> BuildCriticCallScopeAsync(IServiceScope recordingScope, Guid workflowRunId, AgentRun run, AgentTask task, CancellationToken cancellationToken)
+    {
+        var logger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
+        var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
+        var ledger = recordingScope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
+        var scope = new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", logger, offloader, Budget: ledger);
+
+        if (task.MaxCostUsd is not { } capUsd)
+            return scope.Unbudgeted("the agent task declares no cost cap for its output-review critic");
+
+        return scope with { CapUsd = capUsd, ModelPrices = await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false) };
     }
 
     /// <summary>Run the S8 AGENT reviewer from a fresh scope (it stages + executes a first-class run — the heartbeat-loop scope pattern). Authority and ownership refusal propagate; other failures become a failed verdict.</summary>

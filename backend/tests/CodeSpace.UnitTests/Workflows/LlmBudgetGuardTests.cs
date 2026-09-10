@@ -9,13 +9,15 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// 🟢 Unit: the W-hard atomic brain-plane guard — reserve-before-call, settle-at-actual, at the one funnel every
 /// model call rides. Pins: a scope WITH a ledger but no cap value (an operator's deliberate no-cap-configured
-/// launch) passes through untouched, byte-identical to before; a scope with NO ledger at all — or no scope —
-/// is a P15-5a programming-error signal and THROWS instead of the old silent fail-open, unless the caller marked
-/// itself explicitly Unbudgeted, which still passes through but is recorded under an "unbudgeted:" ledger kind; a
-/// refused admission throws BEFORE the model is ever invoked (the overshoot never happens); an admitted call
-/// settles at its actual spend; a faulted call settles pessimistically (null actual = at the reserve); an
-/// unpriceable model UNDER A CAP is refused before the call (D1 fail-closed) while an uncapped one passes through,
-/// and a failed-over successor is judged on its own price; the pessimistic estimate constants are committed values.
+/// launch) still RECORDS, as an "unbudgeted:" row naming the reason, instead of the row-less silent passthrough it
+/// used to be; a scope with NO ledger at all — or no scope — is a P15-5a programming-error signal and THROWS
+/// instead of the old silent fail-open, unless the caller marked itself explicitly Unbudgeted, which still passes
+/// through but is recorded under an "unbudgeted:" ledger kind; a refused admission throws BEFORE the model is ever
+/// invoked (the overshoot never happens); an admitted call settles at its actual spend; a failed call settles to
+/// what was OBSERVED — a transport failure that produced no completion releases its headroom, an ambiguous outcome
+/// (timeout / cancellation / a 2xx that may have billed) holds it; an unpriceable model UNDER A CAP is refused
+/// before the call (D1 fail-closed) while an uncapped one passes through, and a failed-over successor is judged on
+/// its own price; the pessimistic estimate constants are committed values.
 /// </summary>
 [Trait("Category", "Unit")]
 public class LlmBudgetGuardTests
@@ -24,17 +26,23 @@ public class LlmBudgetGuardTests
         new(Guid.NewGuid(), Guid.NewGuid(), "sup", "k", "supervisor.decision", null!, null!, budget, cap);
 
     [Fact]
-    public async Task A_ledgered_scope_with_no_cap_value_passes_through_untouched()
+    public async Task A_ledgered_scope_with_no_cap_value_records_an_unbudgeted_row_naming_the_reason()
     {
-        // The fail-closed / fail-loud rules below are both scoped to "this plane never wired a ledger at all".
-        // An operator who simply configured no cap on an otherwise-instrumented launch is not that — it is the
-        // ordinary, common, BYTE-IDENTICAL no-op it always was (SupervisorBounds branches on MaxCostUsd being
-        // null the same way), so it must never start throwing.
+        // The fail-closed / fail-loud rules below are both scoped to "this plane never wired a ledger at all". An
+        // operator who simply configured no cap on an otherwise-instrumented launch is not that, so it must never
+        // start throwing OR blocking. What it must ALSO not be is what it used to be: `return await call(...)` —
+        // the one silent, row-less passthrough left standing behind this class's "never a silent passthrough"
+        // claim, which answered "what did this run spend on models" with an absence. It now takes the same
+        // Unbudgeted path a plane with no launch takes, so the call is recorded by name.
         var ledger = new RecordingLedger(admit: true);
 
         (await LlmBudgetGuard.GuardedAsync(Scope(ledger, null), "claude-opus-4-8", "s", "u", 100, _ => Task.FromResult(42), _ => 0.1m, CancellationToken.None)).ShouldBe(42);
 
-        ledger.Reserves.ShouldBe(0, "no cap ⇒ no reservation — byte-identical for an instrumented-but-uncapped launch");
+        ledger.Reserves.ShouldBe(1, "a budgeted scope with no cap VALUE is recorded, not silently waved through");
+        ledger.LastReserveKind.ShouldBe($"{BudgetKinds.UnbudgetedPrefix}supervisor.decision");
+        ledger.LastReserveCapUsd.ShouldBeNull("there is no cap to admit against — the row can never refuse and can never poison a real cap");
+        ledger.LastSettleActual.ShouldBe(0.1m, "and it settles at the observed spend like any other row");
+        LlmBudgetGuard.NoRunCapReason.ShouldBe("run has no MaxCostUsd", "the operator-facing phrase on the row is a committed value");
     }
 
     [Fact]
@@ -169,6 +177,64 @@ public class LlmBudgetGuardTests
         ledger.LastSettleActual.ShouldBeNull("actual unknowable ⇒ the ledger's null-actual settle holds the reserve — the only safe direction");
     }
 
+    public static TheoryData<Exception, bool, string> FailureShapes() => new()
+    {
+        { new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "rate limited"), true, "a 429 never generated a completion — holding its estimate is how a retry storm fills the cap with phantoms" },
+        { new LlmApiException("Anthropic", 503, LlmErrorCategory.Transient, "unavailable"), true, "a 5xx never generated a completion (the category's own contract says so)" },
+        { new LlmApiException("OpenAI", 401, LlmErrorCategory.AuthFailed, "bad key"), true, "a rejected key cannot have been billed" },
+        { new LlmApiException("OpenAI", 400, LlmErrorCategory.BadRequest, "unsupported tool_choice"), true, "the gateway refused the request shape — the format fault that failover retries per hop" },
+        { new HttpRequestException("connection refused"), true, "no response was ever produced" },
+        { new LlmApiException("OpenAI", 200, LlmErrorCategory.Malformed, "not json"), false, "a 2xx MAY have billed — its own doc says so; never release on an ambiguous outcome" },
+        { new LlmApiException("OpenAI", 400, LlmErrorCategory.ContextLengthExceeded, "too long"), false, "not one of the shapes proven unbilled — hold" },
+        { new LlmApiException("Anthropic", 400, LlmErrorCategory.ContentFiltered, "blocked"), false, "a provider may bill the input it screened — hold" },
+        { new TaskCanceledException("HttpClient timeout"), false, "the request may well have been served and billed after we stopped listening" },
+        { new TimeoutException("elapsed"), false, "same ambiguity as a cancellation" },
+        { new InvalidOperationException("boom"), false, "an untyped fault proves nothing — the pre-existing pessimistic hold" },
+    };
+
+    [Theory]
+    [MemberData(nameof(FailureShapes))]
+    public async Task A_failed_call_settles_to_what_was_actually_observed(Exception thrown, bool releasesHeadroom, string why)
+    {
+        // THE defect: every failure took the null-actual settle, which lands Indeterminate and HOLDS the estimate
+        // forever (no fact source ever settles an llm: row, and the reconcile pass keeps holding it). A 429 /
+        // format-fault storm across failover hops — each hop its OWN reservation — therefore filled the run's cap
+        // with phantom estimates for calls that produced no tokens, and the next REAL call was refused. So the
+        // catch has to distinguish "provably spent nothing" from "might have been billed".
+        var ledger = new RecordingLedger(admit: true);
+
+        await Should.ThrowAsync<Exception>(() =>
+            LlmBudgetGuard.GuardedAsync<int>(Scope(ledger, 5m), "claude-opus-4-8", "s", "u", 100, _ => throw thrown, _ => 0m, CancellationToken.None));
+
+        ledger.Reserves.ShouldBe(1, "the fixture must actually have reserved, or this measures nothing");
+        ledger.Releases.ShouldBe(releasesHeadroom ? 1 : 0, why);
+        ledger.Settles.ShouldBe(releasesHeadroom ? 0 : 1, why);
+        if (!releasesHeadroom) ledger.LastSettleActual.ShouldBeNull("an ambiguous outcome keeps the reserve without inventing a bill");
+    }
+
+    [Fact]
+    public async Task A_released_transport_failure_leaves_the_headroom_for_the_next_call()
+    {
+        // The consequence the Theory above only implies: two hops that both 429'd must not have consumed the cap.
+        var ledger = new RecordingLedger(admit: true);
+
+        for (var hop = 0; hop < 2; hop++)
+            await Should.ThrowAsync<LlmApiException>(() => LlmBudgetGuard.GuardedAsync<int>(Scope(ledger, 5m), "claude-opus-4-8", "s", "u", 100,
+                _ => throw new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "rate limited"), _ => 0m, CancellationToken.None));
+
+        ledger.Releases.ShouldBe(2, "each hop reserves and releases its own claim — a failover chain cannot spend a cap on calls that produced nothing");
+        ledger.Settles.ShouldBe(0);
+    }
+
+    [Fact]
+    public void An_ambiguous_outcome_wrapped_in_a_transport_shape_is_still_ambiguous()
+    {
+        // The inner-chain walk takes the FIRST typed verdict, and a cancellation anywhere above it wins: a caller
+        // that wrapped its own cancellation in an HttpRequestException must not launder it into a release.
+        LlmBudgetGuard.ObservedNoSpend(new TaskCanceledException("cancelled", new HttpRequestException("reset"))).ShouldBeFalse();
+        LlmBudgetGuard.ObservedNoSpend(new InvalidOperationException("wrapper", new HttpRequestException("reset"))).ShouldBeTrue("an untyped wrapper around a proven-unbilled transport fault is still that fault");
+    }
+
     [Fact]
     public async Task An_unpriceable_model_UNDER_A_CAP_is_refused_before_the_model_is_ever_called()
     {
@@ -191,13 +257,14 @@ public class LlmBudgetGuardTests
     [Fact]
     public async Task An_unpriceable_model_with_NO_cap_still_passes_through_untouched()
     {
-        // The fail-closed rule is scoped to a declared cap. An uncapped run is byte-identical to before D1 — an
-        // unknown cost stays unknown and nothing blocks.
-        var ledger = new RecordingLedger(admit: false);   // would refuse if consulted
+        // The fail-closed rule is scoped to a declared cap. An uncapped run keeps D1's uncapped behaviour — an
+        // unknown cost stays unknown and NOTHING blocks, even though the call is now recorded: the observability
+        // row is reserved with a null cap, so this refusing ledger can never actually refuse it.
+        var ledger = new RecordingLedger(admit: false);   // would refuse if it were ever an admission gate
 
         (await LlmBudgetGuard.GuardedAsync(Scope(ledger, cap: null), "totally-unknown-model", "s", "u", 100, _ => Task.FromResult(1), _ => 0m, CancellationToken.None)).ShouldBe(1);
 
-        ledger.Reserves.ShouldBe(0);
+        ledger.LastReserveKind.ShouldStartWith(BudgetKinds.UnbudgetedPrefix, Case.Sensitive, "an unpriceable model under no cap is recorded at its best-effort $0 estimate, never refused");
     }
 
     [Fact]
@@ -317,7 +384,13 @@ public class LlmBudgetGuardTests
             return Task.CompletedTask;
         }
 
-        public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken) => Task.CompletedTask;
+        public int Releases;
+
+        public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken)
+        {
+            Releases++;
+            return Task.CompletedTask;
+        }
 
         public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
 

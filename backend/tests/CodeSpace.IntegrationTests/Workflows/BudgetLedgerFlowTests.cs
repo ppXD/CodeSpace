@@ -285,6 +285,48 @@ public sealed class BudgetLedgerFlowTests
     }
 
     [Fact]
+    public async Task The_sweep_closes_a_dangling_attempt_claim_and_still_RELEASES_a_terminal_map_branch()
+    {
+        // The kinds the sweep's reconcile pass used to skip entirely: an ORPHANED agent-attempt row (the expiry
+        // sweep's Indeterminate output, now reachable at all because a reservation finally carries a deadline) and
+        // a map-branch row that already went Indeterminate — neither had anything left that would ever close it.
+        //
+        // AND the ordering that makes adding them safe: Reconciled is not releasable, so a TERMINAL run's live
+        // branch claim must still be RELEASED by the pass that returns its headroom, never closed out from under it.
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        const string mapBranch = CodeSpace.Core.Services.Workflows.Engine.WorkflowEngine.MapBranchReservationKind;
+
+        await ledger.ReserveAsync(runId, teamId, BudgetKinds.AgentAttempt, "sup#turn9#0", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
+        await ledger.ReserveAsync(runId, teamId, mapBranch, "orphan-branch", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
+        await ledger.ReserveAsync(runId, teamId, mapBranch, "live-branch", 2m, 100m, "realized-v1", null, null, CancellationToken.None);
+
+        // The run is terminal (so the branch release pass applies), and two rows already sit Indeterminate — the
+        // shape an expiry sweep leaves behind, which nothing used to close for either kind.
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE workflow_run SET status = 'Success' WHERE id = {runId}");
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE budget_reservation SET state = 'Indeterminate' WHERE workflow_run_id = {runId} AND scope_key IN ('sup#turn9#0', 'orphan-branch')");
+
+        var committedBefore = await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None);
+
+        await scope.Resolve<IBudgetSettlementService>().SweepAsync(batchSize: 100, CancellationToken.None);
+
+        var rows = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+        rows.Single(r => r.ScopeKey == "sup#turn9#0").State.ShouldBe(BudgetReservationStates.Reconciled, "an orphaned attempt claim is CLOSED instead of dangling forever");
+        rows.Single(r => r.ScopeKey == "sup#turn9#0").SettledUsd.ShouldBeNull("closing bookkeeping never invents a bill");
+        rows.Single(r => r.ScopeKey == "orphan-branch").State.ShouldBe(BudgetReservationStates.Reconciled, "and so is a branch claim past releasing");
+        rows.Single(r => r.ScopeKey == "live-branch").State.ShouldBe(BudgetReservationStates.Released,
+            "the RELEASE pass must win for a still-live branch on a terminal run — reconciling it first would hold its estimate permanently, the exact thing that pass exists to return");
+
+        (await ledger.CommittedUsdAsync(runId, teamId, CancellationToken.None)).ShouldBe(committedBefore - 2m,
+            "only the released branch's headroom comes back; every closed-but-unsettled claim keeps holding its own");
+    }
+
+    [Fact]
     public async Task Expiry_holds_the_claim_instead_of_silently_freeing_it()
     {
         var (teamId, _) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -592,7 +592,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         public Task<IReadOnlyDictionary<Guid, ArtifactRangeReadResult>> ReadRangesAsync(ArtifactRangesReadRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
-    /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard), the record logger + offloader the recording scope pulls, and (when configured) the S8/D② agent reviewer.</summary>
+    /// <summary>A minimal IServiceScopeFactory whose fresh scope resolves the ledger (the A1-defer guard), the record logger + offloader + BUDGET ledger the recording scope pulls, and (when configured) the S8/D② agent reviewer.</summary>
     private sealed class FakeScopeFactory : IServiceScopeFactory, IServiceScope, IServiceProvider
     {
         private readonly IToolCallLedgerService _ledger;
@@ -608,6 +608,7 @@ public sealed class AgentRunExecutorOutputReviewTests
             serviceType == typeof(IToolCallLedgerService) ? _ledger
             : serviceType == typeof(IRunRecordLogger) ? RecordLogger
             : serviceType == typeof(IArtifactOffloader) ? new NoopOffloader()
+            : serviceType == typeof(CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger) ? new CodeSpace.Tests.Fakes.AdmitAllBudgetLedger()
             : serviceType == typeof(CodeSpace.Core.Services.Agents.Review.IAgentOutputReviewer) ? _agentReviewer
             : null;
         public void Dispose() { }
