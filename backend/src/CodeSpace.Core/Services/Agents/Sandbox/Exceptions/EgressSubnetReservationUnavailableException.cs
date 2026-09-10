@@ -1,6 +1,6 @@
 using CodeSpace.Messages.Failures;
 
-namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+namespace CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 
 /// <summary>
 /// A filtered-egress launch REFUSED because this host cannot reserve the run's /30 at all — its reservation directory

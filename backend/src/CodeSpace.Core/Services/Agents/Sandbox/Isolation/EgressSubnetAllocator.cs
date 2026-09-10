@@ -1,4 +1,5 @@
 using System.Text;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Settings;
 using Serilog;
 
@@ -27,27 +28,39 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// changes nothing about the crash-resume teardown contract.</para>
 ///
 /// <para><b>A host whose reservation DIRECTORY is unusable REFUSES the launch; one that cannot ENFORCE the lock
-/// degrades to process-local uniqueness.</b> Two different facts, two different postures. A directory that can be
-/// neither created nor written (a read-only mount, no rights) makes every acquire throw
-/// <see cref="EgressSubnetReservationUnavailableException"/> naming it and the OS cause — fail-closed, like everything
-/// else on this path: <c>FilteredEgressNetns</c> already aborts a run rather than launch it unfiltered, and
-/// <see cref="Acquire"/> already aborted rather than share a /30 with a live run. It costs no availability that was
-/// not already gone: the directory sits under the same spool root the run's own <c>out.log</c> / <c>exit</c> marker
-/// need, so that run was going to fail regardless — and the alternative was worse than a failure. A rights error read
-/// as another worker's contention (which <c>flock</c> NEVER expresses that way) lost every candidate /30 the same way
-/// and then reported "this host already holds 4096 filtered-egress /30s": a true sentence about nothing, pointing an
-/// operator at concurrency instead of at the mount. The refusal is sticky — a host that proved unusable stays refused
-/// until the worker restarts, as the degradation already was.</para>
+/// degrades to process-local uniqueness; one unopenable <c>.lease</c> is just SKIPPED.</b> Three different facts,
+/// three different postures. A directory that can be neither created nor written (a read-only mount, no rights) makes
+/// every acquire throw <see cref="EgressSubnetReservationUnavailableException"/> naming it and the OS cause —
+/// fail-closed, like everything else on this path: <c>FilteredEgressNetns</c> already aborts a run rather than launch
+/// it unfiltered, and <see cref="Acquire"/> already aborted rather than share a /30 with a live run. It costs no
+/// availability that was not already gone: the directory sits under the same spool root the run's own <c>out.log</c> /
+/// <c>exit</c> marker need, so that run was going to fail regardless. That verdict is only ever reached through a
+/// FRESH probe file, which nothing else can hold, so it can never be another worker's contention wearing an errno.</para>
 ///
-/// <para>The one cause that DEGRADES instead is a filesystem that does not enforce the lock: .NET emulates
-/// <see cref="FileShare.None"/> on Unix with an advisory <c>flock(fd, LOCK_EX|LOCK_NB)</c> and IGNORES every error but
-/// <c>EWOULDBLOCK</c>, so on a mount whose <c>flock</c> answers <c>ENOTSUP</c> — an NFS/RWX volume, which is exactly
-/// the shape this design recommends — the handle comes back UNLOCKED. There the directory IS writable and the runs
-/// themselves are healthy, so the allocator falls back to the PROCESS-LOCAL uniqueness it had before the reservation
-/// existed and says so at Warning level, rather than taking every filtered-egress launch on the host down over a
-/// property of the mount. What must never happen is <see cref="HostReservationsUsable"/> reading <c>true</c> while
-/// nothing is reserved, so the lock is SELF-PROBED once at first use — two opens of one file from this process, which
-/// is exactly what two workers do — instead of assumed.</para>
+/// <para>A single reservation file this process cannot OPEN is a different fact and must not take the host down with
+/// it: on a shared reservation directory whose workers run under different uids, another worker's 0600 <c>.lease</c>
+/// fails <c>EACCES</c> at <c>open(2)</c> — before <c>flock</c> is ever reached — and reading that as "this host
+/// cannot reserve" refused THIS worker for its entire process lifetime, on its very first acquire, over one file
+/// somebody else legitimately holds. The candidate is skipped instead (with a one-time Warning), which OVER-holds a
+/// /30 and is the safe direction; a /30 nobody double-hands-out costs nothing. Counting it as contention is what must
+/// not happen — that lost all 4096 candidates the same way and reported "this host already holds 4096 filtered-egress
+/// /30s": a true sentence about nothing, pointing an operator at concurrency instead of at the mount. So the
+/// exhaustion at the bottom of the loop does not guess either: it RE-PROBES with a fresh file and reports whichever
+/// the host then proves. (The residual is bounded and deliberate: a released <c>.lease</c> another uid owns stays
+/// unopenable here, so those /30s are never reclaimed BY THIS uid — the walk simply moves past them.)</para>
+///
+/// <para>The one cause that DEGRADES instead is a filesystem that does not enforce the lock across processes: .NET
+/// emulates <see cref="FileShare.None"/> on Unix with an advisory <c>flock(fd, LOCK_EX|LOCK_NB)</c> and IGNORES every
+/// error but <c>EWOULDBLOCK</c>, so wherever that call cannot lock, the handle comes back UNLOCKED and two workers
+/// both "reserve" the same /30. There the directory IS writable and the runs themselves are healthy, so the allocator
+/// falls back to the PROCESS-LOCAL uniqueness it had before the reservation existed and says so at Warning level,
+/// rather than taking every filtered-egress launch on the host down over a property of the mount. What must never
+/// happen is <see cref="HostReservationsUsable"/> reading <c>true</c> while nothing is reserved, so enforcement is
+/// PROVEN at first use rather than assumed — and proven the way it is USED, by a second PROCESS: an in-process second
+/// open is the free fast path (where <c>flock</c> is flock proper, two opens are two open file descriptions and the
+/// second is refused), and only when that comes back unrefused is <see cref="CrossProcessLockProbe"/> asked, because
+/// on a Linux NFS client <c>flock()</c> is emulated with per-PROCESS fcntl locks (flock(2) NOTES) and an in-process
+/// probe there reads "unenforced" on a mount whose cross-process locking works perfectly.</para>
 ///
 /// <para>One reservation can OVER-hold: the lock lives on the acquiring worker's fd, so when a run is torn down by a
 /// DIFFERENT worker (a reaper after a crash/resume) that worker's <see cref="Release"/> is a no-op and the /30 stays
@@ -73,10 +86,11 @@ public sealed class EgressSubnetAllocator
     /// <summary>A reservation file carries the holder's pid + runId, so it is 0600 rather than whatever the umask happened to be.</summary>
     private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
 
-    /// <summary>Why this host holds no reservations. Fixed literals — one per cause — so the refusal, the Warning and the tests name the same thing. The first two REFUSE every acquire; the third degrades.</summary>
+    /// <summary>Why this host holds no reservations. Fixed literals — one per cause — so the refusal, the Warning and the tests name the same thing. The first two REFUSE every acquire; the last two degrade. "Unproven" is deliberately not folded into "unenforced": the posture is the same but the operator's fix is not (a mount that does not lock vs. a bootstrap this worker could not run), and misattributing a cause is the defect this whole path exists to end.</summary>
     private const string DirectoryUncreatable = "the reservation directory cannot be created";
     private const string DirectoryUnwritable = "the reservation directory cannot be written";
     private const string LockingUnenforced = "exclusive file locking is not enforced there";
+    private const string LockingUnproven = "exclusive file locking could not be proven across processes";
 
     // 254 (octet2 ∈ 1..254) × 254 (octet3 ∈ 1..254) × 64 (octet4 block ∈ {0,4,…,252}) distinct /30s in 10.0.0.0/8.
     private const int Octet2Count = 254;
@@ -91,26 +105,51 @@ public sealed class EgressSubnetAllocator
     private readonly HashSet<string> _inUse = new(StringComparer.Ordinal);
     private readonly string? _directory;
     private readonly Func<string, FileStream> _open;
+    private readonly CrossProcessLockProbe.Runner _askSecondProcess;
 
     private bool _probed;
+    private bool _warnedUnopenableLease;
     private string? _degradation;
     private (string Reason, Exception? Cause)? _refusal;
+
+    /// <summary>A degradation a posture reader must be told about even though it belongs to no run. Scoped to the calling async flow (the <c>RuntimeSettings.Override</c> shape), so a test can state one without a parallel test class reading a posture this host never had.</summary>
+    private static readonly AsyncLocal<string?> ObservedDegradationOverride = new();
 
     /// <summary>The allocator every launch on this host reserves through — the one whose reservation directory is shared by every worker PROCESS, which is what makes the reservation host-level.</summary>
     public static EgressSubnetAllocator Host { get; } = new();
 
-    /// <summary>Pass a directory to reserve in one (a test standing in for a host) and/or an opener that stands in for a filesystem this process cannot stage (one that does not enforce the lock, one that refuses the write); omit both to resolve the deployment's own directory and take a real exclusive lock, which is what every worker process on the host does.</summary>
-    internal EgressSubnetAllocator(string? reservationDirectory = null, Func<string, FileStream>? opener = null)
+    /// <summary>Pass a directory to reserve in one (a test standing in for a host), an opener that stands in for a filesystem this process cannot stage (one that does not enforce the lock, one that refuses the write), and/or the cross-process probe's answer; omit all three to resolve the deployment's own directory, take a real exclusive lock and ask the real bundled bootstrap, which is what every worker process on the host does.</summary>
+    internal EgressSubnetAllocator(string? reservationDirectory = null, Func<string, FileStream>? opener = null, CrossProcessLockProbe.Runner? askSecondProcess = null)
     {
         _directory = reservationDirectory;
         _open = opener ?? OpenExclusive;
+        _askSecondProcess = askSecondProcess ?? CrossProcessLockProbe.Ask;
     }
 
     /// <summary>False once this host proved it cannot hold host-level reservations — either because the directory is unusable (every acquire then REFUSES) or because the lock is not enforced there (the allocator then degrades to process-local uniqueness and two worker processes on this host CAN collide). Exposed so both are assertable rather than silent. Reading it PROBES if nothing has yet, so it never answers an optimistic <c>true</c> the host has not earned.</summary>
     internal bool HostReservationsUsable { get { lock (_lock) { EnsureProbed(); return _degradation is null && _refusal is null; } } }
 
-    /// <summary>Which of the three causes it was — in the same words the refusal and the Warning use — or null while this host still reserves host-wide.</summary>
+    /// <summary>Which of the four causes it was — in the same words the refusal and the Warning use — or null while this host still reserves host-wide.</summary>
     internal string? UnusableReason { get { lock (_lock) { EnsureProbed(); return _degradation ?? _refusal?.Reason; } } }
+
+    /// <summary>What a probe ALREADY established about this host's locking, or null while nothing has probed. Deliberately does NOT probe: a posture reader asking a question must not create a reservation directory, write a probe file or spawn a child on a host that has launched no filtered-egress run.</summary>
+    internal string? ObservedDegradation { get { lock (_lock) { return _degradation; } } }
+
+    /// <summary>The degradation a posture must disclose (<c>AgentAutonomyPolicy.DescribeNetwork</c>) — this host's own, unless a test scoped one.</summary>
+    internal static string? ObservedHostDegradation => ObservedDegradationOverride.Value ?? Host.ObservedDegradation;
+
+    /// <summary>Test-only: state the degradation a posture reader must see, for the calling async flow only.</summary>
+    internal static IDisposable OverrideObservedHostDegradation(string reason) => new DegradationScope(reason);
+
+    /// <summary>The scope <see cref="OverrideObservedHostDegradation"/> hands back — it restores whatever was there, so nesting is safe.</summary>
+    private sealed class DegradationScope : IDisposable
+    {
+        private readonly string? _previous = ObservedDegradationOverride.Value;
+
+        public DegradationScope(string reason) => ObservedDegradationOverride.Value = reason;
+
+        public void Dispose() => ObservedDegradationOverride.Value = _previous;
+    }
 
     /// <summary>How a reservation is actually held: an open handle whose <see cref="FileShare.None"/> share mode the OS turns into an exclusive lock (an advisory <c>flock(2)</c> on Unix). The lock dies with the handle, which is what makes a crashed worker's reservations self-releasing.</summary>
     private static FileStream OpenExclusive(string path) => new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -122,8 +161,10 @@ public sealed class EgressSubnetAllocator
     /// /30 keeps it even after the directory turns unusable under it.
     ///
     /// <para>Throws <see cref="EgressSubnetReservationUnavailableException"/> when this host cannot hold reservations
-    /// at all, from the gate rather than from inside the loop, so a refusal can never be reported as the exhaustion at
-    /// the bottom.</para>
+    /// at all — from the GATE when a probe already established that, and otherwise only from
+    /// <see cref="ExhaustionOrRefusal"/>, which re-probes rather than let a mount that failed mid-walk be reported as
+    /// concurrency. Nothing inside the loop decides it: a single unopenable file is somebody else's reservation until
+    /// a fresh probe file says otherwise.</para>
     /// </summary>
     public Lease Acquire(string runId)
     {
@@ -147,9 +188,30 @@ public sealed class EgressSubnetAllocator
                 return LeaseFor(cidr);
             }
 
-            // Fail closed — abort rather than share a subnet with a live run.
-            throw new InvalidOperationException($"EgressSubnetAllocator: this host already holds {MaxConcurrentReservations} filtered-egress /30s.");
+            throw ExhaustionOrRefusal();
         }
+    }
+
+    /// <summary>
+    /// What the BOTTOM of the probe loop actually means. Every candidate unavailable can be 4096 live /30s — and can
+    /// equally be a directory that turned unwritable under us after the probe (a remount: <c>EACCES</c> arrives as
+    /// <see cref="UnauthorizedAccessException"/>, <c>EROFS</c> as <see cref="IOException"/>, and a <c>.lease</c> is
+    /// skipped for either rather than refusing this worker for its whole lifetime). From inside the loop the two are
+    /// indistinguishable, and guessing wrong is what reported imaginary concurrency to an operator whose mount had
+    /// gone read-only. So it does not guess: it RE-PROBES with a fresh file nothing else can hold, and reports
+    /// whichever that proves. The re-probe's verdict is recorded like the first one, so a host that has genuinely
+    /// gone read-only refuses immediately from here on.
+    /// </summary>
+    private Exception ExhaustionOrRefusal()
+    {
+        // Not on an already-degraded host: nothing there was skipped for an OS reason (the in-process set alone
+        // decided), so its exhaustion is 4096 live in-process reservations and a re-probe would only buy a second child.
+        if (_degradation is null) ProbeExclusiveLocking(ReservationDirectory);
+
+        if (_refusal is not null) return Refusal();
+
+        // Fail closed — abort rather than share a subnet with a live run.
+        return new InvalidOperationException($"EgressSubnetAllocator: this host already holds {MaxConcurrentReservations} filtered-egress /30s.");
     }
 
     /// <summary>Free <paramref name="runId"/>'s reservation. A no-op when it never held one (e.g. teardown by a restarted worker that never acquired it) — safe + idempotent.</summary>
@@ -175,10 +237,10 @@ public sealed class EgressSubnetAllocator
 
     /// <summary>
     /// Take the host-level lock on <paramref name="cidr"/>. True — with a non-null handle — when this process now owns
-    /// it; false ONLY when another LIVE process does (its handle still holds the lock, so the open is refused). A file
-    /// left by a crashed or finished owner opens cleanly, which is what makes a released reservation immediately
-    /// reusable. True with a NULL handle on a degraded host: the in-process set alone decides there, as it did before
-    /// the reservation existed. Throws when the directory turns unwritable between the probe and here.
+    /// it; false when it is UNAVAILABLE to this process, which is either another LIVE process holding the lock (its
+    /// handle refuses the open) or a reservation file this uid cannot open at all. A file left by a crashed or
+    /// finished owner opens cleanly, which is what makes a released reservation immediately reusable. True with a NULL
+    /// handle on a degraded host: the in-process set alone decides there, as it did before the reservation existed.
     /// </summary>
     private bool TryReserve(string cidr, string runId, out FileStream? handle)
     {
@@ -190,20 +252,32 @@ public sealed class EgressSubnetAllocator
 
         try { handle = _open(path); }
         catch (IOException) { return false; }        // refused: another LIVE process's handle holds this /30's lock
-        catch (UnauthorizedAccessException ex)
+        catch (UnauthorizedAccessException error)
         {
-            // NOT contention. A lock refusal is EWOULDBLOCK, which surfaces as an IOException sharing violation —
-            // never as a rights error — so this is the directory having turned unwritable under us (a remount after
-            // the probe). Read as "held", it would lose EVERY candidate and then blame 4096 imaginary live runs.
-            Refuse(DirectoryUnwritable, ex);
+            // Not contention (flock refuses with EWOULDBLOCK, an IOException sharing violation), and not grounds to
+            // refuse this worker for its lifetime either: on a shared reservation directory whose workers run under
+            // different uids, another worker's 0600 .lease fails EACCES at open(2) before flock is even reached.
+            // Skip it — over-holding one /30 is the safe direction. A directory that is unwritable ENTIRELY still
+            // refuses: every candidate is skipped and the exhaustion below re-probes with a file nothing can hold.
+            WarnOnceAboutUnopenableLease(path, error);
 
-            throw Refusal();
+            return false;
         }
 
         RestrictToOwner(path, OwnerOnlyFile);
         StampOwner(handle, runId);
 
         return true;
+    }
+
+    /// <summary>Say ONCE per worker that a reservation file was unopenable. Once, because the loop can hit 4096 of them in one acquire and every later acquire walks the same files: the actionable fact is that it happens at all, and the operator's copy of it must not be a flood.</summary>
+    private void WarnOnceAboutUnopenableLease(string path, Exception cause)
+    {
+        if (_warnedUnopenableLease) return;
+
+        _warnedUnopenableLease = true;
+
+        Log.Warning(cause, "Filtered-egress /30 reservation {ReservationPath} cannot be opened by this worker; treating that subnet as held and walking on. Expected where the shared reservation directory's workers run under different uids; if EVERY candidate fails this way the directory itself is the fault and the launch is refused by name", path);
     }
 
     /// <summary>
@@ -219,13 +293,17 @@ public sealed class EgressSubnetAllocator
     }
 
     /// <summary>
-    /// Establish ONCE, at first use, whether this host can hold host-level reservations — and record WHICH of the three
+    /// Establish ONCE, at first use, whether this host can hold host-level reservations — and record WHICH of the four
     /// ways it cannot. Assuming it can is what made the flag lie: .NET emulates <see cref="FileShare.None"/> on Unix
-    /// with an advisory <c>flock(fd, LOCK_EX|LOCK_NB)</c> and IGNORES every error but <c>EWOULDBLOCK</c>, so on a
-    /// filesystem that answers <c>ENOTSUP</c>/<c>EACCES</c> — or in a process where .NET's file-locking switch is off —
-    /// the handle comes back UNLOCKED and two workers both "reserve" the same /30 while the flag still reads true. It
-    /// only RECORDS: the refusal is thrown by <see cref="EnsureHostCanReserve"/>, so reading
+    /// with an advisory <c>flock(fd, LOCK_EX|LOCK_NB)</c> and IGNORES every error but <c>EWOULDBLOCK</c>, so wherever
+    /// that call cannot lock — a filesystem without it, a process where .NET's file-locking switch is off — the handle
+    /// comes back UNLOCKED and two workers both "reserve" the same /30 while the flag still reads true. It only
+    /// RECORDS: the refusal is thrown by <see cref="EnsureHostCanReserve"/>, so reading
     /// <see cref="HostReservationsUsable"/> can probe without throwing at a caller that only asked a question.
+    ///
+    /// <para>Under the instance lock, deliberately: the probe can cost a child process (~35ms warm, ~1s cold, capped
+    /// at <see cref="CrossProcessLockProbe.ChildTimeoutMs"/>), and paying it once with concurrent acquires waiting is
+    /// worth more than two probes racing to record different verdicts.</para>
     /// </summary>
     private void EnsureProbed()
     {
@@ -260,13 +338,12 @@ public sealed class EgressSubnetAllocator
     }
 
     /// <summary>
-    /// Open ONE probe file TWICE from this process. Two separate <c>open()</c>s are exactly what two worker processes
-    /// issue and exactly what <c>flock(2)</c> conflicts on, so a second open that is REFUSED proves the reservation
-    /// means what it says, and one that SUCCEEDS proves nothing is enforcing it. The probe file is named per-probe and
-    /// unlinked afterwards, so a concurrent worker's probe can neither be mistaken for a reservation nor delete ours
-    /// between the two opens. The FIRST open is also how an existing-but-unwritable directory is caught: nothing else
-    /// can hold a freshly-named file, so a failure there is the mount, never contention — whatever errno it wore
-    /// (<c>EACCES</c> arrives as <see cref="UnauthorizedAccessException"/>, <c>EROFS</c> as <see cref="IOException"/>).
+    /// Hold ONE probe file exclusively and find out whether a SECOND opener is refused — the property the whole
+    /// reservation rests on. The probe file is named per-probe and unlinked afterwards, so a concurrent worker's probe
+    /// can neither be mistaken for a reservation nor delete ours mid-probe. The FIRST open is also how an
+    /// existing-but-unwritable directory is caught: nothing else can hold a freshly-named file, so a failure there is
+    /// the mount, never contention — whatever errno it wore (<c>EACCES</c> arrives as
+    /// <see cref="UnauthorizedAccessException"/>, <c>EROFS</c> as <see cref="IOException"/>).
     /// </summary>
     private void ProbeExclusiveLocking(string directory)
     {
@@ -275,14 +352,34 @@ public sealed class EgressSubnetAllocator
         FileStream held;
 
         try { held = _open(path); }
-        catch (Exception ex) { Refuse(DirectoryUnwritable, ex); return; }
+        catch (Exception error) { Refuse(DirectoryUnwritable, error); return; }
 
         using (held)
         {
-            if (!SecondOpenIsRefused(path)) DegradeToProcessLocal(directory);
+            if (ReasonEnforcementIsUnproven(path) is { } reason) DegradeToProcessLocal(directory, reason);
         }
 
         try { File.Delete(path); } catch { /* best-effort: a stray probe file is inert — it is not a .lease */ }
+    }
+
+    /// <summary>
+    /// Null when this host PROVED that a second opener is refused; otherwise the degradation cause. Two stages,
+    /// cheapest first. An in-process second open answers wherever <c>flock</c> is flock proper — two opens are two
+    /// open file descriptions and <c>flock(2)</c> conflicts on exactly that — and costs one syscall. Where it is NOT
+    /// refused the question is still open rather than answered: on a Linux NFS client <c>flock()</c> is emulated with
+    /// per-PROCESS fcntl byte-range locks, which never conflict with their own process, so the mount whose
+    /// cross-process locking works is the one an in-process probe libels. Only there is a real second PROCESS asked.
+    /// </summary>
+    private string? ReasonEnforcementIsUnproven(string path)
+    {
+        if (SecondOpenIsRefused(path)) return null;
+
+        return _askSecondProcess(path) switch
+        {
+            CrossProcessLockProbe.Verdict.Enforced => null,
+            CrossProcessLockProbe.Verdict.Unenforced => LockingUnenforced,
+            _ => LockingUnproven,
+        };
     }
 
     private bool SecondOpenIsRefused(string path)
@@ -293,12 +390,12 @@ public sealed class EgressSubnetAllocator
         return false;
     }
 
-    /// <summary>Record + announce the ONE cause that degrades rather than refusing — this filesystem does not enforce the lock, so the allocator falls back to the PROCESS-LOCAL uniqueness it had before the reservation existed and two worker processes on this host can hand out the same /30. Nothing throws here, so the Warning is the only way it becomes visible.</summary>
-    private void DegradeToProcessLocal(string directory)
+    /// <summary>Record + announce the causes that degrade rather than refusing — this filesystem does not enforce the lock across processes (or could not be shown to), so the allocator falls back to the PROCESS-LOCAL uniqueness it had before the reservation existed and two worker processes on this host can hand out the same /30. Nothing throws here, so the Warning is the only way it becomes visible — and the posture line an operator reads (<c>AgentAutonomyPolicy.DescribeNetwork</c>) then discloses it for as long as this worker lives.</summary>
+    private void DegradeToProcessLocal(string directory, string reason)
     {
-        _degradation = LockingUnenforced;
+        _degradation = reason;
 
-        Log.Warning("Filtered-egress /30 reservations under {ReservationDirectory} degraded to process-local uniqueness: {DegradationReason}. Two worker processes on this host can now hand out the same subnet", directory, LockingUnenforced);
+        Log.Warning("Filtered-egress /30 reservations under {ReservationDirectory} degraded to process-local uniqueness: {DegradationReason}. Two worker processes on this host can now hand out the same subnet", directory, reason);
     }
 
     /// <summary>Remember the fail-closed cause, so every later acquire refuses with the SAME named reason instead of re-discovering it — as 4096 imaginary live runs, which is what reading a rights error as contention did.</summary>
