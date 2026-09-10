@@ -541,7 +541,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         /// InfraUnknown — so writing "there was no oracle integrity to record" into the evidence would hand a
         /// previously evidence-less grade an evidence binding, loosening admission on the strength of an absence.</para>
         /// </summary>
-        public static OracleProtectionOutcome Unprotected(string why) => new(null, null, $"oracle: graded UNPROTECTED ({why})");
+        public static OracleProtectionOutcome Unprotected(string why) => new(null, null, $"{AcceptanceOracleProtection.UnanchoredDetailMarker}{why})");
 
         /// <summary>The tamper list as ONE bounded line — the integrity note rides a detail string, never a paragraph.</summary>
         private static string Flatten(string paths)

@@ -28,7 +28,7 @@ public class RoomArtifactVerificationTests
     [InlineData(false, "tests-failed-exit-1", false, true, false, RoomOracleProtection.None)]
     [InlineData(null, null, false, false, null, RoomOracleProtection.None)]
     [InlineData(true, "tests-passed — graded on the candidate's own solution.sh", false, true, true, RoomOracleProtection.Subject)]
-    [InlineData(true, "oracle: graded UNPROTECTED (no base recorded)", false, true, true, RoomOracleProtection.Unanchored)]
+    [InlineData(true, "oracle: graded UNPROTECTED (no base recorded)", false, true, true, RoomOracleProtection.Unanchored)] // contract-shape pin, not production coverage: the grader writes this clause to OracleNote, not Detail, so no producer feeds it here today — this only pins that IF one ever does, the Room decodes it correctly
     [InlineData(true, "not-applicable: no changes were expected and none were produced", false, false, null, RoomOracleProtection.None)]
     public void One_units_row_reads_the_same_graded_line_UnitGrades_uses(bool? acceptancePassed, string? detail, bool waived, bool expectedRan, bool? expectedPassed, RoomOracleProtection expectedProtection)
     {
