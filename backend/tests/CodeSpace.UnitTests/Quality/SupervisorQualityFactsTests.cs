@@ -158,20 +158,41 @@ public sealed class SupervisorQualityFactsTests
     // ─── the UNIT grain of the declared-check fact ─────────────────────────────
 
     /// <summary>
-    /// The grain ruling: a check is declared for a unit when the operator's run-wide floor is declared OR the unit's
-    /// OWN effective oracle exists. The FIRST row is the one the floor-only reading reddens — and it is the common
-    /// shape, since most runs declare no floor at all.
+    /// The grain ruling: a check is declared for a unit ONLY when the unit's OWN effective oracle exists — the
+    /// operator's run-wide floor is a RUN-level gate and declares nothing at this grain. The SECOND row is the one
+    /// the floor disjunct used to flip to <c>true</c>; restoring that disjunct reds it.
     /// </summary>
     [Theory]
     [InlineData(false, true, true)]     // no operator floor, the unit authored its own oracle → declared
-    [InlineData(true, false, true)]     // the operator floor alone, no unit oracle → declared
+    [InlineData(true, false, false)]    // the operator floor alone, no unit oracle → NOT declared — the floor is a run-level gate, not this unit's check
     [InlineData(false, false, false)]   // neither — nothing that could grade this unit is declared
-    public void A_check_is_declared_when_EITHER_the_operator_floor_or_this_units_own_oracle_exists(bool floorDeclared, bool unitOracleAuthored, bool expected)
+    public void A_check_is_declared_only_by_this_units_own_effective_oracle_never_by_the_operator_floor(bool floorDeclared, bool unitOracleAuthored, bool expected)
     {
         var plan = unitOracleAuthored ? PlanWithUnitOracles(1, ("s1", "First")) : Plan(1, ("s1", "First"));
         var context = Context(plan, Spawn(2, new[] { "s1" }, Passed())) with { AcceptanceChecks = floorDeclared ? new[] { "dotnet", "test" } : null };
 
         Facts("s1", context).CheckDeclared.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_floor_declared_run_reads_a_spec_less_units_ungraded_disposition_as_nothing_can_grade_it_not_a_declared_check_that_never_ran()
+    {
+        // The production shape the floor disjunct mis-read: an operator floor is declared, this unit authored no
+        // per-subtask oracle, and its disposition is Unknown because nothing ever graded it (the floor grades only
+        // the run's terminal stop, never a per-unit disposition). The floor disjunct read CheckDeclared true here,
+        // so the policy recommended BoundedRepair ("a declared check never ran — retry, the machinery failed"),
+        // which is false: nothing failed, this unit simply has no per-unit oracle. Mutation: restore the floor
+        // disjunct in AnObjectiveCheckIsDeclared → this reds (Mechanism flips to BoundedRepair).
+        var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Ungraded())) with { AcceptanceChecks = new[] { "dotnet", "test" } };
+
+        var facts = Facts("s1", context);
+
+        facts.CheckDeclared.ShouldBeFalse();
+        facts.LatestDisposition.ShouldBe(VerificationDisposition.Unknown);
+
+        var decision = QualityPolicy.Decide(facts);
+
+        decision.Mechanism.ShouldBe(QualityMechanism.IndependentCritic, "ungraded; nothing recorded can grade this — not BoundedRepair, which would claim a declared check failed to run");
     }
 
     [Fact]
@@ -255,8 +276,10 @@ public sealed class SupervisorQualityFactsTests
         // The divergence #1954 named, asserted end to end over ONE tape rather than argued: the retry escalation
         // fires on the first contradiction; the policy's repeat floor is two consecutive failed verdicts, and its
         // disputed row is guarded on a PASS, so an over-claim (whose check failed) reaches the baseline instead.
-        // 9b keeps BOTH and records the disagreement — this is the case that makes PolicyAgrees false.
-        var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, OverClaimed())) with { AcceptanceChecks = new[] { "dotnet test" } };
+        // 9b keeps BOTH and records the disagreement — this is the case that makes PolicyAgrees false. A unit
+        // oracle (F1: the operator floor no longer declares a check at the unit grain) is what makes the check
+        // declared here, so the tape reaches the baseline row rather than the ungradable-work one.
+        var context = Context(PlanWithUnitOracles(1, ("s1", "First")), Spawn(2, new[] { "s1" }, OverClaimed()));
 
         SupervisorRetryEscalation.EscalationReason(AgentContradiction.OverClaim, noProgressDecisions: 0, maxNoProgressDecisions: 8)
             .ShouldNotBeNull("the legacy trigger escalates on a single contradiction");
@@ -270,9 +293,11 @@ public sealed class SupervisorQualityFactsTests
     [Fact]
     public void A_second_consecutive_failure_on_a_localized_diff_is_where_the_two_agree()
     {
-        var context = Context(Plan(1, ("s1", "First")),
+        // A unit oracle (F1: the operator floor no longer declares a check at the unit grain) is what makes the
+        // check declared here, so the repeat row is reached rather than the ungradable-work one.
+        var context = Context(PlanWithUnitOracles(1, ("s1", "First")),
             Spawn(2, new[] { "s1" }, FailedWithScale(new[] { "a.cs" }, totalChangedFiles: null, repositoryAliases: Array.Empty<string>())),
-            Retry(3, "s1", FailedWithScale(new[] { "a.cs" }, totalChangedFiles: null, repositoryAliases: Array.Empty<string>()))) with { AcceptanceChecks = new[] { "dotnet test" } };
+            Retry(3, "s1", FailedWithScale(new[] { "a.cs" }, totalChangedFiles: null, repositoryAliases: Array.Empty<string>())));
 
         var recommended = QualityPolicy.Decide(Facts("s1", context)).Mechanism;
 
@@ -335,6 +360,9 @@ public sealed class SupervisorQualityFactsTests
     private static object Passed() => new { agentRunId = Guid.NewGuid(), status = "Succeeded", acceptancePassed = true, acceptanceDetail = "tests-passed", changedFiles = new[] { "a.cs" } };
 
     private static object Failed() => new { agentRunId = Guid.NewGuid(), status = "Failed", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", changedFiles = new[] { "a.cs" } };
+
+    /// <summary>A unit with no recorded verdict at all — no per-subtask oracle exists, so nothing ever graded it (Unknown), unlike <see cref="Failed"/> where a check ran and failed.</summary>
+    private static object Ungraded() => new { agentRunId = Guid.NewGuid(), status = "Succeeded", changedFiles = new[] { "a.cs" } };
 
     /// <summary>The over-claim shape: the agent reported success, its own check FAILED, and the fold recorded the contradiction.</summary>
     private static object OverClaimed() =>

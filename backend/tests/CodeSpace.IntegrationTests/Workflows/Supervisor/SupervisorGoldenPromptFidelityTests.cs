@@ -611,10 +611,12 @@ public class SupervisorGoldenPromptFidelityTests
     /// acquired or lost a verb, and no <c>AcceptedKinds</c> changed.
     ///
     /// <para>The corpus also GREW by two, and for the same reason the block is worth showing at all: with no
-    /// operator acceptance floor declared, every attempted unit in the pre-existing corpus reads
-    /// "nothing recorded can grade this" — a true statement about the RUN-grain floor these tapes leave unset, but
-    /// not a mechanism a model can act on. <c>repeat-failure-under-a-declared-check</c> is the corpus's only tape
-    /// with that floor declared (⇒ <c>EscalateModel</c> over two consecutive failed verdicts on a two-file diff) and
+    /// declared check, every attempted unit in the pre-existing corpus reads "nothing recorded can grade this" — a
+    /// true statement, but not a mechanism a model can act on. <c>repeat-failure-under-a-declared-check</c> is the
+    /// corpus's only tape with s1's OWN effective oracle declared (⇒ <c>EscalateModel</c> over two consecutive
+    /// failed verdicts on a two-file diff — F1: <c>CheckDeclared</c> reads the unit grain only, so the operator
+    /// floor also on this tape declares nothing by itself; the per-subtask oracle is what the CURRENT PLAN STATE
+    /// block now additionally recites, which is F1's own share of this digest move) and
     /// <c>waived-unit-cleanly-integrated</c> its only tape with a human waiver on it (⇒ <c>Stop</c>, citing the
     /// authorization). Both are pinned by name in
     /// <see cref="The_two_quality_tapes_recite_the_mechanism_their_own_evidence_chose"/>, so this digest has a named
@@ -675,7 +677,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "e0bf94f13e662724a8767f18241a9d765654b95ac494f72ef349fa91eff692eb";
+    private const string GoldenPromptDigest = "63a7d3f31fb304428e22af81ca03c5118f8867420fd555c2d0a75b73e12742f4";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -909,37 +911,42 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>
-    /// Why reading <c>CheckDeclared</c> at the UNIT grain (the operator floor OR this unit's own effective oracle)
-    /// moved no scenario's bytes, asserted rather than argued: NOT ONE plan in this corpus authors a per-subtask
-    /// oracle. So the only declared checks anywhere in it are the two named below — an operator floor and a
-    /// co-signed amendment — and every other attempted unit carries a folded verdict whose tape declares no check
-    /// at either grain.
+    /// F1: <c>CheckDeclared</c> reads the UNIT grain ONLY — this unit's own effective oracle, never the operator's
+    /// run-wide floor (a RUN-level gate graded once at the terminal stop, not per unit). Asserted rather than
+    /// argued: exactly ONE plan in this corpus authors a per-subtask oracle —
+    /// <see cref="SupervisorDecisionGoldenScenarios.RepeatFailureUnderADeclaredCheck"/>'s s1, authored so its
+    /// declared-check reading survives the floor no longer counting. The corpus's only OTHER declared check is
+    /// <c>amended-oracle-awaiting-retry</c>'s s2, declared through a co-signed AMENDMENT rather than the plan.
+    /// Every other attempted unit carries a folded verdict whose tape declares no check at either grain.
     ///
-    /// <para>That shape is one PRODUCTION CANNOT EMIT: the fold grades a unit only through the effective spec
-    /// <see cref="SupervisorAcceptanceOverlay"/> resolves or the operator's floor, so a verdict on the tape implies
-    /// one of them. These fixtures stake the verdict without either, which is why their prompts still recite
-    /// "nothing recorded can grade this" one screen from "acceptance PASSED" — that residue is a FIXTURE defect,
-    /// not the fact's grain, and closing it moves nearly every scored prompt in the corpus (a re-pin of
-    /// <see cref="GoldenPromptDigest"/> plus the three superseded anchors, whose wind-back does not reach the plan
-    /// block), so it is its own decision rather than a rider on this one.</para>
+    /// <para>That residual shape is one PRODUCTION CANNOT EMIT: the fold grades a unit only through the effective
+    /// spec <see cref="SupervisorAcceptanceOverlay"/> resolves, so a verdict on the tape implies one exists. These
+    /// fixtures stake the verdict without one, which is why their prompts still recite "nothing recorded can grade
+    /// this" one screen from "acceptance PASSED" — a FIXTURE defect, not the fact's grain, and closing it moves
+    /// nearly every scored prompt in the corpus (a re-pin of <see cref="GoldenPromptDigest"/> plus the three
+    /// superseded anchors, whose wind-back does not reach the plan block), so it is its own decision rather than a
+    /// rider on this one.</para>
     ///
-    /// <para>This reds the day a plan here authors an oracle — which is exactly when that decision is being taken,
-    /// and when the digest re-pin must be attributed to it.</para>
+    /// <para>This reds the day a plan OTHER than <c>repeat-failure-under-a-declared-check</c> authors an oracle —
+    /// which is exactly when that decision is being taken, and when the digest re-pin must be attributed to it.</para>
     /// </summary>
     [Fact]
-    public void No_corpus_plan_authors_a_per_unit_oracle_so_only_two_units_in_it_have_a_declared_check()
+    public void Only_one_corpus_plan_authors_a_per_unit_oracle_so_only_two_units_in_it_have_a_declared_check()
     {
-        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
-            foreach (var plan in scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan))
-                SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson).Where(s => s.Acceptance is not null).ShouldBeEmpty(
-                    $"'{scenario.Name}' now authors a per-unit oracle — its units' quality readings move off the ungradable-work row, so re-pin the digest and name this as the reason");
+        var authoredOracles = SupervisorDecisionGoldenScenarios.All
+            .SelectMany(scenario => scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan)
+                .SelectMany(plan => SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson).Where(s => s.Acceptance is not null).Select(s => $"{scenario.Name}/{s.Id}")))
+            .ToList();
+
+        authoredOracles.ShouldBe(new[] { "repeat-failure-under-a-declared-check/s1" }, ignoreOrder: true,
+            "F1's one per-subtask oracle — every other plan in the corpus still authors none; a new one here moves its unit's quality reading off the ungradable-work row, so re-pin the digest and name this as the reason");
 
         var declared = SupervisorDecisionGoldenScenarios.All
             .SelectMany(s => s.Context.QualityDecisions.Where(d => d.Facts.CheckDeclared).Select(d => $"{s.Name}/{d.SubtaskId}"))
             .ToList();
 
         declared.ShouldBe(new[] { "amended-oracle-awaiting-retry/s2", "repeat-failure-under-a-declared-check/s1" }, ignoreOrder: true,
-            "the corpus's only declared checks: s1's OPERATOR FLOOR, and s2's co-signed AMENDMENT — the amendment being this corpus's one exercise of the unit-grain side of the fact (its mechanism is unmoved, because an InfraUnknown verdict is judged by the machinery-failed row above it)");
+            "the corpus's only declared checks: s1's OWN effective oracle (authored above — the operator floor no longer declares a check at the unit grain), and s2's co-signed AMENDMENT — the amendment being this corpus's one exercise of the unit-grain side of the fact via the overlay rather than the plan (its mechanism is unmoved, because an InfraUnknown verdict is judged by the machinery-failed row above it)");
     }
 
     /// <summary>

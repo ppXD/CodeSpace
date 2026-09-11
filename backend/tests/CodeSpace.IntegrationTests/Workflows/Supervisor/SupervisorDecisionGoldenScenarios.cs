@@ -611,14 +611,16 @@ public static class SupervisorDecisionGoldenScenarios
     };
 
     /// <summary>
-    /// P22-9b — a SINGLE-unit plan whose only unit has now failed its check TWICE in a row over a one-file diff, and
-    /// the corpus's ONLY tape with the operator's objective floor
-    /// (<see cref="SupervisorTurnContext.AcceptanceChecks"/>) declared. That floor is what the whole scenario turns
-    /// on: without it the recorded evidence cannot grade anything, so the quality reading falls to the
-    /// nothing-can-grade-this row and recites the statement of absence — which is the reading every other tape in
-    /// this corpus gets, and it is why not one of them exercises a mechanism the model can act on. With the floor
-    /// declared and the failures localized, the policy's repeat row fires on its LOCALIZED arm and recommends
-    /// <c>EscalateModel</c> ("retry (stronger model)") rather than its at-scale arm's replan.
+    /// P22-9b — a SINGLE-unit plan whose only unit has now failed its check TWICE in a row over a two-file diff.
+    /// F1: <c>CheckDeclared</c> reads the UNIT grain only, so what declares s1's check is its OWN effective oracle
+    /// (<see cref="SupervisorPlannedSubtask.Acceptance"/>) — this corpus's only per-subtask oracle — authored here
+    /// rather than left to the operator's run-wide floor (<see cref="SupervisorTurnContext.AcceptanceChecks"/>,
+    /// still declared alongside it, since a real run can carry both). Without a unit-grain declaration the recorded
+    /// evidence cannot grade this unit, so the quality reading would fall to the nothing-can-grade-this row and
+    /// recite the statement of absence — which is the reading every other tape in this corpus gets, and it is why
+    /// not one of them exercises a mechanism the model can act on. With s1's own check declared and the failures
+    /// localized, the policy's repeat row fires on its LOCALIZED arm and recommends <c>EscalateModel</c> ("retry
+    /// (stronger model)") rather than its at-scale arm's replan.
     ///
     /// <para>The accepted set matches <see cref="RetriedStillFailed"/>'s, and for the same reason: the tape is
     /// genuinely STUCK, no retry cap is rendered to the model, and retrying again / stopping honestly / asking a
@@ -636,7 +638,7 @@ public static class SupervisorDecisionGoldenScenarios
         Name = "repeat-failure-under-a-declared-check",
         Context = Context(turn: 3, new[]
         {
-            Plan("s1"),
+            PlanWithUnitAcceptance("s1", new SupervisorAcceptanceSpec { Command = DeclaredAcceptanceFloor }),
             Spawn(new[] { "s1" }, LocalizedDiff(Agent(Agent1, "Failed", error: "the new validation rejects a valid address: 1 assertion failed in SignupValidationTests"))),
             Retry("s1", LocalizedDiff(Agent(RetryAgent, "Failed", error: "the same assertion still fails after the retry: SignupValidationTests.RejectsMissingDomain"))),
         }, DeclaredAcceptanceFloor),
@@ -848,7 +850,22 @@ public static class SupervisorDecisionGoldenScenarios
     /// measuring positional inference off a raw payload dump, not the recited list production actually shows.
     /// Built from the real record rather than another anonymous type, so the shape cannot drift away again.
     /// </summary>
-    private static SupervisorPriorDecision Plan(params string[] subtaskIds)
+    // A FRESH empty dictionary per call, not a shared static field: a field initializer here would run in
+    // declaration order relative to `All` above, and `All`'s own scenario builders call this before such a field
+    // would be assigned — the exact static-init-order trap `DeclaredAcceptanceFloor` (below) was caught by, the
+    // hard way, as a field.
+    private static SupervisorPriorDecision Plan(params string[] subtaskIds) => Plan(subtaskIds, new Dictionary<string, SupervisorAcceptanceSpec>());
+
+    /// <summary>
+    /// F1: the ONE subtask in this corpus that needs its OWN effective oracle, rather than the operator floor
+    /// alone, to keep a declared-check reading (<see cref="RepeatFailureUnderADeclaredCheck"/>) — threaded through
+    /// the shared per-subtask-acceptance <c>Plan</c> overload below so no second copy of the title/instruction
+    /// lookup exists.
+    /// </summary>
+    private static SupervisorPriorDecision PlanWithUnitAcceptance(string subtaskId, SupervisorAcceptanceSpec acceptance) =>
+        Plan(new[] { subtaskId }, new Dictionary<string, SupervisorAcceptanceSpec> { [subtaskId] = acceptance });
+
+    private static SupervisorPriorDecision Plan(string[] subtaskIds, IReadOnlyDictionary<string, SupervisorAcceptanceSpec> acceptanceBySubtask)
     {
         // Plan-item copy that decomposes FixtureGoal for real. The first version synthesised "subtask s1" /
         // "implement s1", and the live gate answered immediately: three scenarios that had been passing started
@@ -880,6 +897,7 @@ public static class SupervisorDecisionGoldenScenarios
             Id = id,
             Title = titles[i % titles.Length],
             Instruction = instructions[i % instructions.Length],
+            Acceptance = acceptanceBySubtask.TryGetValue(id, out var acceptance) ? acceptance : null,
         }).ToList();
 
         return PriorDecision(SupervisorDecisionKinds.Plan, 0,
