@@ -574,14 +574,16 @@ public static class RoomNarrative
     private static int LogStatusRank(RoomAgentLogStatus status) => status switch
     {
         RoomAgentLogStatus.Incomplete => 0,
-        RoomAgentLogStatus.Finalizing => 1,
-        RoomAgentLogStatus.Captured => 2,
-        _ => 3,
+        RoomAgentLogStatus.Stalled => 1,
+        RoomAgentLogStatus.Finalizing => 2,
+        RoomAgentLogStatus.Captured => 3,
+        _ => 4,
     };
 
     private static string LogStatusWord(RoomAgentLogStatus status) => status switch
     {
         RoomAgentLogStatus.Incomplete => "incomplete",
+        RoomAgentLogStatus.Stalled => "held; storage unavailable",
         RoomAgentLogStatus.Finalizing => "finalizing",
         RoomAgentLogStatus.Captured => "captured; integrity proof unavailable",
         _ => "integrity verified",
@@ -590,6 +592,9 @@ public static class RoomNarrative
     private static NarrativeTone LogStatusTone(RoomAgentLogStatus status) => status switch
     {
         RoomAgentLogStatus.Incomplete => NarrativeTone.Error,
+        // Info, not Error: a held stream has lost nothing. The WORD carries the outage; widening the wire tone
+        // vocabulary for it would change every renderer for a state that is not a failure.
+        RoomAgentLogStatus.Stalled => NarrativeTone.Info,
         RoomAgentLogStatus.Finalizing => NarrativeTone.Info,
         RoomAgentLogStatus.Captured => NarrativeTone.Info,
         _ => NarrativeTone.Success,

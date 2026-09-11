@@ -179,6 +179,9 @@ public enum RoomAgentLogStatus
     Verified,
     Captured,
     Finalizing,
+
+    /// <summary>Open, and its remote storage is refusing the segments it is holding. Distinct from <see cref="Finalizing"/> because nothing is progressing and nothing is lost either — the bytes are queued behind an outage, which is the one fact an operator can act on.</summary>
+    Stalled,
     Incomplete,
 }
 

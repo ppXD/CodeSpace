@@ -14,6 +14,7 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
             table.HasCheckConstraint("ck_agent_run_log_stream_manifest", "manifest_digest IS NULL OR (schema_version = 3 AND state = 'Completed' AND octet_length(manifest_digest) = 32)");
             table.HasCheckConstraint("ck_agent_run_log_stream_digest", "(content_digest_algorithm IS NULL AND content_digest IS NULL) OR (content_digest_algorithm IS NOT NULL AND content_digest_algorithm = 'Sha256' AND content_digest IS NOT NULL AND octet_length(content_digest) = 32)");
             table.HasCheckConstraint("ck_agent_run_log_stream_error", "(error_code IS NULL AND error_message IS NULL) OR (error_code IS NOT NULL AND btrim(error_code) <> '')");
+            table.HasCheckConstraint("ck_agent_run_log_stream_remote_stall", "(remote_stall_since IS NULL AND remote_stall_code IS NULL) OR (remote_stall_since IS NOT NULL AND remote_stall_code IS NOT NULL AND btrim(remote_stall_code) <> '')");
             table.HasCheckConstraint("ck_agent_run_log_stream_head", "revision > 0 AND segment_count >= 0 AND total_bytes >= 0 AND source_offset_bytes >= 0 AND capture_source_base_offset_bytes >= 0 AND capture_source_base_offset_bytes <= source_offset_bytes AND next_segment_ordinal = segment_count + 1 AND next_offset_bytes = total_bytes AND schema_version > 0");
             table.HasCheckConstraint("ck_agent_run_log_stream_time", "last_modified_at >= created_at AND (capture_finalized_at IS NULL OR last_modified_at >= capture_finalized_at) AND (completed_at IS NULL OR last_modified_at >= completed_at)");
             table.HasCheckConstraint("ck_agent_run_log_stream_identity", "stream_kind ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND capture_source ~ '^[a-z0-9][a-z0-9._/-]{0,126}/v[1-9][0-9]*$' AND content_type ~ '^[^[:space:]/]+/[^[:space:]]+$' AND (content_encoding IS NULL OR content_encoding ~ '^[a-z0-9][a-z0-9._+-]{0,63}$')");
@@ -34,6 +35,7 @@ public sealed class AgentRunLogStreamConfiguration : IEntityTypeConfiguration<Ag
         builder.Property(stream => stream.ManifestDigest).HasColumnType("bytea");
         builder.Property(stream => stream.ErrorCode).HasMaxLength(128);
         builder.Property(stream => stream.ErrorMessage).HasMaxLength(2048);
+        builder.Property(stream => stream.RemoteStallCode).HasMaxLength(128);
         builder.Property(stream => stream.Xmin).HasColumnName("xmin").HasColumnType("xid").ValueGeneratedOnAddOrUpdate().IsConcurrencyToken();
 
         builder.HasOne(stream => stream.AgentRun).WithMany()

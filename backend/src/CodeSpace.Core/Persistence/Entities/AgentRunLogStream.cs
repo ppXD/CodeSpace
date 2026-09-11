@@ -30,6 +30,15 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     public long CaptureSourceBaseOffsetBytes { get; set; }
     /// <summary>Durable proof that the currently claimed spool source reached a final drain at its committed source head.</summary>
     public DateTimeOffset? CaptureFinalizedAt { get; set; }
+    /// <summary>
+    /// When the producer's remote storage first refused a segment it is STILL holding. It is the difference between a
+    /// stream that is quietly finalizing and one whose bytes are queued behind an outage: the head is frozen on
+    /// purpose, nothing was dropped, and a reader can say so instead of reporting progress that is not happening.
+    /// Present exactly with <see cref="RemoteStallCode"/>, and cleared the moment a segment commits again.
+    /// </summary>
+    public DateTimeOffset? RemoteStallSince { get; set; }
+    /// <summary>The typed refusal being waited out, in the capture bridge's error-code vocabulary. Never a second reason vocabulary, and never parsed.</summary>
+    public string? RemoteStallCode { get; set; }
     public ArtifactDigestAlgorithm? ContentDigestAlgorithm { get; set; }
     public byte[]? ContentDigest { get; set; }
     public byte[]? ManifestDigest { get; set; }
