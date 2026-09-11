@@ -1827,6 +1827,7 @@ public class RoomProjectorFlowTests
         room.ShouldNotBeNull().Blocks.OfType<AssistantTurnBlock>().Count().ShouldBe(4);
         recorder.LogStreamReads.ShouldBe(1, "all collapsed terminal turns share one log-health query");
         recorder.BudgetReservationReads.ShouldBe(2, "all three collapsed turns share one reservation query, plus the focused turn's one fresh read");
+        recorder.ProducerRowReads.ShouldBe(2, "all three collapsed turns share ONE agent-row query for their producers, plus the focused turn's own — a per-turn read here would grow with session length");
     }
 
     [Fact]
@@ -3023,6 +3024,62 @@ public class RoomProjectorFlowTests
             .Files.ShouldHaveSingleItem().Producer.ShouldNotBeNull().AgentRunId.ShouldBe(producer);
     }
 
+    [Fact]
+    public async Task A_collapsed_turns_producer_follows_the_row_a_reaper_terminalized_under_it()
+    {
+        // A non-focused TERMINAL turn's whole flow is served from a process-lifetime cache that only a pull-request
+        // open evicts — and the producer's status is exactly the field that changes afterwards:
+        // AgentRunReconcilerService sweeps agents still Running under a terminal parent (this cached population,
+        // precisely) and terminalizes them. Frozen, the artifact's chip renders Running forever for a reaped agent,
+        // under a frontend tone that reads as reassuring progress: a live-looking agent on a dead run.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "A reaper terminalizes the producer");
+        var runId = await SeedTurnForStateAsync(teamId, sessionId, RunState.Succeeded);
+        var producer = await SeedProducerAgentRunAsync(teamId, runId, ProducerCases[RunState.Succeeded] with { AgentStatus = AgentRunStatus.Running });
+
+        await SeedArtifactForAsync(teamId, runId, producer, ArtifactPresence.Reachable);
+
+        var focusRun = await SeedTurnAsync(teamId, sessionId, turn: 2, goal: "Carry on", resultSummary: "Done.");
+
+        // Warms the cache with the turn as it stood: the agent was still Running when its parent finished.
+        var cached = await CollapsedProducerAsync(focusRun, teamId, runId);
+        cached.Status.ShouldBe(nameof(AgentRunStatus.Running));
+        cached.Confinement.ShouldBe(RoomConfinementPosture.ConfinedNetworkSevered);
+
+        await ReapAgentRunAsync(teamId, producer);
+
+        var reaped = await CollapsedProducerAsync(focusRun, teamId, runId);
+
+        reaped.Status.ShouldBe(nameof(AgentRunStatus.Failed),
+            customMessage: "the cached flow must be re-attached to the agent's CURRENT row — a reaped producer that still reads Running is the cache stating a liveness the row denies");
+        reaped.AgentRunId.ShouldBe(producer);
+        reaped.Confinement.ShouldBe(RoomConfinementPosture.ConfinedNetworkSevered, "the re-attach re-reads the posture off the same row, and the reap does not touch that column");
+        reaped.CostUsd.ShouldBeNull("the seeded model is unpriced — the re-attach carries the figure forward, it does not invent one");
+    }
+
+    /// <summary>The producer on the deliverable of a COLLAPSED (non-focused, terminal) turn, read through a projection focused on a later turn.</summary>
+    private async Task<RoomArtifactProducer> CollapsedProducerAsync(Guid focusRunId, Guid teamId, Guid collapsedRunId)
+    {
+        var room = (await ProjectByRunAsync(focusRunId, teamId)).ShouldNotBeNull();
+        var turn = room.Blocks.OfType<AssistantTurnBlock>().Single(block => block.RunId == collapsedRunId);
+
+        return turn.Blocks.OfType<DeliverablesBlock>().ShouldHaveSingleItem().Files.ShouldHaveSingleItem().Producer.ShouldNotBeNull();
+    }
+
+    /// <summary>Terminalize the agent row the way <see cref="AgentRunReconcilerService"/>'s abandon path does — Failed, carrying its abandoned error, with the parent run already terminal.</summary>
+    private async Task ReapAgentRunAsync(Guid teamId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var row = await db.AgentRun.SingleAsync(agent => agent.Id == agentRunId && agent.TeamId == teamId);
+
+        row.Status = AgentRunStatus.Failed;
+        row.Error = AgentRunReconcilerService.AbandonedError;
+        row.CompletedAt = DateTimeOffset.UtcNow;
+        row.FenceEpoch += 1;
+        await db.SaveChangesAsync();
+    }
+
     /// <summary>One run state's seeded shape and the per-artifact truth it must project. <see cref="Model"/> stays off the price table by default so the unpriced case is the matrix's baseline.</summary>
     private sealed record ProducerCase(WorkflowRunStatus RunStatus, AgentRunStatus AgentStatus, SandboxConfinement? Confinement, RoomConfinementPosture Posture, StreamSeed[] Streams, RoomAgentLogStatus? Logs)
     {
@@ -3207,10 +3264,14 @@ public class RoomProjectorFlowTests
         public int LogStreamReads { get; private set; }
         public int BudgetReservationReads { get; private set; }
 
+        /// <summary>Only the per-artifact producer reads select this column, so it counts them exactly — the batched collapsed-turn read plus the focused turn's own.</summary>
+        public int ProducerRowReads { get; private set; }
+
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             if (command.CommandText.Contains("agent_run_log_stream", StringComparison.OrdinalIgnoreCase)) LogStreamReads++;
             if (command.CommandText.Contains("budget_reservation", StringComparison.OrdinalIgnoreCase)) BudgetReservationReads++;
+            if (command.CommandText.Contains("sandbox_confinement", StringComparison.OrdinalIgnoreCase)) ProducerRowReads++;
             return ValueTask.FromResult(result);
         }
     }
