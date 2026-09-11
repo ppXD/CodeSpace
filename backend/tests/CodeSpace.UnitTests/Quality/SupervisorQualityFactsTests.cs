@@ -28,7 +28,7 @@ public sealed class SupervisorQualityFactsTests
             Retry(3, "s1", Failed()),
             Retry(4, "s1", Passed()));
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.Attempts.Select(a => a.Disposition).ShouldBe(new[] { VerificationDisposition.Failed, VerificationDisposition.Failed, VerificationDisposition.Passed });
         facts.ConsecutiveFailedVerdicts.ShouldBe(0, "the newest attempt PASSED — the two older failures are history, not a streak");
@@ -43,8 +43,8 @@ public sealed class SupervisorQualityFactsTests
         var context = Context(Plan(1, ("s1", "First"), ("s2", "Second")),
             Spawn(2, new[] { "s1", "s2" }, Passed(), Failed()));
 
-        SupervisorQualityFacts.For("s1", context).Attempts.Single().Disposition.ShouldBe(VerificationDisposition.Passed);
-        SupervisorQualityFacts.For("s2", context).Attempts.Single().Disposition.ShouldBe(VerificationDisposition.Failed);
+        Facts("s1", context).Attempts.Single().Disposition.ShouldBe(VerificationDisposition.Passed);
+        Facts("s2", context).Attempts.Single().Disposition.ShouldBe(VerificationDisposition.Failed);
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public sealed class SupervisorQualityFactsTests
             RunSpendUsd = 7m,
         };
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.BudgetCapUsd.ShouldBe(9m);
         facts.SpendSoFarUsd.ShouldBe(7m, "the RUN's realized spend — not the unit's own attempt costs, which are 0 here");
@@ -71,7 +71,7 @@ public sealed class SupervisorQualityFactsTests
     {
         var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Failed())) with { UnpricedSpendModel = "some-unpriceable-model" };
 
-        SupervisorQualityFacts.For("s1", context).SpendIsUndercounted.ShouldBeTrue();
+        Facts("s1", context).SpendIsUndercounted.ShouldBeTrue();
     }
 
     [Fact]
@@ -84,7 +84,7 @@ public sealed class SupervisorQualityFactsTests
             Spawn(2, new[] { "s1" }, Priced(inputTokens: 1_000_000, outputTokens: 0)),
             Retry(3, "s1", Priced(inputTokens: 6_000_000, outputTokens: 0))) with { ModelPrices = OneDollarPerMillionInputTokens };
 
-        SupervisorQualityFacts.For("s1", context).EstimatedNextAttemptCostUsd.ShouldBe(6m, "the MAX over the unit's priced attempts — a mean (3.5) under-estimates and under-stops");
+        Facts("s1", context).EstimatedNextAttemptCostUsd.ShouldBe(6m, "the MAX over the unit's priced attempts — a mean (3.5) under-estimates and under-stops");
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public sealed class SupervisorQualityFactsTests
         // explicitly: a 0 here would read as "another attempt is free" and the affordability row could never fire.
         var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Failed())) with { MaxCostUsd = 1m, RunSpendUsd = 1m };
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.EstimatedNextAttemptCostUsd.ShouldBeNull("no attempt reported priced usage, so nothing recorded says what another attempt costs");
         QualityPolicy.Decide(facts).Mechanism.ShouldNotBe(QualityMechanism.Stop, "an exhausted cap with no recorded rate must not stop the run on a guess");
@@ -105,7 +105,7 @@ public sealed class SupervisorQualityFactsTests
     {
         var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, OverClaimed()));
 
-        SupervisorQualityFacts.For("s1", context).SelfClaimContradictedTheCheck.ShouldBeTrue();
+        Facts("s1", context).SelfClaimContradictedTheCheck.ShouldBeTrue();
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public sealed class SupervisorQualityFactsTests
             Spawn(2, new[] { "s1" }, OverClaimed()),
             ApprovedAmendment(3, "s1"));
 
-        SupervisorQualityFacts.For("s1", context).SelfClaimContradictedTheCheck
+        Facts("s1", context).SelfClaimContradictedTheCheck
             .ShouldBeFalse("the self-report never disagreed with the CO-SIGNED check, only with the dead one");
     }
 
@@ -130,7 +130,7 @@ public sealed class SupervisorQualityFactsTests
         // authorized forgoing — and the policy's Waived row, which cites the authorization, would never fire.
         var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Waived()));
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.LatestDisposition.ShouldBe(VerificationDisposition.Waived);
 
@@ -148,11 +148,56 @@ public sealed class SupervisorQualityFactsTests
         // then free to dispute a PASSING acceptance check or to settle ungraded work forever.
         var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Passed())) with { DecisionReviewMode = Messages.Enums.ReviewMode.Improve, ReviewerCritique = "the plan looks wrong to me" };
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.IndependentReviewRecorded.ShouldBeFalse();
         facts.IndependentReviewDisapproved.ShouldBeFalse();
         facts.RecordedReviewScore.ShouldBeNull();
+    }
+
+    // ─── the UNIT grain of the declared-check fact ─────────────────────────────
+
+    /// <summary>
+    /// The grain ruling: a check is declared for a unit when the operator's run-wide floor is declared OR the unit's
+    /// OWN effective oracle exists. The FIRST row is the one the floor-only reading reddens — and it is the common
+    /// shape, since most runs declare no floor at all.
+    /// </summary>
+    [Theory]
+    [InlineData(false, true, true)]     // no operator floor, the unit authored its own oracle → declared
+    [InlineData(true, false, true)]     // the operator floor alone, no unit oracle → declared
+    [InlineData(false, false, false)]   // neither — nothing that could grade this unit is declared
+    public void A_check_is_declared_when_EITHER_the_operator_floor_or_this_units_own_oracle_exists(bool floorDeclared, bool unitOracleAuthored, bool expected)
+    {
+        var plan = unitOracleAuthored ? PlanWithUnitOracles(1, ("s1", "First")) : Plan(1, ("s1", "First"));
+        var context = Context(plan, Spawn(2, new[] { "s1" }, Passed())) with { AcceptanceChecks = floorDeclared ? new[] { "dotnet", "test" } : null };
+
+        Facts("s1", context).CheckDeclared.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_unit_graded_by_its_OWN_oracle_reads_as_graded_rather_than_as_work_nothing_can_grade()
+    {
+        // The consequence the grain ruling was made for, on the common no-floor run: the same prompt recites this
+        // unit's PASSED verdict one block above. Read at the operator-floor grain the recommendation was
+        // IndependentCritic — "no objective check can grade this work" about a unit its own oracle had just graded,
+        // which is one prompt disagreeing with itself, and the reason it cannot recur is asserted here.
+        var context = Context(PlanWithUnitOracles(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Passed()));
+
+        var decision = QualityPolicy.Decide(Facts("s1", context));
+
+        decision.Mechanism.ShouldBe(QualityMechanism.Stop);
+        decision.Reason.ShouldContain("recorded a Passed verdict from a declared check");
+    }
+
+    [Fact]
+    public void The_unit_oracle_is_the_EFFECTIVE_one_so_a_co_signed_amendment_declares_a_check_the_plan_never_authored()
+    {
+        // Why this reads through SupervisorAcceptanceOverlay rather than off the planned subtask: an approved
+        // amendment can ADD the oracle a plan left unauthored, and the fold that grades the unit honours it. A
+        // re-derivation from `subtask.Acceptance` passes every row of the theory above and reds only here.
+        var context = Context(Plan(1, ("s1", "First")), Spawn(2, new[] { "s1" }, Passed()), ApprovedAmendment(3, "s1"));
+
+        Facts("s1", context).CheckDeclared.ShouldBeTrue("the co-signed amendment IS this unit's effective check, and it is what the unit is graded against");
     }
 
     [Fact]
@@ -162,7 +207,7 @@ public sealed class SupervisorQualityFactsTests
             Spawn(2, new[] { "s1" }, Failed()),
             Retry(3, "s1", FailedWithScale(changedFiles: new[] { "a.cs", "b.cs" }, totalChangedFiles: 41, repositoryAliases: new[] { "app", "lib" })));
 
-        var facts = SupervisorQualityFacts.For("s1", context);
+        var facts = Facts("s1", context);
 
         facts.ChangedFileCount.ShouldBe(41, "the clipped list is a projection artefact — the recorded total is the scale");
         facts.WorkspaceUnitCount.ShouldBe(2);
@@ -216,7 +261,7 @@ public sealed class SupervisorQualityFactsTests
         SupervisorRetryEscalation.EscalationReason(AgentContradiction.OverClaim, noProgressDecisions: 0, maxNoProgressDecisions: 8)
             .ShouldNotBeNull("the legacy trigger escalates on a single contradiction");
 
-        var recommended = QualityPolicy.Decide(SupervisorQualityFacts.For("s1", context)).Mechanism;
+        var recommended = QualityPolicy.Decide(Facts("s1", context)).Mechanism;
 
         recommended.ShouldBe(QualityMechanism.SingleAgent, "one failure is not yet evidence about capability");
         SupervisorRetryEscalation.PolicyAgrees(recommended).ShouldBe(false);
@@ -229,7 +274,7 @@ public sealed class SupervisorQualityFactsTests
             Spawn(2, new[] { "s1" }, FailedWithScale(new[] { "a.cs" }, totalChangedFiles: null, repositoryAliases: Array.Empty<string>())),
             Retry(3, "s1", FailedWithScale(new[] { "a.cs" }, totalChangedFiles: null, repositoryAliases: Array.Empty<string>()))) with { AcceptanceChecks = new[] { "dotnet test" } };
 
-        var recommended = QualityPolicy.Decide(SupervisorQualityFacts.For("s1", context)).Mechanism;
+        var recommended = QualityPolicy.Decide(Facts("s1", context)).Mechanism;
 
         recommended.ShouldBe(QualityMechanism.EscalateModel);
         SupervisorRetryEscalation.PolicyAgrees(recommended).ShouldBe(true);
@@ -246,9 +291,18 @@ public sealed class SupervisorQualityFactsTests
 
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] priors) => new() { PriorDecisions = priors };
 
+    /// <summary>One unit's facts against the run's EFFECTIVE oracle view, resolved by the production fold's own helper — never by a second copy of those two lines here, which would be a mirror with nothing detecting its drift (Rule 12.5).</summary>
+    private static QualityDecisionInput Facts(string subtaskId, SupervisorTurnContext context) =>
+        SupervisorQualityFacts.For(subtaskId, context, SupervisorQualityFacts.EffectiveAcceptanceFor(context).BySubtask);
+
     private static SupervisorPriorDecision Plan(int seq, params (string Id, string Title)[] subtasks) =>
         Prior(seq, SupervisorDecisionKinds.Plan,
             JsonSerializer.Serialize(new { subtasks = subtasks.Select(s => new { id = s.Id, title = s.Title, instruction = $"do {s.Id}" }).ToArray() }, AgentJson.Options));
+
+    /// <summary>A plan whose every unit AUTHORS its own acceptance oracle — the shape a per-unit verdict can only have been folded from, and the one the operator-floor reading could not see.</summary>
+    private static SupervisorPriorDecision PlanWithUnitOracles(int seq, params (string Id, string Title)[] subtasks) =>
+        Prior(seq, SupervisorDecisionKinds.Plan,
+            JsonSerializer.Serialize(new { subtasks = subtasks.Select(s => new { id = s.Id, title = s.Title, instruction = $"do {s.Id}", acceptance = new { command = new[] { "dotnet", "test" } } }).ToArray() }, AgentJson.Options));
 
     private static SupervisorPriorDecision Spawn(int seq, string[] subtaskIds, params object[] results) =>
         Prior(seq, SupervisorDecisionKinds.Spawn,
