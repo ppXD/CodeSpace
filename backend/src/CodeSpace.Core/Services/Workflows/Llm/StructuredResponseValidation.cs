@@ -77,6 +77,13 @@ internal static class StructuredResponseValidation
             // subtotal; but the ANSWER is still the first reply, and it is not this call's job to fail.
             return first with { Usage = first.Usage with { IsPartial = true } };
         }
+        catch (LlmApiException ex)
+        {
+            // A FATAL first reply propagates its re-ask's failure — but `first` was a 2xx the provider already BILLED,
+            // inside the ONE budget reservation covering both physical calls. Unmarked, a 429 here reads as
+            // proven-unbilled and RELEASES headroom that was really spent.
+            throw ex.AfterBilledAttempt();
+        }
 
         var repaired = Classify(second.Json, request);
 
@@ -86,6 +93,30 @@ internal static class StructuredResponseValidation
 
         throw new LlmApiException(provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", repaired.Fatal)}");
+    }
+
+    /// <summary>
+    /// Run one physical request that follows an attempt the provider ALREADY BILLED, marking whatever it throws with
+    /// <see cref="LlmApiException.PriorBilledAttempt"/> (a <paramref name="priorBilled"/> of false runs it verbatim).
+    /// Every attempt of a progressive-then-re-asked structured call — forced tool-use, the prompt-only floor, the
+    /// bounded re-ask — sits inside ONE budget reservation, so the failure of a LATER attempt proves nothing about an
+    /// earlier one that already bought tokens: unmarked, a 429 on it reads to <c>LlmBudgetGuard</c> as proven-unbilled
+    /// and releases headroom that really was spent.
+    ///
+    /// <para>It lives here for the same reason the decision above does: the two clients must not drift on it.</para>
+    /// </summary>
+    public static async Task<T> AfterBilledAttemptAsync<T>(bool priorBilled, Func<Task<T>> attemptAsync)
+    {
+        if (!priorBilled) return await attemptAsync().ConfigureAwait(false);
+
+        try
+        {
+            return await attemptAsync().ConfigureAwait(false);
+        }
+        catch (LlmApiException ex)
+        {
+            throw ex.AfterBilledAttempt();
+        }
     }
 
     /// <summary>

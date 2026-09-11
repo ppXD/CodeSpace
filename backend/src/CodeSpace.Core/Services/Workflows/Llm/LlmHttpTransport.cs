@@ -29,13 +29,17 @@ internal static class LlmHttpTransport
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             // A CLIENT-SIDE timeout (HttpClient.Timeout / a per-call budget) fired — NOT an operator/run cancel (that
-            // would have IsCancellationRequested == true and is re-thrown to abort the run). A timeout produced no
-            // billable completion, so it is a Transient fault the engine RetryPlan may re-attempt.
+            // would have IsCancellationRequested == true and is re-thrown to abort the run). Transient says only that
+            // the engine RetryPlan may re-attempt it: we stopped listening, so the gateway may well have generated and
+            // BILLED a completion. The null StatusCode is what says that — no response ever arrived — and it is what
+            // keeps LlmBudgetGuard holding the reservation instead of releasing it as proven-unbilled.
             throw new LlmApiException(provider, null, LlmErrorCategory.Transient, "the request timed out before the gateway responded");
         }
         catch (HttpRequestException ex)
         {
-            // Connection refused / reset / DNS — the gateway was unreachable. No completion produced → Transient.
+            // Connection refused / unroutable host / DNS / a reset mid-flight. Whether anything was BILLED is decided
+            // from the socket error, not from this category, so the original rides as `inner` for the budget guard to
+            // read (a refused connection sent nothing; a reset after send may have bought a completion).
             throw new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex);
         }
 

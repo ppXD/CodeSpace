@@ -170,7 +170,9 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
         catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.Malformed)
         {
             var feedbackSystem = StructuredJsonText.WithMalformedFeedback(request.SystemPrompt, ex.ProviderMessage);
-            var recovered = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+            // The unparseable first attempt was a 2xx the provider BILLED, and both requests share one budget
+            // reservation — so a failure from the re-ask must never be read as proof that nothing was spent.
+            var recovered = await StructuredResponseValidation.AfterBilledAttemptAsync(priorBilled: true, () => CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken)).ConfigureAwait(false);
             // The failed attempt's usage did not survive the parse exception. A successful re-ask provides only
             // its own subtotal; never present that as the bill for all preceding physical requests.
             return recovered with { Usage = recovered.Usage with { IsPartial = true } };
@@ -211,7 +213,9 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
             Messages = BuildMessages(system, request.UserPrompt),
         };
 
-        var parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        // A forced attempt that returned a 200 carrying no usable function call was BILLED before degrading here, under
+        // this call's ONE reservation — so a failure of the floor must not be read as proof that nothing was spent.
+        var parsed = await StructuredResponseValidation.AfterBilledAttemptAsync(funcParsed is not null, () => PostChatAsync(body, request.Credential, cancellationToken)).ConfigureAwait(false);
         var message = parsed.Choices?.FirstOrDefault()?.Message;
 
         if (StructuredJsonText.TryExtractObject(message?.Content) is not { } result)

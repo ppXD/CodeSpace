@@ -8,7 +8,7 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// </summary>
 public enum LlmErrorCategory
 {
-    /// <summary>A 5xx / 408 / connection-reset / client-side request timeout — the gateway was reachable-but-unhealthy or slow. Safe to retry (no billable completion was produced).</summary>
+    /// <summary>A 5xx / 408 / connection-reset / client-side request timeout — the gateway was reachable-but-unhealthy or slow. Safe to retry. It says NOTHING about whether the provider billed: a 5xx answered that it generated nothing, while a timeout or a reset after send may well have bought a completion we stopped listening to. <see cref="LlmApiException.StatusCode"/> is what separates those, and <c>LlmBudgetGuard</c> settles on it — never on this label.</summary>
     Transient,
 
     /// <summary>A 429 — rate / quota limited. Retry after the <see cref="LlmApiException.RetryAfter"/> backoff.</summary>
@@ -65,6 +65,18 @@ public sealed class LlmApiException : Exception, IRetryClassifiedException
 
     /// <summary>The honored <c>Retry-After</c> delay when the provider supplied one (a 429/503), else null.</summary>
     public TimeSpan? RetryAfter { get; }
+
+    /// <summary>
+    /// Whether an EARLIER physical request in the same logical call already reached the provider and was billed — set
+    /// by the bounded re-ask paths, which make a second request inside ONE budget reservation. Read by
+    /// <c>LlmBudgetGuard.ObservedNoSpend</c>: this failure alone may prove nothing was spent (a 429 on the re-ask
+    /// generated no completion), but the reservation still covers the first request's real bill, so it must be HELD
+    /// rather than released. Never set by the transport — only by a caller that knows it already bought tokens.
+    /// </summary>
+    public bool PriorBilledAttempt { get; init; }
+
+    /// <summary>The same typed failure, marked as raised AFTER an earlier attempt in this reservation was billed (see <see cref="PriorBilledAttempt"/>). Provider / status / category / <c>Retry-After</c> ride along unchanged, so every retry, degrade and classification branch behaves exactly as it did on the unwrapped failure.</summary>
+    public LlmApiException AfterBilledAttempt() => PriorBilledAttempt ? this : new LlmApiException(Provider, StatusCode, Category, ProviderMessage, RetryAfter, this) { PriorBilledAttempt = true };
 
     /// <summary>Whether re-issuing the SAME call could succeed — only a transient/rate-limit fault. Auth/bad-request/context/content/malformed are terminal as-is.</summary>
     public bool IsRetryable => Category is LlmErrorCategory.Transient or LlmErrorCategory.RateLimited;

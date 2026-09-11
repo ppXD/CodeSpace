@@ -2515,12 +2515,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (fail-open), and the critic runs byte-identically.
     ///
     /// <para>The ledger comes from the SAME fresh scope as the record logger, so this call is no longer the one
-    /// model call in the system that produced no ledger row at all: under the task's own <see cref="AgentTask.MaxCostUsd"/>
-    /// it is admitted against that ceiling (and refused once spent — the critic's contract turns a refusal into a
-    /// Failed verdict, so a spent run degrades to "unreviewed", never to a thrown job), and with no ceiling it
-    /// records an "unbudgeted:" observability row instead of nothing. The critic RE-LABELS the pushed scope's Kind
-    /// to its own call kind, so the row lands as <c>llm:critic.output</c> / <c>unbudgeted:critic.output</c> — the
-    /// identity cell is what this push contributes.</para>
+    /// model call in the system that produced no ledger row at all: under the WORKFLOW RUN's own cost ceiling it is
+    /// admitted against that ceiling (and refused once spent — the critic's contract turns a refusal into a Failed
+    /// verdict, so a spent run degrades to "unreviewed", never to a thrown job), and with no ceiling it records an
+    /// "unbudgeted:" observability row instead of nothing. The critic RE-LABELS the pushed scope's Kind to its own
+    /// call kind, so the row lands as <c>llm:critic.output</c> / <c>unbudgeted:critic.output</c> — the identity cell
+    /// is what this push contributes.</para>
     /// </summary>
     private async Task<CriticVerdict> ReviewRecordedAsync(CriticRequest request, AgentRun run, AgentTask task, CancellationToken cancellationToken)
     {
@@ -2529,23 +2529,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         using var recordingScope = _scopeFactory.CreateScope();
 
-        using (LlmCallContext.Push(await BuildCriticCallScopeAsync(recordingScope, workflowRunId, run, task, cancellationToken).ConfigureAwait(false)))
+        using (LlmCallContext.Push(await BuildCriticCallScopeAsync(recordingScope, workflowRunId, run, cancellationToken).ConfigureAwait(false)))
             return await _critic.ReviewAsync(request, run.TeamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The critic call's scope: budgeted under the task's cost ceiling when it declares one — with the team's operator-typed prices, since under a cap an unpriceable reviewer model is refused (D1 fail-closed) — else Unbudgeted, which still records.</summary>
-    private async Task<LlmCallScope> BuildCriticCallScopeAsync(IServiceScope recordingScope, Guid workflowRunId, AgentRun run, AgentTask task, CancellationToken cancellationToken)
+    /// <summary>
+    /// The critic call's scope: budgeted under the WORKFLOW RUN's own cost ceiling when the launch declared one —
+    /// with the team's operator-typed prices, since under a cap an unpriceable reviewer model is refused (D1
+    /// fail-closed) — else Unbudgeted, which still records.
+    ///
+    /// <para>The cap must be read at the RUN grain (<see cref="Workflows.Budget.RunCostCap"/>, the same reader the
+    /// engine's per-node scope uses) because <c>ReserveAsync</c> compares it against the committed sum of the WHOLE
+    /// run. The task's own <see cref="AgentTask.MaxCostUsd"/> is a ceiling on one agent-run chain, so admitting
+    /// against it compared a task-grain cap to a run-grain sum: every review on a run that had already spent past
+    /// the task cap was refused, and the critic's refusal contract silently degraded it to <c>ReviewFailed</c>.
+    /// A cap and the sum it is compared against must always be the same grain.</para>
+    /// </summary>
+    private async Task<LlmCallScope> BuildCriticCallScopeAsync(IServiceScope recordingScope, Guid workflowRunId, AgentRun run, CancellationToken cancellationToken)
     {
         var logger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
         var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
         var ledger = recordingScope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
         var scope = new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", logger, offloader, Budget: ledger);
 
-        if (task.MaxCostUsd is not { } capUsd)
-            return scope.Unbudgeted("the agent task declares no cost cap for its output-review critic");
+        if (await RunCostCapAsync(workflowRunId, cancellationToken).ConfigureAwait(false) is not { } capUsd)
+            return scope.Unbudgeted("the workflow run declares no cost cap for its agent's output-review critic");
 
         return scope with { CapUsd = capUsd, ModelPrices = await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false) };
     }
+
+    /// <summary>The owning workflow run's declared cost ceiling, read from the launch-stamped route the Room displays it from. One indexed single-column read per review pass (a review makes at most a verdict + a co-sign call), so it is not worth a cache that could go stale against a re-launched cap.</summary>
+    private async Task<decimal?> RunCostCapAsync(Guid workflowRunId, CancellationToken cancellationToken) =>
+        Workflows.Budget.RunCostCap.Of(await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == workflowRunId).Select(r => r.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false));
 
     /// <summary>Run the S8 AGENT reviewer from a fresh scope (it stages + executes a first-class run — the heartbeat-loop scope pattern). Authority and ownership refusal propagate; other failures become a failed verdict.</summary>
     private async Task<CriticVerdict> ReviewWithAgentAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
@@ -12,6 +13,8 @@ using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Review;
+using CodeSpace.Messages.Tasks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -184,9 +187,31 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.ObservedScope.IterationKey.ShouldBe("agent-node#2", "the full cell key rides so a map-branch agent's critic is distinguishable");
         critic.ObservedScope.Kind.ShouldBe("agent.critic", "the executor's base kind — the real critic re-labels the recorded kind to the request's own on top of this cell");
         critic.ObservedScope.UnbudgetedReason.ShouldNotBeNull(
-            "P15-5a: this executor has no IBudgetLedger reachable, so the scope is explicitly Unbudgeted rather than a silent Budget-less passthrough — LlmBudgetGuard would otherwise throw on the missing ledger");
+            "P15-5a: this run declares no cost cap, so the scope is explicitly Unbudgeted (still recorded under an 'unbudgeted:' kind) rather than a silent passthrough — see the cap-grain arms below");
         critic.ObservedRequest!.CallKind.ShouldBe(LlmStructuredCritic.OutputReviewCallKind,
             customMessage: "the OUTPUT review names its own kind at THIS call site — the Room's 'did anything check the result?' probe reads critic.output, and the plan/decision critics' generic critic.review must never satisfy it");
+    }
+
+    [Theory]
+    [InlineData(7, 7)]          // the launch stamped a $7 ceiling on the RUN → the critic is admitted against THAT
+    [InlineData(null, null)]    // no route ⇒ the run declares no ceiling ⇒ Unbudgeted, which still records
+    public async Task The_output_critic_is_admitted_against_the_RUN_cap_never_the_agent_tasks_own(int? runCapUsd, int? expectedCapUsd)
+    {
+        // A cap and the committed sum it is compared against must be the SAME GRAIN. `BudgetLedger.ReserveAsync`
+        // compares against the committed sum of the WHOLE workflow run, so admitting the critic under the agent
+        // TASK's own MaxCostUsd (a ceiling on one agent-run chain) refused every review on a run that had already
+        // spent past the task cap — and the critic's refusal contract turned that into a silent ReviewFailed, i.e.
+        // an unreviewed result on a run whose real cap had plenty of headroom left. The task cap below is therefore
+        // deliberately NOT the expected value: reading it here is the defect, in both directions.
+        var workflowRunId = Guid.NewGuid();
+        var task = GatedTask with { MaxCostUsd = 0.5m };
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, owningRun: CappedWorkflowRun(workflowRunId, runCapUsd));
+
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), task, SucceededWithChanges(), Run(runId, workflowRunId: workflowRunId, nodeId: "agent-node"), CancellationToken.None);
+
+        critic.ObservedScope!.CapUsd.ShouldBe((decimal?)expectedCapUsd, customMessage: "the same reader (Budget.RunCostCap) the engine's per-node scope admits through, off the same launch-stamped column the Room displays the cap from");
+        critic.ObservedScope.UnbudgetedReason.ShouldBe(expectedCapUsd is null ? "the workflow run declares no cost cap for its agent's output-review critic" : null,
+            customMessage: "an uncapped run still RECORDS the call under an 'unbudgeted:' kind naming why — never a row-less silent passthrough");
     }
 
     [Theory]
@@ -526,22 +551,45 @@ public sealed class AgentRunExecutorOutputReviewTests
         Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "DELIVERABLE.md" }, Kind = CodeSpace.Messages.Agents.Benchmark.BenchmarkGradingKind.ArtifactPresent },
     };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false) =>
-        NewExecutorWithStore(verdict, pendingDecision, agentVerdict, deliverables, deliverableReadThrows) switch
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic) NewExecutor(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false, WorkflowRun? owningRun = null) =>
+        NewExecutorWithStore(verdict, pendingDecision, agentVerdict, deliverables, deliverableReadThrows, owningRun) switch
         {
             var (runId, executor, runs, critic, _, _) => (runId, executor, runs, critic),
         };
 
-    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic, FakeArtifactManifestStore Store, NoopRecordLogger Ledger) NewExecutorWithStore(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false)
+    private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs, RecordingCritic Critic, FakeArtifactManifestStore Store, NoopRecordLogger Ledger) NewExecutorWithStore(CriticVerdict verdict, Guid? pendingDecision = null, CriticVerdict? agentVerdict = null, IReadOnlyList<FakeDeliverable>? deliverables = null, bool deliverableReadThrows = false, WorkflowRun? owningRun = null)
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId);
         var critic = new RecordingCritic { Verdict = verdict };
         var scopeFactory = new FakeScopeFactory(new FakeLedger(pendingDecision), agentVerdict is null ? null : new FakeAgentReviewer(agentVerdict));
         var captured = new FakeArtifactManifestStore(deliverables ?? Array.Empty<FakeDeliverable>(), deliverableReadThrows);
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, null!, critic, null!, captured, null!, captured, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, scopeFactory, Db(owningRun), critic, null!, captured, null!, captured, new FakeCaptureIntentService(), null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs, critic, captured, scopeFactory.RecordLogger);
     }
+
+    /// <summary>The executor's own context, in-memory: the critic scope reads the OWNING workflow run's declared cost ceiling from it. A test that stages no run leaves the table empty, which is the same "this run declares no cap" shape a manual / trigger run has.</summary>
+    private static CodeSpaceDbContext Db(WorkflowRun? owningRun)
+    {
+        var db = new CodeSpaceDbContext(new DbContextOptionsBuilder<CodeSpaceDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+
+        if (owningRun is not null)
+        {
+            db.WorkflowRun.Add(owningRun);
+            db.SaveChanges();
+        }
+
+        return db;
+    }
+
+    /// <summary>A workflow run carrying the launch-stamped route provenance production writes at projection — serialized through the REAL <see cref="RoutePlan"/> with the same Web options <c>TaskRunSnapshotFactory</c> uses, so the fixture cannot drift from the column the cap is actually read out of.</summary>
+    private static WorkflowRun CappedWorkflowRun(Guid id, decimal? capUsd) => new()
+    {
+        Id = id,
+        TeamId = Guid.NewGuid(),
+        SourceType = WorkflowRunSourceTypes.Snapshot,
+        RoutePlanJson = capUsd is null ? null : JsonSerializer.Serialize(new RoutePlan { ProjectionKind = TaskProjectionKinds.SingleAgent, Caps = new RouteCaps { MaxCostUsd = capUsd.Value } }, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+    };
 
     /// <summary>One captured deliverable the answer review reads back — its logical path plus the bytes the store resolves for it.</summary>
     private sealed record FakeDeliverable(string Path, string Text);
