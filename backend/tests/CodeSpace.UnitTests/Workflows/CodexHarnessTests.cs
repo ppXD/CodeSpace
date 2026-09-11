@@ -364,6 +364,23 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void A_brokered_base_url_reaches_the_argv_still_carrying_the_runner_host_token()
+    {
+        // The other half of the brokered-Codex path, pinned HERE so the two halves cannot drift apart:
+        // ProjectBrokered hands back a base URL whose HOST is still SandboxSpec.ModelBrokerHostToken (only the launch
+        // knows which address a given child can reach the worker at), and BuildInvocation re-emits it on the ARGV —
+        // where nothing but LocalProcessRunner.ResolveModelBrokerHost can resolve it. That runner pass substituting
+        // the env alone is exactly the defect that left a real Codex run unable to build an HTTP request at all.
+        var brokered = new BrokeredModelCredential($"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", "run-token-not-the-key", DateTimeOffset.UtcNow.AddMinutes(3));
+
+        var spec = Harness.BuildInvocation(Task() with { Environment = Harness.ProjectBrokered(brokered) });
+
+        spec.Args.ShouldContain($"model_providers.codespace.base_url=http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId/v1",
+            customMessage: "a brokered run's argv carries the host TOKEN, so every carrier the runner's resolution pass reads must include Args — see LocalProcessRunnerEnvScrubTests");
+        spec.Args.ShouldNotContain(brokered.RunToken, "the bearer stays in the environment; the argv is world-readable on the host");
+    }
+
+    [Fact]
     public void No_provider_override_without_a_gateway_base_url_codex_keeps_its_default_openai_provider()
     {
         // Plain OpenAI (no base-URL override) must NOT inject a model-provider — Codex's built-in provider hits api.openai.com.
