@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;
@@ -22,6 +23,9 @@ public class RoomArtifactProducerFoldTests
 {
     /// <summary>Mirrors CodeSpace.Api's <c>AddJsonOptions</c> — web defaults plus the string enum converter.</summary>
     private static readonly JsonSerializerOptions ApiJson = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+
+    /// <summary>Web defaults WITHOUT the API's global converter — any writer of this payload that is not the MVC pipeline.</summary>
+    private static readonly JsonSerializerOptions BareJson = new(JsonSerializerDefaults.Web);
 
     private static readonly Guid Agent = Guid.NewGuid();
 
@@ -84,6 +88,25 @@ public class RoomArtifactProducerFoldTests
     }
 
     [Theory]
+    // A PRICED model whose captured token row exists with 0/0 prices to exactly 0 — and $0.000 on the card reads
+    // "this agent was free", the one thing a producer may not say about an agent that has spent nothing yet.
+    [InlineData(0, 0, 0, null)]
+    [InlineData(null, null, 0, null)]
+    // A zero that priced out over REAL tokens is a genuine figure (a $0-priced row an operator typed) and stays.
+    [InlineData(1000, 500, 0, 0)]
+    [InlineData(1000, 0, 3, 3)]
+    // Unpriced stays unpriced, tokens or not — nothing here invents a number.
+    [InlineData(1000, 500, null, null)]
+    [InlineData(0, 0, null, null)]
+    public void A_zero_priced_at_zero_tokens_reports_unknown_not_a_free_agent(int? inputTokens, int? outputTokens, int? costUsd, int? expected)
+    {
+        var agent = new PhaseAgentRef { AgentRunId = Agent, Status = nameof(AgentRunStatus.Succeeded), InputTokens = inputTokens, OutputTokens = outputTokens, CostUsd = costUsd };
+
+        RoomProjector.RealizedSpend(agent).ShouldBe((decimal?)expected,
+            customMessage: "zero spend with zero tokens is an unlanded figure, not a free one — and a real zero must survive");
+    }
+
+    [Theory]
     [InlineData(RoomAgentLogStatus.Verified)]
     [InlineData(RoomAgentLogStatus.Captured)]
     [InlineData(RoomAgentLogStatus.Finalizing)]
@@ -134,6 +157,36 @@ public class RoomArtifactProducerFoldTests
         var producer = RoomProjector.ProducerOf(Row(), new RoomAgentLogSummary(RoomAgentLogStatus.Stalled, 1, "detail"), costUsd: null);
 
         JsonSerializer.Serialize(producer, ApiJson).ShouldContain("\"logs\":\"Stalled\"", Case.Sensitive);
+    }
+
+    [Theory]
+    [InlineData(RoomAgentLogStatus.Verified)]
+    [InlineData(RoomAgentLogStatus.Stalled)]
+    public void A_log_status_is_a_word_even_where_the_apis_global_converter_is_absent(RoomAgentLogStatus status)
+    {
+        // The posture enum carries its own converter; this one relied on CodeSpace.Api's AddJsonOptions. Outside
+        // those options it serialized as an ORDINAL, and the frontend's label lookup is indexed by word — so
+        // Verified, ordinal 0, rendered as NOTHING (a falsy key falls through its own `?? producer.logs` fallback).
+        var producer = RoomProjector.ProducerOf(Row(), new RoomAgentLogSummary(status, 1, "detail"), costUsd: null);
+
+        JsonSerializer.Serialize(producer, BareJson).ShouldContain($"\"logs\":\"{status}\"", Case.Sensitive,
+            "the log fold must reach any reader as its word, not as an ordinal one writer's options happen to spell out");
+    }
+
+    [Fact]
+    public void A_repositorys_card_names_each_producing_agent_once_however_many_results_it_carries()
+    {
+        // An agent can carry SEVERAL results touching one repository — which is exactly why the verification rows
+        // beside these are deliberately a list per agent. The producers are not: repeating one agent's record puts
+        // the same chip on the card twice under a duplicate React key.
+        var repositoryId = Guid.NewGuid();
+        var producers = RoomProjector.ProducersOf([Row()], new Dictionary<Guid, RoomAgentLogSummary>(), new Dictionary<Guid, decimal?>());
+        SupervisorAgentResult Result() => new() { AgentRunId = Agent, Status = nameof(AgentRunStatus.Succeeded), RepositoryResults = [new RepositoryRunResult { Alias = "api", RepositoryId = repositoryId }] };
+
+        var attributed = RoomProjector.ProducersForRepository([Result(), Result()], producers, singleRepoRun: false, repositoryId, alias: "api");
+
+        attributed.ShouldHaveSingleItem().AgentRunId.ShouldBe(Agent,
+            "two graded results of ONE agent are one producer — a second chip claims a second agent that does not exist");
     }
 
     private static RoomProjector.AgentProducerRow Row(Guid? agentRunId = null, AgentRunStatus status = AgentRunStatus.Succeeded, string? confinementJson = null) =>

@@ -147,22 +147,24 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     }
 
     /// <summary>
-    /// Terminal-flow projections are cached, but log capture and budget settlement may legitimately change after the
-    /// workflow does. Overlay their preloaded rows on every collapsed terminal read so mutable evidence cannot freeze
-    /// in the cache. <see cref="TerminalEvidenceAsync"/> loads every collapsed turn in a fixed number of team-scoped
-    /// queries, so a long session does not turn the refresh into an N+1 read storm.
+    /// Terminal-flow projections are cached, but log capture, budget settlement and the producing agents' own
+    /// statuses may legitimately change after the workflow does. Overlay their preloaded rows on every collapsed
+    /// terminal read so mutable evidence cannot freeze in the cache. <see cref="TerminalEvidenceAsync"/> loads every
+    /// collapsed turn in a fixed number of team-scoped queries, so a long session does not turn the refresh into an
+    /// N+1 read storm.
     /// </summary>
     private static IReadOnlyList<RoomBlock> RefreshTerminalEvidence(AssistantTurnBlock assistant, TerminalEvidence? evidence)
     {
-        var labels = assistant.Blocks.OfType<AgentGroupBlock>().SelectMany(block => block.Agents)
+        var current = RefreshProducers(assistant.Blocks, evidence);
+        var labels = current.OfType<AgentGroupBlock>().SelectMany(block => block.Agents)
             .GroupBy(agent => agent.AgentRunId).ToDictionary(group => group.Key, group => group.First().Label);
         var logs = RoomNarrative.LogsStat($"turn-{assistant.TurnIndex}:stat:logs", assistant.Seq, evidence?.AgentLogs ?? EmptyAgentLogs, labels);
         var budget = RoomNarrative.BudgetStat($"turn-{assistant.TurnIndex}", assistant.Seq, evidence?.Budget);
-        var hadLogs = assistant.Blocks.Any(block => block is StatBlock { Kind: "logs" });
-        var hadBudget = assistant.Blocks.Any(block => block is StatBlock { Kind: "budget" });
-        if (logs is null && budget is null && !hadLogs && !hadBudget) return assistant.Blocks;
+        var hadLogs = current.Any(block => block is StatBlock { Kind: "logs" });
+        var hadBudget = current.Any(block => block is StatBlock { Kind: "budget" });
+        if (logs is null && budget is null && !hadLogs && !hadBudget) return current;
 
-        var blocks = assistant.Blocks.Where(block => block is not StatBlock { Kind: "logs" or "budget" }).ToList();
+        var blocks = current.Where(block => block is not StatBlock { Kind: "logs" or "budget" }).ToList();
         if (budget is not null)
         {
             var beforePosture = blocks.FindIndex(block => block is StatBlock { Kind: "launch" });
@@ -174,6 +176,39 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         blocks.Insert(lastStat + 1, logs);
         return blocks;
     }
+
+    /// <summary>
+    /// Re-attach every artifact's producer to the run's CURRENT agent rows. A producer's status is precisely the
+    /// field that changes after its parent run finishes: <c>AgentRunReconcilerService</c> sweeps agents still
+    /// Running under a terminal parent — the exact population this cache holds — and terminalizes them. Left frozen,
+    /// the card renders a live-looking agent on a dead run for the whole process lifetime, since nothing but a
+    /// pull-request open evicts the entry. A row that is gone takes its producer with it, which is that record's one
+    /// stated reason to be absent.
+    ///
+    /// <para>The spend rides forward from the cached record instead of being recomputed: a per-agent figure comes
+    /// from the phase projection's priced tokens, and re-reading those per collapsed turn is the N+1 this whole
+    /// refresh exists to avoid. Carried forward it is the figure the fresh projection computed — never fabricated,
+    /// and still null while no tokens have landed.</para>
+    /// </summary>
+    private static IReadOnlyList<RoomBlock> RefreshProducers(IReadOnlyList<RoomBlock> blocks, TerminalEvidence? evidence)
+    {
+        if (evidence is null || !blocks.Any(block => block is DeliverablesBlock or DeliveryBlock)) return blocks;
+
+        var rows = evidence.Agents.GroupBy(row => row.AgentRunId).ToDictionary(group => group.Key, group => group.First());
+
+        return blocks.Select(block => block switch
+        {
+            DeliverablesBlock produced => produced with { Files = produced.Files.Select(file => file with { Producer = ReattachProducer(file.Producer, rows, evidence.AgentLogs) }).ToList() },
+            DeliveryBlock delivered => delivered with { Producers = delivered.Producers.Select(producer => ReattachProducer(producer, rows, evidence.AgentLogs)).OfType<RoomArtifactProducer>().ToList() },
+            _ => block,
+        }).ToList();
+    }
+
+    /// <summary>One cached producer folded again over its own current row — cost carried forward, every other fact re-read. Null when the row is gone, so a collapsed turn reports the same absence a fresh projection would.</summary>
+    private static RoomArtifactProducer? ReattachProducer(RoomArtifactProducer? cached, IReadOnlyDictionary<Guid, AgentProducerRow> rows, IReadOnlyDictionary<Guid, RoomAgentLogSummary> logs) =>
+        cached is not null && rows.TryGetValue(cached.AgentRunId, out var row)
+            ? ProducerOf(row, logs.GetValueOrDefault(cached.AgentRunId), cached.CostUsd)
+            : null;
 
     private async Task<IReadOnlyDictionary<Guid, TerminalEvidence>> TerminalEvidenceAsync(IReadOnlyCollection<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
     {
@@ -195,11 +230,24 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             (IReadOnlyDictionary<Guid, RoomAgentLogSummary>)group.GroupBy(row => row.AgentRunId).ToDictionary(agents => agents.Key, agents => SummarizeLogs(agents.Select(row => row.Log).ToList())));
         var ledgerByRun = reservations.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => (IReadOnlyList<BudgetLedgerRow>)group.ToList());
         var routeByRun = routes.ToDictionary(row => row.RunId, row => row.RouteJson);
+        var agentsByRun = await AgentProducerRowsByRunAsync(runIds, teamId, cancellationToken).ConfigureAwait(false);
         var teamCap = await TeamCapEvidenceAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         return runIds.ToDictionary(runId => runId, runId => new TerminalEvidence(
             logsByRun.GetValueOrDefault(runId) ?? EmptyAgentLogs,
-            SummarizeBudget(costs.GetValueOrDefault(runId), ledgerByRun.GetValueOrDefault(runId) ?? Array.Empty<BudgetLedgerRow>(), routeByRun.GetValueOrDefault(runId), teamCap)));
+            SummarizeBudget(costs.GetValueOrDefault(runId), ledgerByRun.GetValueOrDefault(runId) ?? Array.Empty<BudgetLedgerRow>(), routeByRun.GetValueOrDefault(runId), teamCap),
+            agentsByRun.GetValueOrDefault(runId) ?? EmptyAgentRows));
+    }
+
+    /// <summary>EVERY collapsed turn's agent rows in ONE team-scoped query, in the same three columns <see cref="AgentProducerRowsAsync"/> reads for a fresh turn — so a re-attached producer and a freshly projected one are folded from identical evidence, and a long session pays one read rather than one per turn.</summary>
+    private async Task<IReadOnlyDictionary<Guid, IReadOnlyList<AgentProducerRow>>> AgentProducerRowsByRunAsync(IReadOnlyCollection<Guid> runIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        var rows = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.WorkflowRunId.HasValue && runIds.Contains(r.WorkflowRunId.Value))
+            .Select(r => new RunAgentProducerRow(r.WorkflowRunId.GetValueOrDefault(), r.Id, r.Status, r.SandboxConfinementJson))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.GroupBy(row => row.RunId).ToDictionary(group => group.Key, group => (IReadOnlyList<AgentProducerRow>)group.Select(row => row.Agent).ToList());
     }
 
     private async Task<AssistantTurnBlock> BuildTurnAsync(SessionTurn turn, Guid? anchorRunId, Guid teamId, CancellationToken cancellationToken)
@@ -787,6 +835,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private static readonly IReadOnlyDictionary<Guid, RoomRunRecovery> EmptyAgentRecovery = new Dictionary<Guid, RoomRunRecovery>();
     private static readonly IReadOnlyDictionary<Guid, RoomAgentLogSummary> EmptyAgentLogs = new Dictionary<Guid, RoomAgentLogSummary>();
     private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
+    private static readonly IReadOnlyList<AgentProducerRow> EmptyAgentRows = Array.Empty<AgentProducerRow>();
 
     internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled = false);
 
@@ -800,7 +849,14 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest, RemoteStalled);
     }
-    private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget);
+
+    /// <summary>One agent row of a COLLAPSED turn, carrying its owning run so the batched read can be split per turn. Its <see cref="Agent"/> is the identical row a fresh projection folds.</summary>
+    private readonly record struct RunAgentProducerRow(Guid RunId, Guid AgentRunId, Messages.Enums.AgentRunStatus Status, string? ConfinementJson)
+    {
+        public AgentProducerRow Agent => new(AgentRunId, Status, ConfinementJson);
+    }
+
+    private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget, IReadOnlyList<AgentProducerRow> Agents);
     private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd, string Kind);
     private readonly record struct RunRouteRow(Guid RunId, string? RouteJson);
     private readonly record struct TeamCapEvidence(TeamCostCap Cap, decimal CommittedUsd);
@@ -980,7 +1036,17 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>Each agent's REALIZED priced spend, reusing the figure the phase projection already computed (no second pricing definition, no extra query). An agent the phases never carried is absent → its producer reports cost UNKNOWN rather than zero.</summary>
     private static IReadOnlyDictionary<Guid, decimal?> AgentCosts(IReadOnlyList<RunPhase> phases) =>
         phases.SelectMany(phase => phase.Agents).GroupBy(agent => agent.AgentRunId)
-            .ToDictionary(group => group.Key, group => group.First().CostUsd);
+            .ToDictionary(group => group.Key, group => RealizedSpend(group.First()));
+
+    /// <summary>
+    /// One agent's spend as an artifact may state it. The phase figure is <c>price × tokens</c>, so a PRICED model
+    /// whose captured token row exists with 0/0 prices to exactly <c>0</c> — and <c>0</c> on the card reads "this
+    /// agent was free", which is the one thing a producer record may not say about an agent that has not spent yet.
+    /// Zero cost with zero tokens is therefore reported as UNKNOWN; a zero that priced out over real tokens is a
+    /// genuine figure and stays.
+    /// </summary>
+    internal static decimal? RealizedSpend(PhaseAgentRef agent) =>
+        agent.CostUsd == 0m && (agent.InputTokens ?? 0) == 0 && (agent.OutputTokens ?? 0) == 0 ? null : agent.CostUsd;
 
     /// <summary>Deserialize one confinement record with the SAME options the executor wrote it with; a malformed / legacy column degrades to null.</summary>
     private static SandboxConfinement? TryReadConfinement(string json)
@@ -1822,11 +1888,22 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         }).ToList();
     }
 
-    /// <summary>THIS repository's own producers (P21-8b) — the units that delivered into it, matched by the SAME <see cref="TouchesRepository"/> predicate the verification rows use, so a repository's checks and the agents behind them can never be attributed differently. A matched unit whose agent-run row is gone drops out rather than appearing as an empty producer.</summary>
+    /// <summary>
+    /// THIS repository's own producers (P21-8b) — the units that delivered into it, matched by the SAME
+    /// <see cref="TouchesRepository"/> predicate the verification rows use, so a repository's checks and the agents
+    /// behind them can never be attributed differently. A matched unit whose agent-run row is gone drops out rather
+    /// than appearing as an empty producer.
+    ///
+    /// <para>One PRODUCER per agent, unlike the verification rows this walks beside: an agent can carry several
+    /// results (each its own graded row, which is why <see cref="VerificationsForAgent"/> is deliberately a list),
+    /// but they all name ONE agent run, and repeating its producer would put the same chip on the card twice under a
+    /// duplicate key. The first match wins — every result of one agent resolves to the same record.</para>
+    /// </summary>
     internal static IReadOnlyList<RoomArtifactProducer> ProducersForRepository(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, RoomArtifactProducer> producers, bool singleRepoRun, Guid? repositoryId, string? alias) =>
         results.Where(result => TouchesRepository(result, singleRepoRun, repositoryId, alias))
             .Select(result => producers.GetValueOrDefault(result.AgentRunId))
             .OfType<RoomArtifactProducer>()
+            .DistinctBy(producer => producer.AgentRunId)
             .ToList();
 
     /// <summary>Every repository's latest durable PR disposition. The server-authored operation record is authoritative because it retains failures and skips that cannot produce a manifest; node output and manifests remain backwards-compatible fallbacks.</summary>

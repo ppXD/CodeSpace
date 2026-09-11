@@ -12,8 +12,9 @@ namespace CodeSpace.Messages.Dtos.Sessions.Room;
 /// listed under a still-Running producer read exactly like one listed under a Succeeded producer, in every
 /// <c>WorkflowRunStatus</c>.</para>
 ///
-/// <para>Every field is a recorded fact or an explicit absence: an unpriced model is <c>null</c> cost (never
-/// <c>0</c>, which reads as free), a producer with no stream is <c>null</c> <see cref="Logs"/> (never "settled"),
+/// <para>Every field is a recorded fact or an explicit absence: an unpriced model and one that captured no tokens
+/// are both <c>null</c> cost (never <c>0</c>, which reads as free), a producer with no stream is
+/// <c>null</c> <see cref="Logs"/> (never "settled"),
 /// and an unrecorded posture is <see cref="RoomConfinementPosture.Unknown"/> (never
 /// <see cref="RoomConfinementPosture.Confined"/>, which reads as safe). This projection never fabricates a value
 /// that reads better than the evidence behind it.</para>
@@ -23,7 +24,16 @@ public sealed record RoomArtifactProducer
     /// <summary>The agent run that produced this artifact — the terminal deep-link, and the id every other per-agent surface keys on.</summary>
     public required Guid AgentRunId { get; init; }
 
-    /// <summary>The producer's lifecycle status as a stable string (the <c>AgentRunStatus</c> name) read straight off its own row — the same open-vocabulary word <see cref="RoomAgentCard.Status"/> carries, so an artifact and the agent card above it can never speak different statuses for one agent.</summary>
+    /// <summary>
+    /// The producer's lifecycle status as a stable string (the <c>AgentRunStatus</c> name) read straight off its own
+    /// row — the same open vocabulary <see cref="RoomAgentCard.Status"/> speaks, from the same column.
+    ///
+    /// <para>The same vocabulary, NOT necessarily the same instant: the card's word arrives through the phase
+    /// projection and this one through the projector's own agent-row read, so a status that lands between the two
+    /// reads shows here first. On a COLLAPSED terminal turn that is by construction — the cached flow is re-attached
+    /// to a fresh row read (a reaper terminalizes exactly that population after the parent finishes) while the
+    /// cached card is not, which makes this field the more current of the two rather than an agreeing one.</para>
+    /// </summary>
     public required string Status { get; init; }
 
     /// <summary>The producer's durable log-stream health. Null when it declared no stream at all — an unsaid fact, never a claim that its logs settled.</summary>
@@ -32,7 +42,7 @@ public sealed record RoomArtifactProducer
     /// <summary>What the host actually did to confine this producer — <see cref="RoomConfinementPosture.Unknown"/> (the default) whenever nothing recorded it.</summary>
     public RoomConfinementPosture Confinement { get; init; }
 
-    /// <summary>This producer's REALIZED priced spend in USD (model price × its own captured tokens). Null when the model is unpriced or no tokens landed yet — never <c>0</c>, which would read as a free agent rather than an unpriceable one.</summary>
+    /// <summary>This producer's REALIZED priced spend in USD (model price × its own captured tokens). Null when the model is unpriced, and null when its captured token counts are both zero — a zero-token row on a PRICED model prices to exactly <c>0</c>, which renders as "free" rather than as the "nothing landed yet" it actually records. A <c>0</c> that reaches here is therefore a priced-at-zero agent that really did consume tokens.</summary>
     public decimal? CostUsd { get; init; }
 }
 
