@@ -5,10 +5,13 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Capture;
+using CodeSpace.Core.Services.Agents.Recovery;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Recovery;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
@@ -239,6 +242,60 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         run.Status.ShouldBe(AgentRunStatus.Failed, "a foreign handle past its deadline must still reach a terminal state");
         run.Error!.ShouldContain("abandoned");
+
+        // Terminal is not the whole story: the run's spool is still on a host this worker cannot reach, and before the
+        // cleanup ledger existed nothing anywhere named it. Every receipt must be a CLAIM, never a reclaim.
+        var receipts = await verify.Resolve<IRunCleanupLedger>().ForRunsAsync(teamId, [runId], CancellationToken.None);
+        receipts.ShouldContain(receipt => receipt.Kind == RunResourceKind.Spool && receipt.Outcome == RunResourceOutcome.Orphaned
+            && receipt.OwnerHost == "a-host-that-never-came-back");
+        receipts.ShouldAllBe(receipt => !receipt.IsSettled, "this worker freed nothing, so nothing here may read as freed");
+    }
+
+    [Fact]
+    public async Task Same_host_abandon_settles_its_own_isolation_instead_of_orphaning_it()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The mirror of the foreign case, and the reason the branch cannot simply always record orphans: a sweep
+        // standing on the run's OWN host really can tear its netns down, so the receipt must say what happened here —
+        // Completed where the tools exist, Unknown where they cannot even be attempted — and never "orphaned", which
+        // would send a reader looking for a host to reap that is the one they are already on.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var spoolDir = Path.Combine(Path.GetTempPath(), "cs-recover-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(spoolDir);
+        _spoolDirs.Add(spoolDir);
+
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = DeadPid(), LaunchHost = LocalProcessRunner.CurrentHost, SpoolDirectory = spoolDir,
+            Deadline = DateTimeOffset.UtcNow.AddMinutes(-1), EgressNetnsKey = runId.ToString("N"),
+        };
+        var stamp = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = 1,
+                StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,
+                RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var netns = (await verify.Resolve<IRunCleanupLedger>().ForRunsAsync(teamId, [runId], CancellationToken.None))
+            .Single(receipt => receipt.Kind == RunResourceKind.EgressSubnet);
+        netns.Outcome.ShouldBe(FilteredEgressNetns.IsSupported ? RunResourceOutcome.Completed : RunResourceOutcome.Unknown);
+        netns.ErrorCode.ShouldBe(FilteredEgressNetns.IsSupported ? null : RunCleanupReceipts.UnsupportedCode);
+        netns.OwnerHost.ShouldBe(LocalProcessRunner.CurrentHost);
     }
 
     [Fact]

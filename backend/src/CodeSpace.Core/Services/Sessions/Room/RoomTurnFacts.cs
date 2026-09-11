@@ -55,6 +55,9 @@ public sealed record RoomTurnFacts
     /// <summary>Each agent's exact changed-file identities. Multi-repo equal paths remain separate; empty on legacy facts.</summary>
     public IReadOnlyDictionary<Guid, IReadOnlyList<RoomFileIdentity>> AgentFileIdentities { get; init; } = new Dictionary<Guid, IReadOnlyList<RoomFileIdentity>>();
 
+    /// <summary>What each agent left behind that nobody has reclaimed yet, keyed by its run id — folded from the run's typed cleanup receipts. Absent for an agent with nothing outstanding, which is nearly all of them.</summary>
+    public IReadOnlyDictionary<Guid, RoomRunRecovery> AgentRecovery { get; init; } = new Dictionary<Guid, RoomRunRecovery>();
+
     /// <summary>Each agent's durable log-stream health. An absent agent has no declared/captured stream and remains unsaid; a present summary never changes the task verdict.</summary>
     public IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs { get; init; } = new Dictionary<Guid, RoomAgentLogSummary>();
 

@@ -222,6 +222,34 @@ public sealed record RoomAgentCard
     /// <summary>The workflow node + iteration this agent ran as — the cell key. Lets the opened terminal fetch this cell's ATTEMPT history (rerun-from-here) and switch between attempts, exactly like the Activity view. Null for a supervisor-spawned agent (no workflow node), where there is no cell to switch.</summary>
     public string? NodeId { get; init; }
     public string? IterationKey { get; init; }
+
+    /// <summary>What this agent left behind on a host nobody could reach when it was abandoned. Null — the overwhelming case — when it left nothing outstanding.</summary>
+    public RoomRunRecovery? Recovery { get; init; }
+}
+
+/// <summary>
+/// The unsettled part of one agent run's cleanup, folded from its typed cleanup receipts. It exists because an agent
+/// run abandoned by a sweep on a DIFFERENT worker cannot clean up a single one of its own host-local resources — the
+/// spool, the netns and its subnet lease, the cgroup leaf, the workspace clone — and a Room that showed only "Failed"
+/// said nothing about the things still standing.
+///
+/// <para>Counts and hosts ride alongside the backend-authored <see cref="Detail"/> so the frontend never composes
+/// this copy. Present only while something is genuinely outstanding: once the owning host's own sweep compensates a
+/// resource, it drops out, and a run with nothing left over projects no recovery at all.</para>
+/// </summary>
+public sealed record RoomRunRecovery
+{
+    /// <summary>Resources still standing on a named host.</summary>
+    public required int OrphanedCount { get; init; }
+
+    /// <summary>The distinct hosts those resources are on, ordered — who has to come back (or be reaped) for them to be reclaimed.</summary>
+    public IReadOnlyList<string> OrphanHosts { get; init; } = Array.Empty<string>();
+
+    /// <summary>Resources whose state nobody can establish — a teardown no host could attempt, or the injected credential, which may have been mid-use when its host died.</summary>
+    public required int UnknownCount { get; init; }
+
+    /// <summary>Backend-authored one-line copy, e.g. "3 resources orphaned on host worker-7".</summary>
+    public required string Detail { get; init; }
 }
 
 /// <summary>

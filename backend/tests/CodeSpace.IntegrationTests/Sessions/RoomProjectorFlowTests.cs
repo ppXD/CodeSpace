@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Agents.Recovery;
 using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Quality;
 using CodeSpace.Core.Services.Review;
@@ -18,6 +19,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Agents.Recovery;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
@@ -1192,6 +1194,39 @@ public class RoomProjectorFlowTests
 
         files.Items.Select(item => item.Text).ShouldBe(new[] { "current.cs" }, "the old generation remains audit history, not the current reviewable file set");
         attachments.Select(attachment => attachment.Label).ShouldBe(new[] { "current.cs" }, "a superseded output must not be repackaged as a final deliverable");
+    }
+
+    [Fact]
+    public async Task An_agent_card_names_the_resources_its_run_left_on_a_host_nobody_could_reach()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Abandoned mid-flight");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Edit the file", resultSummary: "Interrupted.");
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnDecisionAsync(teamId, run, (agentRunId, ["edited.cs"]));
+
+        // Written through the production ledger, exactly as a foreign reconciler's abandon writes them.
+        var stamp = new RunCleanupStamp(agentRunId, 2, "host-b", DateTimeOffset.UtcNow);
+        using (var scope = _fixture.BeginScope())
+        {
+            var ledger = scope.Resolve<IRunCleanupLedger>();
+            await ledger.UpsertAsync(stamp.Orphaned(RunResourceKind.Spool, "host-a", "/spool/run"), CancellationToken.None);
+            await ledger.UpsertAsync(stamp.Orphaned(RunResourceKind.EgressSubnet, "host-a", "netns-key"), CancellationToken.None);
+            await ledger.UpsertAsync(stamp.Orphaned(RunResourceKind.Cgroup, "host-a", "cgroup-key"), CancellationToken.None);
+            await ledger.UpsertAsync(stamp.Completed(RunResourceKind.LogSegments, "host-a", null), CancellationToken.None);
+        }
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var card = turn.Blocks.OfType<AgentGroupBlock>().Single().Agents.Single(agent => agent.AgentRunId == agentRunId);
+
+        card.Recovery.ShouldNotBeNull("a Room that shows only the status says nothing about the things still standing");
+        card.Recovery!.Detail.ShouldBe("3 resources orphaned on host host-a");
+        card.Recovery.OrphanedCount.ShouldBe(3);
+        card.Recovery.OrphanHosts.ShouldBe(["host-a"]);
+        card.Recovery.UnknownCount.ShouldBe(0, "the settled log-capture receipt is not something a reader has to act on");
+
+        JsonSerializer.SerializeToElement(card, ApiJson).GetProperty("recovery").GetProperty("detail").GetString()
+            .ShouldBe("3 resources orphaned on host host-a", "the copy is backend-authored — the frontend composes none of it");
     }
 
     [Fact]
