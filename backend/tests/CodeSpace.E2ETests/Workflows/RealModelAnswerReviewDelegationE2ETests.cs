@@ -137,6 +137,16 @@ public sealed class RealModelAnswerReviewDelegationE2ETests
                 if (child.Status != AgentRunStatus.Succeeded)
                 {
                     var note = $"review child {child.Id}: status={child.Status}; exitReason={RealModelRunClassifier.ExitReasonOf(child)}; error={child.Error}";
+                    // NO format-fault repair is bought here, unlike the sibling real-model arms — and that is a
+                    // measured decision, not an omission. The only model in this arm runs in the reviewer CHILD,
+                    // whose task production builds from scratch in AgentReviewRunner.BuildReviewTask; AgentReviewSpec
+                    // carries no Environment and no resume, deliberately (an independent reviewer inherits neither the
+                    // producer's model nor its env). So ApplyFormatFaultMitigation folded onto the PARENT task reaches
+                    // nothing: its fresh-conversation half is already the child's default, and its thinking-disabled
+                    // half cannot cross the spec. A plain re-drive would add nothing either — the whole-loop gate
+                    // above already re-drives an infra fault on its own InfraRetryBudget. Buying a repair here needs
+                    // a production seam on AgentReviewSpec, which is a design decision about reviewer independence,
+                    // not a test change.
                     if (RealModelRunClassifier.IsGatewayInfra(child)) throw new AgentExecutionInfraException(note);
                     return (RealModelOutcome.CodeFault, note);
                 }
