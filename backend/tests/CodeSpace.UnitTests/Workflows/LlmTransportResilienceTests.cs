@@ -55,6 +55,26 @@ public class LlmTransportResilienceTests
         handler.Count.ShouldBe(1, "a 400 is terminal — the retry strategy must not re-attempt it");
     }
 
+    [Fact]
+    public async Task A_thrown_HttpRequestException_is_NOT_retried_by_this_layer()
+    {
+        // THE fix: ShouldHandle is STATUS-ONLY. Before it, Polly's DEFAULT predicate also retried
+        // HttpRequestException — so a reset-after-send attempt (possibly already billed) got a second, billable
+        // physical request under the SAME budget reservation before the caller ever saw a failure. Now the
+        // exception must reach LlmHttpTransport (which wraps it into a status-less Transient LlmApiException) after
+        // exactly ONE attempt; the engine-level RetryPlan is the layer that re-attempts, with its own reservation.
+        var handler = new ThrowingHandler(new HttpRequestException("connection reset"));
+        var client = BuildClient(handler);
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteAsync(new LLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", Credential = Cred,
+        }, CancellationToken.None));
+
+        ex.Category.ShouldBe(LlmErrorCategory.Transient);
+        handler.Count.ShouldBe(1, "a transport exception must not be retried at this layer — retrying it would launder a possibly-billed attempt into a released reservation");
+    }
+
     /// <summary>Build an AnthropicClient over the REAL named-client registration, with the primary handler swapped for the fake (the resilience delegating handler stays in the pipeline).</summary>
     private static AnthropicClient BuildClient(HttpMessageHandler fake)
     {
@@ -77,6 +97,19 @@ public class LlmTransportResilienceTests
             Count++;
             var (status, body) = _responses.Count > 0 ? _responses.Dequeue() : (HttpStatusCode.OK, "{}");
             return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        private readonly Exception _fault;
+        public int Count { get; private set; }
+        public ThrowingHandler(Exception fault) { _fault = fault; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Count++;
+            throw _fault;
         }
     }
 }
