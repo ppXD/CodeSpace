@@ -132,7 +132,9 @@ public partial class AgentRunExecutorTests
         var result = JsonSerializer.Deserialize<AgentRunResult>(persisted.ResultJson!, AgentJson.Options)!;
 
         persisted.Status.ShouldBe(AgentRunStatus.Failed, "a named resume session without its required bytes is not a valid cold start");
-        result.ExitReason.ShouldBe("executor-error");
+        // The throw DECLARES its failure identity (ArtifactContentUnavailableException : IFailure), so the exit reason
+        // is that identity's code rather than the one word every executor throw used to collapse to.
+        result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ArtifactContentUnavailable);
         result.Error.ShouldContain("artifact", Case.Insensitive);
         (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty("the harness must not run after required resume state is unavailable");
     }

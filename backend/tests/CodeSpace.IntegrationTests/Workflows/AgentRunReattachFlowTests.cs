@@ -433,6 +433,58 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_re_attached_brokered_run_records_that_its_model_access_died_with_the_minting_worker()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string brokerRunToken = "brokered-run-token-that-died-with-its-worker";
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var spoolDir = NewSpoolDir();
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "out.log"), "resumed-line\n");
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), "0");
+
+        // The launch's posture as its runner stamped it — confined, brokered — plus the handle the launch left
+        // behind, carrying the per-run bearer. The re-attach opens NO lease (the one that mattered lived in the dead
+        // worker's memory), so the detached CLI is pointed at a port nothing answers on: its model access is over,
+        // and the record has to say so WITHOUT losing what the launch recorded beside it.
+        using (var scope = _fixture.BeginScope())
+        {
+            var runs = scope.Resolve<IAgentRunService>();
+            await runs.SetSandboxConfinementAsync(runId, JsonSerializer.Serialize(new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, ModelCredentialBrokered = true }, AgentJson.Options), CancellationToken.None);
+
+            var fingerprint = AgentRunExecutor.WithModelBrokerRunToken(AgentRunExecutor.BuildRunRedactor(new Dictionary<string, string>(), null), brokerRunToken).Fingerprint;
+            var handle = new SandboxHandle { Kind = "local", ProcessId = 2147480000, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddMinutes(10), ModelBrokerRunToken = brokerRunToken, InjectedKeyFingerprint = fingerprint };
+            await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+        }
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using var verify = _fixture.BeginScope();
+        var stored = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.SandboxConfinementJson).SingleAsync();
+        var confinement = JsonSerializer.Deserialize<SandboxConfinement>(stored!, AgentJson.Options).ShouldNotBeNull();
+
+        confinement.ModelCredentialLeaseLost.ShouldBeTrue(
+            "a re-attach re-opens no lease, so every model call the detached agent makes from here fails to connect — unrecorded, that presents as a provider outage nobody can attribute");
+        confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Confined, "the fact is MERGED onto the launch's posture; replacing it would lose what the sandbox actually did");
+        confinement.ModelCredentialBrokered.ShouldBe(true);
+
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Unleashed, confinement)
+            .ShouldEndWith(AgentAutonomyPolicy.LostBrokeredModelCredentialCaveat,
+                customMessage: "the recorded fact has to reach the sentence a reader actually sees, or it is a column nobody consults");
+    }
+
+    [Fact]
     public async Task Re_attach_does_NOT_re_tail_when_the_credential_no_longer_matches_the_launch_key()
     {
         if (OperatingSystem.IsWindows()) return;

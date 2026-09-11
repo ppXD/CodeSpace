@@ -209,14 +209,20 @@ public static class AgentAutonomyPolicy
     internal static string WithHostSubnetPosture(string line, string? subnetDegradation) => subnetDegradation is null ? line : line + ProcessLocalSubnetCaveat;
 
     /// <summary>
-    /// Append <see cref="DirectModelCredentialCaveat"/> when the run's launch recorded that it put the tenant's own
-    /// provider key in the sandbox. Appended to EVERY branch, including "on" — unlike the confinement qualifier,
-    /// which exists to qualify an "off" claim, this fact is at its most load-bearing exactly where the network IS on,
-    /// since that is the run whose agent can spend the key. Silent when no record exists (an un-launched composer
-    /// preview) and when the run injected no credential at all: there is nothing to disclose either way.
+    /// Append what the run's launch (and any re-attach) recorded about its MODEL CREDENTIAL: that it put the tenant's
+    /// own provider key in the sandbox (<see cref="DirectModelCredentialCaveat"/>), or that its brokered lease died
+    /// with the worker that minted it (<see cref="LostBrokeredModelCredentialCaveat"/>). Appended to EVERY branch,
+    /// including "on" — unlike the confinement qualifier, which exists to qualify an "off" claim, these facts are at
+    /// their most load-bearing exactly where the network IS on, since that is the run whose agent can spend the key.
+    /// Silent when no record exists (an un-launched composer preview) and when the run injected no credential at all:
+    /// there is nothing to disclose either way.
     /// </summary>
-    internal static string WithModelCredentialPosture(string line, SandboxConfinement? confinement) =>
-        confinement?.ModelCredentialBrokered is false ? line + DirectModelCredentialCaveat : line;
+    internal static string WithModelCredentialPosture(string line, SandboxConfinement? confinement) => confinement switch
+    {
+        { ModelCredentialBrokered: false } => line + DirectModelCredentialCaveat,
+        { ModelCredentialLeaseLost: true } => line + LostBrokeredModelCredentialCaveat,
+        _ => line,
+    };
 
     /// <summary>
     /// What replaces <see cref="ConfinementCaveat"/> once a run's launch recorded its posture. An unconfined run is
@@ -254,6 +260,15 @@ public static class AgentAutonomyPolicy
     /// here, because for it the sentence would be false.
     /// </summary>
     public const string DirectModelCredentialCaveat = "; model credential injected directly (not revocable mid-run)";
+
+    /// <summary>
+    /// What a BROKERED run that outlived its launching worker has to disclose. The lease is that process's memory by
+    /// design — it is what makes revocation real — so the port the detached CLI holds a URL for stopped answering
+    /// when the worker went away, and the run cannot reach a model any more. The opposite trade-off from
+    /// <see cref="DirectModelCredentialCaveat"/>, and the reason both sentences exist: one run keeps spending a key
+    /// nobody can withdraw, the other loses its access the moment its worker does.
+    /// </summary>
+    public const string LostBrokeredModelCredentialCaveat = "; brokered model access ended with the worker that minted it";
 
     /// <summary>
     /// The qualifier an "off" posture carries when NO confinement record exists — the sandbox severs egress only

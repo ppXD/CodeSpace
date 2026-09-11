@@ -146,6 +146,10 @@ public partial class AgentRunExecutorTests
         run.Error!.ShouldContain("Sandbox:RequireConfinement", customMessage: "the refusal must name the setting an operator would change");
         run.Error!.ShouldNotContain(plaintextKey);
 
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason
+            .ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable,
+                customMessage: "the refusal has to land under its OWN failure code: 'executor-error' tells an operator nothing about which wall the run hit, and no reader can tell it apart from a harness that crashed");
+
         (harness.BuiltTask?.Environment.Values ?? Array.Empty<string>()).ShouldNotContain(plaintextKey,
             "the refusal must land BEFORE the projection — a run that failed after the key was already put in a spec is not fail-closed");
     }
@@ -182,6 +186,43 @@ public partial class AgentRunExecutorTests
 
         kill.Release.SetResult();
         (await cancel).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task The_reconcilers_abandon_refuses_the_credential_before_the_kill_is_issued()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        using var broker = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+        var brokered = await broker.OpenAsync(
+            new() { RunId = runId, TeamId = teamId, Epoch = 1, Upstream = new() { Provider = BrokeredProvider, ApiKey = "sk-abandon-fixture-key" }, Ttl = TimeSpan.FromMinutes(5) },
+            CancellationToken.None);
+
+        if (brokered is null) return;   // this host cannot bind a listener — nothing to order
+
+        var spool = Path.Combine(Path.GetTempPath(), "cs-broker-abandon-" + runId.ToString("N"));
+        await SeedStaleBrokeredRunAsync(teamId, runId, spool);
+
+        (await ProxiedCallAsync(brokered)).ShouldBe(HttpStatusCode.OK, "precondition: the lease answers before the sweep");
+
+        // The abandon's kill BLOCKS at entry, holding the window open — but only for THIS run's handle, so the
+        // deployment-wide sweep is not wedged by another suite's stale row on its way here. The probe throws, which
+        // is the ladder branch that kills a maybe-alive orphan and abandons it. A refusal observed inside that window
+        // can only mean the revocation ran FIRST: the same ordering the cancel path promises, for the same reason.
+        // Move the revoke after the terminate and this observes 200.
+        var kill = new BlockingTerminateRunner { OnlyForSpool = spool, ProbeThrows = true };
+        using var scope = _fixture.BeginScope();
+        var sweep = Task.Run(() => BuildReconciler(scope, kill, broker).ReconcileAsync(CancellationToken.None));
+
+        (await kill.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30))).ShouldBeTrue(
+            "the sweep never reached TerminateAsync for this run within 30s — check that the seeded row is still Running with an expired lease and no recent events, and that its handle kind matches the substituted runner");
+
+        (await ProxiedCallAsync(brokered)).ShouldBe(HttpStatusCode.Unauthorized,
+            "an abandoned orphan's credential must already be refused while its kill is still in flight — a signal races the agent's next model call, a withdrawn lease does not");
+
+        kill.Release.SetResult();
+        await sweep;
     }
 
     [Fact]
@@ -268,6 +309,42 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>
+    /// A stale Running run whose durable handle routes to the test's runner. Its lease expired YEARS ago so the row
+    /// sorts first in the reconciler's batch — the sweep is deployment-wide and bounded
+    /// (<see cref="AgentRunReconcilerService.BatchSize"/>), so a row that sorts late can fall out of it entirely on a
+    /// shared test database.
+    /// </summary>
+    private async Task SeedStaleBrokeredRunAsync(Guid teamId, Guid runId, string spoolDirectory)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var handle = new SandboxHandle { Kind = SandboxKinds.Local, ProcessId = Environment.ProcessId, SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(30), ModelBrokerRunToken = "brokered-run-token-fixture" };
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = runId, TeamId = teamId, Harness = "scripted", Status = AgentRunStatus.Running, FenceEpoch = 1,
+            StartedAt = DateTimeOffset.UtcNow.AddHours(-1), HeartbeatAt = DateTimeOffset.UtcNow.AddHours(-1), LeaseExpiresAt = DateTimeOffset.UtcNow.AddYears(-5),
+            RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The REAL reconciler with the same two substitutions <see cref="BuildCancelService"/> makes — the runner registry (so the kill is the interceptable one) and the broker (so the lease under test is the one the test holds).</summary>
+    private static IAgentRunReconcilerService BuildReconciler(ILifetimeScope scope, ISandboxRunner runner, IModelCredentialBroker broker) =>
+        new AgentRunReconcilerService(
+            scope.Resolve<CodeSpaceDbContext>(),
+            scope.Resolve<IAgentRunService>(),
+            scope.Resolve<IAgentRunCompletionNotifier>(),
+            scope.Resolve<CodeSpace.Core.Services.Jobs.ICodeSpaceBackgroundJobClient>(),
+            new SandboxRunnerRegistry(new[] { runner }),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Mcp.IToolCallLedgerService>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunReconcilerService>.Instance,
+            credentialBroker: broker);
+
+    /// <summary>
     /// The REAL <see cref="AgentRunService"/> with two substitutions: the runner registry (so the kill is the
     /// interceptable one) and the broker (so the lease under test is the one the test holds). Everything else — the
     /// DbContext, the authority service, the record plane — is the production object from the scope.
@@ -286,10 +363,18 @@ public partial class AgentRunExecutorTests
         public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>Block (and throw from the probe) only for the handle at this spool. Null blocks every handle, which is right for a cancel — it names one run — and wrong for the reconciler's deployment-wide sweep, where another suite's stale row would wedge the pass before it reached this test's.</summary>
+        public string? OnlyForSpool { get; init; }
+
+        /// <summary>Make ProbeAsync throw, the ladder branch that kills a maybe-alive orphan and abandons it. Default: a live process, which is the re-attach branch.</summary>
+        public bool ProbeThrows { get; init; }
+
         public string Kind => SandboxKinds.Local;
 
         public async Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
         {
+            if (!IsMine(handle)) return;
+
             Entered.TrySetResult(true);
             await Release.Task;
         }
@@ -297,7 +382,13 @@ public partial class AgentRunExecutorTests
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) => throw new NotSupportedException();
-        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) => Task.FromResult(new SandboxProbe { State = SandboxRunState.Running });
+
+        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) =>
+            ProbeThrows && IsMine(handle)
+                ? Task.FromException<SandboxProbe>(new IOException("the probe cannot be answered from this host (test fixture)"))
+                : Task.FromResult(new SandboxProbe { State = SandboxRunState.Running });
+
+        private bool IsMine(SandboxHandle handle) => OnlyForSpool is not { } mine || handle.SpoolDirectory == mine;
     }
 
     /// <summary>The provider, answering 200 to anything — the test asserts WHETHER a call is relayed, never what a model said.</summary>

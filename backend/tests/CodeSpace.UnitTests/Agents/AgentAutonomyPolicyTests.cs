@@ -250,13 +250,14 @@ public class AgentAutonomyPolicyTests
             customMessage: "the caveat is keyed on the allocator's OWN recorded cause, so both degradation reasons disclose and no reason invents one");
 
     [Theory]
-    [InlineData(null, false)]    // no record (an un-launched preview) — nothing was decided yet, so nothing is claimed
-    [InlineData(true, false)]    // brokered — the sentence would be false
-    [InlineData(false, true)]    // the tenant's own key went into the sandbox — say so
-    public void The_model_credential_posture_is_appended_only_for_a_run_that_was_handed_the_key(bool? brokered, bool discloses) =>
-        AgentAutonomyPolicy.WithModelCredentialPosture("Network: on (Trusted)", new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, ModelCredentialBrokered = brokered })
-            .ShouldBe(discloses ? "Network: on (Trusted)" + AgentAutonomyPolicy.DirectModelCredentialCaveat : "Network: on (Trusted)",
-                customMessage: "a directly-injected model credential cannot be withdrawn while the run lives, so the operator reading a posture has to be told which runs are holding one");
+    [InlineData(null, false, null)]                                                  // no credential reached the sandbox — nothing to claim either way
+    [InlineData(true, false, null)]                                                  // brokered and still held by its own worker — neither sentence is true
+    [InlineData(false, false, AgentAutonomyPolicy.DirectModelCredentialCaveat)]      // the tenant's own key went into the sandbox — say so
+    [InlineData(true, true, AgentAutonomyPolicy.LostBrokeredModelCredentialCaveat)]  // brokered, then re-attached by another worker — its model access died with the minting one
+    public void The_model_credential_posture_states_what_the_run_is_actually_holding(bool? brokered, bool leaseLost, string? caveat) =>
+        AgentAutonomyPolicy.WithModelCredentialPosture("Network: on (Trusted)", new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, ModelCredentialBrokered = brokered, ModelCredentialLeaseLost = leaseLost })
+            .ShouldBe("Network: on (Trusted)" + (caveat ?? ""),
+                customMessage: "the two failures are opposite and both have to be sayable: a directly-injected key cannot be withdrawn while the run lives, and a brokered one stops working the moment its worker goes away");
 
     [Fact]
     public void An_unconfined_run_holding_the_key_discloses_BOTH_losses()
