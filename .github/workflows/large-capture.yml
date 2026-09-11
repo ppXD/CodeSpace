@@ -1,0 +1,140 @@
+name: Backend · Large capture
+
+# The Category=LargeCapture tests: a 4 GiB agent log through the whole real capture path (real bridge,
+# real AgentRunLogService, real CAS runtime coordinator and driver broker, real Postgres). Neither end
+# materializes the payload — the durable source mints bytes per read from a position formula and the
+# provider double keeps a (key, length, sha, span) ledger and regenerates on read — so the lane needs
+# nothing the Integration lane does not: no live model, no live bucket, no privileged container.
+#
+# It has its own lane only because of COST: about nine minutes for the 4 GiB case, against a few seconds
+# for the 32 MiB guard that stays in the Integration gate. backend-integration.yml therefore excludes
+# Category=LargeCapture by name, exactly as the Sandbox tier is excluded from the unit gate, and this
+# lane runs it on main, on any change to the capture path, and on demand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/src/CodeSpace.Core/Services/Agents/AgentRunLogging/**'
+      - 'backend/src/CodeSpace.Core/Services/Workflows/Artifacts/**'
+      - 'backend/tests/CodeSpace.IntegrationTests/Workflows/AgentRunLogSyntheticCapture*.cs'
+      - 'backend/tests/CodeSpace.IntegrationTests/Workflows/AgentRunLog*CaptureFlowTests.cs'
+      - '.github/workflows/large-capture.yml'
+  pull_request:
+    paths:
+      - 'backend/src/CodeSpace.Core/Services/Agents/AgentRunLogging/**'
+      - 'backend/src/CodeSpace.Core/Services/Workflows/Artifacts/**'
+      - 'backend/tests/CodeSpace.IntegrationTests/Workflows/AgentRunLogSyntheticCapture*.cs'
+      - 'backend/tests/CodeSpace.IntegrationTests/Workflows/AgentRunLog*CaptureFlowTests.cs'
+      - '.github/workflows/large-capture.yml'
+  workflow_dispatch:
+
+concurrency:
+  # On a pull-request ref a new push supersedes the old proof, so cancelling the in-flight one is free. On main the
+  # ref is CONSTANT across every merge, so cancel-in-progress there would let back-to-back merges kill the ONLY lane
+  # that runs the 4 GiB case before it can finish — a nine-minute job cancelled by the next merge proves nothing, and
+  # the proof would silently never complete on main. Queue instead.
+  group: large-capture-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  # The same committed local-dev test key every other backend lane carries — a committed value, not a
+  # toggle; production deployments still supply their own real key.
+  CODESPACE_VARIABLE_MASTER_KEY: 'bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE='
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  large-capture:
+    name: dotnet test (LargeCapture · 4 GiB · Postgres)
+    runs-on: ubuntu-latest
+    # Three nested deadlines, ordered so the INNERMOST always fires first and the diagnosis is readable: the in-test
+    # CancellationTokenSource at 40 m (AgentRunLogFourGibibyteCaptureFlowTests.cs) throws an XunitException naming the
+    # stream and the SQL to inspect it; --blame-hang-timeout at 50 m only catches a genuinely wedged process, and
+    # gives a dump instead of a message; this cap at 60 m is the last resort and explains nothing. They must stay
+    # strictly increasing — equal values make a race decide which diagnosis you get. The margin is for the runner:
+    # four vCPUs and a byte-at-a-time redaction loop can be several times a dev machine's wall clock.
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-integration-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-integration-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Test (4 GiB through the real capture path)
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --filter "Category=LargeCapture"
+          --logger "console;verbosity=detailed"
+          --logger "trx;LogFileName=large-capture.trx"
+          --results-directory backend/TestResults
+          --blame-hang-timeout 50m
+
+      - name: Assert the 4 GiB case actually ran and passed (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a trait regression or a filter
+        # typo could green this lane while exercising nothing at all — and this is the ONLY lane that runs the 4 GiB
+        # case, so a silent skip here means the size claim is unproven everywhere.
+        #
+        # A count alone is too weak to say that: `executed>=1` is also satisfied by any OTHER test that happens to
+        # carry the category, so the 4 GiB case is named EXPLICITLY below. And `passed` is asserted rather than
+        # merely echoed — the step would otherwise read as a verdict while checking nothing.
+        run: |
+          trx=backend/TestResults/large-capture.trx
+          four_gib=A_four_gibibyte_log_finalizes_over_contiguous_segments_without_the_payload_being_held
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0} passed=${passed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected >=1 Category=LargeCapture test to run (the 4 GiB capture case), but ${executed:-0} did — the filter matched nothing (trait regression?)."
+            exit 1
+          fi
+          if ! grep -q "$four_gib" "$trx"; then
+            echo "::error::The trx records ${executed} executed test(s) but none of them is $four_gib — the 4 GiB case did not run, so this lane proved nothing it exists for."
+            exit 1
+          fi
+          if [ "${passed:-0}" -ne "${executed:-0}" ]; then
+            echo "::error::${passed:-0} of ${executed:-0} Category=LargeCapture tests passed — see the uploaded trx for the failing case."
+            exit 1
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: large-capture-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore
