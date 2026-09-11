@@ -65,6 +65,28 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// <summary>The provider tag whose API authenticates by <c>x-api-key</c>. Every other endpoint this codebase drives takes a bearer — the same split <c>ClaudeCodeHarness.ProjectToEnv</c> already encodes (api key for Anthropic itself, auth token for a gateway).</summary>
     private const string ApiKeyHeaderProvider = "Anthropic";
 
+    /// <summary>The paths the relay carries to an ANTHROPIC upstream: the Messages API the Claude Code CLI drives, plus its token-count sibling. Public so the surface a run's key can be spent on is pinnable, and so widening it is a reviewed edit rather than a side effect of a path-handling change.</summary>
+    public static readonly IReadOnlySet<string> AnthropicRelayPaths = new HashSet<string>(StringComparer.Ordinal) { "/v1/messages", "/v1/messages/count_tokens" };
+
+    /// <summary>The paths the relay carries to an OPENAI upstream: the Responses wire Codex drives, the Chat Completions wire an OpenAI-compatible gateway serves, and the model listing a CLI reads at start-up.</summary>
+    public static readonly IReadOnlySet<string> OpenAiRelayPaths = new HashSet<string>(StringComparer.Ordinal) { "/v1/responses", "/v1/chat/completions", "/v1/models" };
+
+    /// <summary>
+    /// The per-provider path allowlist, indexed by the credential's provider tag (the same spelling
+    /// <see cref="EgressAllowlistBuilder.ProviderDefaultHosts"/> keys on). A run's token is a capability on ONE
+    /// provider API, and without this the relay would spend the tenant's key on any path a compromised CLI appended
+    /// — file uploads, batches, an account-management endpoint the key also opens.
+    ///
+    /// <para>A provider NOT named here relays unrestricted, deliberately: an operator gateway's path surface is
+    /// theirs, not ours to enumerate, and refusing what we cannot enumerate would break the run rather than narrow
+    /// it. The bearer + the lease remain the guarantee for those; this table narrows the two APIs we do know.</para>
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> RelayPathsByProvider = new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Anthropic"] = AnthropicRelayPaths,
+        ["OpenAI"] = OpenAiRelayPaths,
+    };
+
     private readonly ConcurrentDictionary<Guid, Lease> _byRun = new();
     private readonly ConcurrentDictionary<string, Lease> _byRoute = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _stopping = new();
@@ -258,6 +280,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         try
         {
             if (Authorize(context.Request) is not { } lease) { Refuse(context.Response, HttpStatusCode.Unauthorized); return; }
+            if (UnrelayablePath(lease, context.Request.Url!) is { } refused) { RefusePath(context.Response, lease, refused); return; }
 
             await ForwardAsync(context, lease).ConfigureAwait(false);
         }
@@ -284,6 +307,36 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         if (!IsPlausibleSandboxSource(request.RemoteEndPoint?.Address)) return null;
 
         return lease;
+    }
+
+    /// <summary>
+    /// The path this request wants relayed when its lease's provider does not permit that path, or null when it does.
+    /// Separate from <see cref="Authorize"/> and answered with a DIFFERENT status on purpose: the 401s are all "you
+    /// hold no capability here", while this is "the capability you hold does not reach that endpoint" — a distinction
+    /// the run's own operator needs, since a 401 would send them hunting a credential problem.
+    /// </summary>
+    private static string? UnrelayablePath(Lease lease, Uri requested)
+    {
+        var path = RelayPathOf(lease.PathId, requested);
+
+        return IsRelayablePath(lease.Upstream.Provider, path) ? null : path;
+    }
+
+    /// <summary>Whether the provider's allowlist admits this relay path. True for a provider the table does not name — see the remarks on <see cref="RelayPathsByProvider"/>.</summary>
+    internal static bool IsRelayablePath(string? provider, string path)
+    {
+        if (provider is not { Length: > 0 } named || !RelayPathsByProvider.TryGetValue(named, out var allowed)) return true;
+
+        return allowed.Contains(path.Length > 1 ? path.TrimEnd('/') : path);
+    }
+
+    private void RefusePath(HttpListenerResponse response, Lease lease, string path)
+    {
+        // Warning, not Debug: a false refusal here presents to the run as a hard model failure, and this line is the
+        // only place that names the path to add to the allowlist.
+        _logger.LogWarning("The model-credential broker refused to relay {Path} for agent run {RunId}: it is not on the {Provider} path allowlist", path, lease.RunId, lease.Upstream.Provider);
+
+        Refuse(response, HttpStatusCode.Forbidden);
     }
 
     /// <summary>The first path segment — this run's unguessable route id. Null for a request with no segment at all.</summary>
@@ -332,12 +385,27 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         var request = new HttpRequestMessage(new HttpMethod(source.HttpMethod), UpstreamUriFor(lease.UpstreamRoot, lease.PathId, source.Url!));
 
-        if (source.HasEntityBody) request.Content = new StreamContent(source.InputStream);
+        if (source.HasEntityBody) request.Content = BodyOf(source);
 
         CopyRequestHeaders(source, request);
         ApplyUpstreamAuth(request, lease.Upstream);
 
         return request;
+    }
+
+    /// <summary>
+    /// The request body, carrying forward the length the CLIENT declared. <c>Content-Length</c> is dropped from the
+    /// copied headers (the HTTP stack owns framing), so without restating it here a length-declared upload would be
+    /// re-framed as chunked — and a gateway that refuses chunked request bodies answers 411, which the run reads as
+    /// the model rejecting its prompt. Absent (a genuinely chunked client) it stays chunked, as it must.
+    /// </summary>
+    private static StreamContent BodyOf(HttpListenerRequest source)
+    {
+        var content = new StreamContent(source.InputStream);
+
+        if (source.Headers["Content-Length"] is { Length: > 0 } && source.ContentLength64 >= 0) content.Headers.ContentLength = source.ContentLength64;
+
+        return content;
     }
 
     private static void CopyRequestHeaders(HttpListenerRequest source, HttpRequestMessage request)
@@ -420,12 +488,18 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// route segment, plus its query verbatim. Null-free by construction — the route segment is how the request was
     /// authorized, so it is a prefix of the path.
     /// </summary>
-    internal static Uri UpstreamUriFor(string upstreamRoot, string route, Uri requested)
+    internal static Uri UpstreamUriFor(string upstreamRoot, string route, Uri requested) => new(upstreamRoot + RelayPathOf(route, requested) + requested.Query);
+
+    /// <summary>
+    /// The path the CLI asked for BELOW this run's route segment — <c>/v1/messages</c> for
+    /// <c>…/&lt;route&gt;/v1/messages</c>, and <c>""</c> for a bare route. The ONE unit both the allowlist gate and
+    /// the upstream URI are computed from, so the path that passed the gate is provably the path relayed.
+    /// </summary>
+    internal static string RelayPathOf(string route, Uri requested)
     {
         var path = requested.AbsolutePath.TrimStart('/');
-        var remainder = path.Length > route.Length ? path[route.Length..] : "";
 
-        return new Uri(upstreamRoot + remainder + requested.Query);
+        return path.Length > route.Length ? path[route.Length..] : "";
     }
 
     /// <summary>

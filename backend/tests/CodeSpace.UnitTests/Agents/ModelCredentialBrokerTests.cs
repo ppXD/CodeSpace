@@ -73,8 +73,16 @@ public class ModelCredentialBrokerTests
 
     // ── The lease: what the broker answers, and when it stops ─────────────────────────────────────────────────────
 
-    [Fact]
-    public async Task A_live_lease_relays_the_call_with_the_tenants_key_attached_server_side()
+    /// <summary>
+    /// Both carriers a harness projection can put the bearer on, because the DROP is per-header and a header left
+    /// out of <c>DroppedRequestHeaders</c> is forwarded: a token arriving on <c>x-api-key</c> would then reach the
+    /// provider ALONGSIDE the tenant's key on the same header. That is the mutation the <c>Single()</c> below kills —
+    /// remove <c>"x-api-key"</c> from the drop set and the upstream sees two values, not one.
+    /// </summary>
+    [Theory]
+    [InlineData("Authorization")]
+    [InlineData(ApiKeyCarrier)]
+    public async Task A_live_lease_relays_the_call_with_the_tenants_key_attached_server_side(string carrier)
     {
         var upstream = new StubUpstream();
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
@@ -83,7 +91,7 @@ public class ModelCredentialBrokerTests
         var brokered = await broker.OpenAsync(LeaseFor(runId), CancellationToken.None);
         if (brokered is null) return;   // this host cannot bind a loopback listener at all — nothing to assert
 
-        var response = await CallAsync(brokered, "/v1/messages", brokered.RunToken);
+        var response = await CallAsync(brokered, "/v1/messages", brokered.RunToken, carrier);
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
         upstream.LastRequest.ShouldNotBeNull();
@@ -259,6 +267,43 @@ public class ModelCredentialBrokerTests
         LoopbackModelCredentialBroker.UpstreamUriFor("https://api.anthropic.com", "route", new Uri("http://127.0.0.1:9/" + requestedPath.TrimStart('/') + "?beta=true"))
             .ToString().ShouldBe(expected + "?beta=true");
 
+    // ── The path allowlist ────────────────────────────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("/v1/messages", HttpStatusCode.OK)]
+    [InlineData("/v1/messages/count_tokens", HttpStatusCode.OK)]
+    [InlineData("/v1/files", HttpStatusCode.Forbidden)]
+    [InlineData("/v1/organizations/me", HttpStatusCode.Forbidden)]
+    public async Task Only_the_providers_own_model_paths_are_relayed(string path, HttpStatusCode expected)
+    {
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+
+        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+        if (brokered is null) return;
+
+        (await CallAsync(brokered, path, brokered.RunToken)).StatusCode.ShouldBe(expected,
+            customMessage: "the run's bearer is a capability on the provider's MODEL API, not on every endpoint the tenant's key opens — without the allowlist the relay attaches that key to whatever path a compromised CLI appends");
+
+        upstream.Calls.ShouldBe(expected == HttpStatusCode.OK ? 1 : 0,
+            "a refused path must be refused HERE: a call relayed and then rejected upstream has already spent the tenant's key on it");
+    }
+
+    [Theory]
+    [InlineData("Anthropic", "/v1/messages", true)]
+    [InlineData("Anthropic", "/v1/messages/", true)]        // a trailing slash names the same endpoint
+    [InlineData("Anthropic", "/v1/responses", false)]       // the OTHER provider's wire is not this one's surface
+    [InlineData("Anthropic", "", false)]                    // a bare route is not a model call
+    [InlineData("OpenAI", "/v1/responses", true)]
+    [InlineData("OpenAI", "/v1/chat/completions", true)]
+    [InlineData("OpenAI", "/v1/models", true)]
+    [InlineData("OpenAI", "/v1/files", false)]
+    [InlineData("OpenRouter", "/anything/at/all", true)]    // no table entry → unrestricted: an operator gateway's path surface is theirs to define
+    [InlineData(null, "/v1/files", true)]
+    public void The_relay_path_allowlist_is_per_provider_and_silent_for_a_provider_it_does_not_name(string? provider, string path, bool relayable) =>
+        LoopbackModelCredentialBroker.IsRelayablePath(provider, path).ShouldBe(relayable,
+            customMessage: "the allowlist narrows the two APIs this codebase drives and refuses to guess at the rest — refusing an unenumerable gateway's paths would break the run instead of narrowing it");
+
     // ── The window, and the fail-closed decision ──────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -334,20 +379,23 @@ public class ModelCredentialBrokerTests
     private static string Reachable(BrokeredModelCredential brokered) =>
         brokered.BaseUrl.Replace(SandboxSpec.ModelBrokerHostToken, "127.0.0.1", StringComparison.Ordinal);
 
-    private static HttpRequestMessage Authorized(BrokeredModelCredential brokered, string path, string? token)
+    /// <summary>The api-key carrier a Claude Code run presents its bearer on (the auth-token one is a plain <c>Authorization: Bearer</c>).</summary>
+    private const string ApiKeyCarrier = "x-api-key";
+
+    private static HttpRequestMessage Authorized(BrokeredModelCredential brokered, string path, string? token, string carrier = "Authorization")
     {
         var request = new HttpRequestMessage(HttpMethod.Post, Reachable(brokered) + path) { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
 
-        if (token is not null) request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        if (token is not null) request.Headers.TryAddWithoutValidation(carrier, ApiKeyCarrier.Equals(carrier, StringComparison.OrdinalIgnoreCase) ? token : $"Bearer {token}");
 
         return request;
     }
 
-    private static async Task<HttpResponseMessage> CallAsync(BrokeredModelCredential brokered, string path, string? token)
+    private static async Task<HttpResponseMessage> CallAsync(BrokeredModelCredential brokered, string path, string? token, string carrier = "Authorization")
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 
-        return await client.SendAsync(Authorized(brokered, path, token));
+        return await client.SendAsync(Authorized(brokered, path, token, carrier));
     }
 
     /// <summary>
