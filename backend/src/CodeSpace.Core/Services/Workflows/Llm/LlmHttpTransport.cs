@@ -40,7 +40,7 @@ internal static class LlmHttpTransport
             // Connection refused / unroutable host / DNS / a reset mid-flight. Whether anything was BILLED is decided
             // from the socket error, not from this category, so the original rides as `inner` for the budget guard to
             // read (a refused connection sent nothing; a reset after send may have bought a completion).
-            throw new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex);
+            throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex));
         }
 
         using (response)
@@ -50,7 +50,7 @@ internal static class LlmHttpTransport
                 var status = (int)response.StatusCode;
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-                throw new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response));
+                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response)));
             }
 
             try
@@ -87,7 +87,7 @@ internal static class LlmHttpTransport
         }
         catch (HttpRequestException ex)
         {
-            throw new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex);
+            throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, null, LlmErrorCategory.Transient, ex.Message, inner: ex));
         }
 
         using (response)
@@ -97,7 +97,7 @@ internal static class LlmHttpTransport
                 var status = (int)response.StatusCode;
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-                throw new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response));
+                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response)));
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -127,6 +127,10 @@ internal static class LlmHttpTransport
 
         return content;
     }
+
+    /// <summary>Mark <paramref name="fault"/> as riding over a possibly-billed earlier attempt when a PRECEDING attempt of this same (Polly-retried) request was sent and got no response back — see <see cref="PhysicalLlmAccountingHandler.AmbiguousSendKey"/>. This is what keeps <c>LlmBudgetGuard.ObservedNoSpend</c> holding the reservation instead of reading THIS attempt's own — possibly clean — outcome as proof the call spent nothing.</summary>
+    private static LlmApiException MarkIfAmbiguousSendPreceded(HttpRequestMessage request, LlmApiException fault) =>
+        request.Options.TryGetValue(PhysicalLlmAccountingHandler.AmbiguousSendKey, out var marker) && marker.Occurred ? fault.AfterBilledAttempt() : fault;
 
     /// <summary>The provider's <c>Retry-After</c> as a delay — a delta header verbatim, or an absolute date converted to a delay from now (clamped non-negative); null when absent.</summary>
     private static TimeSpan? RetryAfterOf(HttpResponseMessage response)
