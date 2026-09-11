@@ -433,11 +433,13 @@ public sealed partial class ArtifactCasTransferResumerTests
 
     /// <summary>
     /// Discard first, clear second — and a discard the destination refuses clears nothing. Clearing a record whose
-    /// bytes are still there is how an orphan becomes one nobody will ever look for again; keeping it costs one
-    /// re-ask on the next pass, which the reclaim contract makes free by answering an absent object as success.
+    /// bytes are still there is how an orphan becomes one nobody will ever look for again — and here the same pass
+    /// also settles the transfer TERMINALLY, which is what makes keeping it a PERMANENT orphan rather than one a
+    /// later pass could still retry: 0226 gates the clearing write on a live lease and forces every terminal state to
+    /// have released it, so a row that reaches Failed with the key still named can never have it cleared afterward.
     /// </summary>
     [Fact]
-    public async Task A_staging_object_this_pass_could_not_discard_stays_named_for_a_later_one()
+    public async Task A_staging_object_this_pass_could_not_discard_stays_named()
     {
         var world = await SeedWorldAsync();
         var storage = new ResumeStorage { RefuseStagingDiscard = true };
@@ -449,8 +451,11 @@ public sealed partial class ArtifactCasTransferResumerTests
 
         await ResumeAsync(storage);
 
-        (await IntentAsync(intentId)).TemporaryObjectKey.ShouldBe(staging,
+        var swept = await IntentAsync(intentId);
+        swept.TemporaryObjectKey.ShouldBe(staging,
             "the bytes are still at the destination, and the row is the only record of where — dropping it here turns a reclaimable orphan into a permanent one");
+        swept.State.ShouldBe(ArtifactTransferState.Failed,
+            "this same pass also settled the transfer terminally, so the key above is not merely waiting for a later re-ask — a terminal row can never have it cleared again");
         storage.Objects.ShouldContainKey(staging);
     }
 
