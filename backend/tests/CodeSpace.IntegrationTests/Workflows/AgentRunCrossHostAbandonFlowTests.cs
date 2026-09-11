@@ -100,7 +100,10 @@ public sealed class AgentRunCrossHostAbandonFlowTests : IDisposable
             FilteredEgressNetns.IsSupported ? RunResourceOutcome.Compensated : RunResourceOutcome.Unknown,
             customMessage: "a reclaim that could not be attempted is not a reclaim");
         afterKernelSweep.Single(receipt => receipt.Kind == RunResourceKind.Cgroup).Outcome.ShouldBe(
-            CgroupResourceLimit.IsSupported && CgroupResourceLimit.CgroupRoot is not null ? RunResourceOutcome.Compensated : RunResourceOutcome.Unknown);
+            !CgroupResourceLimit.IsSupported ? RunResourceOutcome.Unknown
+            : CgroupResourceLimit.CgroupRoot is not null ? RunResourceOutcome.Compensated
+            : RunResourceOutcome.Orphaned,
+            customMessage: "no cgroup-v2 support answers Unknown (permanent); an unconfigured delegated root leaves the row Orphaned so a later-configured sweep can still reclaim it");
 
         afterKernelSweep.Where(receipt => receipt.Kind is RunResourceKind.Spool or RunResourceKind.McpSocket or RunResourceKind.Workspace)
             .ShouldAllBe(receipt => receipt.Outcome == RunResourceOutcome.Orphaned,

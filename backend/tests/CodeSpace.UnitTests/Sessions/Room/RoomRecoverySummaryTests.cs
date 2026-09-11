@@ -51,18 +51,38 @@ public class RoomRecoverySummaryTests
     }
 
     [Fact]
-    public void An_unknowable_resource_is_reported_separately_from_an_orphan()
+    public void An_unsupported_teardown_is_reported_separately_from_an_orphan()
     {
         var both = RoomProjector.SummarizeRecovery([
+            Receipt(RunResourceKind.Spool, RunResourceOutcome.Orphaned, "host-a"),
+            Receipt(RunResourceKind.Cgroup, RunResourceOutcome.Unknown, "host-a"),
+        ]);
+
+        both!.Detail.ShouldBe("1 resource orphaned on host host-a · 1 with an unknown cleanup state",
+            "an orphan is addressed to a host and an unknowable teardown is addressed to nobody — collapsing them would claim a sweep can fix the second");
+    }
+
+    [Fact]
+    public void A_provider_credential_lease_left_unknown_never_counts_towards_unknown_count()
+    {
+        var summary = RoomProjector.SummarizeRecovery([
             Receipt(RunResourceKind.Spool, RunResourceOutcome.Orphaned, "host-a"),
             Receipt(RunResourceKind.ProviderCredentialLease, RunResourceOutcome.Unknown, "host-a"),
         ]);
 
-        both!.Detail.ShouldBe("1 resource orphaned on host host-a · 1 with an unknown cleanup state",
-            "an orphan is addressed to a host and an unknowable is addressed to nobody — collapsing them would claim a sweep can fix the second");
+        summary!.UnknownCount.ShouldBe(0, "a structurally unknowable credential lease is not outstanding cleanup work");
+        summary.Detail.ShouldBe("1 resource orphaned on host host-a");
+    }
 
-        RoomProjector.SummarizeRecovery([Receipt(RunResourceKind.ProviderCredentialLease, RunResourceOutcome.Unknown, null)])!
-            .Detail.ShouldBe("1 resource with an unknown cleanup state");
+    [Fact]
+    public void A_run_fully_compensated_except_an_unknowable_credential_lease_says_nothing()
+    {
+        RoomProjector.SummarizeRecovery([
+            Receipt(RunResourceKind.Spool, RunResourceOutcome.Compensated, "host-a"),
+            Receipt(RunResourceKind.EgressSubnet, RunResourceOutcome.Compensated, "host-a"),
+            Receipt(RunResourceKind.Cgroup, RunResourceOutcome.Compensated, "host-a"),
+            Receipt(RunResourceKind.ProviderCredentialLease, RunResourceOutcome.Unknown, "host-a"),
+        ]).ShouldBeNull("once the owner host reclaims every resource it can, a permanently-unknowable credential lease must not keep the Room's warning alive forever");
     }
 
     private static RunCleanupReceipt Receipt(RunResourceKind kind, RunResourceOutcome outcome, string? ownerHost) => new()
