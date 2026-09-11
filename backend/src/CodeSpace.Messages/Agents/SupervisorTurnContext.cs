@@ -273,6 +273,18 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlySet<Guid> PublishedAgentRunIds { get; init; } = EmptyGuidSet;
 
+    /// <summary>
+    /// P22-9b — the pure quality policy's per-unit RECOMMENDATION for every ATTEMPTED unit of the newest plan,
+    /// folded at rehydrate from the same recorded facts every other block reads (<c>SupervisorQualityFacts.DecideAll</c>).
+    /// Three consumers, one fold: the decider prompt recites it, the decision row freezes it (so what the turn was
+    /// shown survives the turn), and the retry escalation records whether the legacy trigger AGREED with it.
+    ///
+    /// <para>It STEERS nothing. No branch anywhere reads <c>Mechanism</c> to decide what happens — the verb roster
+    /// and the action mask are untouched by it, so it can neither offer a verb the run may not emit nor withdraw
+    /// one it may. Empty (the default, and every turn before a unit has been attempted) ⇒ byte-identical prompt.</para>
+    /// </summary>
+    public IReadOnlyList<Quality.SupervisorUnitQualityDecision> QualityDecisions { get; init; } = [];
+
     private static readonly IReadOnlySet<Guid> EmptyGuidSet = new HashSet<Guid>();
 }
 
@@ -287,4 +299,7 @@ public sealed record SupervisorPriorDecision
     public required string PayloadJson { get; init; }
     public string? OutcomeJson { get; init; }
     public string? Error { get; init; }
+
+    /// <summary>P22-9b — the durable <c>quality_decisions</c> column this row froze at claim time: the per-unit quality recommendations the turn that emitted this decision was shown. Null on every row written before the column existed and on any decision emitted before a unit had been attempted.</summary>
+    public string? QualityDecisionsJson { get; init; }
 }

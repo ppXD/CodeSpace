@@ -2421,6 +2421,7 @@ function statIcon(kind: string): SymName {
   if (kind === "logs") return "terminal";
   if (kind === "reasoning") return "sparkle";
   if (kind === "launch") return "lock";   // the run's launch posture (network access) — a permission fact, not a metric
+  if (kind === "quality") return "zap";   // the quality policy's per-unit RECOMMENDATION — advice on what to spend the next increment on, not a metric. Its own glyph because the default ("list") is the Plan row's, and two different rows under one icon read as one row rendered twice
   return "list";
 }
 

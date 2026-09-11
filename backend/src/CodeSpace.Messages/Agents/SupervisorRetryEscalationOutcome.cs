@@ -24,4 +24,23 @@ public sealed record SupervisorRetryEscalationOutcome
 
     /// <summary>Why the floor was raised, in one legible sentence (e.g. "the prior attempt's self-report contradicted its acceptance grade (over_claim)").</summary>
     public required string Reason { get; init; }
+
+    /// <summary>
+    /// P22-9b — what the pure quality policy recommended for THIS unit on the same turn, or null when it had no
+    /// reading (a unit outside the newest plan, or one with no attempt yet). Recorded, never obeyed:
+    /// <see cref="Reason"/> above is still the whole of why this retry escalated.
+    /// </summary>
+    public Quality.QualityMechanism? PolicyMechanism { get; init; }
+
+    /// <summary>
+    /// Whether the quality policy AGREED with this escalation — i.e. whether <see cref="PolicyMechanism"/> is
+    /// <c>EscalateModel</c> too. Null when the policy had no reading to agree or disagree with.
+    ///
+    /// <para>This exists because the two mechanisms are KNOWN to diverge and 9b deliberately did not replace either:
+    /// the legacy trigger escalates on the FIRST over-claim, while the policy's repeat floor is two consecutive
+    /// failed verdicts, so a first over-claim escalates here and reads as an ordinary attempt there. Recording the
+    /// disagreement is what lets P22-9c's ablation settle which floor is right, instead of one of them being
+    /// switched off on an argument. A <c>false</c> is therefore expected and is not a fault.</para>
+    /// </summary>
+    public bool? PolicyAgrees { get; init; }
 }

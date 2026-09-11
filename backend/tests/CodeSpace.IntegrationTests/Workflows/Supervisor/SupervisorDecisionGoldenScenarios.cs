@@ -65,6 +65,10 @@ public static class SupervisorDecisionGoldenScenarios
         ResolveBaitCleanIntegration(),    // clean merge, overlap prose      → stop, NEVER resolve
         AgentReportedConflictNoRecord(),  // agents SAY conflict, no record  → retry/spawn, NEVER resolve
         ResolveCapSpent(),                // conflict, but the cap is spent  → stop/ask, NEVER resolve (it would KILL the run)
+        // P22-9b — the two tapes whose QUALITY POLICY line says something other than "nothing recorded can grade
+        // this": a repeat failure under an operator-declared floor, and a unit a human waived verification for.
+        RepeatFailureUnderADeclaredCheck(), // 2 failed verdicts, small diff → retry/stop/ask, NEVER merge
+        WaivedUnitCleanlyIntegrated(),      // a human waived a unit's check → stop, NEVER re-attempt the waived work
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -606,15 +610,144 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Stop, SupervisorDecisionKinds.AskHuman },
     };
 
-    private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors) =>
-        new()
+    /// <summary>
+    /// P22-9b — a SINGLE-unit plan whose only unit has now failed its check TWICE in a row over a one-file diff, and
+    /// the corpus's ONLY tape with the operator's objective floor
+    /// (<see cref="SupervisorTurnContext.AcceptanceChecks"/>) declared. That floor is what the whole scenario turns
+    /// on: without it the recorded evidence cannot grade anything, so the quality reading falls to the
+    /// nothing-can-grade-this row and recites the statement of absence — which is the reading every other tape in
+    /// this corpus gets, and it is why not one of them exercises a mechanism the model can act on. With the floor
+    /// declared and the failures localized, the policy's repeat row fires on its LOCALIZED arm and recommends
+    /// <c>EscalateModel</c> ("retry (stronger model)") rather than its at-scale arm's replan.
+    ///
+    /// <para>The accepted set matches <see cref="RetriedStillFailed"/>'s, and for the same reason: the tape is
+    /// genuinely STUCK, no retry cap is rendered to the model, and retrying again / stopping honestly / asking a
+    /// human are all on-rail there. It is not a duplicate of that scenario — one plan unit, so there is no green
+    /// sibling and nothing mergeable anywhere on the tape, and the teeth are the same MERGE rejection at the sharper
+    /// shape: a model that merges here merges a run with no passing work in it at all.</para>
+    ///
+    /// <para>What this scenario CANNOT prove is that the recommendation is obeyed — nothing in the lane branches on
+    /// it, and a corpus point earned or lost here is the model's own judgement. It proves the recommendation is
+    /// SHOWN, on a tape where it says something an action could follow; measuring whether showing it helps is
+    /// P22-9c's ablation, not this corpus.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario RepeatFailureUnderADeclaredCheck() => new()
+    {
+        Name = "repeat-failure-under-a-declared-check",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1"),
+            Spawn(new[] { "s1" }, LocalizedDiff(Agent(Agent1, "Failed", error: "the new validation rejects a valid address: 1 assertion failed in SignupValidationTests"))),
+            Retry("s1", LocalizedDiff(Agent(RetryAgent, "Failed", error: "the same assertion still fails after the retry: SignupValidationTests.RejectsMissingDomain"))),
+        }, DeclaredAcceptanceFloor),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Stop, SupervisorDecisionKinds.AskHuman },
+    };
+
+    /// <summary>
+    /// P22-9b — a human CO-SIGNED forgoing verification for s2, the run integrated cleanly, and the only honest move
+    /// left is to close. The quality reading here is the policy's <c>Waived</c> row, which exists precisely so a
+    /// waiver cannot re-read as an ungraded unit that wants another attempt: it recommends <c>Stop</c> and cites the
+    /// authorization, and the recitation renders that as "close".
+    ///
+    /// <para>Both halves of the waiver are on the tape, because production produces both and either alone is a shape
+    /// it never emits: the APPROVED waive card (minted by the production card builder
+    /// <see cref="SupervisorAmendAcceptance.IntoAskHuman"/>, so the marker sentence and the structured <c>amend</c>
+    /// node are exactly what <see cref="SupervisorAcceptanceOverlay"/> reads back) and the unit stamped
+    /// <see cref="Messages.Contracts.VerificationDisposition.Waived"/> by the fold that honours it
+    /// (<see cref="Waived"/>). A card with no stamp would leave the unit reading ungraded; a stamp with no card would
+    /// be a verdict no human authorized.</para>
+    ///
+    /// <para><see cref="CleanIntegration"/>'s accepted set, for <see cref="CleanIntegration"/>'s reason — the
+    /// integration is clean and nothing remains. The teeth are the WAIVED unit: a model that retries or re-spawns s2
+    /// is re-spending budget on work a human already ruled needs no verification, which is the FATAL-1 failure in
+    /// the direction that costs money rather than the one that launders a pass.</para>
+    /// </summary>
+    private static SupervisorGoldenScenario WaivedUnitCleanlyIntegrated() => new()
+    {
+        Name = "waived-unit-cleanly-integrated",
+        Context = Context(turn: 4, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "added the email-format validation to the signup handler", branch: "agent/s1"),
+                Waived(Agent(Agent2, "Succeeded", summary: "returned HTTP 400 naming the malformed address", branch: "agent/s2"))),
+            WaiveApproved("s2", sequence: 2),
+            CleanMerge() with { Sequence = 3 },
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Stop },
+    };
+
+    /// <summary>
+    /// The operator's objective floor for <see cref="RepeatFailureUnderADeclaredCheck"/> — real argv, because
+    /// <see cref="SupervisorTurnContext.AcceptanceChecks"/> is the command a terminal verdict is graded against, not
+    /// a label.
+    /// <para>A PROPERTY for the reason <see cref="SupervisorProfile"/> is one, and this one was caught the hard way:
+    /// as a <c>static readonly</c> field declared below <see cref="All"/> it was still <c>null</c> while the
+    /// scenarios were being built, so the floor never reached the fold and the quality line recited
+    /// "declared: False" over a tape whose whole point is a declared check. Nothing threw — a null floor is the
+    /// ordinary uncapped shape.</para>
+    /// </summary>
+    private static IReadOnlyList<string> DeclaredAcceptanceFloor => new[] { "dotnet", "test" };
+
+    /// <summary>
+    /// A failed attempt that DID touch code — two files in one repository. That is what makes the repeat-failure
+    /// reading LOCALIZED (both counts below <c>QualityPolicy.SplitScaleFileFloor</c> / <c>SplitScaleUnitFloor</c>),
+    /// so the policy recommends a stronger model rather than a decomposition. An attempt with no recorded diff lands
+    /// on the same side of both floors, but "0 changed file(s)" is an absence of evidence dressed as smallness —
+    /// this fixture should show the model a real small diff, because that is the fact the recommendation cites.
+    /// </summary>
+    private static SupervisorAgentResult LocalizedDiff(SupervisorAgentResult result) =>
+        result with { ChangedFiles = new[] { "src/Signup/EmailValidator.cs", "tests/Signup/SignupValidationTests.cs" } };
+
+    /// <summary>A unit a human authorized forgoing verification for — the EXACT stamp the fold writes when the co-sign overlay reports the subtask waived (<c>SupervisorTurnService.FoldUnitAcceptanceGradeAsync</c>), so the fixture cannot record a waiver production never writes. WAIVED is not a pass, and no <c>AcceptancePassed</c> rides beside it.</summary>
+    private static SupervisorAgentResult Waived(SupervisorAgentResult result) =>
+        result with
+        {
+            AcceptancePassed = null,
+            AcceptanceVerdict = Messages.Contracts.VerificationDisposition.Waived,
+            AcceptanceDetail = "verification waived by a human co-sign",
+            AcceptanceEvidenceId = null,
+        };
+
+    /// <summary>An APPROVED WAIVE card — <see cref="AmendApproved"/>'s sibling through the same production builder, with <see cref="SupervisorAmendAcceptancePayload.Waive"/> set and NO replacement oracle (a waiver forgoes the check rather than replacing it).</summary>
+    private static SupervisorPriorDecision WaiveApproved(string subtaskId, long sequence)
+    {
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = subtaskId,
+            Waive = true,
+            Reason = "the endpoint's 400 response is verified by the reviewer's own read of the diff; no runnable check exists for it in this repository",
+        });
+        var outcome = JsonSerializer.Serialize(new { question = $"waive {subtaskId}'s acceptance", askHumanToken = $"fixed-waive-token-{subtaskId}", answer = "approve" }, AgentJson.Options);
+
+        return PriorDecision(SupervisorDecisionKinds.AskHuman, sequence, card.PayloadJson, outcome);
+    }
+
+    /// <summary>
+    /// <paramref name="acceptanceChecks"/> is the OPERATOR's objective floor
+    /// (<see cref="SupervisorTurnContext.AcceptanceChecks"/>), and null — the default, and what every scenario but
+    /// <see cref="RepeatFailureUnderADeclaredCheck"/> passes — leaves the context byte-identical to before it was a
+    /// parameter. It is threaded HERE rather than applied with a <c>with</c> at the call site because the quality
+    /// fold below reads it: a floor attached after the fold would be invisible to the recommendation that is
+    /// supposed to be derived from it.
+    /// </summary>
+    private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors, IReadOnlyList<string>? acceptanceChecks = null)
+    {
+        var context = new SupervisorTurnContext
         {
             Goal = FixtureGoal,
             TurnNumber = turn,
             PriorDecisions = priors,
             SupervisorModelId = BrainModelRowId,
+            AcceptanceChecks = acceptanceChecks,
             CompletionRecital = RenderStoppedNowRecital(priors, null),
         };
+
+        // P22-9b — the per-unit quality readings, folded by the PRODUCTION fold the live rehydrate calls, never by a
+        // fixture copy of the policy's table (Rule 12.5: a mirror with no drift detector is a test that passes while
+        // production changes). Empty for every pre-spawn tape ⇒ those prompts stay byte-identical.
+        return context with { QualityDecisions = Core.Services.Quality.SupervisorQualityFacts.DecideAll(context) };
+    }
 
     /// <summary>
     /// The mode profile these fixtures answer to — the corpus grades the SUPERVISOR lane, so it is that lane's

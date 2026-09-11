@@ -95,8 +95,14 @@ public sealed record RoomTurnFacts
     /// <summary>The supervisor's RE-SPAWN waves in tape order — each additional Spawn decision that re-dispatched an already-spawned subtask (a second/third wave). The authored phase group anchors only each subtask's FIRST attempt, so a later wave (and its failed agent) is otherwise dropped; the narrative renders each as its own chronological wave, mirroring <see cref="RetrySteps"/>. Empty when every subtask was spawned once.</summary>
     public IReadOnlyList<RoomRespawnStep> RespawnSteps { get; init; } = Array.Empty<RoomRespawnStep>();
 
+    /// <summary>P22-9b — the per-unit quality recommendation the run's newest decision froze onto its row. Read straight off the durable column, never recomputed here, so the Room shows what the turn was actually shown. Empty for every run written before the column existed and for a run no unit was attempted in.</summary>
+    public IReadOnlyList<RoomQualityRecommendation> QualityRecommendations { get; init; } = Array.Empty<RoomQualityRecommendation>();
+
     public static readonly RoomTurnFacts Empty = new();
 }
+
+/// <summary>One unit's recorded quality recommendation, flattened for rendering (the mechanism as its name — the Room renders strings, never enums). A recommendation the brain was free to reject, which is why the reason travels with it.</summary>
+public sealed record RoomQualityRecommendation(string SubtaskId, string Mechanism, string Reason);
 
 /// <summary>One supervisor RETRY beat — the tape sequence it landed at and the fresh agent it staged (null for a no-op retry). Rendered as that agent's own "Retry" card so the recovery reads chronologically; the retry's line + rationale live on the Journal ③ beat now, not the room.</summary>
 public sealed record RoomRetryStep(long Sequence, Guid? AgentRunId);

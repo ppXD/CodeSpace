@@ -677,6 +677,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
             // turn reads the assignment back off the tape instead of re-rolling it against a changed lesson ledger.
             LessonArm = context.LessonArm,
             LessonIds = context.LessonIds,
+            // P22-9b: freeze the per-unit quality recommendations this turn's prompt carried onto the row of the
+            // decision it emitted. The model was free to reject them, and the point of keeping them is that the
+            // rejection stays legible afterwards — a recommendation nobody recorded cannot be compared with anything.
+            QualityDecisionsJson = Quality.SupervisorQualityRecord.ToJson(context.QualityDecisions),
         }, cancellationToken).ConfigureAwait(false);
 
         // Duplicate = a TERMINAL row already settled this turn's decision → REPLAY: never re-run the side

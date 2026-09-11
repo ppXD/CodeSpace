@@ -131,6 +131,10 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             FenceEpoch = request.FenceEpoch,
             LessonArm = string.IsNullOrWhiteSpace(request.LessonArm) ? null : request.LessonArm,
             LessonIds = request.LessonIds.Distinct().OrderBy(id => id).ToList(),
+
+            // P22-9b: the quality recommendations the turn was shown. Sanitized like every other stored JSON — the
+            // reasons quote the grader's own detail strings, which is model/tool text and can carry a NUL.
+            QualityDecisionsJson = PersistedText.SanitizeJson(request.QualityDecisionsJson),
         };
 
         _db.SupervisorDecisionRecord.Add(row);
@@ -238,6 +242,7 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
         PayloadJson = row.PayloadJson,
         OutcomeJson = row.OutcomeJson,
         Error = row.Error,
+        QualityDecisionsJson = row.QualityDecisionsJson,
     };
 
     public async Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)

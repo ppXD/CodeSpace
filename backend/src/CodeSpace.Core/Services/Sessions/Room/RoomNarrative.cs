@@ -246,6 +246,7 @@ public static class RoomNarrative
         if (BudgetStat(idPrefix, seq, facts.Budget) is { } budget) blocks.Add(budget);
         if (NetworkStat(idPrefix, seq, facts) is { } network) blocks.Add(network);
         if (LogsStat($"{idPrefix}:stat:logs", seq, facts.AgentLogs, agentById.ToDictionary(pair => pair.Key, pair => UnitLabel(pair.Value))) is { } logs) blocks.Add(logs);
+        if (QualityStat(idPrefix, seq, facts) is { } quality) blocks.Add(quality);
 
         blocks.AddRange(DeliveriesFrom(idPrefix, seq, facts));
         if (DeliverablesFrom(idPrefix, seq, facts) is { } deliverables) blocks.Add(deliverables);
@@ -593,6 +594,23 @@ public static class RoomNarrative
         RoomAgentLogStatus.Captured => NarrativeTone.Info,
         _ => NarrativeTone.Success,
     };
+
+    /// <summary>
+    /// P22-9b — the quality-policy row: one item per unit the recorded evidence had a reading for, each naming the
+    /// mechanism and the evidence that chose it. An existing <c>StatBlock</c> under a new open <c>kind</c>, so the
+    /// backend-authored-block contract holds and the frontend needs no change to render it.
+    /// <para>The label says RECOMMENDED, not "next step": nothing in the run obeyed these, and a row that read as an
+    /// instruction would tell an operator the run was steered by something it was not.</para>
+    /// </summary>
+    private static StatBlock? QualityStat(string idPrefix, long seq, RoomTurnFacts f) =>
+        f.QualityRecommendations.Count == 0
+            ? null
+            : new StatBlock
+            {
+                Id = $"{idPrefix}:stat:quality", Seq = seq, Kind = "quality", Label = "Quality policy",
+                Detail = $"recommended for {Count(f.QualityRecommendations.Count, "unit")}",
+                Items = f.QualityRecommendations.Select(q => new StatItem { Text = $"{q.SubtaskId} · {q.Mechanism}", Detail = q.Reason }).ToList(),
+            };
 
     /// <summary>The tools row — collapsed to just the total ("129 calls"); expanding reveals the per-tool breakdown (Read · 40, WebSearch · 15, …), one item per real tool NAME. A summary, not the raw per-call stream.</summary>
     private static StatBlock? ToolsStat(string idPrefix, long seq, RoomTurnFacts f) =>

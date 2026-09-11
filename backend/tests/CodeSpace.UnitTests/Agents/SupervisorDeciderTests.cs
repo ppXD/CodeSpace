@@ -1663,6 +1663,58 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_quality_policy_block_sits_after_the_run_bounds_and_before_the_verb_roster()
+    {
+        // P22-9b. The ORDER is the design, not a layout preference: the model reads the bounds that constrain what
+        // it can still spend, THEN what the recorded evidence suggests, THEN which verbs this turn will actually
+        // accept. Placed after the roster the recommendation reads as a postscript to the menu it is meant to
+        // inform; placed before the bounds it reads as a mechanism unconstrained by the caps that force-stop the run.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(QualityContext());
+
+        var bounds = prompt.IndexOf(SupervisorBoundsRecitation.Header, StringComparison.Ordinal);
+        var quality = prompt.IndexOf(SupervisorQualityRecitation.Header, StringComparison.Ordinal);
+        var roster = prompt.IndexOf(SupervisorActionRoster.Header, StringComparison.Ordinal);
+
+        bounds.ShouldBeGreaterThan(-1, "the tape carries a no-progress streak, so the bounds block MUST render — otherwise this test pins an ordering against an absent block");
+        quality.ShouldBeGreaterThan(bounds, "the recommendation is bounded by the run bounds above it");
+        roster.ShouldBeGreaterThan(quality, "…and is read BEFORE the verbs this turn accepts, never after them");
+    }
+
+    [Fact]
+    public void The_quality_policy_block_leaves_the_verb_roster_byte_identical()
+    {
+        // The keep-both reconciliation, asserted rather than asserted-in-a-comment: the block is ADDITIVE text. A
+        // mechanism must be unable to offer a verb the run may not emit or withhold one it may, and the roster (plus
+        // everything after it) is where that would show. Same tape, block on and off, identical tail.
+        var withBlock = LlmSupervisorDecider.BuildUserPromptForTest(QualityContext());
+        var withoutBlock = LlmSupervisorDecider.BuildUserPromptForTest(QualityContext() with { QualityDecisions = [] });
+
+        withoutBlock.ShouldNotContain(SupervisorQualityRecitation.Header, Case.Sensitive, "no reading → no block, so the comparison below is really measuring the block's absence");
+
+        RosterOnward(withBlock).ShouldBe(RosterOnward(withoutBlock), "the recommendation may not add, remove or reorder a single verb of the roster it sits above");
+    }
+
+    /// <summary>A tape with a no-progress streak (so the RUN BOUNDS block renders above) plus one unit's recorded quality reading.</summary>
+    private static SupervisorTurnContext QualityContext() =>
+        Context(turnNumber: 3, PlanPrior(1, "s1"), SpawnPrior(2, ("s1", "Failed", "build failed: missing symbol"))) with
+        {
+            NoProgressDecisions = 2,
+            MaxNoProgressDecisions = 8,
+            QualityDecisions = new[]
+            {
+                new CodeSpace.Messages.Quality.SupervisorUnitQualityDecision
+                {
+                    SubtaskId = "s1",
+                    Mechanism = CodeSpace.Messages.Quality.QualityMechanism.EscalateModel,
+                    Reason = "the check failed twice in a row on a localized diff",
+                    Facts = new CodeSpace.Messages.Quality.QualityDecisionInput(),
+                },
+            },
+        };
+
+    private static string RosterOnward(string prompt) => prompt[prompt.IndexOf(SupervisorActionRoster.Header, StringComparison.Ordinal)..];
+
+    [Fact]
     public void The_turn_roster_names_every_verb_the_schema_accepts_when_nothing_is_masked()
     {
         // The vocabulary a verb is missing from reads to the model as a verb that does not exist — 'resolve' was

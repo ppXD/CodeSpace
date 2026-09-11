@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Quality;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -485,7 +486,10 @@ public class SupervisorGoldenPromptFidelityTests
 
     private static readonly HashSet<string> CleanIntegratedScenarios = new(StringComparer.Ordinal)
     {
-        "clean-integration", "resolve-bait-clean-integration",
+        // P22-9b's waived tape belongs here for the ordinary reason and not a new one: its merge landed a clean
+        // branch. The WAIVED unit does not change that — a waiver withholds the unit from the head, it does not
+        // un-integrate what merged.
+        "clean-integration", "resolve-bait-clean-integration", "waived-unit-cleanly-integrated",
     };
 
     [Fact]
@@ -516,7 +520,7 @@ public class SupervisorGoldenPromptFidelityTests
         "amended-oracle-discarded-by-replan", "first-infra-failure", "five-subtask-middle-failed", "four-subtask-all-succeeded",
         "four-subtask-two-failed", "merge-conflict", "mixed-results",
         "multi-file-conflict", "re-plan-left-the-verdict-unchanged", "resolve-cap-spent",
-        "retried-failure-succeeded", "retried-still-failed",
+        "repeat-failure-under-a-declared-check", "retried-failure-succeeded", "retried-still-failed",
         "subset-conflict-across-three", "three-subtask-all-succeeded", "three-subtask-partial-failure",
         "unverified-resolution",
     };
@@ -597,6 +601,31 @@ public class SupervisorGoldenPromptFidelityTests
     /// futile choice that all three real-model wires selected on <c>resolve-bait-clean-integration</c>, while a
     /// later spawn/retry/resolve with an actually recorded agent run reopens merge.
     ///
+    /// THIS RE-PIN: the prompt gained the QUALITY POLICY block (P22-9b) — the pure <c>QualityPolicy</c>'s per-unit
+    /// recommendation over the recorded evidence, rendered by <see cref="SupervisorQualityRecitation"/> between the
+    /// run bounds that constrain it and the verb roster that says what this turn accepts. Every tape with an
+    /// ATTEMPTED unit gains one line per unit, which is most of the corpus, so this re-pin moves nearly every
+    /// scenario's bytes; a pre-spawn tape gains nothing (<c>first-turn</c> and <c>planned-not-spawned</c> are
+    /// byte-identical, asserted by <see cref="A_pre_spawn_tape_is_byte_identical_because_it_has_nothing_to_recommend"/>).
+    /// The block is ADDITIVE ONLY: it never touches the roster or <see cref="SupervisorActionMask"/>, so no scenario
+    /// acquired or lost a verb, and no <c>AcceptedKinds</c> changed.
+    ///
+    /// <para>The corpus also GREW by two, and for the same reason the block is worth showing at all: with no
+    /// operator acceptance floor declared, every attempted unit in the pre-existing corpus reads
+    /// "nothing recorded can grade this" — a true statement about the RUN-grain floor these tapes leave unset, but
+    /// not a mechanism a model can act on. <c>repeat-failure-under-a-declared-check</c> is the corpus's only tape
+    /// with that floor declared (⇒ <c>EscalateModel</c> over two consecutive failed verdicts on a two-file diff) and
+    /// <c>waived-unit-cleanly-integrated</c> its only tape with a human waiver on it (⇒ <c>Stop</c>, citing the
+    /// authorization). Both are pinned by name in
+    /// <see cref="The_two_quality_tapes_recite_the_mechanism_their_own_evidence_chose"/>, so this digest has a named
+    /// receipt rather than being a number nobody can attribute.</para>
+    ///
+    /// <para>The superseded pins below still reproduce over the corpora they were taken at:
+    /// <see cref="AsRenderedBeforeTheTurnRoster"/> gained a sixth wind-back that removes this block, which is sound
+    /// because it is a pure insertion (exactly like the per-unit cost recital beneath it). That also means every
+    /// receipt routed through that helper is BLIND to this block — only <see cref="GoldenPromptDigest"/> catches a
+    /// reword of it, and <c>SupervisorQualityRecitationTests</c> pins the copy itself.</para>
+    ///
     /// PREVIOUS RE-PIN: the prompt gained the bounded per-unit MODEL/TOKEN/COST recitation produced by
     /// <see cref="SupervisorBudgetRecitation.RenderUnits"/>. This is an intentional rendering change for tapes with
     /// durable agent attempts: the supervisor can now compare retries and model spend by planned unit instead of
@@ -646,7 +675,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "1b612083320d1cb134b081cf6c8096d057aa43c7c9a94b09fdccbb284555530a";
+    private const string GoldenPromptDigest = "e0bf94f13e662724a8767f18241a9d765654b95ac494f72ef349fa91eff692eb";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -857,11 +886,58 @@ public class SupervisorGoldenPromptFidelityTests
             "the set of scenarios whose tape records a conflict must match the named receipt beside the digest");
     }
 
+    /// <summary>
+    /// P22-9b's named receipt for <see cref="GoldenPromptDigest"/>: the two tapes the corpus grew by exist to carry
+    /// a quality reading a model could ACT on, and this asserts each recites the mechanism its own evidence chose —
+    /// not merely that the block is present. Without it the growth is two scenarios whose whole purpose lives in a
+    /// digest, and a fixture edit that quietly turned either reading back into the ungradable-work statement would
+    /// read as an ordinary re-pin.
+    /// </summary>
+    [Fact]
+    public void The_two_quality_tapes_recite_the_mechanism_their_own_evidence_chose()
+    {
+        var repeat = PromptFor("repeat-failure-under-a-declared-check");
+
+        repeat.ShouldContain($"- [s1] {QualityMechanism.EscalateModel} \u2192 retry (stronger model)", Case.Sensitive,
+            "two consecutive failed verdicts under a DECLARED floor, on a two-file diff — the policy's repeat row on its localized arm");
+
+        var waived = PromptFor("waived-unit-cleanly-integrated");
+
+        waived.ShouldContain($"- [s2] {QualityMechanism.Stop} \u2192 close", Case.Sensitive, "a human authorized forgoing verification for s2 — the waiver is an authorization to stop spending");
+        waived.ShouldContain("a human authorized forgoing verification", Case.Sensitive, "…and the recommendation cites that authorization, so the model can check it rather than take the mechanism on trust");
+        waived.ShouldNotContain($"- [s2] {QualityMechanism.SingleAgent}", Case.Sensitive, "a waived unit must never read as ungraded work that wants another attempt (the amend-acceptance FATAL-1 invariant at the recitation)");
+    }
+
+    /// <summary>
+    /// The other half of that receipt, and the reason the re-pin is attributable at all: a tape with NOTHING
+    /// attempted gains no block, so its bytes are exactly what they were before P22-9b. Asserted against the
+    /// wind-back rather than against a pinned string — if the block ever rendered an empty header for a pre-spawn
+    /// turn, both sides would still contain it and this would still pass, so the wind-back's own no-op is checked too.
+    /// </summary>
+    [Fact]
+    public void A_pre_spawn_tape_is_byte_identical_because_it_has_nothing_to_recommend()
+    {
+        foreach (var name in new[] { "first-turn", "planned-not-spawned" })
+        {
+            var scenario = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
+
+            scenario.Context.QualityDecisions.ShouldBeEmpty($"'{name}' has attempted nothing — a baseline recommendation over no evidence is not a reading worth reciting");
+
+            var prompt = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
+
+            prompt.ShouldNotContain(SupervisorQualityRecitation.Header, Case.Sensitive, $"'{name}' must carry no quality block at all");
+            SupervisorQualityRecitation.Render(scenario.Context.QualityDecisions).ShouldBeNull("…so the wind-back for this tape is a no-op, which is what makes its bytes identical rather than merely reconstructible");
+        }
+    }
+
+    private static string PromptFor(string name) =>
+        LlmSupervisorDecider.BuildUserPromptForTest(SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name).Context);
+
     [Fact]
     public void The_digest_covers_every_scenario_in_the_corpus()
     {
         // A digest over a shrinking corpus is a green light for a shrinking corpus. Pin the count beside the bytes.
-        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(27, "a scenario was added or dropped — re-pin this count together with the digest");
+        SupervisorDecisionGoldenScenarios.All.Count.ShouldBe(29, "a scenario was added or dropped — re-pin this count together with the digest");
         SupervisorDecisionGoldenScenarios.All.Select(s => s.Name).Distinct(StringComparer.Ordinal).Count()
             .ShouldBe(SupervisorDecisionGoldenScenarios.All.Count, "two scenarios share a name — the digest's ordering would not be stable");
     }
@@ -928,12 +1004,14 @@ public class SupervisorGoldenPromptFidelityTests
     private static readonly HashSet<string> AddedSinceTheSupersededPins = new(StringComparer.Ordinal)
     {
         "amended-oracle-awaiting-retry", "amended-oracle-discarded-by-replan", "re-plan-left-the-verdict-unchanged", "first-infra-failure",
+        "repeat-failure-under-a-declared-check", "waived-unit-cleanly-integrated",
     };
 
     /// <summary>Scenarios added after <see cref="StaticVerbRosterCorpusDigest"/> was taken. That pin measured 25 scenarios — the two co-sign ones INCLUDED, which is why they are absent here and why this cannot be folded into the 23-scenario set above.</summary>
     private static readonly HashSet<string> AddedSinceTheRosterPin = new(StringComparer.Ordinal)
     {
         "re-plan-left-the-verdict-unchanged", "first-infra-failure",
+        "repeat-failure-under-a-declared-check", "waived-unit-cleanly-integrated",
     };
 
     private static bool PredatesTheSupersededPins(SupervisorGoldenScenario scenario) => !AddedSinceTheSupersededPins.Contains(scenario.Name);
@@ -992,7 +1070,14 @@ public class SupervisorGoldenPromptFidelityTests
         var unitCosts = SupervisorBudgetRecitation.RenderUnits(context.PriorDecisions, context.ModelPrices);
         var beforeUnitCosts = unitCosts is null ? prompt : prompt.Replace($"{Environment.NewLine}{unitCosts}{Environment.NewLine}", string.Empty, StringComparison.Ordinal);
 
-        return beforeUnitCosts
+        // P22-9b — the QUALITY POLICY block, removed the same way the per-unit cost recital is: a pure INSERTION
+        // that renders on every tape with an attempted unit, so a superseded digest recomputed over today's raw
+        // rendering could no longer reproduce itself. Null on a pre-spawn tape, which is why those prompts need no
+        // wind-back at all.
+        var quality = SupervisorQualityRecitation.Render(context.QualityDecisions);
+        var beforeQuality = quality is null ? beforeUnitCosts : beforeUnitCosts.Replace($"{Environment.NewLine}{quality}{Environment.NewLine}", string.Empty, StringComparison.Ordinal);
+
+        return beforeQuality
             .Replace(roster, mask, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingCannotLand, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal)

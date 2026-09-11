@@ -464,16 +464,30 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (reason is null) return (builtTask, null);
 
+        // P22-9b: the quality policy's own reading of this unit, read for the RECORD only. `reason` above still
+        // decides — keeping both and recording where they disagree is what lets 9c's ablation choose between them.
+        var policy = context.QualityDecisions.FirstOrDefault(q => q.SubtaskId == builtTask.SubtaskId);
+
         var picked = await ResolveEscalatedModelAsync(priorResult?.Model, context, cancellationToken).ConfigureAwait(false);
 
         // D3: nothing in the (bounded) pool beats the prior model's tier — a one-model team, or a run already at the
         // top. The retry's ordinary model resolution stands UNTOUCHED, but the attempt is RECORDED: previously this
         // returned null and the brain saw a still-failing retry with no hint that reaching higher had already been
         // tried and found impossible, which reads as "nobody tried" and invites the same retry again.
-        if (picked is null) return (builtTask, new SupervisorRetryEscalationOutcome { From = priorResult?.Model, To = null, Reason = reason });
+        if (picked is null) return (builtTask, Escalation(priorResult?.Model, to: null, reason, policy));
 
-        return (builtTask with { Model = picked }, new SupervisorRetryEscalationOutcome { From = priorResult?.Model, To = picked, Reason = reason });
+        return (builtTask with { Model = picked }, Escalation(priorResult?.Model, picked, reason, policy));
     }
+
+    /// <summary>One escalation record, built in ONE place so both arms above (a stronger model was found, and D3's nothing-stronger-in-the-pool) carry the same reconciliation fields rather than one of them quietly omitting them.</summary>
+    private static SupervisorRetryEscalationOutcome Escalation(string? from, string? to, string reason, Messages.Quality.SupervisorUnitQualityDecision? policy) => new()
+    {
+        From = from,
+        To = to,
+        Reason = reason,
+        PolicyMechanism = policy?.Mechanism,
+        PolicyAgrees = SupervisorRetryEscalation.PolicyAgrees(policy?.Mechanism),
+    };
 
     /// <summary>The escalated candidate pool: every ENABLED model on an ACTIVE, non-deleted credential of this team, bounded by <see cref="SupervisorTurnContext.AllowedModelIds"/> (empty = every team row) — the SAME pool + bound <c>ApplyDispatchModelAsync</c>'s own <c>ResolveDispatchAsync</c> will re-validate the picked name against, so an escalated pick can never be a phantom the pool gate then rejects.</summary>
     private async Task<string?> ResolveEscalatedModelAsync(string? priorModelName, SupervisorTurnContext context, CancellationToken cancellationToken)
