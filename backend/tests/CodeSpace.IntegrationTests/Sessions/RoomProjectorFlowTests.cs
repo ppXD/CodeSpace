@@ -391,12 +391,12 @@ public class RoomProjectorFlowTests
         room.Blocks.Concat(room.Blocks.OfType<AssistantTurnBlock>().SelectMany(turn => turn.Blocks));
 
     /// <summary>Mints the manifest row and its CAS content the way a capture does, so the projection reads what production writes.</summary>
-    private async Task<Guid> SeedProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes, Guid? supersededBy = null)
+    private async Task<Guid> SeedProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes, Guid? supersededBy = null, Guid? producer = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var agentRunId = Guid.NewGuid();
+        var agentRunId = producer ?? Guid.NewGuid();
         var payload = System.Text.Encoding.UTF8.GetBytes($"{path} {Guid.NewGuid():N}");
         var artifactId = Guid.NewGuid();
 
@@ -418,12 +418,12 @@ public class RoomProjectorFlowTests
         return agentRunId;
     }
 
-    private async Task SeedMissingProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes)
+    private async Task SeedMissingProducedFileAsync(Guid teamId, Guid runId, string path, ArtifactManifestKind kind, long sizeBytes, Guid? producer = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var agentRunId = Guid.NewGuid();
+        var agentRunId = producer ?? Guid.NewGuid();
         var artifactId = Guid.NewGuid();
         var sha = Convert.ToHexString(Guid.NewGuid().ToByteArray().Concat(Guid.NewGuid().ToByteArray()).ToArray()).ToLowerInvariant();
         var root = DurableRoots.ArtifactStore(RuntimeSettings.Current.ArtifactStoreDirectory);
@@ -2855,6 +2855,286 @@ public class RoomProjectorFlowTests
                 CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
             });
 
+        await db.SaveChangesAsync();
+    }
+
+
+    // ─── P21-8b: per-artifact producer truth, in EVERY run state ────────────────────
+
+    /// <summary>The eight run states an artifact can be read in. "Abandoned" is not a <see cref="WorkflowRunStatus"/> — it is Failure carrying the reconciler's abandoned error; "Parked" is Suspended plus a completion-authority park stamp, and "Waiting" the same status without one.</summary>
+    public enum RunState { Pending, Enqueued, Running, Parked, Waiting, Abandoned, Cancelled, Succeeded }
+
+    /// <summary>What the run left behind for the Room to attribute.</summary>
+    public enum ArtifactPresence { Reachable, BytesGone, Superseded, None }
+
+    /// <summary>
+    /// Each run state's seeded producer and the per-artifact truth the Room must then report for it. Deliberately
+    /// varied across the table: the agent's status, its confinement posture and its log fold are each read off the
+    /// PRODUCER's own row, so a projection that derived any of them from the run's state fails here rather than
+    /// agreeing by coincidence.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<RunState, ProducerCase> ProducerCases = new Dictionary<RunState, ProducerCase>
+    {
+        [RunState.Pending] = new(WorkflowRunStatus.Pending, AgentRunStatus.Queued, null, RoomConfinementPosture.Unknown, [], null),
+        [RunState.Enqueued] = new(WorkflowRunStatus.Enqueued, AgentRunStatus.Queued, Confinement(SandboxConfinementOutcome.Confined, severed: false), RoomConfinementPosture.Confined, [new(AgentRunLogStreamState.Open)], RoomAgentLogStatus.Finalizing),
+        [RunState.Running] = new(WorkflowRunStatus.Running, AgentRunStatus.Running, Confinement(SandboxConfinementOutcome.Confined, severed: true), RoomConfinementPosture.ConfinedNetworkSevered, [new(AgentRunLogStreamState.Open)], RoomAgentLogStatus.Finalizing),
+        [RunState.Parked] = new(WorkflowRunStatus.Suspended, AgentRunStatus.Succeeded, Confinement(SandboxConfinementOutcome.Unconfined, severed: false), RoomConfinementPosture.Unconfined, [new(AgentRunLogStreamState.Unavailable)], RoomAgentLogStatus.Incomplete),
+        [RunState.Waiting] = new(WorkflowRunStatus.Suspended, AgentRunStatus.Running, Confinement(SandboxConfinementOutcome.Confined, severed: true), RoomConfinementPosture.ConfinedNetworkSevered, [new(AgentRunLogStreamState.Open, RemoteStalled: true)], RoomAgentLogStatus.Stalled),
+        [RunState.Abandoned] = new(WorkflowRunStatus.Failure, AgentRunStatus.Failed, null, RoomConfinementPosture.Unknown, [new(AgentRunLogStreamState.Truncated)], RoomAgentLogStatus.Incomplete),
+        [RunState.Cancelled] = new(WorkflowRunStatus.Cancelled, AgentRunStatus.Cancelled, Confinement(SandboxConfinementOutcome.NotApplicable, severed: false), RoomConfinementPosture.Unconfined, [], null),
+        [RunState.Succeeded] = new(WorkflowRunStatus.Success, AgentRunStatus.Succeeded, Confinement(SandboxConfinementOutcome.Confined, severed: true), RoomConfinementPosture.ConfinedNetworkSevered, [new(AgentRunLogStreamState.Open)], RoomAgentLogStatus.Finalizing),
+    };
+
+    public static TheoryData<RunState, ArtifactPresence> EveryRunStateAndArtifactPresence()
+    {
+        var matrix = new TheoryData<RunState, ArtifactPresence>();
+
+        foreach (var state in Enum.GetValues<RunState>())
+            foreach (var presence in Enum.GetValues<ArtifactPresence>())
+                matrix.Add(state, presence);
+
+        return matrix;
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryRunStateAndArtifactPresence))]
+    public async Task Every_run_state_names_the_producer_behind_each_artifact_it_shows(RunState state, ArtifactPresence presence)
+    {
+        // The gap this closes: the Room emitted deliverables in every run state, but a file's row said only WHAT was
+        // delivered. Who made it, whether that agent had even finished, whether its logs settled, whether the host
+        // confined it and what it cost were all unavailable — a file under a still-Running producer read exactly like
+        // one under a Succeeded producer. Every cell of the matrix must now state each fact or an explicit unknown.
+        var expected = ProducerCases[state];
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, $"{state} · {presence}");
+        var runId = await SeedTurnForStateAsync(teamId, sessionId, state);
+        var producer = await SeedProducerAgentRunAsync(teamId, runId, expected);
+
+        await SeedArtifactForAsync(teamId, runId, producer, presence);
+
+        var room = (await ProjectByRunAsync(runId, teamId)).ShouldNotBeNull();
+        var deliverables = AllBlocks(room).OfType<DeliverablesBlock>().ToList();
+
+        if (presence == ArtifactPresence.None)
+        {
+            deliverables.ShouldBeEmpty("a turn that produced no file carries no deliverables block at all — an empty one is a claim about the run");
+            return;
+        }
+
+        var file = deliverables.ShouldHaveSingleItem().Files.ShouldHaveSingleItem(
+            "a superseded copy is not a second deliverable — the current one is the run's answer to \"what did you produce\"");
+        file.SizeBytes.ShouldBe(CurrentDeliverableBytes, "the CURRENT copy must be the one listed, never the superseded row it replaced");
+        file.Availability.ShouldBe(presence == ArtifactPresence.BytesGone ? RoomDeliverableAvailability.PhysicalObjectMissing : RoomDeliverableAvailability.Reachable);
+
+        var made = file.Producer.ShouldNotBeNull($"the agent run exists, so {state} must say who produced this file");
+        made.AgentRunId.ShouldBe(producer);
+        made.Status.ShouldBe(expected.AgentStatus.ToString(), customMessage: "the producer's execution is its OWN row's status, never the run's");
+        made.Logs.ShouldBe(expected.Logs, customMessage: "the log fold rides per producer — null when it declared no stream, never a value that reads as settled");
+        made.Confinement.ShouldBe(expected.Posture, customMessage: "an unrecorded posture must read Unknown; defaulting it to Confined paints a safety nobody evidenced");
+        made.CostUsd.ShouldBeNull("the seeded model is absent from the price table — an unpriceable producer reads unknown, never $0");
+
+        file.Verifications.ShouldHaveSingleItem().Ran.ShouldBeFalse(
+            "nothing graded this unit, so its row may not claim a check executed — an absent grade is not a pass, and a live run has run none");
+        file.Verifications[0].Passed.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_priced_producer_reports_the_spend_it_actually_realized()
+    {
+        // The other half of the cost contract: null means UNPRICEABLE, not "we never say". A producer on a priced
+        // model must carry its real figure, or the null above would be indistinguishable from a hardwired blank.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Priced producer");
+        var runId = await SeedTurnForStateAsync(teamId, sessionId, RunState.Succeeded);
+        var priced = ProducerCases[RunState.Succeeded] with { Model = "claude-sonnet-4-6", Tokens = new AgentTokenUsage { InputTokens = 1_000_000, OutputTokens = 0 } };
+        var producer = await SeedProducerAgentRunAsync(teamId, runId, priced);
+
+        await SeedArtifactForAsync(teamId, runId, producer, ArtifactPresence.Reachable);
+
+        var file = (await DeliverablesOfAsync(runId, teamId)).Files.ShouldHaveSingleItem();
+
+        file.Producer.ShouldNotBeNull().CostUsd.ShouldBe(3m, "1M input tokens on a $3/M model — the same figure the agent card shows, not a second pricing definition");
+    }
+
+    [Fact]
+    public async Task A_file_whose_producing_agent_run_is_gone_reports_no_producer_rather_than_an_invented_one()
+    {
+        // The manifest outlives the agent-run row, so an unresolvable producer is a REAL absence. Null is the only
+        // honest answer; a zero-valued placeholder would claim a Queued, unconfined, free agent that never existed.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Orphaned manifest");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report", resultSummary: "done");
+        await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, sizeBytes: 4096);
+
+        var file = (await DeliverablesOfAsync(runId, teamId)).Files.ShouldHaveSingleItem();
+
+        file.Producer.ShouldBeNull("a gone agent-run row is the ONE reason a file may report no producer");
+    }
+
+    [Fact]
+    public async Task Each_repositorys_delivery_names_only_the_agents_that_delivered_into_it()
+    {
+        // Per-repository attribution, at the producer grain: a two-repo turn's PR card must name the unit that pushed
+        // THAT repository — never the sibling's, and never a run-wide roll-up of both.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Ship two repositories");
+        var runId = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship both repositories", resultSummary: "Shipped both.");
+        var apiAgent = Guid.NewGuid();
+        var webAgent = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var webId = Guid.NewGuid();
+
+        await SeedPerRepositoryUnitGradesAsync(teamId, runId, (apiAgent, apiId, "api", AcceptancePassed: true), (webAgent, webId, "web", AcceptancePassed: false));
+        await SeedDeliveryRecordAsync(teamId, runId, (apiId, "api"), (webId, "web"));
+
+        var turn = (await ProjectByRunAsync(runId, teamId)).ShouldNotBeNull().Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var deliveries = turn.Blocks.OfType<DeliveryBlock>().ToList();
+
+        var api = deliveries.Single(delivery => delivery.RepositoryAlias == "api");
+        var web = deliveries.Single(delivery => delivery.RepositoryAlias == "web");
+
+        api.Producers.ShouldHaveSingleItem().AgentRunId.ShouldBe(apiAgent, "api's card names api's own unit, never web's");
+        api.Producers[0].Status.ShouldBe(nameof(AgentRunStatus.Succeeded));
+
+        web.Producers.ShouldHaveSingleItem().AgentRunId.ShouldBe(webAgent);
+        web.Producers[0].Status.ShouldBe(nameof(AgentRunStatus.Failed), "the agent behind the withheld repository must read its own failed execution");
+    }
+
+    [Fact]
+    public async Task A_rooms_producer_reaches_the_wire_as_words_the_frontend_renders()
+    {
+        // The endpoint writes the WHOLE RoomView as one document; a posture that serialized as an ordinal would
+        // render as a bare number, and an omitted null cost would read to a renderer as $0.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Producer on the wire");
+        var runId = await SeedTurnForStateAsync(teamId, sessionId, RunState.Running);
+        var producer = await SeedProducerAgentRunAsync(teamId, runId, ProducerCases[RunState.Running] with { Confinement = null, Streams = [] });
+
+        await SeedArtifactForAsync(teamId, runId, producer, ArtifactPresence.Reachable);
+
+        var wire = JsonSerializer.Serialize((await ProjectAsync(runId, teamId)).ShouldNotBeNull(), ApiJson);
+
+        wire.ShouldContain("\"confinement\":\"Unknown\"", Case.Sensitive, "an unrecorded posture must reach the frontend as the Unknown word, never a confined glyph");
+        wire.ShouldContain("\"status\":\"Running\"", Case.Sensitive);
+        wire.ShouldContain("\"costUsd\":null", Case.Sensitive, "an unpriceable producer reaches the wire as null, never as an omitted field a renderer reads as 0");
+
+        var readBack = JsonSerializer.Deserialize<RoomView>(wire, ApiJson).ShouldNotBeNull();
+        AllBlocks(readBack).OfType<DeliverablesBlock>().ShouldHaveSingleItem()
+            .Files.ShouldHaveSingleItem().Producer.ShouldNotBeNull().AgentRunId.ShouldBe(producer);
+    }
+
+    /// <summary>One run state's seeded shape and the per-artifact truth it must project. <see cref="Model"/> stays off the price table by default so the unpriced case is the matrix's baseline.</summary>
+    private sealed record ProducerCase(WorkflowRunStatus RunStatus, AgentRunStatus AgentStatus, SandboxConfinement? Confinement, RoomConfinementPosture Posture, StreamSeed[] Streams, RoomAgentLogStatus? Logs)
+    {
+        public string Model { get; init; } = "gpt-5.4-codex";
+        public AgentTokenUsage? Tokens { get; init; } = new() { InputTokens = 1000, OutputTokens = 500 };
+    }
+
+    /// <summary>
+    /// One durable log stream of the producer, staged through the transitions its table admits: every stream is born
+    /// Open, then either stays there, states a remote stall, or makes a terminal transition. The settled
+    /// <c>Completed</c> shapes need a whole sealed segment manifest to exist at all, so the fold's Verified/Captured
+    /// members stay pinned where they are cheap and exhaustive — <c>RoomLogSummaryTests</c> and
+    /// <c>RoomArtifactProducerFoldTests</c> at the unit tier.
+    /// </summary>
+    private sealed record StreamSeed(AgentRunLogStreamState State, bool RemoteStalled = false);
+
+    private static SandboxConfinement Confinement(SandboxConfinementOutcome outcome, bool severed) =>
+        new() { Outcome = outcome, NetworkSevered = severed, Reason = outcome == SandboxConfinementOutcome.Confined ? null : SandboxConfinement.ReasonNoBubblewrap };
+
+    private const long CurrentDeliverableBytes = 4096;
+    private const long SupersededDeliverableBytes = 10;
+
+    /// <summary>Seed the run row in the state under test — a park stamp and the reconciler's abandoned error are the two facts that distinguish states sharing one <see cref="WorkflowRunStatus"/>.</summary>
+    private Task<Guid> SeedTurnForStateAsync(Guid teamId, Guid sessionId, RunState state) =>
+        SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Write the report",
+            resultSummary: state == RunState.Succeeded ? "done" : null,
+            status: ProducerCases[state].RunStatus,
+            error: state == RunState.Abandoned ? AgentRunReconcilerService.AbandonedError : null,
+            completionParkedAt: state == RunState.Parked ? DateTimeOffset.UtcNow : null);
+
+    /// <summary>Seed the producing agent run — its node beats (so the phase projection prices it), its own status, its launch-stamped confinement, and its durable log streams.</summary>
+    private async Task<Guid> SeedProducerAgentRunAsync(Guid teamId, Guid runId, ProducerCase seed)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentId = Guid.NewGuid();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.started", NodeId = "agent", IterationKey = "", OccurredAt = now.AddSeconds(-5), PayloadJson = "{}" });
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = "agent", IterationKey = "",
+            WaitKind = WorkflowWaitKinds.AgentRun, Token = agentId.ToString(), WakeAt = now,
+            Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now,
+        });
+
+        var result = new AgentRunResult { Status = seed.AgentStatus, ExitReason = "completed", Summary = "wrote the report", ChangedFiles = [], Model = seed.Model, TokenUsage = seed.Tokens };
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = "",
+            Harness = "codex-cli", Status = seed.AgentStatus, FenceEpoch = 1,
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "Write the report", Harness = "codex-cli", Model = seed.Model }, AgentJson.Options),
+            ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+            SandboxConfinementJson = seed.Confinement is null ? null : JsonSerializer.Serialize(seed.Confinement, AgentJson.Options),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        var streams = seed.Streams.Select(stream => (Seed: stream, Row: new AgentRunLogStream
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = agentId, StreamKind = "stdout/v1", CaptureSource = "sandbox-spool/v1",
+            WorkerFenceEpoch = 1, CaptureSessionId = Guid.NewGuid(), State = AgentRunLogStreamState.Open, Revision = 1, SchemaVersion = 3,
+            CreatedAt = now, LastModifiedAt = now,
+        })).ToList();
+
+        db.AgentRunLogStream.AddRange(streams.Select(stream => stream.Row));
+        await db.SaveChangesAsync();
+
+        // The table admits a stream ONLY as an empty Open head, so the seeded shape is reached the way production
+        // reaches it: a remote-stall statement, or a terminal transition, each advancing the revision.
+        foreach (var (stream, row) in streams.Where(stream => stream.Seed.RemoteStalled || stream.Seed.State != AgentRunLogStreamState.Open))
+        {
+            row.Revision += 1;
+            row.LastModifiedAt = now.AddSeconds(1);
+            if (stream.RemoteStalled) { row.RemoteStallSince = now; row.RemoteStallCode = "remote-unavailable"; }
+            else { row.State = stream.State; row.CompletedAt = now; row.ErrorCode = "seeded-terminal"; row.ErrorMessage = "seeded by the Room producer matrix"; }
+        }
+
+        await db.SaveChangesAsync();
+
+        return agentId;
+    }
+
+    /// <summary>Seed what the run left behind: the current copy, a current copy whose bytes are gone, a current copy that superseded an earlier one, or nothing at all.</summary>
+    private async Task SeedArtifactForAsync(Guid teamId, Guid runId, Guid producer, ArtifactPresence presence)
+    {
+        if (presence == ArtifactPresence.None) return;
+
+        if (presence == ArtifactPresence.BytesGone)
+        {
+            await SeedMissingProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, CurrentDeliverableBytes, producer: producer);
+            return;
+        }
+
+        if (presence == ArtifactPresence.Superseded)
+            await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, SupersededDeliverableBytes, supersededBy: Guid.NewGuid(), producer: producer);
+
+        await SeedProducedFileAsync(teamId, runId, "report.md", ArtifactManifestKind.Document, CurrentDeliverableBytes, producer: producer);
+    }
+
+    /// <summary>Stamp the durable per-repository delivery record both multi-repo cards are read from.</summary>
+    private async Task SeedDeliveryRecordAsync(Guid teamId, Guid runId, params (Guid RepositoryId, string Alias)[] repositories)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var pullRequests = repositories.Select((repo, index) => new { repositoryId = repo.RepositoryId, alias = repo.Alias, disposition = "Opened", number = 10 + index, url = $"https://example.test/{repo.Alias}/pull/{10 + index}", error = (string?)null }).ToArray();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(), RunId = runId, RecordType = WorkflowRunRecordTypes.DeliveryPullRequests, OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = JsonSerializer.Serialize(new { pullRequests }, AgentJson.Options),
+        });
         await db.SaveChangesAsync();
     }
 

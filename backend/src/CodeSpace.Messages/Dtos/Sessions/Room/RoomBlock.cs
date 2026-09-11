@@ -410,6 +410,9 @@ public sealed record DeliveryBlock : RoomBlock
 
     /// <summary>THIS repository's own per-check verification truth (P21) — empty when nothing graded it. A sibling repository's verdict never appears here.</summary>
     public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
+
+    /// <summary>The agents that delivered INTO this repository (P21-8b) — each stating its own execution, logs, confinement and spend. Plural because a multi-agent turn can push one branch from several units; empty when no agent's result names this repository, or when the rows they name are gone.</summary>
+    public IReadOnlyList<RoomArtifactProducer> Producers { get; init; } = Array.Empty<RoomArtifactProducer>();
 }
 
 /// <summary>
@@ -447,6 +450,9 @@ public sealed record DeliverableFile
 
     /// <summary>THIS file's own per-check verification truth (P21), attributed by its producing agent — empty when nothing graded it.</summary>
     public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
+
+    /// <summary>The agent named by <see cref="AgentRunId"/>, stating its own execution, logs, confinement and spend (P21-8b). Null ONLY when that agent run row is gone — the manifest outlives the row, so an unresolvable producer is a real absence, not a default.</summary>
+    public RoomArtifactProducer? Producer { get; init; }
 }
 
 /// <summary>Transport-stable storage facts for a produced file. Values mirror the bounded artifact range reader without leaking provider-specific errors.</summary>

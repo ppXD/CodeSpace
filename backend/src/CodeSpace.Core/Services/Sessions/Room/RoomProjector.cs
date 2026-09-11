@@ -628,7 +628,13 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         // fold needs it to attach alongside each unit's verdict, never gating it.
         var agentLogs = await AgentLogsAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false);
 
-        var deliveries = await DeliveriesAsync(runId, teamId, agentResults, agentLogs, cancellationToken).ConfigureAwait(false);
+        // The turn's agent rows, read ONCE (P21-8b): the run-level posture sentence folds them to their weakest, and
+        // every artifact below attaches its OWN producer off the same rows — so a file and the sentence above it can
+        // never be sourced from two different reads of the same columns.
+        var agentRows = await AgentProducerRowsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var unitTruth = new UnitTruth(agentResults, agentLogs, ProducersOf(agentRows, agentLogs, AgentCosts(phases)));
+
+        var deliveries = await DeliveriesAsync(runId, teamId, unitTruth, cancellationToken).ConfigureAwait(false);
 
         // The run's durable plan checklist (contract + tape-derived states) — null for pre-plan runs, which then
         // project exactly as before (the per-round plan stat rows carry the story).
@@ -665,7 +671,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
             ChangedFileIdentities = changedFileIdentities,
-            Deliverables = await DeliverablesAsync(runId, teamId, agentResults, agentLogs, cancellationToken).ConfigureAwait(false),
+            Deliverables = await DeliverablesAsync(runId, teamId, unitTruth, cancellationToken).ConfigureAwait(false),
             ToolCalls = toolCalls,
             ToolHistogram = toolHistogram,
             ReasoningCount = reasoningCount,
@@ -678,7 +684,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             RetrySteps = retrySteps,
             RespawnSteps = respawnSteps,
             QualityRecommendations = QualityRecommendations(decisions),
-            NetworkPosture = await NetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
+            NetworkPosture = await NetworkPostureAsync(runId, teamId, agentRows, cancellationToken).ConfigureAwait(false),
         };
     }
 
@@ -783,6 +789,13 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
 
     internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled = false);
+
+    /// <summary>One agent run of the turn, in the three columns a produced artifact has to be able to speak for. Internal so the producer fold is unit-pinned directly, not only through a full projection.</summary>
+    internal readonly record struct AgentProducerRow(Guid AgentRunId, Messages.Enums.AgentRunStatus Status, string? ConfinementJson);
+
+    /// <summary>The per-UNIT facts every delivered artifact attaches — each unit's graded result, its log fold, and its producer record. Gathered once and handed to BOTH the deliveries and the deliverables projection, so a repository and a file can never attribute the same agent differently.</summary>
+    private sealed record UnitTruth(IReadOnlyList<SupervisorAgentResult> Results, IReadOnlyDictionary<Guid, RoomAgentLogSummary> Logs, IReadOnlyDictionary<Guid, RoomArtifactProducer> Producers);
+
     private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled)
     {
         public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest, RemoteStalled);
@@ -866,7 +879,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// as "off", since a wrong "off" is exactly the silent claim this row exists to end. A run whose agents recorded
     /// no confinement (launched before the stamp existed) keeps the hedged wording — the same reason.
     /// </summary>
-    private async Task<string?> NetworkPostureAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<string?> NetworkPostureAsync(Guid runId, Guid teamId, IReadOnlyList<AgentProducerRow> agents, CancellationToken cancellationToken)
     {
         var json = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == runId && r.TeamId == teamId)
@@ -876,28 +889,34 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var route = string.IsNullOrWhiteSpace(json) ? null : TryReadRoute(json);
 
         if (route is null || route.EffectiveAutonomy.Length == 0)
-            return await DeploymentNetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+            return await DeploymentNetworkPostureAsync(runId, teamId, agents, cancellationToken).ConfigureAwait(false);
 
         return AgentAutonomyPolicy.DescribeNetwork(
             AgentAutonomyPolicy.Parse(route.EffectiveAutonomy, AgentAutonomyLevel.Standard),
             AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyPolicy.UnboundedRouteCeiling),
             AgentAutonomyPolicy.DeploymentCeiling,
-            await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
+            Confinement(agents));
     }
+
+    /// <summary>
+    /// Every agent run of this turn, with the three facts each ARTIFACT it produced has to be able to state: which
+    /// agent, what its execution did, and what the host actually did to confine it. ONE read serves both the
+    /// run-level posture sentence (which folds these to their weakest) and the per-artifact producer records — the
+    /// pre-8b query selected the confinement column alone, for the sentence, and filtered out the very rows an
+    /// artifact needs when its producer recorded no posture.
+    /// </summary>
+    private async Task<IReadOnlyList<AgentProducerRow>> AgentProducerRowsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId)
+            .Select(r => new AgentProducerRow(r.Id, r.Status, r.SandboxConfinementJson))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The posture this turn's agents actually ran under, folded to ONE record by <see cref="LeastConfined"/>. Null
     /// when no agent recorded one (an older run, or a turn that spawned no agent) — the caller then keeps the hedge.
     /// </summary>
-    private async Task<SandboxConfinement?> ConfinementAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
-    {
-        var records = await _db.AgentRun.AsNoTracking()
-            .Where(r => r.WorkflowRunId == runId && r.TeamId == teamId && r.SandboxConfinementJson != null)
-            .Select(r => r.SandboxConfinementJson!)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        return LeastConfined(records);
-    }
+    private static SandboxConfinement? Confinement(IReadOnlyList<AgentProducerRow> agents) =>
+        LeastConfined(agents.Select(agent => agent.ConfinementJson).OfType<string>());
 
     /// <summary>
     /// Fold a turn's agent-run confinement records into the ONE the sentence may claim: the LEAST confined of them.
@@ -919,6 +938,49 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>Ascending strength: anything not confined is 0 (the reader's "yes, one of them could reach the network"), confinement without a severed netns 1, full severance 2.</summary>
     private static int ConfinementRank(SandboxConfinement confinement) =>
         confinement.Outcome != SandboxConfinementOutcome.Confined ? 0 : confinement.NetworkSevered ? 2 : 1;
+
+    /// <summary>
+    /// One producer's own posture, named at the SAME three strengths <see cref="ConfinementRank"/> orders the
+    /// run-level fold by — so the per-artifact word and the turn's sentence can never disagree about what a record
+    /// means. An absent record is <see cref="RoomConfinementPosture.Unknown"/>, never the confined value a reader
+    /// would take as safety nobody evidenced.
+    /// </summary>
+    internal static RoomConfinementPosture PostureOf(SandboxConfinement? confinement) => confinement switch
+    {
+        null => RoomConfinementPosture.Unknown,
+        { Outcome: not SandboxConfinementOutcome.Confined } => RoomConfinementPosture.Unconfined,
+        { NetworkSevered: true } => RoomConfinementPosture.ConfinedNetworkSevered,
+        _ => RoomConfinementPosture.Confined,
+    };
+
+    /// <summary>
+    /// Each agent's producer record keyed by run id (P21-8b) — what every artifact the turn produced attaches so its
+    /// card can state who made it, in what execution state, under what confinement and at what cost. An agent whose
+    /// row is gone is simply ABSENT here, which is the one and only reason an artifact reports no producer.
+    /// </summary>
+    internal static IReadOnlyDictionary<Guid, RoomArtifactProducer> ProducersOf(IReadOnlyList<AgentProducerRow> agents, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, IReadOnlyDictionary<Guid, decimal?> costs) =>
+        agents.GroupBy(agent => agent.AgentRunId)
+            .ToDictionary(group => group.Key, group => ProducerOf(group.First(), agentLogs.GetValueOrDefault(group.Key), costs.GetValueOrDefault(group.Key)));
+
+    /// <summary>
+    /// One producer record. Each field is the recorded fact or an explicit absence: <paramref name="costUsd"/> stays
+    /// null for an unpriced model (never 0, which reads as free), <paramref name="logs"/> stays null for an agent
+    /// that declared no stream (never "settled"), and an unparseable / absent confinement column resolves to
+    /// <see cref="RoomConfinementPosture.Unknown"/>.
+    /// </summary>
+    internal static RoomArtifactProducer ProducerOf(AgentProducerRow agent, RoomAgentLogSummary? logs, decimal? costUsd) => new()
+    {
+        AgentRunId = agent.AgentRunId,
+        Status = agent.Status.ToString(),
+        Logs = logs?.Status,
+        Confinement = PostureOf(agent.ConfinementJson is { } json ? TryReadConfinement(json) : null),
+        CostUsd = costUsd,
+    };
+
+    /// <summary>Each agent's REALIZED priced spend, reusing the figure the phase projection already computed (no second pricing definition, no extra query). An agent the phases never carried is absent → its producer reports cost UNKNOWN rather than zero.</summary>
+    private static IReadOnlyDictionary<Guid, decimal?> AgentCosts(IReadOnlyList<RunPhase> phases) =>
+        phases.SelectMany(phase => phase.Agents).GroupBy(agent => agent.AgentRunId)
+            .ToDictionary(group => group.Key, group => group.First().CostUsd);
 
     /// <summary>Deserialize one confinement record with the SAME options the executor wrote it with; a malformed / legacy column degrades to null.</summary>
     private static SandboxConfinement? TryReadConfinement(string json)
@@ -944,7 +1006,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// default: with no clamp to report, an authored run's Launch row stays absent rather than stating a posture
     /// nobody bounded.</para>
     /// </summary>
-    private async Task<string?> DeploymentNetworkPostureAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<string?> DeploymentNetworkPostureAsync(Guid runId, Guid teamId, IReadOnlyList<AgentProducerRow> agents, CancellationToken cancellationToken)
     {
         var ceiling = AgentAutonomyPolicy.DeploymentCeiling;
 
@@ -958,9 +1020,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var effective = TryReadAutonomy(taskJson);
 
-        return effective is null
-            ? null
-            : AgentAutonomyPolicy.DescribeNetwork(effective.Value, ceiling, ceiling, await ConfinementAsync(runId, teamId, cancellationToken).ConfigureAwait(false));
+        return effective is null ? null : AgentAutonomyPolicy.DescribeNetwork(effective.Value, ceiling, ceiling, Confinement(agents));
     }
 
     /// <summary>Read just the <c>autonomy</c> tier out of a staged <c>AgentTask</c> payload — one property, not the whole envelope. Null for an absent / malformed / tier-less payload (the room drops one row, never fails a turn).</summary>
@@ -1568,7 +1628,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// row pointing at its successor is exactly what makes a re-capture auditable, so a reader that wants "what did
     /// this run produce" filters, and a reader that wants the chain still has it.</para>
     /// </summary>
-    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<DeliverableFile>> DeliverablesAsync(Guid runId, Guid teamId, UnitTruth units, CancellationToken cancellationToken)
     {
         var manifests = CurrentDeliverableManifests(await _producedFiles.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false)).Take(MaxChangedFiles).ToList();
         if (manifests.Count == 0) return Array.Empty<DeliverableFile>();
@@ -1584,7 +1644,8 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
                 ArtifactId = manifest.ContentArtifactId,
                 AgentRunId = manifest.AgentRunId,
                 Availability = reads.TryGetValue(manifest.ContentArtifactId, out var read) ? DeliverableAvailability(read.State) : RoomDeliverableAvailability.Unknown,
-                Verifications = VerificationsForAgent(agentResults, agentLogs, manifest.AgentRunId),
+                Verifications = VerificationsForAgent(units.Results, units.Logs, manifest.AgentRunId),
+                Producer = units.Producers.GetValueOrDefault(manifest.AgentRunId),
             })
             .ToList();
     }
@@ -1741,23 +1802,32 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
     private sealed record ToolPayload(string? DataJson, Guid? DataArtifactId);
 
-    /// <summary>Every repository's latest durable PR disposition, each carrying ITS OWN P21 verification rows — attached last, over whichever source below produced the list, so every delivery path (recorded operation, node output, or the manifest fallback) reports the same per-repository truth.</summary>
-    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesAsync(Guid runId, Guid teamId, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs, CancellationToken cancellationToken)
+    /// <summary>Every repository's latest durable PR disposition, each carrying ITS OWN P21 verification rows and producers — attached last, over whichever source below produced the list, so every delivery path (recorded operation, node output, or the manifest fallback) reports the same per-repository truth.</summary>
+    private async Task<IReadOnlyList<RoomDelivery>> DeliveriesAsync(Guid runId, Guid teamId, UnitTruth units, CancellationToken cancellationToken)
     {
         var deliveries = await ResolveDeliveriesAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return AttachVerifications(deliveries, agentResults, agentLogs);
+        return AttachUnitTruth(deliveries, units);
     }
 
-    /// <summary>Attaches each repository's OWN verification rows (P21) — never a run-wide fold — so a sibling repository's verdict can never bleed into this one's.</summary>
-    private static IReadOnlyList<RoomDelivery> AttachVerifications(IReadOnlyList<RoomDelivery> deliveries, IReadOnlyList<SupervisorAgentResult> agentResults, IReadOnlyDictionary<Guid, RoomAgentLogSummary> agentLogs)
+    /// <summary>Attaches each repository's OWN verification rows and producers (P21) — never a run-wide fold — so a sibling repository's verdict, or the agent that delivered into it, can never bleed into this one's.</summary>
+    private static IReadOnlyList<RoomDelivery> AttachUnitTruth(IReadOnlyList<RoomDelivery> deliveries, UnitTruth units)
     {
         var singleRepoRun = deliveries.Count <= 1;
 
-        return deliveries
-            .Select(delivery => delivery with { Verifications = VerificationsForRepository(agentResults, agentLogs, singleRepoRun, delivery.RepositoryId, delivery.RepositoryAlias) })
-            .ToList();
+        return deliveries.Select(delivery => delivery with
+        {
+            Verifications = VerificationsForRepository(units.Results, units.Logs, singleRepoRun, delivery.RepositoryId, delivery.RepositoryAlias),
+            Producers = ProducersForRepository(units.Results, units.Producers, singleRepoRun, delivery.RepositoryId, delivery.RepositoryAlias),
+        }).ToList();
     }
+
+    /// <summary>THIS repository's own producers (P21-8b) — the units that delivered into it, matched by the SAME <see cref="TouchesRepository"/> predicate the verification rows use, so a repository's checks and the agents behind them can never be attributed differently. A matched unit whose agent-run row is gone drops out rather than appearing as an empty producer.</summary>
+    internal static IReadOnlyList<RoomArtifactProducer> ProducersForRepository(IReadOnlyList<SupervisorAgentResult> results, IReadOnlyDictionary<Guid, RoomArtifactProducer> producers, bool singleRepoRun, Guid? repositoryId, string? alias) =>
+        results.Where(result => TouchesRepository(result, singleRepoRun, repositoryId, alias))
+            .Select(result => producers.GetValueOrDefault(result.AgentRunId))
+            .OfType<RoomArtifactProducer>()
+            .ToList();
 
     /// <summary>Every repository's latest durable PR disposition. The server-authored operation record is authoritative because it retains failures and skips that cannot produce a manifest; node output and manifests remain backwards-compatible fallbacks.</summary>
     private async Task<IReadOnlyList<RoomDelivery>> ResolveDeliveriesAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
