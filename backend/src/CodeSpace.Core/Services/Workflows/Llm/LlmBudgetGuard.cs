@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Messages.Exceptions;
@@ -122,30 +123,64 @@ public static class LlmBudgetGuard
     /// (<c>BudgetLedger.SettleAsync</c> writes any state that is not already Settled), while a phantom hold is
     /// only ever corrected by the operator raising the cap.</para>
     ///
-    /// <para>The exception shapes, first typed verdict in the inner chain wins:</para>
+    /// <para><b>Release only when unbilled is PROVEN</b> — the CATEGORY is not that proof. The transport turns a
+    /// client-side timeout and a mid-flight connection reset into the SAME <see cref="LlmErrorCategory.Transient"/>
+    /// an HTTP 503 gets, and both of those were sent to a provider that generated (and billed) a completion we
+    /// stopped listening to. Only two shapes prove no completion exists, and both are read from evidence the
+    /// transport could not have faked:</para>
     /// <list type="bullet">
-    ///   <item><see cref="LlmApiException"/> <see cref="LlmErrorCategory.Transient"/> (5xx/408/reset),
-    ///         <see cref="LlmErrorCategory.RateLimited"/> (429), <see cref="LlmErrorCategory.AuthFailed"/>
-    ///         (401/403) and <see cref="LlmErrorCategory.BadRequest"/> (400/422) — the gateway REJECTED the
-    ///         request, so no completion was generated ⇒ RELEASE.</item>
-    ///   <item><see cref="HttpRequestException"/> — the request never completed a response ⇒ RELEASE.</item>
-    ///   <item><see cref="LlmErrorCategory.Malformed"/> (a 2xx whose body would not parse — its own doc says it
-    ///         MAY have billed), <see cref="LlmErrorCategory.ContextLengthExceeded"/> and
-    ///         <see cref="LlmErrorCategory.ContentFiltered"/> (a provider may bill the input it screened) ⇒ hold.</item>
-    ///   <item><see cref="OperationCanceledException"/> (a <c>TaskCanceledException</c> HttpClient timeout
-    ///         included) and <see cref="TimeoutException"/> — the request may well have been served and billed
-    ///         after we stopped listening ⇒ hold. Never release on an ambiguous outcome.</item>
-    ///   <item>Anything else (an untyped provider/parse fault) ⇒ hold, the pre-existing behaviour.</item>
+    ///   <item>An <see cref="LlmApiException"/> carrying an ERROR <see cref="LlmApiException.StatusCode"/> (4xx or
+    ///         5xx): a status is a response, and an error response carries no completion ⇒ RELEASE, whatever the
+    ///         category refined it to. A <see cref="LlmErrorCategory.Malformed"/> fault carries its 2xx status, so
+    ///         it stays a hold on the same rule rather than on a special case.</item>
+    ///   <item>An <see cref="HttpRequestException"/> whose socket error says the request never reached a server —
+    ///         see <see cref="NeverReachedAServer"/> ⇒ RELEASE.</item>
+    ///   <item>Everything else ⇒ hold: a status-less Transient (timeout, reset after send), a truncated body, a
+    ///         cancellation, an untyped fault. Ambiguity is a hold, always.</item>
     /// </list>
+    ///
+    /// <para>Two vetoes outrank any proof found below them: a cancellation / timeout ANYWHERE in the chain (a
+    /// caller that wrapped its own cancellation around a transport fault must not launder it into a release), and
+    /// <see cref="LlmApiException.PriorBilledAttempt"/> — a bounded re-ask makes a SECOND physical call inside this
+    /// one reservation, so a 429 on the re-ask proves nothing about the first request that already bought tokens.</para>
     /// </summary>
     internal static bool ObservedNoSpend(Exception thrown)
     {
+        var proven = false;
+
         for (var e = thrown; e is not null; e = e.InnerException)
         {
             if (e is OperationCanceledException or TimeoutException) return false;
-            if (e is LlmApiException api) return api.Category is LlmErrorCategory.Transient or LlmErrorCategory.RateLimited or LlmErrorCategory.AuthFailed or LlmErrorCategory.BadRequest;
-            if (e is HttpRequestException) return true;
+            if (e is LlmApiException { PriorBilledAttempt: true }) return false;
+
+            proven |= ProvesUnbilled(e);
         }
+
+        return proven;
+    }
+
+    /// <summary>Whether THIS link of the chain is one of the two shapes that prove no completion was generated (see <see cref="ObservedNoSpend"/>).</summary>
+    private static bool ProvesUnbilled(Exception e) => e switch
+    {
+        LlmApiException { StatusCode: >= 400 and <= 599 } => true,
+        HttpRequestException http => NeverReachedAServer(http),
+        _ => false,
+    };
+
+    /// <summary>
+    /// Whether a transport fault proves the request never reached a server: the connection was refused, the host
+    /// was unroutable, or DNS could not resolve it (<see cref="SocketError.HostNotFound"/>). Nothing was sent, so
+    /// nothing could have been generated.
+    ///
+    /// <para>A reset, an abort mid-body or a truncated read is deliberately NOT here: those happen after the
+    /// request was already on the wire, and the provider bills a completion it generated whether or not we managed
+    /// to read it back.</para>
+    /// </summary>
+    private static bool NeverReachedAServer(HttpRequestException http)
+    {
+        for (var e = http.InnerException; e is not null; e = e.InnerException)
+            if (e is SocketException socket)
+                return socket.SocketErrorCode is SocketError.ConnectionRefused or SocketError.HostNotFound or SocketError.HostUnreachable or SocketError.NetworkUnreachable;
 
         return false;
     }

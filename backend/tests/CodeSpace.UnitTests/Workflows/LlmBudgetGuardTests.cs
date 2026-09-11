@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -14,10 +15,16 @@ namespace CodeSpace.UnitTests.Workflows;
 /// instead of the old silent fail-open, unless the caller marked itself explicitly Unbudgeted, which still passes
 /// through but is recorded under an "unbudgeted:" ledger kind; a refused admission throws BEFORE the model is ever
 /// invoked (the overshoot never happens); an admitted call settles at its actual spend; a failed call settles to
-/// what was OBSERVED — a transport failure that produced no completion releases its headroom, an ambiguous outcome
-/// (timeout / cancellation / a 2xx that may have billed) holds it; an unpriceable model UNDER A CAP is refused
-/// before the call (D1 fail-closed) while an uncapped one passes through, and a failed-over successor is judged on
-/// its own price; the pessimistic estimate constants are committed values.
+/// what was OBSERVED — headroom goes back ONLY when unbilled is PROVEN (an error STATUS, or a socket error saying
+/// the request never reached a server), while everything ambiguous holds (a status-less timeout or reset, a
+/// truncated body, a cancellation, a 2xx that may have billed, a failure that follows a billed attempt in the same
+/// reservation); an unpriceable model UNDER A CAP is refused before the call (D1 fail-closed) while an uncapped one
+/// passes through, and a failed-over successor is judged on its own price; the pessimistic estimate constants are
+/// committed values.
+///
+/// <para>This pins how the guard READS a failure. That the re-ask paths actually MARK theirs
+/// (<c>LlmApiException.PriorBilledAttempt</c>) is pinned over the real provider wire in
+/// <see cref="StructuredResponseContractTests"/>.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class LlmBudgetGuardTests
@@ -179,14 +186,20 @@ public class LlmBudgetGuardTests
 
     public static TheoryData<Exception, bool, string> FailureShapes() => new()
     {
-        { new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "rate limited"), true, "a 429 never generated a completion — holding its estimate is how a retry storm fills the cap with phantoms" },
-        { new LlmApiException("Anthropic", 503, LlmErrorCategory.Transient, "unavailable"), true, "a 5xx never generated a completion (the category's own contract says so)" },
+        { new LlmApiException("Anthropic", 429, LlmErrorCategory.RateLimited, "rate limited"), true, "a 429 is a RESPONSE, and an error response carries no completion — holding its estimate is how a retry storm fills the cap with phantoms" },
+        { new LlmApiException("Anthropic", 503, LlmErrorCategory.Transient, "unavailable"), true, "a 5xx status is the gateway answering that it produced nothing" },
+        { new LlmApiException("Anthropic", 502, LlmErrorCategory.Transient, "bad gateway"), true, "the same proof at the other end of the 5xx range — the STATUS is what proves it, not the category" },
         { new LlmApiException("OpenAI", 401, LlmErrorCategory.AuthFailed, "bad key"), true, "a rejected key cannot have been billed" },
         { new LlmApiException("OpenAI", 400, LlmErrorCategory.BadRequest, "unsupported tool_choice"), true, "the gateway refused the request shape — the format fault that failover retries per hop" },
-        { new HttpRequestException("connection refused"), true, "no response was ever produced" },
+        { new HttpRequestException("connection refused", new SocketException((int)SocketError.ConnectionRefused)), true, "nothing was ever sent, so nothing could have been generated" },
+        { new HttpRequestException("no such host", new SocketException((int)SocketError.HostNotFound)), true, "a DNS miss never reached a server" },
+        { new LlmApiException("OpenAI", 400, LlmErrorCategory.ContextLengthExceeded, "too long"), true, "a 400 is a refusal to generate, whatever the body keywords refined the category to" },
+        { new LlmApiException("Anthropic", 400, LlmErrorCategory.ContentFiltered, "blocked"), true, "a screened-out request the gateway answered with a 400 returned no completion; a filter applied to a 2xx REPLY arrives as a status-less fault and holds below" },
+        { new LlmApiException("Anthropic", null, LlmErrorCategory.Transient, "the request timed out before the gateway responded"), false, "THE defect: a client-side timeout is a status-LESS Transient — we stopped listening, and the provider may have generated and billed the completion anyway" },
+        { new LlmApiException("Anthropic", null, LlmErrorCategory.Transient, "connection reset", inner: new HttpRequestException("reset", new SocketException((int)SocketError.ConnectionReset))), false, "a reset AFTER the request was sent is not proof of anything — only a refused/unroutable/unresolved connection is" },
+        { new HttpRequestException("error while copying content to a stream"), false, "a truncated read of a 200 body — the completion was generated and billed, we just did not finish reading it" },
         { new LlmApiException("OpenAI", 200, LlmErrorCategory.Malformed, "not json"), false, "a 2xx MAY have billed — its own doc says so; never release on an ambiguous outcome" },
-        { new LlmApiException("OpenAI", 400, LlmErrorCategory.ContextLengthExceeded, "too long"), false, "not one of the shapes proven unbilled — hold" },
-        { new LlmApiException("Anthropic", 400, LlmErrorCategory.ContentFiltered, "blocked"), false, "a provider may bill the input it screened — hold" },
+        { new LlmApiException("OpenAI", 429, LlmErrorCategory.RateLimited, "rate limited") { PriorBilledAttempt = true }, false, "a re-ask's 429 proves nothing about the first physical call, which was billed inside this same reservation" },
         { new TaskCanceledException("HttpClient timeout"), false, "the request may well have been served and billed after we stopped listening" },
         { new TimeoutException("elapsed"), false, "same ambiguity as a cancellation" },
         { new InvalidOperationException("boom"), false, "an untyped fault proves nothing — the pre-existing pessimistic hold" },
@@ -201,6 +214,10 @@ public class LlmBudgetGuardTests
         // format-fault storm across failover hops — each hop its OWN reservation — therefore filled the run's cap
         // with phantom estimates for calls that produced no tokens, and the next REAL call was refused. So the
         // catch has to distinguish "provably spent nothing" from "might have been billed".
+        //
+        // The proof is the STATUS (an error response carries no completion) or the SOCKET ERROR (the request never
+        // reached a server) — never the retry CATEGORY, which collapses a 503 together with a client-side timeout
+        // and a mid-flight reset, both of which reached a provider that bills what it generated.
         var ledger = new RecordingLedger(admit: true);
 
         await Should.ThrowAsync<Exception>(() =>
@@ -229,10 +246,15 @@ public class LlmBudgetGuardTests
     [Fact]
     public void An_ambiguous_outcome_wrapped_in_a_transport_shape_is_still_ambiguous()
     {
-        // The inner-chain walk takes the FIRST typed verdict, and a cancellation anywhere above it wins: a caller
-        // that wrapped its own cancellation in an HttpRequestException must not launder it into a release.
-        LlmBudgetGuard.ObservedNoSpend(new TaskCanceledException("cancelled", new HttpRequestException("reset"))).ShouldBeFalse();
-        LlmBudgetGuard.ObservedNoSpend(new InvalidOperationException("wrapper", new HttpRequestException("reset"))).ShouldBeTrue("an untyped wrapper around a proven-unbilled transport fault is still that fault");
+        // The chain walk looks for PROOF anywhere in it, and the two vetoes outrank any proof below them: a caller
+        // that wrapped its own cancellation around a transport fault must not launder it into a release, and
+        // neither may a re-ask's failure that sits above a first call this reservation already paid for.
+        var refused = new HttpRequestException("connection refused", new SocketException((int)SocketError.ConnectionRefused));
+
+        LlmBudgetGuard.ObservedNoSpend(new TaskCanceledException("cancelled", refused)).ShouldBeFalse("a cancellation above the proof wins");
+        LlmBudgetGuard.ObservedNoSpend(new InvalidOperationException("wrapper", refused)).ShouldBeTrue("an untyped wrapper around a proven-unbilled transport fault is still that fault");
+        LlmBudgetGuard.ObservedNoSpend(new InvalidOperationException("wrapper", new HttpRequestException("reset"))).ShouldBeFalse("a transport fault with no socket error proves nothing — the reset may have followed a billed request");
+        LlmBudgetGuard.ObservedNoSpend(new LlmApiException("OpenAI", null, LlmErrorCategory.Transient, "reset", inner: refused) { PriorBilledAttempt = true }).ShouldBeFalse("a prior BILLED attempt vetoes even a proven-unbilled second one — one reservation covers both");
     }
 
     [Fact]

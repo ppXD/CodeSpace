@@ -126,15 +126,21 @@ public class AgentRunExecutorRecordingFlowTests
     /// <summary>
     /// The critic call is no longer the one model call in the system that produced NO ledger row at all: it used to
     /// be <c>Unbudgeted</c> with no ledger carried, so the executor's own review spend was invisible AND un-metered
-    /// even for a task under a cost ceiling. Under a cap it is a real admission claim (<c>llm:</c>); with no cap it
+    /// even on a run under a cost ceiling. Under a cap it is a real admission claim (<c>llm:</c>); with no cap it
     /// is an <c>unbudgeted:</c> observability row. Either way a reader asking "what did this run spend on models"
     /// is never answered by an absence. The critic re-labels the pushed scope's Kind to its own call kind, so the
     /// row lands under <c>critic.output</c> — the executor's push supplies the identity cell.
+    ///
+    /// <para>The ceiling is the WORKFLOW RUN's own, read off the launch-stamped route column through
+    /// <c>Budget.RunCostCap</c> — the same reader the engine's per-node scope admits through. The agent task below
+    /// deliberately declares a DIFFERENT one: a task cap bounds one agent-run chain, while
+    /// <c>BudgetLedger.ReserveAsync</c> compares the value it is handed against the committed sum of the whole run,
+    /// so admitting this call under the task's cap compared two different grains.</para>
     /// </summary>
     [Theory]
     [InlineData(null, "unbudgeted:critic.output")]
     [InlineData(5.0, "llm:critic.output")]
-    public async Task The_output_review_critics_model_call_lands_a_ledger_row(double? maxCostUsd, string expectedKind)
+    public async Task The_output_review_critics_model_call_lands_a_ledger_row(double? runCapUsd, string expectedKind)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
@@ -143,9 +149,10 @@ public class AgentRunExecutorRecordingFlowTests
         var (_, reviewerModelId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8", provider: DeterministicWorkPlanLlmClient.ProviderTag);
 
         var workflowId = await CreateWorkflowAsync(teamId, userId);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId,
+            routePlanJson: runCapUsd is null ? null : WorkflowsTestSeed.RouteJsonWithCostCap((decimal)runCapUsd));
 
-        var task = new AgentTask { Goal = "ship the widget", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerModelId, MaxCostUsd = (decimal?)maxCostUsd };
+        var task = new AgentTask { Goal = "ship the widget", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerModelId, MaxCostUsd = 0.5m };
         var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did it", ChangedFiles = new[] { "src/widget.cs" }, Patch = "diff --git a/src/widget.cs b/src/widget.cs\n+// change" };
 
         using (var scope = _fixture.BeginScope())
@@ -163,7 +170,7 @@ public class AgentRunExecutorRecordingFlowTests
         var reservation = await db.BudgetReservation.AsNoTracking().Where(r => r.WorkflowRunId == runId).SingleAsync();
 
         reservation.Kind.ShouldBe(expectedKind);
-        reservation.CapUsd.ShouldBe((decimal?)maxCostUsd, "a capped critic call freezes the ceiling it was admitted against; an uncapped observability row carries no cap it could be mistaken for");
+        reservation.CapUsd.ShouldBe((decimal?)runCapUsd, "a capped critic call freezes the RUN's ceiling it was admitted against — never the task's own $0.50, which is a different grain from the run-wide sum it would be compared to; an uncapped observability row carries no cap it could be mistaken for");
         reservation.State.ShouldBe(CodeSpace.Core.Services.Workflows.Budget.BudgetReservationStates.Settled, "the call completed, so the row settles at its observed spend");
     }
 

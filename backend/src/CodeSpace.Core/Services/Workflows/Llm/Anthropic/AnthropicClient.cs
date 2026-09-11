@@ -144,7 +144,9 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
         catch (LlmApiException ex) when (ex.Category == LlmErrorCategory.Malformed)
         {
             var feedbackSystem = StructuredJsonText.WithMalformedFeedback(request.SystemPrompt, ex.ProviderMessage);
-            var recovered = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+            // The unparseable first attempt was a 2xx the provider BILLED, and both requests share one budget
+            // reservation — so a failure from the re-ask must never be read as proof that nothing was spent.
+            var recovered = await StructuredResponseValidation.AfterBilledAttemptAsync(priorBilled: true, () => CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken)).ConfigureAwait(false);
             // The failed attempt's usage did not survive the parse exception. A successful re-ask provides only
             // its own subtotal; never present that as the bill for all preceding physical requests.
             return recovered with { Usage = recovered.Usage with { IsPartial = true } };
@@ -180,7 +182,9 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
             Messages = messages
         };
 
-        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        // A forced attempt that returned a 200 carrying no usable tool call was BILLED before degrading here, under
+        // this call's ONE reservation — so a failure of the floor must not be read as proof that nothing was spent.
+        var parsed = await StructuredResponseValidation.AfterBilledAttemptAsync(toolParsed is not null, () => PostMessagesAsync(body, request.Credential, cancellationToken)).ConfigureAwait(false);
         var text = TextContent(parsed);
 
         if (StructuredJsonText.TryExtractObject(text) is not { } result)

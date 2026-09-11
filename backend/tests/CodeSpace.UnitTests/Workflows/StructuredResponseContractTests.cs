@@ -247,6 +247,77 @@ public sealed class StructuredResponseContractTests
     }
 
     [Theory]
+    [InlineData("Anthropic", "a schema-fatal first reply", 2)]
+    [InlineData("OpenAI", "a schema-fatal first reply", 2)]
+    [InlineData("Anthropic", "the floor after a billed forced attempt", 2)]
+    [InlineData("OpenAI", "the floor after a billed forced attempt", 2)]
+    [InlineData("Anthropic", "the re-ask after an unparseable reply", 3)]
+    [InlineData("OpenAI", "the re-ask after an unparseable reply", 3)]
+    public async Task A_failure_that_follows_a_BILLED_attempt_holds_the_one_reservation_covering_both(string provider, string shape, int physicalRequests)
+    {
+        // Every attempt of a progressive-then-re-asked structured call — forced tool/function use, the prompt-only
+        // floor, the bounded re-ask — is a SEPARATE physical request billed separately, and all of them ride ONE
+        // budget reservation. So a 429 on a LATER attempt proves nothing about an earlier one that already bought
+        // tokens: unmarked, LlmBudgetGuard read that 429 as proven-unbilled and RELEASED headroom the run had really
+        // spent. The three shapes are the three places a second request is made after a first one was billed.
+        const string prose = "I will answer in prose instead of calling the tool.";
+        const string gatewayError = """{"error":{"message":"slow down"}}""";
+
+        var handler = shape switch
+        {
+            "a schema-fatal first reply" => new WireHandler(provider, ["{}", gatewayError]) { Statuses = [HttpStatusCode.OK, HttpStatusCode.TooManyRequests] },
+            "the floor after a billed forced attempt" => new WireHandler(provider, [prose, gatewayError]) { Statuses = [HttpStatusCode.OK, HttpStatusCode.TooManyRequests] },
+            _ => new WireHandler(provider, [prose, prose, gatewayError]) { Statuses = [HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.TooManyRequests] },
+        };
+
+        var ledger = new CountingBudgetLedger();
+        var scope = new LlmCallScope(Guid.NewGuid(), Guid.NewGuid(), "planner", "planner#1", "llm.complete", null!, null!, ledger, CapUsd: 5m);
+        var client = Client(provider, handler);
+
+        var thrown = await Should.ThrowAsync<LlmApiException>(() => LlmBudgetGuard.GuardedAsync(scope, "claude-opus-4-8", "s", "u", 100,
+            cancellationToken => client.CompleteStructuredAsync(Request(provider), cancellationToken), _ => (decimal?)null, CancellationToken.None));
+
+        handler.Bodies.Count.ShouldBe(physicalRequests, customMessage: "the fixture has to actually have made the LATER request, or it measures nothing");
+
+        thrown.StatusCode.ShouldBe(429, customMessage: "the status / category / retryability ride through the marking unchanged — every retry and degrade branch must behave exactly as it did");
+        thrown.Category.ShouldBe(LlmErrorCategory.RateLimited);
+        thrown.PriorBilledAttempt.ShouldBeTrue($"{shape} was a 2xx the provider billed under this reservation");
+        LlmBudgetGuard.ObservedNoSpend(thrown).ShouldBeFalse("which is exactly what the guard must read off it");
+
+        ledger.Releases.ShouldBe(0, "releasing here hands back headroom that really was spent — the defect this marking closes");
+        ledger.Settles.ShouldBe(1);
+        ledger.LastSettleActual.ShouldBeNull("the spend is unknowable (the billed reply died with the exception), so the reserve is HELD rather than priced");
+    }
+
+    /// <summary>Counts what the guard did with the reservation — the whole assertion of the settlement arms above.</summary>
+    private sealed class CountingBudgetLedger : CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger
+    {
+        public int Settles { get; private set; }
+        public int Releases { get; private set; }
+        public decimal? LastSettleActual { get; private set; }
+
+        public Task<CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission> ReserveAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal estimateUsd, decimal? capUsd, string priceVersion, Guid? parentReservationId, DateTimeOffset? expiresAt, CancellationToken cancellationToken) =>
+            Task.FromResult(new CodeSpace.Core.Services.Workflows.Budget.BudgetAdmission(true, Guid.NewGuid(), 0m, capUsd, null));
+
+        public Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken)
+        {
+            Settles++;
+            LastSettleActual = actualUsd;
+            return Task.CompletedTask;
+        }
+
+        public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken)
+        {
+            Releases++;
+            return Task.CompletedTask;
+        }
+
+        public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(0m);
+        public Task<int> ReconcileDanglingAsync(string kindPrefix, int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
+    }
+
+    [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
     public async Task The_live_four_subtask_reply_survives_its_reask_with_all_four_oracles_dropped(string provider)
