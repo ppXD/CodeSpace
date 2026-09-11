@@ -245,7 +245,7 @@ public sealed record RoomRunRecovery
     /// <summary>The distinct hosts those resources are on, ordered — who has to come back (or be reaped) for them to be reclaimed.</summary>
     public IReadOnlyList<string> OrphanHosts { get; init; } = Array.Empty<string>();
 
-    /// <summary>Resources whose state nobody can establish — a teardown no host could attempt, or the injected credential, which may have been mid-use when its host died.</summary>
+    /// <summary>Resources whose state nobody can establish — a teardown no host could attempt. Excludes a <c>ProviderCredentialLease</c> left <c>Unknown</c>: that fact is structurally unknowable rather than outstanding cleanup work, so it is never counted here and never keeps this card alive by itself.</summary>
     public required int UnknownCount { get; init; }
 
     /// <summary>Backend-authored one-line copy, e.g. "3 resources orphaned on host worker-7".</summary>

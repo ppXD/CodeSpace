@@ -64,12 +64,24 @@ public sealed class AgentRunOrphanReaper : IAgentRunOrphanReaper, IScopedDepende
     {
         if (await AnswerFor(orphan, cancellationToken).ConfigureAwait(false) is not { } answer) return false;
 
-        await _cleanup.UpsertAsync(orphan with
-        {
-            Outcome = answer.Outcome, RecordedByHost = host, RecordedAt = DateTimeOffset.UtcNow, ErrorCode = answer.ErrorCode,
-        }, cancellationToken).ConfigureAwait(false);
+        var settled = orphan with { Outcome = answer.Outcome, RecordedByHost = host, RecordedAt = DateTimeOffset.UtcNow, ErrorCode = answer.ErrorCode };
 
-        return answer.Outcome == RunResourceOutcome.Compensated;
+        return await UpsertQuietlyAsync(settled, cancellationToken).ConfigureAwait(false) && answer.Outcome == RunResourceOutcome.Compensated;
+    }
+
+    /// <summary>Write one settled receipt, swallowing a ledger failure so a transient DB error never aborts the rest of the batch — the row keeps its prior orphan claim and the next sweep retries it.</summary>
+    private async Task<bool> UpsertQuietlyAsync(RunCleanupReceipt receipt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _cleanup.UpsertAsync(receipt, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunOrphanReaper: could not record the {Kind} cleanup receipt for agent run {RunId}; it stays orphaned for the next sweep", receipt.Kind, receipt.AgentRunId);
+            return false;
+        }
     }
 
     /// <summary>What this host can say about one orphaned resource, or null when it has nothing to add and the standing orphan claim is still the truest answer.</summary>
@@ -99,11 +111,12 @@ public sealed class AgentRunOrphanReaper : IAgentRunOrphanReaper, IScopedDepende
         }
     }
 
-    /// <summary>The cgroup parallel. A host with no delegated root can attempt nothing, so it answers Unknown rather than claiming a reclaim.</summary>
+    /// <summary>The cgroup parallel. A kernel with no cgroup-v2 support can never attempt this, so it answers Unknown. An unconfigured delegated root is different — an operator can set <c>Sandbox:CgroupRoot</c> later — so that case leaves the row Orphaned for a future, configured sweep rather than de-queuing it as Unknown.</summary>
     private async Task<Answer?> TearDownCgroupAsync(RunCleanupReceipt orphan, CancellationToken cancellationToken)
     {
         if (orphan.ResourceKey is not { Length: > 0 } key) return null;
-        if (!CgroupResourceLimit.IsSupported || CgroupResourceLimit.CgroupRoot is not { } root) return new Answer(RunResourceOutcome.Unknown, RunCleanupReceipts.UnsupportedCode);
+        if (!CgroupResourceLimit.IsSupported) return new Answer(RunResourceOutcome.Unknown, RunCleanupReceipts.UnsupportedCode);
+        if (CgroupResourceLimit.CgroupRoot is not { } root) return null;   // cgroup-root-unconfigured: a config gap, not a kernel limit
 
         try
         {

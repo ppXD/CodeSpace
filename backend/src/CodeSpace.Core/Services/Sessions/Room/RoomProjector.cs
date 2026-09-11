@@ -744,12 +744,15 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>
     /// Fold one run's receipts into what is still outstanding, or null when nothing is. Settled receipts are
     /// deliberately invisible: a resource that was cleaned up on its own host, or orphaned and later compensated, is
-    /// not something a reader has to act on — the Room's job here is to name what is still standing and where.
+    /// not something a reader has to act on — the Room's job here is to name what is still standing and where. A
+    /// <see cref="RunResourceKind.ProviderCredentialLease"/> left <see cref="RunResourceOutcome.Unknown"/> is excluded
+    /// from the count entirely (see <see cref="RoomRunRecovery.UnknownCount"/>): it is never settled by any sweep, so
+    /// counting it would make the card permanent even after every reachable resource is reclaimed.
     /// </summary>
     internal static RoomRunRecovery? SummarizeRecovery(IReadOnlyList<RunCleanupReceipt> receipts)
     {
         var orphans = receipts.Where(receipt => receipt.Outcome == RunResourceOutcome.Orphaned).ToList();
-        var unknown = receipts.Count(receipt => receipt.Outcome == RunResourceOutcome.Unknown);
+        var unknown = receipts.Count(receipt => receipt.Outcome == RunResourceOutcome.Unknown && receipt.Kind != RunResourceKind.ProviderCredentialLease);
 
         if (orphans.Count == 0 && unknown == 0) return null;
 

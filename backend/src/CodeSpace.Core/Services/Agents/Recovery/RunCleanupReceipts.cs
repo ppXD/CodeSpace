@@ -21,10 +21,12 @@ public static class RunCleanupReceipts
     /// handle names is <see cref="RunResourceOutcome.Orphaned"/> against <see cref="SandboxHandle.LaunchHost"/>; a
     /// resource the handle does not name gets no row, because a row is a claim that something real is standing there.
     ///
-    /// <para>Two kinds are not about hosts at all. The log-capture promises were settled (or not) by a DATABASE write
-    /// this abandon already made, so they are reported from <paramref name="logSegmentsTerminalized"/>. The injected
-    /// model credential is permanently <see cref="RunResourceOutcome.Unknown"/>: the agent may have been mid-call when
-    /// its host died, and no sweep anywhere can establish otherwise.</para>
+    /// <para>Two kinds are not about hosts at all. The log-capture promises are reported only when this abandon
+    /// actually settled some — <paramref name="logSegmentsTerminalized"/> greater than zero — exactly like the
+    /// same-host branch (<c>AgentRunReconcilerService.ReclaimLocalIsolationAsync</c>): a sweep that moved no intent
+    /// knows there was nothing outstanding, so it has nothing to say and writes no row. The injected model credential
+    /// is permanently <see cref="RunResourceOutcome.Unknown"/>: the agent may have been mid-call when its host died,
+    /// and no sweep anywhere can establish otherwise.</para>
     /// </summary>
     public static IReadOnlyList<RunCleanupReceipt> ForForeignAbandon(SandboxHandle handle, RunCleanupStamp stamp, int logSegmentsTerminalized)
     {
@@ -39,18 +41,13 @@ public static class RunCleanupReceipts
         if (handle.WorkspaceDirectory is { Length: > 0 } workspace) receipts.Add(stamp.Orphaned(RunResourceKind.Workspace, owner, workspace));
         if (handle.InjectedKeyFingerprint is { Length: > 0 }) receipts.Add(stamp.Unknown(RunResourceKind.ProviderCredentialLease, owner, null, CredentialUnknowableCode));
 
-        receipts.Add(logSegmentsTerminalized > 0
-            ? stamp.Completed(RunResourceKind.LogSegments, owner, null)
-            : stamp.Unknown(RunResourceKind.LogSegments, owner, null, NoCaptureIntentCode));
+        if (logSegmentsTerminalized > 0) receipts.Add(stamp.Completed(RunResourceKind.LogSegments, owner, null));
 
         return receipts;
     }
 
     /// <summary>The credential lease's permanent error code — it names an unknowability, not a failure to try.</summary>
     public const string CredentialUnknowableCode = "host-died-mid-use-possible";
-
-    /// <summary>Recorded when an abandon settled no capture intent: either the run declared none or something else already settled them, and this abandon cannot tell those apart.</summary>
-    public const string NoCaptureIntentCode = "no-open-capture-intent";
 
     /// <summary>Recorded when the sweeping host cannot even attempt a teardown (no netns / cgroup-v2 support, or no delegated cgroup root) — never <see cref="RunResourceOutcome.Compensated"/>, which would claim a reclaim that never ran.</summary>
     public const string UnsupportedCode = "unsupported";

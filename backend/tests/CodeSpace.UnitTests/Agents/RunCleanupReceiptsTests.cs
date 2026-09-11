@@ -72,14 +72,21 @@ public class RunCleanupReceiptsTests
         receipt.ErrorCode.ShouldBe(RunCleanupReceipts.CredentialUnknowableCode);
     }
 
-    [Theory]
-    [InlineData(2, RunResourceOutcome.Completed)]   // the abandon settled the run's open capture promises
-    [InlineData(0, RunResourceOutcome.Unknown)]     // none moved — and this path cannot tell "none existed" from "something else settled them"
-    public void The_log_capture_promises_report_what_the_abandon_actually_settled(int terminalized, RunResourceOutcome expected)
+    [Fact]
+    public void A_log_capture_receipt_is_completed_only_when_the_abandon_settled_some()
     {
-        var receipts = RunCleanupReceipts.ForForeignAbandon(FullHandle(), Stamp, terminalized);
+        var receipts = RunCleanupReceipts.ForForeignAbandon(FullHandle(), Stamp, logSegmentsTerminalized: 2);
 
-        receipts.Single(receipt => receipt.Kind == RunResourceKind.LogSegments).Outcome.ShouldBe(expected);
+        receipts.Single(receipt => receipt.Kind == RunResourceKind.LogSegments).Outcome.ShouldBe(RunResourceOutcome.Completed);
+    }
+
+    [Fact]
+    public void No_log_capture_receipt_is_written_when_the_abandon_settled_none()
+    {
+        var receipts = RunCleanupReceipts.ForForeignAbandon(FullHandle(), Stamp, logSegmentsTerminalized: 0);
+
+        receipts.ShouldNotContain(receipt => receipt.Kind == RunResourceKind.LogSegments,
+            customMessage: "mirrors the same-host branch: a sweep that moved no intent has nothing outstanding to report, not an unknown that lingers forever");
     }
 
     [Fact]

@@ -17,7 +17,7 @@
 -- This table is that record: ONE ROW PER RESOURCE, not one boolean per run, because these resources live in
 -- different places and are reclaimed by different tools. An Orphaned row is a claim that something REAL is still
 -- sitting on a NAMED host, which is why owner_host is mandatory for exactly that outcome (ck_..._orphan): an orphan
--- nobody can address is the silence this table exists to break.
+-- with no owner host cannot be found by any sweep.
 --
 -- Identity is the RESOURCE, not the statement — (agent_run_id, kind, resource_key) — so each resource carries one
 -- current, readable answer instead of an append-only log a reader must fold. resource_key is nullable and folded
