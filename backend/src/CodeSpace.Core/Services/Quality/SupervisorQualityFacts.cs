@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Quality;
 ///   <item><term><c>Attempts</c></term><description>PER UNIT — every attempt that ever staged this subtask id, oldest first (<see cref="AttemptsFor"/>). Each attempt's own recorded verdict, so <c>ConsecutiveFailedVerdicts</c> counts back from the newest.</description></item>
 ///   <item><term><c>SpendSoFarUsd</c> / <c>BudgetCapUsd</c></term><description>PLAN grain, both of them — the run's realized spend and the run's cap. Deliberately NOT a per-unit spend paired with a run cap, which would subtract one thing from another; the cost is that a fan-out's second sibling sees the first sibling's bill, so the affordability row reads "this RUN cannot afford another attempt", never "this unit cannot". 9c revisits it with a per-unit cap.</description></item>
 ///   <item><term><c>EstimatedNextAttemptCostUsd</c></term><description>The MAXIMUM priced attempt cost for THIS unit. Conservative on purpose: a mean over a cheap first attempt under-stops, and under-stopping is the failure that spends real money. Null when no attempt of this unit priced — the affordability row then cannot fire at all.</description></item>
-///   <item><term><c>CheckDeclared</c></term><description>UNIT grain — the operator's <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor OR this unit's own EFFECTIVE acceptance spec. See <see cref="AnObjectiveCheckIsDeclared"/>.</description></item>
+///   <item><term><c>CheckDeclared</c></term><description>UNIT grain ONLY — this unit's own EFFECTIVE acceptance spec. The operator's run-wide <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor is a RUN-level gate (it grades only the terminal stop, never a per-unit disposition) and has no row here. See <see cref="AnObjectiveCheckIsDeclared"/>.</description></item>
 ///   <item><term>the review facts</term><description>NOT MAPPED — there is no per-unit work review to map. See <see cref="NoWorkReviewIsRecorded"/>.</description></item>
 /// </list>
 /// </summary>
@@ -86,7 +86,7 @@ public static class SupervisorQualityFacts
             Attempts = attempts.Select(Fact).ToList(),
             NoProgressDecisions = context.NoProgressDecisions,
             MaxNoProgressDecisions = context.MaxNoProgressDecisions,
-            CheckDeclared = AnObjectiveCheckIsDeclared(subtaskId, context, effectiveAcceptance),
+            CheckDeclared = AnObjectiveCheckIsDeclared(subtaskId, effectiveAcceptance),
             SelfClaimContradictedTheCheck = AnOverClaimStillStands(latest, subtaskId, context),
             ChangedFileCount = latest?.TotalChangedFiles ?? latest?.ChangedFiles.Count ?? 0,
             WorkspaceUnitCount = latest?.RepositoryResults.Count ?? 0,
@@ -123,6 +123,12 @@ public static class SupervisorQualityFacts
     /// can never disagree with them about WHICH result belongs to a unit — it only keeps all of them where they
     /// keep the newest. Order is load-bearing: <c>ConsecutiveFailedVerdicts</c> counts back from the LAST element,
     /// so a reversed list would read a fixed unit's old failures as a live streak.
+    ///
+    /// <para>UNSCOPED by plan generation, deliberately: it walks the WHOLE tape rather than only decisions after the
+    /// newest Plan, matching <c>SupervisorRecitation.FindCoveringDecision</c> (also whole-tape) and
+    /// <c>SupervisorAmendPrecondition.GradedAttempts</c>'s named rationale — a re-plan that re-anchors a subtask id
+    /// must not be able to hide the attempts that evidenced it, so a repeat streak survives a replan that keeps the
+    /// same id.</para>
     /// </summary>
     internal static IReadOnlyList<SupervisorAgentResult> AttemptsFor(string subtaskId, IReadOnlyList<SupervisorPriorDecision> priors)
     {
@@ -174,23 +180,25 @@ public static class SupervisorQualityFacts
     }
 
     /// <summary>
-    /// Whether an objective check is DECLARED for this work, read at the UNIT grain: the operator's run-wide
-    /// <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor is declared, OR this unit's OWN effective
+    /// Whether an objective check is DECLARED for this work, read at the UNIT grain ONLY: this unit's OWN effective
     /// acceptance spec exists — resolved through <see cref="SupervisorAcceptanceOverlay"/> (so a co-signed
     /// amendment's replacement counts, a superseded plan's does not, and a waiver — which removes the spec — reads
     /// as no declared check, where the policy's own <c>Waived</c> row is what stops the work).
     ///
-    /// <para>The disjunction is the grain, and either side alone is a prompt that disagrees with itself. The FLOOR
-    /// alone is what shipped first: on a run that declares none — the common case — every unit read <c>false</c>,
-    /// including one whose own per-subtask oracle ran and PASSED, so the prompt carried "acceptance PASSED — this
-    /// unit's definition-of-done check ran green" one screen from "no objective check can grade this work
-    /// (declared: False, verdict Passed)", and the recommendation was <c>IndependentCritic</c> for work the graded
-    /// receipts above it had already settled. The unit SPEC alone drops the run whose terminal head is graded only
-    /// by the operator's floor. Read together, a unit is gradable when anything that can actually grade it is
-    /// declared, which is the reading the receipts one block above recite.</para>
+    /// <para>The operator's run-wide <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor deliberately plays
+    /// NO part here: it is a RUN-level gate, graded once at the terminal stop (<c>ApplyStopAcceptanceGradeAsync</c>)
+    /// and, per unit, only as an oracle-floor input to a grade the unit's OWN spec already produced — it never
+    /// grades a spec-less unit's disposition. A run that declares the floor but authors no per-subtask oracle
+    /// leaves such a unit's disposition <c>Unknown</c> regardless; reading the floor here told this row "an
+    /// objective check is declared" while the fold that decides <c>LatestDisposition</c> never consulted the floor
+    /// at all — two blocks of one prompt disagreeing about the same fact ("a check is declared" next to "nothing
+    /// ran a check"), which is what made the policy read the unit as a declared check that never ran
+    /// (<c>BoundedRepair</c> — "retry, the machinery failed") when nothing failed: the unit simply has no per-unit
+    /// oracle. That case reads correctly as <c>IndependentCritic</c> — "nothing recorded can grade this" — once
+    /// this fact answers only for what actually graded the unit.</para>
     /// </summary>
-    private static bool AnObjectiveCheckIsDeclared(string subtaskId, SupervisorTurnContext context, IReadOnlyDictionary<string, SupervisorAcceptanceSpec> effectiveAcceptance) =>
-        context.AcceptanceChecks is { Count: > 0 } || effectiveAcceptance.ContainsKey(subtaskId);
+    private static bool AnObjectiveCheckIsDeclared(string subtaskId, IReadOnlyDictionary<string, SupervisorAcceptanceSpec> effectiveAcceptance) =>
+        effectiveAcceptance.ContainsKey(subtaskId);
 
     /// <summary>An attempt whose cost is really known: it reported token usage and nothing in it is unpriceable. Mirrors <c>SupervisorBudgetRecitation.UnitSpend.Add</c>'s own unpriced-usage test, so the two agree about which attempts have a real figure.</summary>
     private static bool IsPriced(SupervisorAgentResult result, IReadOnlyDictionary<string, ModelPrice> modelPrices) =>
