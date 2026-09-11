@@ -414,44 +414,65 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     /// <summary>
     /// BLOCK the synchronous tools/call until a decision lands or the bound elapses. The in-memory waiter is a latency
-    /// fast-path; the durable row is the authority, so we ALWAYS re-read it after the wake. A linked CTS cancels the
-    /// leftover delay/waiter once one completes; the waiter is ALWAYS removed in finally. On ct cancellation during the
-    /// block we let it propagate — the row stays AwaitingApproval for the reaper / a reattach to resume (NOT stranded
-    /// Pending). The bound is capped under nothing here beyond the env ceiling (the run's own TimeoutSeconds cancels ct,
-    /// which we honor by propagating).
+    /// fast-path; the durable row is the authority, and it is read BOTH immediately after arming the waiter and again
+    /// after the wake. The arm-then-look order is what makes the wake unlosable: the row became APPROVABLE several
+    /// awaits before this point (the park CAS, the card post), and <see cref="IToolApprovalWaiterRegistry.TrySignal"/>
+    /// DROPS a wake that finds no waiter registered — so a human deciding inside that window left this call blocked for
+    /// the WHOLE bound with a signal nothing would ever re-deliver. On ct cancellation during the block we let it
+    /// propagate — the row stays AwaitingApproval for the reaper / a reattach to resume (NOT stranded Pending).
     /// </summary>
     private async Task<JsonElement> BlockForDecisionAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
         var waiter = _waiters!.Register(ledgerId);
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
         try
         {
-            var bound = Task.Delay(TimeSpan.FromSeconds(ApprovalBoundSeconds()), linked.Token);
+            if (await SettledApprovalAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false) is { } decidedBeforeArming) return decidedBeforeArming;
 
-            await Task.WhenAny(waiter.Completion, bound).ConfigureAwait(false);
+            await AwaitSignalOrBoundAsync(waiter, cancellationToken).ConfigureAwait(false);
 
-            linked.Cancel();   // cancel the loser (the leftover delay, or the never-signaled waiter's backing delay)
-
-            cancellationToken.ThrowIfCancellationRequested();   // the run timed out / teardown — propagate, row stays AwaitingApproval
-
-            // ALWAYS re-read the durable row — it's the authority (handles a cross-worker signal / a restart that
-            // dropped the TCS). The TCS only told us "something happened, look now".
-            var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
-
-            if (state is null) return ToolResult(isError: true, "This tool call's approval record is missing.");
-
-            if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);   // rejected / expired by the reaper
-
-            if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);   // approved → claim for execution (single-winner) → run once
-
-            return PendingTicket(ledgerId);   // the bound elapsed with no decision — the row stays AwaitingApproval
+            return await SettledApprovalAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false)
+                ?? PendingTicket(ledgerId);   // the bound elapsed with no decision — the row stays AwaitingApproval
         }
         finally
         {
             _waiters.Remove(ledgerId);
         }
+    }
+
+    /// <summary>
+    /// What the DURABLE row says about a parked tool call, or null while it is genuinely still awaiting a human — the
+    /// authority consulted on BOTH sides of the block. A terminal row replays (rejected / expired by the reaper); an
+    /// approved one claims execution through the single-winner CAS and runs the side effect once. A missing record is
+    /// an error result, never a silent wait.
+    /// </summary>
+    private async Task<JsonElement?> SettledApprovalAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is null) return ToolResult(isError: true, "This tool call's approval record is missing.");
+
+        if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
+
+        if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Wait for the armed waiter's wake or the bounded window, whichever lands first, cancelling the loser (the
+    /// leftover delay, or the never-signaled waiter's backing delay). Propagates ct cancellation — the run timed out
+    /// or the worker is tearing down — so the caller records nothing on the row's behalf.
+    /// </summary>
+    private static async Task AwaitSignalOrBoundAsync(IToolApprovalWaiter waiter, CancellationToken cancellationToken)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        await Task.WhenAny(waiter.Completion, Task.Delay(TimeSpan.FromSeconds(ApprovalBoundSeconds()), linked.Token)).ConfigureAwait(false);
+
+        linked.Cancel();
+
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     // ─── Decision flow (Decision substrate D2 — agent.run mid-run decision.request) ──────────────────
@@ -561,38 +582,40 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>
     /// BLOCK the synchronous decision.request call until an answer lands or the bound elapses (mirrors
     /// <see cref="BlockForDecisionAsync"/>, minus the approve→execute hop — a decision resolves straight to a terminal).
-    /// The durable row is the authority, so we ALWAYS re-read after the wake; the in-memory waiter is a latency fast-path.
-    /// On ct cancellation we propagate (the row stays AwaitingApproval for the reaper / a re-issue). On the bound elapsing
-    /// with no answer, the pending ticket lets the model re-issue the exact call to keep waiting.
+    /// The durable row is the authority and is read on BOTH sides of the block; the in-memory waiter is a latency
+    /// fast-path whose wake is DROPPED when it finds no registered waiter, which is why the arm-time read exists — the
+    /// row has been queue-answerable since the park CAS, several awaits back, and an answer landing in that window used
+    /// to strand this call for the WHOLE bound. On ct cancellation we propagate (the row stays AwaitingApproval for the
+    /// reaper / a re-issue). On the bound elapsing with no answer, the pending ticket lets the model re-issue the exact
+    /// call to keep waiting.
     /// </summary>
     private async Task<JsonElement> BlockForDecisionAnswerAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
         var waiter = _waiters!.Register(ledgerId);
 
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
         try
         {
-            var bound = Task.Delay(TimeSpan.FromSeconds(ApprovalBoundSeconds()), linked.Token);
+            if (await SettledDecisionAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false) is { } answeredBeforeArming) return answeredBeforeArming;
 
-            await Task.WhenAny(waiter.Completion, bound).ConfigureAwait(false);
+            await AwaitSignalOrBoundAsync(waiter, cancellationToken).ConfigureAwait(false);
 
-            linked.Cancel();
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
-
-            if (state is null) return ToolResult(isError: true, "This decision's record is missing.");
-
-            if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return WrapDecisionResult(state.Status, state.ResultJson, state.Error);   // answered / expired by the reaper
-
-            return PendingDecisionTicket(ledgerId);   // the bound elapsed with no answer — the row stays AwaitingApproval
+            return await SettledDecisionAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false)
+                ?? PendingDecisionTicket(ledgerId);   // the bound elapsed with no answer — the row stays AwaitingApproval
         }
         finally
         {
             _waiters.Remove(ledgerId);
         }
+    }
+
+    /// <summary>What the DURABLE row says about a parked decision, or null while it is genuinely still awaiting an answer — the authority consulted on both sides of the block. A missing record is an error result, never a silent wait.</summary>
+    private async Task<JsonElement?> SettledDecisionAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is null) return ToolResult(isError: true, "This decision's record is missing.");
+
+        return ToolCallLedgerStateMachine.IsTerminal(state.Status) ? WrapDecisionResult(state.Status, state.ResultJson, state.Error) : null;
     }
 
     /// <summary>Wrap a settled decision row into the MCP wire result at the redacting choke point: a Succeeded row replays its stored DecisionAnswer (as both text + structuredContent); anything else (expired / cancelled) is an isError the model can act on.</summary>

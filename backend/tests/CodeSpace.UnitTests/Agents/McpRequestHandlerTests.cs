@@ -820,11 +820,14 @@ public class McpRequestHandlerTests
             return Task.CompletedTask;
         }
 
+        /// <summary>When set, TryBeginApprovalAsync returns this — true is the park CAS WON, i.e. the row is now live on the answer surface and the block is next.</summary>
+        public Func<bool>? BeginApprovalResult { get; init; }
+
         public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct)
         {
             if (OnBeginApprovalThrow is { } make) throw make();
 
-            return Task.FromResult(false);
+            return Task.FromResult(BeginApprovalResult?.Invoke() ?? false);
         }
 
         public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct) => Task.CompletedTask;
@@ -866,8 +869,11 @@ public class McpRequestHandlerTests
             throw new NotImplementedException();
         public Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken ct) =>
             throw new NotImplementedException();
+        /// <summary>When set, CountPendingDecisionsAsync returns this (the decision-path cap gate); unset keeps the approval-path tests' "no decision flows here" refusal.</summary>
+        public Func<int>? PendingDecisionCount { get; init; }
+
         public Task<int> CountPendingDecisionsAsync(Guid agentRunId, Guid teamId, string excludeIdempotencyKey, CancellationToken ct) =>
-            throw new NotImplementedException();
+            PendingDecisionCount is { } count ? Task.FromResult(count()) : throw new NotImplementedException();
         public Task<Guid?> FindBlockingDecisionIdAsync(Guid agentRunId, CancellationToken ct) =>
             throw new NotImplementedException();
     }
@@ -1257,6 +1263,84 @@ public class McpRequestHandlerTests
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
         result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe("""{"echoed":42}""");
         tool.CallCount.ShouldBe(1, "carrying an approval-conversation reference must not alter dispatch — it is stored, never read, in this slice");
+    }
+
+    // ── the lost-wake window: a verdict that lands between the park CAS and the waiter's arm ──
+
+    /// <summary>How long a fixed handler may take to notice a verdict that was already on the row when it armed: it re-reads immediately, so this is generous. A handler that instead blocks waits <see cref="McpRequestHandler.DefaultApprovalBoundSeconds"/> — ten minutes — which is why the regression must FAIL here and never be awaited out (it aborted a whole integration lane on a 5-minute hang detector once).</summary>
+    private static readonly TimeSpan ArmRaceBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>A waiter registry that ARMS like the real one but never signals — the state of the world when the verdict's own TrySignal already ran and found nobody. The only way out is the durable row.</summary>
+    private sealed class ArmedButNeverSignalledWaiters : IToolApprovalWaiterRegistry
+    {
+        public int Arms { get; private set; }
+
+        public IToolApprovalWaiter Register(Guid ledgerId) { Arms++; return new Silent(); }
+        public bool TrySignal(Guid ledgerId, ToolApprovalOutcome outcome) => false;
+        public void Remove(Guid ledgerId) { }
+
+        private sealed class Silent : IToolApprovalWaiter
+        {
+            public Task<ToolApprovalOutcome> Completion { get; } = new TaskCompletionSource<ToolApprovalOutcome>().Task;
+        }
+    }
+
+    /// <summary>Await a blocking tools/call under <see cref="ArmRaceBudget"/> — a call still running past it is the lost-wake regression, and reporting that beats hanging the suite.</summary>
+    private static async Task<JsonElement> WithinArmRaceBudgetAsync(Task<JsonElement?> call, string what)
+    {
+        (await Task.WhenAny(call, Task.Delay(ArmRaceBudget))).ShouldBeSameAs(call,
+            customMessage: $"{what}: the handler armed its waiter and then blocked on the {McpRequestHandler.DefaultApprovalBoundSeconds}s bound instead of re-reading the durable row — the wake landed before the arm and was dropped, so nothing will ever end that wait");
+
+        return (await call)!.Value;
+    }
+
+    [Fact]
+    public async Task A_decision_answered_before_the_block_arms_is_replayed_instead_of_waited_out()
+    {
+        // The row goes AwaitingApproval — and is therefore live on the "Needs decision" queue — several awaits before
+        // BlockForDecisionAnswerAsync arms its waiter (the envelope stash, the card-surface check). TrySignal DROPS a
+        // wake that finds no waiter, so an answer landing inside that window is the ONLY wake there will ever be. The
+        // handler must find it by reading the authority after arming, not by waiting out its bound.
+        var answer = """{"decisionId":"d","selectedOptions":["a"]}""";
+        var ledger = new SpyLedger
+        {
+            PendingDecisionCount = () => 0,
+            BeginApprovalResult = () => true,                                         // the park CAS won → answerable from here
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.Succeeded, ResultJson = answer },   // ...and the human answered before the arm
+        };
+        var waiters = new ArmedButNeverSignalledWaiters();
+        var handler = new McpRequestHandler(new FakeRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger,
+            fenceEpoch: 1, governanceEnabled: true, approvalConversationId: Guid.NewGuid(), new StubBot { ConversationInTeam = false }, waiters, new StubComponents());
+
+        var call = handler.HandleAsync(Parse(Call(DecisionRequestTool.ToolKind, """{"question":"ok?","decisionType":"choose_one","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}""")), CancellationToken.None);
+
+        var result = (await WithinArmRaceBudgetAsync(call, "a decision answered before the arm")).GetProperty("result");
+
+        waiters.Arms.ShouldBe(1, "the waiter is still armed FIRST — arming after the read would reopen the window from the other side");
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("selectedOptions", customMessage: "the recorded answer is replayed, not a pending ticket");
+    }
+
+    [Fact]
+    public async Task An_approval_granted_before_the_block_arms_executes_instead_of_waiting_out_the_bound()
+    {
+        // The approval half of the same window: ParkForApprovalAsync flips the row AwaitingApproval and posts the card
+        // before BlockForDecisionAsync arms, so a human who presses Approve in between leaves a dropped wake behind. The
+        // arm-time read of the authority must carry the call straight into the single-winner execution claim.
+        var ledger = new SpyLedger
+        {
+            BeginApprovalResult = () => true,
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovedAt = DateTimeOffset.UtcNow },
+        };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger,
+            fenceEpoch: 1, governanceEnabled: true, approvalConversationId: Guid.NewGuid(), new StubBot { ConversationInTeam = true }, new ArmedButNeverSignalledWaiters(), new StubComponents());
+
+        var result = (await WithinArmRaceBudgetAsync(handler.HandleAsync(Parse(Call("git.merge_pr", "{}")), CancellationToken.None), "an approval granted before the arm")).GetProperty("result");
+
+        ledger.ExecutionClaims.ShouldHaveSingleItem("the approved row is claimed for execution exactly once");
+        tool.CallCount.ShouldBe(1, "the side effect the human approved runs now, not ten minutes from now");
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
     }
 
     [Fact]
