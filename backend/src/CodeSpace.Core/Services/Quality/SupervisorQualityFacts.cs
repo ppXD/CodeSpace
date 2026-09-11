@@ -21,7 +21,7 @@ namespace CodeSpace.Core.Services.Quality;
 ///   <item><term><c>Attempts</c></term><description>PER UNIT — every attempt that ever staged this subtask id, oldest first (<see cref="AttemptsFor"/>). Each attempt's own recorded verdict, so <c>ConsecutiveFailedVerdicts</c> counts back from the newest.</description></item>
 ///   <item><term><c>SpendSoFarUsd</c> / <c>BudgetCapUsd</c></term><description>PLAN grain, both of them — the run's realized spend and the run's cap. Deliberately NOT a per-unit spend paired with a run cap, which would subtract one thing from another; the cost is that a fan-out's second sibling sees the first sibling's bill, so the affordability row reads "this RUN cannot afford another attempt", never "this unit cannot". 9c revisits it with a per-unit cap.</description></item>
 ///   <item><term><c>EstimatedNextAttemptCostUsd</c></term><description>The MAXIMUM priced attempt cost for THIS unit. Conservative on purpose: a mean over a cheap first attempt under-stops, and under-stopping is the failure that spends real money. Null when no attempt of this unit priced — the affordability row then cannot fire at all.</description></item>
-///   <item><term><c>CheckDeclared</c></term><description>RUN grain — the operator's <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor, not the unit's own planned oracle. See <see cref="AnObjectiveCheckIsDeclared"/>.</description></item>
+///   <item><term><c>CheckDeclared</c></term><description>UNIT grain — the operator's <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor OR this unit's own EFFECTIVE acceptance spec. See <see cref="AnObjectiveCheckIsDeclared"/>.</description></item>
 ///   <item><term>the review facts</term><description>NOT MAPPED — there is no per-unit work review to map. See <see cref="NoWorkReviewIsRecorded"/>.</description></item>
 /// </list>
 /// </summary>
@@ -40,10 +40,11 @@ public static class SupervisorQualityFacts
     public static IReadOnlyList<SupervisorUnitQualityDecision> DecideAll(SupervisorTurnContext context)
     {
         var decisions = new List<SupervisorUnitQualityDecision>();
+        var effectiveAcceptance = EffectiveAcceptanceFor(context).BySubtask;
 
         foreach (var subtask in SupervisorRecitation.LatestPlanSubtasks(context.PriorDecisions))
         {
-            var facts = For(subtask.Id, context);
+            var facts = For(subtask.Id, context, effectiveAcceptance);
 
             if (facts.AttemptCount == 0) continue;
 
@@ -55,8 +56,22 @@ public static class SupervisorQualityFacts
         return decisions;
     }
 
-    /// <summary>One unit's recorded facts. Never throws and never queries — a unit with no attempts yields an empty <c>Attempts</c> list, which is what makes the policy fall to its baseline rather than recommend repairing a check nothing has run yet.</summary>
-    public static QualityDecisionInput For(string subtaskId, SupervisorTurnContext context)
+    /// <summary>
+    /// The run's EFFECTIVE oracle view for the newest plan — resolved ONCE per fold through the same
+    /// <see cref="SupervisorAcceptanceOverlay"/> the decider's plan block and the fold's per-unit grade read, and
+    /// handed to every <see cref="For"/> below rather than re-resolved per unit. Exposed (internal) so a test can
+    /// reach one unit's facts through the SAME resolution production uses instead of restating those two lines,
+    /// which would be a mirror of production logic with nothing detecting its drift (Rule 12.5).
+    /// </summary>
+    internal static SupervisorAcceptanceOverlay.EffectiveAcceptance EffectiveAcceptanceFor(SupervisorTurnContext context)
+    {
+        var subtasks = SupervisorRecitation.LatestPlanSubtasks(context.PriorDecisions);
+
+        return SupervisorAcceptanceOverlay.Resolve(context.PriorDecisions, subtasks.Where(s => s.Acceptance is not null).ToDictionary(s => s.Id, s => s.Acceptance!, StringComparer.Ordinal));
+    }
+
+    /// <summary>One unit's recorded facts, against the run's already-resolved effective oracle view (<see cref="EffectiveAcceptanceFor"/>). Never throws and never queries — a unit with no attempts yields an empty <c>Attempts</c> list, which is what makes the policy fall to its baseline rather than recommend repairing a check nothing has run yet.</summary>
+    public static QualityDecisionInput For(string subtaskId, SupervisorTurnContext context, IReadOnlyDictionary<string, SupervisorAcceptanceSpec> effectiveAcceptance)
     {
         var attempts = AttemptsFor(subtaskId, context.PriorDecisions);
         var latest = attempts.Count == 0 ? null : attempts[^1];
@@ -71,7 +86,7 @@ public static class SupervisorQualityFacts
             Attempts = attempts.Select(Fact).ToList(),
             NoProgressDecisions = context.NoProgressDecisions,
             MaxNoProgressDecisions = context.MaxNoProgressDecisions,
-            CheckDeclared = AnObjectiveCheckIsDeclared(context),
+            CheckDeclared = AnObjectiveCheckIsDeclared(subtaskId, context, effectiveAcceptance),
             SelfClaimContradictedTheCheck = AnOverClaimStillStands(latest, subtaskId, context),
             ChangedFileCount = latest?.TotalChangedFiles ?? latest?.ChangedFiles.Count ?? 0,
             WorkspaceUnitCount = latest?.RepositoryResults.Count ?? 0,
@@ -159,31 +174,23 @@ public static class SupervisorQualityFacts
     }
 
     /// <summary>
-    /// Whether an objective check is DECLARED for this work, read at the RUN grain — the operator's
-    /// <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor, which gates this run's final reviewable head.
-    /// <para>The cost of the run grain, stated rather than discovered: a unit whose own planned oracle is absent
-    /// still reads as "a check is declared", so its ungraded attempts reach the declared-check-never-ran row
-    /// (bounded repair) instead of the ungraded-work row. The opposite reading has the symmetric cost — a unit with
-    /// no oracle of its own would route to buying a critic that, per <see cref="NoWorkReviewIsRecorded"/>, nothing
-    /// can record. Both loop, and both are bounded only by the budget and no-progress rows above them, so the
-    /// choice here is which honest reading to publish, not which one escapes the loop. The run-grain floor is the
-    /// one the run's terminal is actually graded against, so it is the one that ships; 9c revisits it alongside the
-    /// per-unit cap.</para>
+    /// Whether an objective check is DECLARED for this work, read at the UNIT grain: the operator's run-wide
+    /// <see cref="SupervisorTurnContext.AcceptanceChecks"/> floor is declared, OR this unit's OWN effective
+    /// acceptance spec exists — resolved through <see cref="SupervisorAcceptanceOverlay"/> (so a co-signed
+    /// amendment's replacement counts, a superseded plan's does not, and a waiver — which removes the spec — reads
+    /// as no declared check, where the policy's own <c>Waived</c> row is what stops the work).
     ///
-    /// <para><b>The cost the golden corpus made visible, and the one an owner should rule on before 9c.</b> Most
-    /// runs declare NO operator floor, and on those the reading is <c>false</c> for every unit — including a unit
-    /// whose OWN per-subtask oracle ran and passed. The prompt then carries, one screen apart, "acceptance PASSED —
-    /// this unit's definition-of-done check ran green" and "no objective check can grade this work (declared:
-    /// False, verdict Passed)". That is two blocks of one prompt disagreeing about one row, which is the failure
-    /// shape this lane keeps paying for; the narrowing that fixes it is to read the floor OR the unit's own
-    /// EFFECTIVE spec (<c>SupervisorAcceptanceOverlay.Resolve(...).BySubtask</c>, which the decider already reads
-    /// two blocks above) rather than the floor alone. It is deliberately NOT done here: it moves the recommendation
-    /// on most of the corpus, which is a grain decision with its own cost argument and not a bug fix to slip into
-    /// the PR that first wires the block up. What contains it meanwhile is that the block is a RECOMMENDATION
-    /// nothing branches on, and that the reason discloses <c>declared: False</c> verbatim, so a reader (and the
-    /// model, which is invited to reject the line) can see exactly which fact produced it.</para>
+    /// <para>The disjunction is the grain, and either side alone is a prompt that disagrees with itself. The FLOOR
+    /// alone is what shipped first: on a run that declares none — the common case — every unit read <c>false</c>,
+    /// including one whose own per-subtask oracle ran and PASSED, so the prompt carried "acceptance PASSED — this
+    /// unit's definition-of-done check ran green" one screen from "no objective check can grade this work
+    /// (declared: False, verdict Passed)", and the recommendation was <c>IndependentCritic</c> for work the graded
+    /// receipts above it had already settled. The unit SPEC alone drops the run whose terminal head is graded only
+    /// by the operator's floor. Read together, a unit is gradable when anything that can actually grade it is
+    /// declared, which is the reading the receipts one block above recite.</para>
     /// </summary>
-    private static bool AnObjectiveCheckIsDeclared(SupervisorTurnContext context) => context.AcceptanceChecks is { Count: > 0 };
+    private static bool AnObjectiveCheckIsDeclared(string subtaskId, SupervisorTurnContext context, IReadOnlyDictionary<string, SupervisorAcceptanceSpec> effectiveAcceptance) =>
+        context.AcceptanceChecks is { Count: > 0 } || effectiveAcceptance.ContainsKey(subtaskId);
 
     /// <summary>An attempt whose cost is really known: it reported token usage and nothing in it is unpriceable. Mirrors <c>SupervisorBudgetRecitation.UnitSpend.Add</c>'s own unpriced-usage test, so the two agree about which attempts have a real figure.</summary>
     private static bool IsPriced(SupervisorAgentResult result, IReadOnlyDictionary<string, ModelPrice> modelPrices) =>

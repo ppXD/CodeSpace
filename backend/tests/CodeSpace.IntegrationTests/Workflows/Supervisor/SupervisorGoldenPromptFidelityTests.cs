@@ -909,6 +909,40 @@ public class SupervisorGoldenPromptFidelityTests
     }
 
     /// <summary>
+    /// Why reading <c>CheckDeclared</c> at the UNIT grain (the operator floor OR this unit's own effective oracle)
+    /// moved no scenario's bytes, asserted rather than argued: NOT ONE plan in this corpus authors a per-subtask
+    /// oracle. So the only declared checks anywhere in it are the two named below — an operator floor and a
+    /// co-signed amendment — and every other attempted unit carries a folded verdict whose tape declares no check
+    /// at either grain.
+    ///
+    /// <para>That shape is one PRODUCTION CANNOT EMIT: the fold grades a unit only through the effective spec
+    /// <see cref="SupervisorAcceptanceOverlay"/> resolves or the operator's floor, so a verdict on the tape implies
+    /// one of them. These fixtures stake the verdict without either, which is why their prompts still recite
+    /// "nothing recorded can grade this" one screen from "acceptance PASSED" — that residue is a FIXTURE defect,
+    /// not the fact's grain, and closing it moves nearly every scored prompt in the corpus (a re-pin of
+    /// <see cref="GoldenPromptDigest"/> plus the three superseded anchors, whose wind-back does not reach the plan
+    /// block), so it is its own decision rather than a rider on this one.</para>
+    ///
+    /// <para>This reds the day a plan here authors an oracle — which is exactly when that decision is being taken,
+    /// and when the digest re-pin must be attributed to it.</para>
+    /// </summary>
+    [Fact]
+    public void No_corpus_plan_authors_a_per_unit_oracle_so_only_two_units_in_it_have_a_declared_check()
+    {
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+            foreach (var plan in scenario.Context.PriorDecisions.Where(d => d.DecisionKind == SupervisorDecisionKinds.Plan))
+                SupervisorOutcome.ReadPlanSubtasks(plan.PayloadJson).Where(s => s.Acceptance is not null).ShouldBeEmpty(
+                    $"'{scenario.Name}' now authors a per-unit oracle — its units' quality readings move off the ungradable-work row, so re-pin the digest and name this as the reason");
+
+        var declared = SupervisorDecisionGoldenScenarios.All
+            .SelectMany(s => s.Context.QualityDecisions.Where(d => d.Facts.CheckDeclared).Select(d => $"{s.Name}/{d.SubtaskId}"))
+            .ToList();
+
+        declared.ShouldBe(new[] { "amended-oracle-awaiting-retry/s2", "repeat-failure-under-a-declared-check/s1" }, ignoreOrder: true,
+            "the corpus's only declared checks: s1's OPERATOR FLOOR, and s2's co-signed AMENDMENT — the amendment being this corpus's one exercise of the unit-grain side of the fact (its mechanism is unmoved, because an InfraUnknown verdict is judged by the machinery-failed row above it)");
+    }
+
+    /// <summary>
     /// The other half of that receipt, and the reason the re-pin is attributable at all: a tape with NOTHING
     /// attempted gains no block, so its bytes are exactly what they were before P22-9b. Asserted against the
     /// wind-back rather than against a pinned string — if the block ever rendered an empty header for a pre-spawn
