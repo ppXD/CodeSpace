@@ -342,6 +342,7 @@ public partial class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Recovery.IRunCleanupLedger>(),
+            scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunReconcilerService>.Instance,
             credentialBroker: broker);
 

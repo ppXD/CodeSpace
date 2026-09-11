@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Recovery;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -116,12 +117,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly Capture.ICaptureIntentService _captureIntents;
     private readonly Capture.INativeRecordPlane _nativeRecords;
     private readonly IRunCleanupLedger _cleanup;
+    private readonly AgentRunLogging.IAgentRunLogService _logs;
     // Withdraws an abandoned run's brokered model credential before its orphaned process is killed. Optional so a
     // deployment (or a hand-built double) without a broker has nothing to withdraw.
     private readonly Credentials.IModelCredentialBroker? _credentialBroker;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, IRunCleanupLedger cleanup, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, IRunCleanupLedger cleanup, AgentRunLogging.IAgentRunLogService logs, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _db = db;
         _runs = runs;
@@ -132,6 +134,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _captureIntents = captureIntents;
         _nativeRecords = nativeRecords;
         _cleanup = cleanup;
+        _logs = logs;
         _credentialBroker = credentialBroker;
         _logger = logger;
     }
@@ -609,6 +612,8 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         else
             await ReclaimLocalIsolationAsync(handle, stamp, settledCaptures, cancellationToken).ConfigureAwait(false);
 
+        await RecordLogOwnerLossQuietlyAsync(candidate.TeamId, stamp, cancellationToken).ConfigureAwait(false);
+
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
         return StaleOutcome.Abandoned;
     }
@@ -713,6 +718,34 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         {
             _logger.LogWarning(ex, "AgentRunReconciler: cgroup teardown for abandoned run {RunId} failed", stamp.AgentRunId);
             await UpsertQuietlyAsync(stamp.Unknown(RunResourceKind.Cgroup, stamp.RecordedByHost, key, TeardownFailedCode), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Close the log streams the dead generation left Open. Its worker was the only thing that could ever have drained
+    /// them, so without this they sat Open at a superseded fence and the Room's fold reported "Finalizing" about a
+    /// capture that ended when the host did — with no deadline and nothing that could move it.
+    ///
+    /// <para>Runs immediately after the cleanup receipts, and states the same <see cref="RunCleanupStamp.FenceEpoch"/>
+    /// they are stamped with, so the message the operator reads on the stream cites the exact rows this abandon wrote.
+    /// It cannot literally share their transaction — the log seam owns its own connection by design, because its
+    /// writes bracket provider I/O that must never sit inside a database transaction — so it takes the same shape as
+    /// every other statement in this method: the abandon already stands, and no failure here may change it.</para>
+    /// </summary>
+    private async Task RecordLogOwnerLossQuietlyAsync(Guid teamId, RunCleanupStamp stamp, CancellationToken cancellationToken)
+    {
+        var request = new AgentRunLogOwnerLossRequest(teamId, stamp.AgentRunId, stamp.FenceEpoch, AgentRunLogOwnerLossRequest.OwnerLostErrorCode);
+
+        try
+        {
+            var orphaned = await _logs.RecordOwnerLossAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (orphaned > 0)
+                _logger.LogWarning("AgentRunReconciler: agent run {RunId} left {Streams} log stream(s) open at a superseded capture fence; recorded them as {Code} rather than leaving them reported as still finalizing", stamp.AgentRunId, orphaned, AgentRunLogOwnerLossRequest.OwnerLostErrorCode);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: could not record log-capture owner loss for abandoned agent run {RunId}; its streams stay Open for a later sweep", stamp.AgentRunId);
         }
     }
 

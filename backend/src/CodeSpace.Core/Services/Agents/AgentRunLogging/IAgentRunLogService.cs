@@ -15,6 +15,13 @@ public interface IAgentRunLogService : IScopedDependency
     Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken);
     Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken);
     Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Terminalize every stream of a run whose capturing generation is provably over — the ONE call on this seam a
+    /// process that is not the capturing worker may make. Returns how many streams it moved; zero is the ordinary
+    /// answer (the run left no orphaned stream, or the caller's own epoch is no longer the run's current one).
+    /// </summary>
+    Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken);
     Task<AgentRunLogMetadataResult> GetMetadataAsync(Guid teamId, Guid streamId, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentRunLogMetadata>> ListMetadataAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken);
     Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken);

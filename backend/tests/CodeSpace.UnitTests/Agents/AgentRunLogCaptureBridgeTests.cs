@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Dtos.Agents;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
@@ -628,6 +629,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         public Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) =>
             Task.FromResult(Heads);
         public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
         public byte[] Bytes(string kind) { lock (_gate) return _streams[kind].Bytes.ToArray(); }
 
         private StreamHead Find(Guid streamId) => _streams.Values.Single(value => value.Head.Metadata.StreamId == streamId);
