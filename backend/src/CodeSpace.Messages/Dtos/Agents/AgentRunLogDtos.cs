@@ -82,3 +82,28 @@ public sealed record AgentRunLogReadProblem
     public required bool IsRetryable { get; init; }
     public required Guid StreamId { get; init; }
 }
+
+/// <summary>
+/// One statement that a run's log capture outlived the worker that owned it: the run reached a terminal state on some
+/// OTHER host, and the streams its dead generation left Open can never be drained, completed or failed by the process
+/// that was doing the capturing.
+///
+/// <para><paramref name="WorkerFenceEpoch"/> is the CALLER's own generation — the fence the abandon just minted, not
+/// the one the orphaned streams carry. It is both the caller's authority (a superseded sweep whose epoch is no longer
+/// the run's current one may state nothing) and the boundary of what may be flipped: only streams STRICTLY behind it
+/// are orphaned, so a stream a live worker still owns is never touched. It is also the epoch every
+/// <c>agent_run_cleanup_receipt</c> row of that same abandon is stamped with, which is what lets the stream's error
+/// message cite the durable record of the abandon it belongs to.</para>
+///
+/// <para>Committed bytes are NOT part of this statement. The flip leaves the segment rows, the byte head and the
+/// source offsets exactly where they were, so everything the dead worker did manage to make durable stays readable
+/// through the ordinary read path — what ends is the pretence that more of it is still on the way.</para>
+/// </summary>
+public sealed record AgentRunLogOwnerLossRequest(Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch, string ErrorCode)
+{
+    /// <summary>
+    /// The code an orphaned capture is terminalized with. Pinned by a unit test: it is written into durable rows, read
+    /// back by the Room and by operators, and a rename would silently orphan every stream already carrying the old one.
+    /// </summary>
+    public const string OwnerLostErrorCode = "capture.owner-lost";
+}

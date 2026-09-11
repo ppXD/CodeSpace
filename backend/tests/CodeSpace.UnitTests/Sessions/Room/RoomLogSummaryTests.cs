@@ -36,6 +36,28 @@ public sealed class RoomLogSummaryTests
         summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Finalizing, 2, "2 streams · 1 finalizing · 1 integrity verified"));
     }
 
+    /// <summary>An abandoned run's only stream: the fold must stop reporting progress the moment capture is recorded as owner-lost.</summary>
+    [Fact]
+    public void A_capture_whose_owner_is_gone_is_incomplete_rather_than_finalizing()
+    {
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.CaptureFailed)]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Incomplete, 1, "1 stream · 1 capture failed"));
+    }
+
+    /// <summary>
+    /// The shape an abandon leaves on a producer that was waiting out a storage outage when its host died: the flip
+    /// does not erase the marker (it is the durable record of why the capture parked), so the terminal state has to
+    /// outrank it. "Held; storage unavailable" would promise bytes that no surviving process can still deliver.
+    /// </summary>
+    [Fact]
+    public void A_capture_whose_owner_is_gone_is_incomplete_even_carrying_a_stall_marker()
+    {
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.CaptureFailed, remoteStalled: true)]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Incomplete, 1, "1 stream · 1 capture failed"));
+    }
+
     [Fact]
     public void Failure_states_outrank_success_and_render_in_deterministic_severity_order()
     {

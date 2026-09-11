@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.RunData;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
@@ -445,6 +446,8 @@ public sealed class AgentRunLogCaptureBackpressureTests
         public Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken)
         { lock (_gate) return Task.FromResult<IReadOnlyList<AgentRunLogCaptureHead>>(_streams.Values.Select(value => value.Head).ToArray()); }
         public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
+        /// <summary>The reconciler's statement about a dead worker's streams, never the bridge's — a call here would mean the bridge reached for a verb that is not its to make.</summary>
+        public Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken) => throw new NotImplementedException();
 
         private StreamHead Find(Guid streamId) => _streams.Values.Single(value => value.Head.Metadata.StreamId == streamId);
 
