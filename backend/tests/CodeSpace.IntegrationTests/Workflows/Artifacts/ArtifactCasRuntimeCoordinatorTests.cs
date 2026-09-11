@@ -1606,7 +1606,16 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
         var world = await SeedWorldAsync();
         var storage = new FakeStorageState { BlockIgnoringCancellationNextPut = true };
         var bytes = RandomNumberGenerator.GetBytes(64_000);
-        var request = Request(world, new MemoryStream(bytes), bytes, "concurrent") with { OperationTimeout = TimeSpan.FromMilliseconds(100) };
+        // The FIRST worker's own timeout sizes its lease (LeaseDuration = timeout + max(timeout, MinimumLeaseMargin)),
+        // so it has to stay live long enough for the "liveDuplicate" check below to actually observe it. A 100ms
+        // timeout (350ms lease) was too tight: that check runs a fresh PutAsync — profile-revision lookup, intent
+        // lookup, fenced claim UPDATE, three round trips to Postgres — and under CI scheduling contention (thread-pool
+        // injection stalls, co-scheduled test collections) those round trips alone have taken long enough to observe
+        // an already-lapsed lease and reclaim it (Committed) instead of finding it live (Deferred), failing with
+        // "liveDuplicate should be ... Deferred but was Committed" — live-observed on PRs #1962 and #1963. 3 seconds
+        // (6-second lease) leaves the immediate check generous headroom without touching any sleep or assertion; the
+        // duplicate/poll requests below keep their own short timeout since they never need to hold the lease.
+        var request = Request(world, new MemoryStream(bytes), bytes, "concurrent") with { OperationTimeout = TimeSpan.FromSeconds(3) };
         using var firstScope = Scope(storage);
         var first = firstScope.Resolve<IArtifactCasRuntimeCoordinator>().PutAsync(request, CancellationToken.None);
         await storage.IgnoringCancellationPutEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -1618,8 +1627,8 @@ public sealed class ArtifactCasRuntimeCoordinatorTests : IAsyncLifetime
         // lands, and on a slow runner that stamp lands later than this test's timeline assumes — a fixed 500ms wait then
         // meets a still-live lease and gets Deferred(TransferInProgress), which is a correct answer at that instant, not
         // the defect. Live-observed on CI (run 32768977365). What the test pins is that the reclaim EVENTUALLY commits
-        // once the lease lapses, so ask until it does, bounded well past any lease this test can mint (100ms timeout →
-        // 100ms + max(100ms, MinimumLeaseMargin) lease).
+        // once the lease lapses, so ask until it does, bounded well past any lease this test can mint (3s timeout →
+        // 3s + max(3s, MinimumLeaseMargin) lease).
         ArtifactCasTransferResult? second = null;
         var reclaimDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
 
