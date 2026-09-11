@@ -703,6 +703,7 @@ public static class RoomNarrative
             Reference = d.Reference, BranchHead = d.BranchHead, BranchBase = d.BranchBase,
             Checks = d.Checks, ChecksOk = d.ChecksOk, Url = d.Url, Error = d.Error,
             Verifications = d.Verifications,
+            Producers = d.Producers,
         }).ToList();
 
     // ─── summary + diagnostic ───────────────────────────────────────────────────────

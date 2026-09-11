@@ -336,6 +336,25 @@ export interface RoomArtifactVerification {
   logsComplete?: boolean | null;
 }
 
+/// One agent's durable log-stream health, as the Room's projector folds it.
+export type RoomAgentLogStatus = "Verified" | "Captured" | "Finalizing" | "Incomplete" | "Stalled";
+
+/// What the sandbox actually did to one producer. `Unknown` is a real absence (nothing recorded it), never a
+/// confinement to render as safety — the renderer must say "posture unknown" rather than show a confined glyph.
+export type RoomConfinementPosture = "Unknown" | "Unconfined" | "Confined" | "ConfinedNetworkSevered";
+
+/// WHO produced one delivered artifact and under what conditions (P21-8b). Every field is recorded fact or an
+/// explicit absence: a null `costUsd` means UNPRICEABLE (never free), a null `logs` means no stream was declared
+/// (never "settled"), and `Unknown` confinement means nothing recorded a posture.
+export interface RoomArtifactProducer {
+  agentRunId: string;
+  /** The producing agent's own lifecycle status (the `AgentRunStatus` name) — an open vocabulary, never switched on for copy. */
+  status: string;
+  logs?: RoomAgentLogStatus | null;
+  confinement: RoomConfinementPosture;
+  costUsd?: number | null;
+}
+
 /// The delivered change set (PR card).
 export interface DeliveryBlock extends RoomBlockBase {
   type: "delivery";
@@ -352,6 +371,8 @@ export interface DeliveryBlock extends RoomBlockBase {
   error?: string | null;
   /** THIS repository's own per-check verification truth (P21) — empty when nothing graded it. A sibling repository's verdict never appears here. */
   verifications?: RoomArtifactVerification[] | null;
+  /** The agents that delivered INTO this repository (P21-8b) — empty when no agent's result names it, or their rows are gone. */
+  producers?: RoomArtifactProducer[] | null;
 }
 /// One file a turn produced as a file. `artifactId` is what fetches its bytes.
 export interface DeliverableFile {
@@ -365,6 +386,8 @@ export interface DeliverableFile {
   availability: "Unknown" | "Reachable" | "MetadataMissing" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied";
   /** THIS file's own per-check verification truth (P21), attributed by its producing agent — empty when nothing graded it. */
   verifications?: RoomArtifactVerification[] | null;
+  /** The agent named by `agentRunId`, stating its own execution, logs, confinement and spend (P21-8b). Null ONLY when that agent-run row is gone. */
+  producer?: RoomArtifactProducer | null;
 }
 /// Files a turn produced as files rather than as a repository change. Absent when it produced none — an empty
 /// list would read as "it produced nothing", which is a claim about the run rather than about this card.

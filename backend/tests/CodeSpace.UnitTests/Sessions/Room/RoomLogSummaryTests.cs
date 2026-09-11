@@ -1,5 +1,6 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Messages.Dtos.Sessions.Room;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;

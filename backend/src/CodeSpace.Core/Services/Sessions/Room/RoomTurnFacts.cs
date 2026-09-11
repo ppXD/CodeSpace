@@ -172,27 +172,13 @@ public sealed record RoomDelivery
 
     /// <summary>THIS repository's own per-check verification truth (P21) — see <see cref="RoomArtifactVerification"/>.</summary>
     public IReadOnlyList<RoomArtifactVerification> Verifications { get; init; } = Array.Empty<RoomArtifactVerification>();
+
+    /// <summary>The agents that delivered into THIS repository (P21-8b) — see <see cref="RoomArtifactProducer"/>.</summary>
+    public IReadOnlyList<RoomArtifactProducer> Producers { get; init; } = Array.Empty<RoomArtifactProducer>();
 }
 
-/// <summary>Turn-facing reduction of one agent's durable log streams. Detail is backend-authored from persisted stream state and integrity evidence.</summary>
+/// <summary>Turn-facing reduction of one agent's durable log streams. Detail is backend-authored from persisted stream state and integrity evidence. The status vocabulary itself lives in Messages (<see cref="RoomAgentLogStatus"/>) because the Room now puts it on the wire per artifact.</summary>
 public sealed record RoomAgentLogSummary(RoomAgentLogStatus Status, int StreamCount, string Detail);
-
-public enum RoomAgentLogStatus
-{
-    Verified,
-    Captured,
-    Finalizing,
-    Incomplete,
-
-    /// <summary>
-    /// Open, and its remote storage is refusing the segments it is holding. Distinct from <see cref="Finalizing"/>
-    /// because nothing is progressing and nothing is lost either — the bytes are queued behind an outage, which is the
-    /// one fact an operator can act on. Appended rather than slotted into the severity order (which
-    /// <c>RoomNarrative.LogStatusRank</c> owns explicitly) so no existing member's ordinal moves: nothing persists one
-    /// today, and a value shifted underneath a stored ordinal is unrecoverable.
-    /// </summary>
-    Stalled,
-}
 
 /// <summary>Run-level budget truth. Estimated spend and committed reservation headroom remain separate because an unresolved commitment is not an actual bill.</summary>
 public sealed record RoomBudgetSummary

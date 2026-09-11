@@ -25,7 +25,10 @@ import type {
   PlanChecklistItem,
   RoomAction,
   RoomAgentCard,
+  RoomAgentLogStatus,
+  RoomArtifactProducer,
   RoomArtifactVerification,
+  RoomConfinementPosture,
   RoomAttemptDelta,
   RoomBlock,
   RoomOracleProtection,
@@ -1983,6 +1986,48 @@ function VerificationRow({ v }: { v: RoomArtifactVerification }) {
   );
 }
 
+/**
+ * Backend-recorded confinement posture → the word the row shows. `Unknown` states the ABSENCE outright: it never
+ * borrows a confined glyph, because an unrecorded posture is exactly the case a reader must not take as safety.
+ */
+const POSTURE_LABEL: Record<RoomConfinementPosture, string> = {
+  Unknown: "posture unknown",
+  Unconfined: "unconfined",
+  Confined: "confined",
+  ConfinedNetworkSevered: "confined \u00b7 egress severed",
+};
+
+/** A producer's own log health → the word the row shows. A producer that declared no stream renders none of this rather than a word that reads as settled. */
+const PRODUCER_LOG_LABEL: Record<RoomAgentLogStatus, string> = {
+  Verified: "logs integrity verified",
+  Captured: "logs captured",
+  Finalizing: "logs finalizing",
+  Incomplete: "logs incomplete",
+  Stalled: "logs held; storage unavailable",
+};
+
+/**
+ * WHO made this artifact and under what conditions (P21-8b) — the producing agent's own execution status, log
+ * health, confinement posture and realized spend, on the row of the thing it produced.
+ *
+ * <p>Each unknown is STATED rather than omitted: a null cost reads "cost unknown" (never $0, which would claim a
+ * free agent), and an unrecorded posture reads "posture unknown" (never a confined glyph). An open status word and
+ * an open posture value both degrade gracefully, so a newer backend can never render a blank chip.</p>
+ */
+function ProducerRow({ producer }: { producer: RoomArtifactProducer }) {
+  const tone = producer.status === "Succeeded" ? "ok" : producer.status === "Running" || producer.status === "Queued" ? "check" : "err";
+  const logs = producer.logs ? PRODUCER_LOG_LABEL[producer.logs] ?? producer.logs : null;
+
+  return (
+    <div className="room-pr-sub room-verif">
+      <span className={`room-pchip room-pchip-${tone}`} title="The agent that produced this, and its own execution status"><Sym n="cpu" s={10} /> {producer.status}</span>
+      <span className="room-pchip" title="What the host actually did to confine this agent">{POSTURE_LABEL[producer.confinement] ?? POSTURE_LABEL.Unknown}</span>
+      <span className="room-muted">{producer.costUsd == null ? "cost unknown" : formatCostUsd(producer.costUsd)}</span>
+      {logs && <span className="room-muted">{logs}</span>}
+    </div>
+  );
+}
+
 /** One repository's durable delivery outcome. Failed and skipped siblings remain visible after a Room reload. */
 export function PrCard({ delivery }: { delivery: DeliveryBlock }) {
   const disposition = delivery.disposition === "AlreadyOpened" ? "Already open" : delivery.disposition;
@@ -2005,6 +2050,7 @@ export function PrCard({ delivery }: { delivery: DeliveryBlock }) {
           </div>
         )}
         {(delivery.verifications ?? []).map((v, i) => <VerificationRow key={i} v={v} />)}
+        {(delivery.producers ?? []).map((producer) => <ProducerRow key={producer.agentRunId} producer={producer} />)}
       </div>
       {delivery.url && <a className="room-pr-btn" href={delivery.url} target="_blank" rel="noreferrer">View PR</a>}
     </div>
@@ -2048,6 +2094,7 @@ export function ProducedFilesCard({ block }: { block: DeliverablesBlock }) {
                 {unavailable && reason && <span className="room-danger"> · {roomFileUnavailableNote(reason)}</span>}
               </div>
               {(file.verifications ?? []).map((v, i) => <VerificationRow key={i} v={v} />)}
+              {file.producer && <ProducerRow producer={file.producer} />}
             </Fragment>
           );
         })}
