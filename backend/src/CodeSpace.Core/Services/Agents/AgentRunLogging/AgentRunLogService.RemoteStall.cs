@@ -24,6 +24,11 @@ public sealed partial class AgentRunLogService : IAgentRunLogRemoteStallWriter
     /// because 0230's guard requires every update to (a side channel exempt from the monotonic rule is a row two
     /// writers can disagree about), and the <c>IS DISTINCT FROM</c> tail makes a restatement of the same stall a
     /// zero-row no-op — so a long outage costs one write at its start and one at its end rather than one per retry.
+    ///
+    /// <para>The correlated <c>EXISTS</c> over <c>agent_run.fence_epoch</c> is the fence itself, in the same shape
+    /// <c>PublishManifestStore.FencedUpdateAsync</c> uses: the row's own <c>worker_fence_epoch</c> only proves this
+    /// producer wrote it LAST, so without the subquery a superseded worker could still restate the health of a stream
+    /// on a row nobody has reclaimed yet.</para>
     /// </summary>
     private static async Task<int> StallUpdateAsync(Persistence.Db.CodeSpaceDbContext db, AgentRunLogRemoteStallRequest request, DateTimeOffset now, CancellationToken cancellationToken) =>
         await db.Database.ExecuteSqlAsync($"""
@@ -33,6 +38,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogRemoteStallWriter
              WHERE team_id = {request.TeamId} AND id = {request.StreamId} AND agent_run_id = {request.AgentRunId}
                AND worker_fence_epoch = {request.WorkerFenceEpoch} AND capture_session_id = {request.CaptureSessionId}
                AND state = 'Open'
+               AND EXISTS (SELECT 1 FROM agent_run WHERE team_id = {request.TeamId} AND id = {request.AgentRunId} AND fence_epoch = {request.WorkerFenceEpoch})
                AND (remote_stall_since IS DISTINCT FROM {request.StalledSince}::timestamptz OR remote_stall_code IS DISTINCT FROM {request.StallCode}::text)
             """, cancellationToken).ConfigureAwait(false);
 

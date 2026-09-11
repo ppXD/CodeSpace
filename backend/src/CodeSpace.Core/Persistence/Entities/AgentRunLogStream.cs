@@ -34,7 +34,11 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     /// When the producer's remote storage first refused a segment it is STILL holding. It is the difference between a
     /// stream that is quietly finalizing and one whose bytes are queued behind an outage: the head is frozen on
     /// purpose, nothing was dropped, and a reader can say so instead of reporting progress that is not happening.
-    /// Present exactly with <see cref="RemoteStallCode"/>, and cleared the moment a segment commits again.
+    /// Present exactly with <see cref="RemoteStallCode"/>. It is cleared when a segment commits again inside the same
+    /// capture session, and otherwise by the NEXT capture claim — a marker is one producer's statement about bytes it
+    /// is holding in memory, so it cannot outlive the session that made it. A row that PARKED keeps its marker on
+    /// purpose: it is the durable record of why capture ended, and a reader only treats the marker as live health
+    /// while the stream is still Open.
     /// </summary>
     public DateTimeOffset? RemoteStallSince { get; set; }
     /// <summary>The typed refusal being waited out, in the capture bridge's error-code vocabulary. Never a second reason vocabulary, and never parsed.</summary>

@@ -65,11 +65,27 @@ public sealed class RoomLogSummaryTests
     }
 
     [Fact]
-    public void A_recovered_stall_leaves_no_trace_in_the_fold()
+    public void A_settled_stream_that_still_carries_its_marker_is_read_by_its_state_not_the_marker()
     {
-        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true)]);
+        // The marker is not cleared on the way to a terminal state — it is the durable record of WHY a stream parked,
+        // and a park needs it. So the fold has to read it only while the stream is Open, or the opposite lie shows up:
+        // a stream that reached Completed with a proof over every byte reported as an ongoing storage incident. The
+        // marker is set here deliberately; with it at its default this assertion passes on a fold that never reads it.
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true, remoteStalled: true)]);
 
         summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Verified, 1, "1 stream · 1 integrity verified"));
+    }
+
+    [Fact]
+    public void A_stream_a_newer_capture_session_reclaimed_is_finalizing_again()
+    {
+        // The shape a worker restart leaves behind: the next capture claim clears both stall columns (the producer
+        // that was holding those bytes is the one being superseded, and nothing else would ever clear its marker), so
+        // the row the Room folds is an Open stream with no marker. The reclaim itself is proven against the real guard
+        // in AgentRunLogRemoteStallFlowTests, which is the only place a capture session exists.
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.Open, remoteStalled: false)]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Finalizing, 1, "1 stream · 1 finalizing"));
     }
 
     [Fact]

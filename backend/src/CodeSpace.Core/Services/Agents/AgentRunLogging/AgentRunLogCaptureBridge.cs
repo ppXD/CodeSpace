@@ -312,12 +312,13 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             if (attempt is AppendAttempt.Refused) return DrainOutcome.Stopped;
 
             var stall = NoteStall(stream, ((AppendAttempt.Transient)attempt).Code);
+            await MarkStallAsync(request, captureSessionId, stream, stall, cancellationToken).ConfigureAwait(false);
             if (final)
             {
                 await Task.Delay(AppendRetryDelay(stall.Attempts), cancellationToken).ConfigureAwait(false);
                 continue;
             }
-            if (!Exhausted(stream, stall)) return await HoldAsync(request, captureSessionId, stream, stall, cancellationToken).ConfigureAwait(false);
+            if (!Exhausted(stream, stall)) return DrainOutcome.Holding;
 
             await ParkExhaustedAsync(request, captureSessionId, stream, stall, cancellationToken).ConfigureAwait(false);
             return DrainOutcome.Stopped;
@@ -380,13 +381,17 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private bool Exhausted(CaptureStream stream, RemoteStall stall) =>
         _clock.GetUtcNow() - stall.Since >= _backpressure.ParkAfter || stream.BacklogSourceBytes >= _backpressure.MaxLocalBacklogBytes;
 
-    /// <summary>Keep waiting. The durable marker is written once per outage, on its first refusal, so a long stall costs one write rather than one per retry.</summary>
-    private async Task<DrainOutcome> HoldAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, RemoteStall stall, CancellationToken cancellationToken)
+    /// <summary>
+    /// Say the outage is happening. Written once per outage, on its first refusal, so a long stall costs one write
+    /// rather than one per retry — and written on the FINAL drain too: an incident that starts while the source is
+    /// being drained out leaves the Room reading "Finalizing" for as long as the budget lasts otherwise. A marker is
+    /// not a park; the final drain still never parks, because a stream its budget cancels stays Open and reconcilable.
+    /// </summary>
+    private async Task MarkStallAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, RemoteStall stall, CancellationToken cancellationToken)
     {
-        if (stall.Attempts == 1)
-            await WriteStallAsync(request, captureSessionId, stream, stall.Since, stall.Code, cancellationToken).ConfigureAwait(false);
+        if (stall.Attempts != 1) return;
 
-        return DrainOutcome.Holding;
+        await WriteStallAsync(request, captureSessionId, stream, stall.Since, stall.Code, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The remote answered again: the marker comes off so no reader keeps calling a live stream stalled.</summary>
@@ -465,25 +470,73 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         }
     }
 
-    /// <summary>Commit the source's final-drain receipt. True only when the stream is now provably finalized — the caller's licence to write any further terminal fact about it.</summary>
+    /// <summary>
+    /// Commit the source's final-drain receipt. True only when the stream is now provably finalized — the caller's
+    /// licence to write any further terminal fact about it.
+    ///
+    /// <para>A <c>ConcurrentMutation</c> rejection is re-read rather than re-offered, because this producer can cause
+    /// one itself: a health write advances the row's revision, and an acknowledgement lost on the way back leaves the
+    /// cached head one behind. Re-polling with the same stale revision would then be refused identically until the
+    /// finalization budget expired — a livelock over a marker the row already has.</para>
+    /// </summary>
     private async Task<bool> FinalizeSourceAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CancellationToken cancellationToken)
     {
-        var result = await _logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            TeamId = request.TeamId, AgentRunId = request.AgentRunId, StreamId = stream.Metadata.StreamId,
-            WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = captureSessionId,
-            ExpectedRevision = stream.Metadata.Revision, ExpectedSourceOffsetBytes = stream.Metadata.SourceOffsetBytes,
-        }, cancellationToken).ConfigureAwait(false);
-        if (result is AgentRunLogFinalizeSourceResult.Finalized finalized)
-        {
-            stream.Metadata = finalized.Metadata;
-            stream.Terminal = true;
-            return true;
+            var result = await _logs.FinalizeSourceAsync(new AgentRunLogFinalizeSourceRequest
+            {
+                TeamId = request.TeamId, AgentRunId = request.AgentRunId, StreamId = stream.Metadata.StreamId,
+                WorkerFenceEpoch = request.WorkerFenceEpoch, CaptureSessionId = captureSessionId,
+                ExpectedRevision = stream.Metadata.Revision, ExpectedSourceOffsetBytes = stream.Metadata.SourceOffsetBytes,
+            }, cancellationToken).ConfigureAwait(false);
+            if (result is AgentRunLogFinalizeSourceResult.Finalized finalized)
+            {
+                stream.Metadata = finalized.Metadata;
+                stream.Terminal = true;
+                return true;
+            }
+
+            var problem = ((AgentRunLogFinalizeSourceResult.Rejected)result).Problem;
+            if (problem.Code != AgentRunLogProblemCode.ConcurrentMutation)
+            {
+                await StopFinalizingAsync(request, captureSessionId, stream, problem, cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
+            var refreshed = await RefreshClaimedHeadAsync(new CaptureFailureContext(request.TeamId, request.AgentRunId, request.WorkerFenceEpoch, captureSessionId), stream.Metadata.StreamId, cancellationToken).ConfigureAwait(false);
+            if (refreshed == null) return false;
+
+            stream.Metadata = refreshed;
         }
-        var problem = ((AgentRunLogFinalizeSourceResult.Rejected)result).Problem;
-        if (problem.IsTransient) return false;
-        await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogWarning("Agent run {RunId} log stream {StreamId} final-drain receipt remained concurrently mutable after bounded retries", request.AgentRunId, stream.Metadata.StreamId);
         return false;
+    }
+
+    /// <summary>The non-stale exits from a refused receipt: a transient rejection is re-polled with the head we already hold, a permanent one terminalizes the stream with its real cause.</summary>
+    private async Task StopFinalizingAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, AgentRunLogProblem problem, CancellationToken cancellationToken)
+    {
+        if (problem.IsTransient) return;
+
+        await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure($"finalize-{Code(problem.Code)}", "The Agent Run log source final-drain receipt could not be committed."), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The stream's head as the row ACTUALLY has it, or null when this producer no longer owns the claim. The one
+    /// definition of "is this still mine" for every fenced write that has to retry: two of them would be two ways to
+    /// disagree about whether a superseded worker may keep writing.
+    /// </summary>
+    private async Task<AgentRunLogMetadata?> RefreshClaimedHeadAsync(CaptureFailureContext context, Guid streamId, CancellationToken cancellationToken)
+    {
+        var heads = await _logs.ListCaptureHeadsAsync(context.TeamId, context.AgentRunId, cancellationToken).ConfigureAwait(false);
+        var refreshed = heads.SingleOrDefault(value => value.Metadata.StreamId == streamId);
+        if (refreshed == null || refreshed.WorkerFenceEpoch != context.WorkerFenceEpoch || refreshed.CaptureSessionId != context.CaptureSessionId || refreshed.Metadata.State != AgentRunLogStreamState.Open)
+        {
+            _logger.LogWarning("Agent run {RunId} log stream {StreamId} lost its active capture claim while retrying a fenced write", context.AgentRunId, streamId);
+            return null;
+        }
+
+        return refreshed.Metadata;
     }
 
     private async Task FailStreamAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, CaptureFailure failure, CancellationToken cancellationToken)
@@ -519,14 +572,9 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     _logger.LogWarning("Agent run {RunId} log stream {StreamId} capture health was rejected: {Problem}", context.AgentRunId, current.StreamId, problem.Code);
                     return;
                 }
-                var heads = await _logs.ListCaptureHeadsAsync(context.TeamId, context.AgentRunId, cancellationToken).ConfigureAwait(false);
-                var refreshed = heads.SingleOrDefault(value => value.Metadata.StreamId == current.StreamId);
-                if (refreshed == null || refreshed.WorkerFenceEpoch != context.WorkerFenceEpoch || refreshed.CaptureSessionId != context.CaptureSessionId || refreshed.Metadata.State != AgentRunLogStreamState.Open)
-                {
-                    _logger.LogWarning("Agent run {RunId} log stream {StreamId} capture health lost its active claim while retrying", context.AgentRunId, current.StreamId);
-                    return;
-                }
-                current = refreshed.Metadata;
+                var refreshed = await RefreshClaimedHeadAsync(context, current.StreamId, cancellationToken).ConfigureAwait(false);
+                if (refreshed == null) return;
+                current = refreshed;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
             catch (Exception exception)
