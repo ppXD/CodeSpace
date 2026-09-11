@@ -193,6 +193,15 @@ public enum CaptureGapReason
 
     /// <summary>The frame arrived and could not be read — undecodable bytes, a truncated frame, a torn record.</summary>
     FrameUnreadable,
+
+    /// <summary>
+    /// Durable storage never ANSWERED, for longer than the producer was willing to hold the span. Distinct from
+    /// <see cref="WriteRefused"/> because that one is a verdict — quota, admission, a refused destination — and the
+    /// same write would fail again, while this one would have been accepted minutes earlier or later. Distinct from
+    /// <see cref="BoundExceeded"/> because the source still HAS the bytes: a ceiling ended the wait, it did not stop
+    /// the capture from reading them. An operator triaging one column needs the outage named as an outage.
+    /// </summary>
+    RemoteUnavailable,
 }
 
 /// <summary>Whether the span is still missing. Filled exactly once, in one direction, and never at birth.</summary>

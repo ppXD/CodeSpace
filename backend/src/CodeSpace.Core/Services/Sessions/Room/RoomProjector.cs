@@ -183,7 +183,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var logRows = await (from stream in _db.AgentRunLogStream.AsNoTracking()
             join agent in _db.AgentRun.AsNoTracking() on new { stream.TeamId, AgentRunId = stream.AgentRunId } equals new { agent.TeamId, AgentRunId = agent.Id }
             where stream.TeamId == teamId && agent.WorkflowRunId.HasValue && runIds.Contains(agent.WorkflowRunId.Value)
-            select new RunAgentLogRow(agent.WorkflowRunId.GetValueOrDefault(), stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null))
+            select new RunAgentLogRow(agent.WorkflowRunId.GetValueOrDefault(), stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var reservations = await _db.BudgetReservation.AsNoTracking()
             .Where(row => row.TeamId == teamId && runIds.Contains(row.WorkflowRunId))
@@ -689,7 +689,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var rows = await _db.AgentRunLogStream.AsNoTracking()
             .Where(stream => stream.TeamId == teamId && agentIds.Contains(stream.AgentRunId))
-            .Select(stream => new AgentLogRow(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null))
+            .Select(stream => new AgentLogRow(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return rows.GroupBy(row => row.AgentRunId).ToDictionary(group => group.Key, group => SummarizeLogs(group.ToList()));
@@ -699,11 +699,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         var incomplete = rows.Where(row => row.State is not AgentRunLogStreamState.Open and not AgentRunLogStreamState.Completed).ToList();
         var open = rows.Count(row => row.State == AgentRunLogStreamState.Open);
+        // An Open stream whose remote is refusing segments is NOT finalizing: its head is frozen on purpose and its
+        // bytes are queued in the sandbox spool. Saying "finalizing" through a storage incident is the reading an
+        // operator acts on wrongly — it claims progress that is not happening and hides the one fact worth knowing.
+        var stalled = rows.Count(row => row.State == AgentRunLogStreamState.Open && row.RemoteStalled);
         var verified = rows.Count(row => row.State == AgentRunLogStreamState.Completed && row.SchemaVersion == 3 && row.HasManifestDigest);
         var captured = rows.Count(row => row.State == AgentRunLogStreamState.Completed) - verified;
-        var status = incomplete.Count > 0 ? RoomAgentLogStatus.Incomplete : open > 0 ? RoomAgentLogStatus.Finalizing : captured > 0 ? RoomAgentLogStatus.Captured : RoomAgentLogStatus.Verified;
+        var status = incomplete.Count > 0 ? RoomAgentLogStatus.Incomplete : stalled > 0 ? RoomAgentLogStatus.Stalled : open > 0 ? RoomAgentLogStatus.Finalizing : captured > 0 ? RoomAgentLogStatus.Captured : RoomAgentLogStatus.Verified;
         var details = incomplete.GroupBy(row => row.State).OrderBy(group => LogStateRank(group.Key)).Select(group => $"{group.Count()} {LogStateWord(group.Key)}").ToList();
-        if (open > 0) details.Add($"{open} finalizing");
+        if (stalled > 0) details.Add($"{stalled} held; storage unavailable");
+        if (open - stalled > 0) details.Add($"{open - stalled} finalizing");
         if (captured > 0) details.Add($"{captured} captured; integrity proof unavailable");
         if (verified > 0) details.Add($"{verified} integrity verified");
 
@@ -777,10 +782,10 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private static readonly IReadOnlyDictionary<Guid, RoomAgentLogSummary> EmptyAgentLogs = new Dictionary<Guid, RoomAgentLogSummary>();
     private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
 
-    internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest);
-    private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest)
+    internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled = false);
+    private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled)
     {
-        public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest);
+        public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest, RemoteStalled);
     }
     private sealed record TerminalEvidence(IReadOnlyDictionary<Guid, RoomAgentLogSummary> AgentLogs, RoomBudgetSummary? Budget);
     private readonly record struct BudgetLedgerRow(Guid RunId, string State, decimal ReservedUsd, decimal? SettledUsd, decimal? CapUsd, string Kind);

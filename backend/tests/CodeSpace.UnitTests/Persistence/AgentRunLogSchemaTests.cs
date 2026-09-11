@@ -27,7 +27,7 @@ public sealed class AgentRunLogSchemaTests
         {
             "AgentRunId", "CaptureFinalizedAt", "CaptureSessionId", "CaptureSource", "CaptureSourceBaseOffsetBytes", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
             "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt", "ManifestDigest",
-            "NextOffsetBytes", "NextSegmentOrdinal", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
+            "NextOffsetBytes", "NextSegmentOrdinal", "RemoteStallCode", "RemoteStallSince", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
             "SourceOffsetBytes", "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
         }.Order());
         entity.FindProperty(nameof(AgentRunLogStream.State))!.GetMaxLength().ShouldBe(24);
@@ -41,8 +41,8 @@ public sealed class AgentRunLogSchemaTests
         entity.GetCheckConstraints().Select(constraint => constraint.Name).ShouldBe(new[]
         {
             "ck_agent_run_log_stream_claim", "ck_agent_run_log_stream_digest", "ck_agent_run_log_stream_error", "ck_agent_run_log_stream_head", "ck_agent_run_log_stream_identity",
-            "ck_agent_run_log_stream_manifest", "ck_agent_run_log_stream_retention", "ck_agent_run_log_stream_state", "ck_agent_run_log_stream_terminal",
-            "ck_agent_run_log_stream_time",
+            "ck_agent_run_log_stream_manifest", "ck_agent_run_log_stream_remote_stall", "ck_agent_run_log_stream_retention", "ck_agent_run_log_stream_state",
+            "ck_agent_run_log_stream_terminal", "ck_agent_run_log_stream_time",
         }, ignoreOrder: true);
     }
 

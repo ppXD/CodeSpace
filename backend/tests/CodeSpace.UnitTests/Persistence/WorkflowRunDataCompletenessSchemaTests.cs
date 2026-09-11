@@ -79,7 +79,7 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
 
         // No 'Unknown' member, and that is the point: a reason column with an escape hatch collects every gap nobody
         // wanted to classify, and the plane is back to a silence with extra columns.
-        Enum.GetNames<CaptureGapReason>().ShouldBe(new[] { "BoundExceeded", "WriteRefused", "ReattachTorn", "FrameUnreadable" });
+        Enum.GetNames<CaptureGapReason>().ShouldBe(new[] { "BoundExceeded", "WriteRefused", "ReattachTorn", "FrameUnreadable", "RemoteUnavailable" });
         Enum.GetNames<CaptureGapRangeKind>().ShouldBe(new[] { "Ordinal", "ByteOffset", "Time", "Unbounded" });
         Enum.GetNames<CaptureGapResolution>().ShouldBe(new[] { "Open", "Recovered" });
 
@@ -332,6 +332,11 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         mentions.ShouldBe(new[]
         {
             "AgentRunExecutor.cs",
+
+            // The log-capture producer. A transient storage outage is HELD rather than dropped, and when the wait
+            // outgrows its ceiling the span the sandbox spool still has but nobody captured is recorded here as
+            // RemoteUnavailable. It states no facet and reads neither table.
+            "AgentRunLogCaptureBridge.cs",
         "AgentRunService.cs",
 
             "CodeSpaceDbContext.cs",

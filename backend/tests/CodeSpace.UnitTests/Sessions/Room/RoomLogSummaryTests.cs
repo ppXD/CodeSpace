@@ -50,6 +50,40 @@ public sealed class RoomLogSummaryTests
         summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Incomplete, 5, "5 streams · 1 corrupt · 1 capture failed · 1 unavailable · 1 truncated · 1 integrity verified"));
     }
 
-    private static RoomProjector.AgentLogRow Row(AgentRunLogStreamState state, int schemaVersion = 3, bool hasManifestDigest = false) =>
-        new(AgentId, state, schemaVersion, hasManifestDigest);
+    [Fact]
+    public void An_open_stream_whose_remote_is_refusing_segments_is_held_not_finalizing()
+    {
+        // "Finalizing" through a storage incident is the reading an operator acts on wrongly: it claims the stream is
+        // wrapping up when its head is frozen and its bytes are queued in the sandbox spool. The held count has to be
+        // the headline, or the one fact worth knowing is the one the Room never says.
+        var summary = RoomProjector.SummarizeLogs([
+            Row(AgentRunLogStreamState.Open, remoteStalled: true),
+            Row(AgentRunLogStreamState.Open),
+        ]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Stalled, 2, "2 streams · 1 held; storage unavailable · 1 finalizing"));
+    }
+
+    [Fact]
+    public void A_recovered_stall_leaves_no_trace_in_the_fold()
+    {
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true)]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Verified, 1, "1 stream · 1 integrity verified"));
+    }
+
+    [Fact]
+    public void A_terminal_stream_still_outranks_a_held_one()
+    {
+        var summary = RoomProjector.SummarizeLogs([
+            Row(AgentRunLogStreamState.Open, remoteStalled: true),
+            Row(AgentRunLogStreamState.CaptureFailed),
+        ]);
+
+        summary.Status.ShouldBe(RoomAgentLogStatus.Incomplete, "a span that is already lost outranks one that is only waiting");
+        summary.Detail.ShouldBe("2 streams · 1 capture failed · 1 held; storage unavailable");
+    }
+
+    private static RoomProjector.AgentLogRow Row(AgentRunLogStreamState state, int schemaVersion = 3, bool hasManifestDigest = false, bool remoteStalled = false) =>
+        new(AgentId, state, schemaVersion, hasManifestDigest, remoteStalled);
 }
