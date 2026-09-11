@@ -28,6 +28,11 @@ namespace CodeSpace.E2ETests.Agents;
 /// pass, surfaced loudly) when <c>CODESPACE_LLM_*</c> are absent or the <c>claude</c> CLI is not installed; FAILS on a
 /// partial secret config. POSIX-only. <c>[Category=RealModel]</c>, class token <c>RealModelSession</c> → runs only on
 /// the real-model lane.</para>
+///
+/// <para>A gateway FORMAT fault (the owner's Anthropic-compat layer mangling thinking-block continuation) buys ONE
+/// repair before that skip: a COLD RE-STAGE of the whole fixture, bounded by <c>RealModelFormatFaultRepair</c>.
+/// Deliberately NOT production's <c>ApplyFormatFaultMitigation</c> — it drops the restored conversation this arm
+/// exists to measure, so a mitigated retry would report a different experiment as this arm's verdict.</para>
 /// </summary>
 [Trait("Category", "RealModel")]
 [Trait("Surface", "RealCli")]
@@ -57,51 +62,73 @@ public sealed class RealModelSessionResumeE2ETests
         {
             // INFORMATIONAL: gates ONLY a CodeFault; a CapabilityMiss (model ran but didn't recall) is reported, an
             // incomplete run is non-gating infra. A fresh codeword + config per attempt — a stale transcript can't satisfy a retry.
-            await RealModelGate.AssessLiveAsync(Provider, async () =>
-            {
-                var codeword = "CODESPACE-" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
-                var env = Harness.ProjectToEnv(new ResolvedModelCredential { Provider = Provider, ApiKey = apiKey, BaseUrl = baseUrl });
-                var cwd = await ResolveRealPathAsync(NewWorkspace());
-
-                // ── FRESH run: tell the model a unique codeword + capture the real session id + the session transcript. ──
-                var freshConfig = NewDir();
-                var fresh = await RunClaudeAsync(Harness.BuildInvocation(Task(cwd, model!, env, $"Remember this codeword, I will ask you to recall it: {codeword}. Reply with only: ok.")), freshConfig);
-                var freshResult = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode, "");
-
-                if (freshResult.Status != AgentRunStatus.Succeeded || string.IsNullOrEmpty(freshResult.SessionId))
-                    throw new AgentExecutionInfraException($"the fresh claude run did not complete (status={freshResult.Status}, session={freshResult.SessionId ?? "null"}) — gateway/exec infra, not a recall verdict");
-
-                var sessionId = freshResult.SessionId!;
-                var binaryDir = Directory.GetDirectories(Path.Combine(freshConfig, "projects")).Select(Path.GetFileName).Single();
-                var transcript = await File.ReadAllTextAsync(Path.Combine(freshConfig, "projects", binaryDir!, $"{sessionId}.jsonl"));
-
-                // ── CONTINUE run: restore that transcript via the production harness + --resume, then ask for the codeword. ──
-                var continueTask = Task(cwd, model!, env, "What was the codeword I told you to remember? Reply with ONLY the codeword, nothing else.")
-                    with { ResumeFromSessionId = sessionId, RestoredTranscript = transcript };
-                var resumed = await RunClaudeAsync(Harness.BuildInvocation(continueTask), NewDir());
-                var resumedResult = Harness.BuildResult(ParseAll(resumed.Stdout), resumed.ExitCode, "");
-
-                if (resumedResult.Status != AgentRunStatus.Succeeded)
-                    throw new AgentExecutionInfraException($"the resumed claude run did not complete (status={resumedResult.Status}) — gateway/exec infra, not a recall verdict");
-
-                // The model recalled the codeword ⇒ it genuinely CONTINUED the restored conversation (the chain held live).
-                // Check ONLY the model's OWN reply events (assistant/completed), never the raw stream — verified against the
-                // real binary that `--resume` does NOT echo the loaded history to stdout, so a match can't be a false positive;
-                // restricting to reply events keeps that guarantee even if a future CLI version changed the stream shape.
-                var modelReply = string.Join("\n", ParseAll(resumed.Stdout)
-                    .Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.Completed or AgentEventKind.FinalSummary)
-                    .Select(e => e.Text));
-                var recalled = modelReply.Contains(codeword, StringComparison.OrdinalIgnoreCase);
-
-                return (recalled ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss,
-                    $"{Provider} '{model}': the resumed agent {(recalled ? "RECALLED" : "did NOT recall")} the codeword {codeword} from the restored conversation — the P3 continue chain {(recalled ? "held end-to-end against the live model" : "did not surface the prior context")}");
-            });
+            //
+            // A gateway FORMAT fault buys ONE COLD RE-STAGE (RealModelFormatFaultRepair owns the bound). NOT the
+            // production mitigation: this arm's SUBJECT is the warm resume, and ApplyFormatFaultMitigation drops the
+            // very transcript under test (ResumeFromSessionId + RestoredTranscript = null), so a mitigated retry would
+            // measure something else and report it as this arm's verdict. The whole drive below already stages itself
+            // COLD per call — fresh codeword, fresh workspace, fresh config dirs, fresh session — so re-driving it is
+            // a faithful second measurement of the SAME configuration, and it never re-sends the mangled block
+            // (the new conversation has its own transcript). This arm's gate does not retry infra on its own, so the
+            // re-stage is the only attempt the format fault gets.
+            await RealModelGate.AssessLiveAsync(Provider, () => RealModelFormatFaultRepair.WithColdRestageAsync(() => DriveColdStagedResumeAsync(baseUrl!, apiKey!, model!)));
         }
         finally
         {
             foreach (var dir in _tempDirs)
                 try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
+    }
+
+    /// <summary>
+    /// One COLD-staged measurement of the continue chain: a fresh codeword told to a fresh conversation, then that
+    /// conversation's captured session id + transcript restored into a second run that is asked to recall it. Every
+    /// resource is minted per call (codeword, workspace, both config dirs), which is what makes this safe to re-drive
+    /// as the format-fault repair — a re-stage measures the same configuration, never a stale transcript.
+    ///
+    /// <para>Both infra exits carry the harness's own folded error text. That text is the ONLY carrier of the
+    /// gateway's <c>Content block is not a thinking block</c> message, and <c>RealModelFormatFaultRepair</c> reads
+    /// production's marker vocabulary off the thrown exception to decide whether a repair is owed — a status-only
+    /// message classified as unrepairable generic infra and cost the whole measurement.</para>
+    /// </summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> DriveColdStagedResumeAsync(string baseUrl, string apiKey, string model)
+    {
+        var codeword = "CODESPACE-" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+        var env = Harness.ProjectToEnv(new ResolvedModelCredential { Provider = Provider, ApiKey = apiKey, BaseUrl = baseUrl });
+        var cwd = await ResolveRealPathAsync(NewWorkspace());
+
+        // ── FRESH run: tell the model a unique codeword + capture the real session id + the session transcript. ──
+        var freshConfig = NewDir();
+        var fresh = await RunClaudeAsync(Harness.BuildInvocation(Task(cwd, model, env, $"Remember this codeword, I will ask you to recall it: {codeword}. Reply with only: ok.")), freshConfig);
+        var freshResult = Harness.BuildResult(ParseAll(fresh.Stdout), fresh.ExitCode, "");
+
+        if (freshResult.Status != AgentRunStatus.Succeeded || string.IsNullOrEmpty(freshResult.SessionId))
+            throw new AgentExecutionInfraException($"the fresh claude run did not complete (status={freshResult.Status}, session={freshResult.SessionId ?? "null"}, error={freshResult.Error ?? "none"}) — gateway/exec infra, not a recall verdict");
+
+        var sessionId = freshResult.SessionId!;
+        var binaryDir = Directory.GetDirectories(Path.Combine(freshConfig, "projects")).Select(Path.GetFileName).Single();
+        var transcript = await File.ReadAllTextAsync(Path.Combine(freshConfig, "projects", binaryDir!, $"{sessionId}.jsonl"));
+
+        // ── CONTINUE run: restore that transcript via the production harness + --resume, then ask for the codeword. ──
+        var continueTask = Task(cwd, model, env, "What was the codeword I told you to remember? Reply with ONLY the codeword, nothing else.")
+            with { ResumeFromSessionId = sessionId, RestoredTranscript = transcript };
+        var resumed = await RunClaudeAsync(Harness.BuildInvocation(continueTask), NewDir());
+        var resumedResult = Harness.BuildResult(ParseAll(resumed.Stdout), resumed.ExitCode, "");
+
+        if (resumedResult.Status != AgentRunStatus.Succeeded)
+            throw new AgentExecutionInfraException($"the resumed claude run did not complete (status={resumedResult.Status}, error={resumedResult.Error ?? "none"}) — gateway/exec infra, not a recall verdict");
+
+        // The model recalled the codeword ⇒ it genuinely CONTINUED the restored conversation (the chain held live).
+        // Check ONLY the model's OWN reply events (assistant/completed), never the raw stream — verified against the
+        // real binary that `--resume` does NOT echo the loaded history to stdout, so a match can't be a false positive;
+        // restricting to reply events keeps that guarantee even if a future CLI version changed the stream shape.
+        var modelReply = string.Join("\n", ParseAll(resumed.Stdout)
+            .Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.Completed or AgentEventKind.FinalSummary)
+            .Select(e => e.Text));
+        var recalled = modelReply.Contains(codeword, StringComparison.OrdinalIgnoreCase);
+
+        return (recalled ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss,
+            $"{Provider} '{model}': the resumed agent {(recalled ? "RECALLED" : "did NOT recall")} the codeword {codeword} from the restored conversation — the P3 continue chain {(recalled ? "held end-to-end against the live model" : "did not surface the prior context")}");
     }
 
     private static AgentTask Task(string cwd, string model, IReadOnlyDictionary<string, string> env, string goal) => new()

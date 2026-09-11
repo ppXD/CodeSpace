@@ -55,11 +55,15 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
         Environment.SetEnvironmentVariable(InLoopAcceptanceHook.MaxBlocksEnvVar, "0");
         try
         {
-            await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
+            // A gateway FORMAT fault buys ONE repaired re-dispatch (RealModelFormatFaultRepair owns the bound): this
+            // arm AUTHORS the faulting run's task, so production's own mitigation reaches the model that faulted —
+            // task.Environment is merged into the sandbox env with the task's entry winning, so MAX_THINKING_TOKENS=0
+            // reaches the CLI. Every other infra class still skips on the first attempt.
+            await RealModelGate.AssessLiveWholeLoopAsync(Provider, () => RealModelFormatFaultRepair.WithMitigatedRetryAsync(async repair =>
             {
                 using var attempt = new CancellationTokenSource(RealModelGate.WholeLoopAttemptDeadline() - TimeSpan.FromSeconds(30));
-                return await RunCaseAsync(new LiveCase(baseUrl!.TrimEnd('/'), apiKey!, model!), attempt.Token);
-            });
+                return await RunCaseAsync(new LiveCase(baseUrl!.TrimEnd('/'), apiKey!, model!), repair, attempt.Token);
+            }));
         }
         finally
         {
@@ -80,7 +84,8 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
     internal static bool MeetsWitness(Witness witness) =>
         witness.Result.Status == AgentRunStatus.Succeeded && witness.Result.AcceptancePassed is true && witness.Result.ReviseRounds == 1 && witness.NativeStarts >= 2 && witness.NativeTools > 0 && witness.InitialWasObserved && !string.IsNullOrWhiteSpace(witness.Expected) && witness.Actual == witness.Expected && witness.Result.TokenUsage is { OutputTokens: > 0, InputTokens: >= 0 } && !string.IsNullOrWhiteSpace(witness.Result.SessionId) && !string.IsNullOrWhiteSpace(witness.Result.Model);
 
-    private async Task<(RealModelOutcome Outcome, string Note)> RunCaseAsync(LiveCase live, CancellationToken cancellationToken)
+    /// <summary><paramref name="repair"/> is the format-fault transform this attempt's task is dispatched under — identity on the first attempt, production's own mitigation on the one repaired re-dispatch.</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> RunCaseAsync(LiveCase live, Func<AgentTask, AgentTask> repair, CancellationToken cancellationToken)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, inProcessPool: false);
         var root = Path.Combine(Path.GetTempPath(), "codespace-live-revise-" + Guid.NewGuid().ToString("N"));
@@ -96,14 +101,14 @@ public sealed class RealModelReviseEvidenceE2ETests(PostgresFixture fixture)
         try
         {
             var credentialId = await SeedCredentialAsync(teamId, live, cancellationToken);
-            var task = new AgentTask
+            var task = repair(new AgentTask
             {
                 Goal = "This is a two-stage correction exercise. On your initial invocation, create payload.txt containing exactly INITIAL, then finish. Do not inspect or run validators ahead of that first submission. If the server later requests a revision with validator feedback, follow that correction and replace payload.txt as requested. Never modify a validator or its observation files.",
                 Harness = "claude-code", Model = live.Model, ModelCredentialId = credentialId, WorkspaceDirectory = workspace,
                 Autonomy = AgentAutonomyLevel.Trusted, Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted),
                 Acceptance = new SupervisorAcceptanceSpec { Command = ["sh", oraclePath] }, MaxReviseRounds = 1,
                 TimeoutSeconds = 180, EnableMcpEndpoint = false, PushProducedBranch = false,
-            };
+            });
             task.Goal.ShouldNotContain(expected);
             Guid runId;
             using (var admission = fixture.BeginScopeAs(userId, teamId))
