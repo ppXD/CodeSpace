@@ -1,3 +1,7 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
 namespace CodeSpace.Messages.Failures;
 
 /// <summary>
@@ -112,4 +116,17 @@ public static class FailureCodes
 
     /// <summary>A run's model credential could not be brokered on a deployment that requires confinement, so the run is refused rather than handed the tenant's long-lived provider key. Remedy: make the worker able to bind a broker listener, use a harness that honours a base-URL override, or store an upstream endpoint on the credential — a retry on the same host cannot help.</summary>
     public const string ModelCredentialBrokerUnavailable = "model_credential_broker_unavailable";
+
+    /// <summary>
+    /// Every code declared above, computed by reflection so it can never drift from the constants themselves. For a
+    /// caller that must treat ANY coded exit as this codebase's own diagnosis of what went wrong — never a downstream
+    /// heuristic's guess — membership here is the check: see <c>RealModelRunClassifier.IsGatewayInfra</c>, which
+    /// reserves every code in this set as "our fault, not an infra skip" even when the failure's own message happens
+    /// to contain gateway-looking vocabulary.
+    /// </summary>
+    public static readonly IReadOnlySet<string> All = typeof(FailureCodes)
+        .GetFields(BindingFlags.Public | BindingFlags.Static)
+        .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+        .Select(f => (string)f.GetRawConstantValue()!)
+        .ToHashSet(StringComparer.Ordinal);
 }

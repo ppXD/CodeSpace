@@ -77,14 +77,24 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// provider API, and without this the relay would spend the tenant's key on any path a compromised CLI appended
     /// — file uploads, batches, an account-management endpoint the key also opens.
     ///
-    /// <para>A provider NOT named here relays unrestricted, deliberately: an operator gateway's path surface is
-    /// theirs, not ours to enumerate, and refusing what we cannot enumerate would break the run rather than narrow
-    /// it. The bearer + the lease remain the guarantee for those; this table narrows the two APIs we do know.</para>
+    /// <para><c>OpenRouter</c> shares <see cref="OpenAiRelayPaths"/> rather than getting its own row: the only
+    /// harness that can carry an OpenRouter credential is <c>CodexHarness</c>
+    /// (<c>ClaudeCodeHarness.SupportedProviders</c> has no OpenRouter entry), and Codex drives every non-default
+    /// provider — OpenRouter included — through the SAME <c>AppendModelProviderConfig</c> Responses-wire override it
+    /// uses for a Custom OpenAI-compatible gateway. The relayed path this proxy ever sees is therefore
+    /// <c>/v1/responses</c> (or <c>/v1/models</c> at CLI start-up) regardless of which upstream host the credential
+    /// resolves to — OpenRouter's own REST shape (<c>/api/v1/chat/completions</c>) never reaches the relay, because
+    /// <see cref="NormalizeUpstreamRoot"/> already folds the <c>/api</c> segment into the upstream ROOT rather than
+    /// the per-request path. A provider NOT named here relays unrestricted, deliberately: an operator gateway's path
+    /// surface is theirs, not ours to enumerate, and refusing what we cannot enumerate would break the run rather
+    /// than narrow it. The bearer + the lease remain the guarantee for those; this table narrows the APIs we do
+    /// know the shape of.</para>
     /// </summary>
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> RelayPathsByProvider = new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
     {
         ["Anthropic"] = AnthropicRelayPaths,
         ["OpenAI"] = OpenAiRelayPaths,
+        ["OpenRouter"] = OpenAiRelayPaths,
     };
 
     private readonly ConcurrentDictionary<Guid, Lease> _byRun = new();

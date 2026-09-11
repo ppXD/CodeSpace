@@ -35,6 +35,8 @@ public sealed class RealModelRunClassifierTests
     [InlineData("executor-error", "AgentOperatingContract.Compose threw: value cannot be null", false)]   // the persona channel threw
     [InlineData("executor-error", "some failure mentioning a 429 in passing", false)]         // executor-error WINS over a gateway-looking word
     [InlineData("reattach-error", "API Error: 503 upstream unavailable", false)]              // reattach-error reserves too — WINS even over a genuine gateway marker, same as executor-error above
+    [InlineData("model_credential_broker_unavailable", "API Error: 503 upstream unavailable", false)]   // a coded IFailure exit (FailureCodes.All) reserves too — the broker's own outage is OUR fault, never a gateway skip, however gateway-shaped its text
+    [InlineData("artifact_content_unavailable", "claude exited with code 1 — stderr: Error: read ECONNRESET", false)]   // ditto for a coded exit whose text carries a dropped-connection marker
     [InlineData("non-zero-exit", "claude exited with code 1", false)]                          // an unknown CLI failure defaults to a code fault (never a silent skip)
     [InlineData("non-zero-exit", "API Error: some shape nobody has classified yet", false)]     // the PINNED format marker is infra — a bare "API Error:" prefix is NOT a blanket skip
     // ── The measurement-honesty rows: a GENUINE code fault whose text merely CONTAINS a gateway-looking word. Each of

@@ -824,6 +824,11 @@ public sealed partial class LocalProcessRunner
     ///
     /// <para>A network-severed run (no netns, no shared network) resolves to loopback and cannot reach the broker —
     /// nor could it reach the provider directly, so brokerage neither adds nor removes anything for it.</para>
+    ///
+    /// <para><see cref="MentionsModelBrokerHost(SandboxSpec)"/> scans only <see cref="SandboxSpec.Command"/>,
+    /// <see cref="SandboxSpec.Args"/> and <see cref="SandboxSpec.Environment"/> — a harness that instead wrote the
+    /// broker base URL into <see cref="SandboxSpec.ConfigHomeFiles"/> would ship the token unresolved into that file,
+    /// so any such projection must route the base URL through the command, argv, or env carriers this pass covers.</para>
     /// </summary>
     internal static SandboxSpec ResolveModelBrokerHost(SandboxSpec spec, string? gatewayIp)
     {

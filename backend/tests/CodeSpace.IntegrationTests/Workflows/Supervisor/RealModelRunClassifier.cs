@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -81,9 +82,16 @@ public static class RealModelRunClassifier
     {
         if (run.Status == AgentRunStatus.TimedOut) return true;   // the model/gateway was too slow — infra, never a code fault
 
-        // OUR code faulted building/attaching the run (the operating-contract threw, the harness invocation broke) — a
-        // real MISS, NOT infra. Reserved even if the message happens to contain a gateway-looking token.
-        if (ExitReasonOf(run) is "executor-error" or "reattach-error") return false;
+        var exitReason = ExitReasonOf(run);
+
+        // OUR code faulted building/attaching the run — the operating-contract threw, the harness invocation broke,
+        // or a launch threw something that DECLARES its own failure identity (IFailure) and now lands under that
+        // identity's code (AgentRunExecutor.ExecutorExitReason) instead of the old blanket "executor-error". Any of
+        // the three is a real MISS, NOT infra. Reserved even if the message happens to contain a gateway-looking
+        // token: a coded exit is this codebase's own diagnosis of what went wrong (a broker outage, a budget cap,
+        // an unreadable artifact…), so it must never fall through to the heuristics below and be reread as weather
+        // just because its own text mentions a status code or a transport error.
+        if (exitReason is "executor-error" or "reattach-error" || FailureCodes.All.Contains(exitReason)) return false;
 
         var error = run.Error ?? "";
 
@@ -94,10 +102,11 @@ public static class RealModelRunClassifier
         if (AgentRetryCauses.Classify(error) == AgentRetryCauses.GatewayFormatFault) return true;
 
         // DEFENSIVE: reads the same anchored slot the engine lane gates on, but unreachable here today — an
-        // AgentRun's own LlmApiException never survives to this string. The executor's generic catch folds ANY
-        // exception (this one included) into Failed/exitReason=executor-error, which the check above already returns
-        // false for before Error is ever read. Kept so this arm still gates if a future path ever lets that
-        // engine-written slot reach a run's Error the way it already reaches a supervisor node-failed payload.
+        // AgentRun's own LlmApiException never survives to this string. LlmApiException is not an IFailure, so the
+        // executor's generic catch still folds it into Failed/exitReason=executor-error, which the check above
+        // already returns false for before Error is ever read. Kept so this arm still gates if a future path ever
+        // lets that engine-written slot reach a run's Error the way it already reaches a supervisor node-failed
+        // payload.
         if (RealModelGate.IsGatewayInfraError(error)) return true;
 
         if (IsInfraAnnouncedStatus(error)) return true;
