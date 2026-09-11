@@ -11,8 +11,10 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.AliyunOss;
 /// A write is staged, verified, then published with a server-side copy guarded by <c>x-oss-forbid-overwrite</c>. That
 /// mirrors the local driver's temp-file-then-rename contract: unverified bytes never occupy the destination key, so a
 /// checksum failure or a crash mid-upload cannot wedge a content-addressed key with content that does not match it.
-/// The cost is a server-side copy per write, which caps a single object at the OSS simple-copy limit (5 GiB); artifact
-/// payloads here are run logs and node outputs, orders of magnitude below it.
+/// The cost is a server-side copy per write, which caps a single object at the OSS simple-copy limit
+/// (<see cref="SimpleCopyCeilingBytes"/>); artifact payloads here are run logs and node outputs, orders of magnitude
+/// below it. An object ABOVE that ceiling is refused up front rather than discovered at the copy, because this driver
+/// has no multipart path to fall back to.
 ///
 /// REQUIRES A VERSIONING-DISABLED BUCKET, and says so rather than failing quietly on one. The driver discards its
 /// staging object with a plain DELETE, which on a versioning-enabled (or suspended) bucket inserts a delete marker and
@@ -29,6 +31,18 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
 
     /// <summary>Length of a staging key's one trailing segment: a GUID in <c>N</c> format. Pinned because it is half of what makes a staging key unable to name a published object.</summary>
     internal const int StagingNonceLength = 32;
+
+    /// <summary>
+    /// The largest object this driver's staged publish can place: the OSS simple-copy ceiling its
+    /// <c>CopyObject</c> publish inherits, which is also the ceiling of the single <c>PutObject</c> that stages it.
+    ///
+    /// <para>A HARD limit rather than a hint, because there is nothing to fall back to — the driver speaks
+    /// Put/Copy/Get/Head/Delete and has no multipart path at all. Raising it does not buy a larger object; it only
+    /// moves where the refusal comes from, and the versions of that refusal are much worse than this one: the stage
+    /// uploads (and is billed for) the whole payload before the copy refuses it, or the copy is refused on a status
+    /// whose provider-neutral meaning depends on whatever OSS happened to answer.</para>
+    /// </summary>
+    internal const long SimpleCopyCeilingBytes = 5L * 1024 * 1024 * 1024;
 
     private static readonly SearchValues<char> StagingNonceCharacters = SearchValues.Create("0123456789abcdef");
 
@@ -60,6 +74,7 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
         if (invalid != null) return ArtifactStoragePutResult.Failed(invalid);
         if (!_target.TryResolveKey(request.ObjectKey, ObjectArea, out var key)) return ArtifactStoragePutResult.Failed(InvalidKey(request.ObjectKey));
         if (!TryResolveContentLength(request, out var length, out var lengthError)) return ArtifactStoragePutResult.Failed(lengthError!);
+        if (length > SimpleCopyCeilingBytes) return ArtifactStoragePutResult.Failed(TooLargeToPublish(request.ObjectKey, length));
 
         var staging = request.StagingObjectKey ?? MintStagingObjectKey();
         if (!IsOwnStagingKey(staging)) return ArtifactStoragePutResult.Failed(ForeignStagingKey(staging));
@@ -379,6 +394,15 @@ internal sealed partial class AliyunOssArtifactStorageDriver : IArtifactStorageD
 
         return nonce.Length == StagingNonceLength && !nonce.ContainsAnyExcept(StagingNonceCharacters);
     }
+
+    /// <summary>
+    /// Says the destination cannot hold an object this large, BEFORE a byte is staged. <c>Unsupported</c> rather than
+    /// a provider failure because it is a fact about this driver's one publish mechanism and no repair or retry
+    /// changes it — and refusing here is what stops the alternative, which is paying to upload the whole payload and
+    /// then being told the copy that would publish it is impossible.
+    /// </summary>
+    private static ArtifactStorageError TooLargeToPublish(string objectKey, long length) => Failure(ArtifactStorageErrorCode.Unsupported,
+        $"Object '{objectKey}' is {length} bytes, above the {SimpleCopyCeilingBytes}-byte simple-copy ceiling this Aliyun OSS destination publishes through; it has no multipart path.");
 
     private static ArtifactStorageError ForeignStagingKey(string objectKey) =>
         Failure(ArtifactStorageErrorCode.InvalidRequest, $"Staging key '{objectKey}' is not one this Aliyun OSS destination minted, so it must not be written to or deleted.");

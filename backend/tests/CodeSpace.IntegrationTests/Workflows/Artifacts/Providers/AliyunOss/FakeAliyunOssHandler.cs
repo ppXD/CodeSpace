@@ -43,6 +43,13 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
 
     public List<string> Authorizations { get; } = [];
     public List<string> Calls { get; } = [];
+
+    /// <summary>
+    /// Every server-side copy this endpoint was asked for, as <c>source -&gt; destination</c>. On the wire a copy and a
+    /// plain upload are the same verb at the same key, so a test that has to tell a publish from a direct re-upload
+    /// reads this rather than <see cref="Calls"/>.
+    /// </summary>
+    public List<string> Copies { get; } = [];
     public List<string?> Rfc822Dates { get; } = [];
     public TaskCompletionSource RequestStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -61,6 +68,13 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
     /// </summary>
     public string? ListGrantedOnlyForPrefix { get; set; }
     public bool BlockEveryRequest { get; set; }
+
+    /// <summary>
+    /// The status and OSS <c>&lt;Code&gt;</c> token the server-side copy answers instead of performing the publish,
+    /// with the staging upload left exactly where it landed — how the real service refuses to copy an object above its
+    /// own simple-copy ceiling, which is a refusal no client-side length check can be the only guard against.
+    /// </summary>
+    public (HttpStatusCode Status, string Code)? CopyRejection { get; set; }
 
     /// <summary>Empties the bucket without touching the recorded calls — the shape of an object deleted outside CodeSpace.</summary>
     public void EmptyBucket() => _objects.Clear();
@@ -178,7 +192,9 @@ public sealed class FakeAliyunOssHandler : HttpMessageHandler
 
         lock (_gate)
         {
+            Copies.Add($"{sourceKey} -> {destinationKey}");
             if (!_objects.TryGetValue(sourceKey, out var stored)) return Error(HttpStatusCode.NotFound, "NoSuchKey");
+            if (CopyRejection is { } rejection) return Error(rejection.Status, rejection.Code);
             if (Forbids(request) && _objects.ContainsKey(destinationKey)) return Error(HttpStatusCode.Conflict, "FileAlreadyExists");
 
             // A copy writes a new object version, so the destination never inherits the staging upload's version id.

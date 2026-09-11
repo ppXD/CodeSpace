@@ -22,7 +22,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Artifacts;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ArtifactCasTransferResumerTests
+public sealed partial class ArtifactCasTransferResumerTests
 {
     private const int Batch = 200;
 
@@ -780,6 +780,20 @@ public sealed class ArtifactCasTransferResumerTests
 
         public ConcurrentDictionary<string, byte[]> Objects { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// Every object this destination ever PUBLISHED, the dead worker's own server-side copy included. A resumer
+        /// holds no bytes, so the only correct value after a recovery is the one the crash left behind — which is why
+        /// the pre-crash copy is recorded here rather than the final object simply being planted.
+        /// </summary>
+        public ConcurrentBag<string> Publishes { get; } = [];
+
+        /// <summary>The copy the killed worker had already finished: the bytes at the final key, and the publish that put them there on the record.</summary>
+        public void Publish(string objectKey, byte[] bytes)
+        {
+            Objects[objectKey] = bytes;
+            Publishes.Add(objectKey);
+        }
+
         /// <summary>Every key a reclaim was ATTEMPTED for, refusals included — so a test can tell "the sweep did not ask" from "the sweep asked and was told no".</summary>
         public ConcurrentBag<string> DiscardedStaging { get; } = [];
 
@@ -826,8 +840,13 @@ public sealed class ArtifactCasTransferResumerTests
             return ValueTask.FromResult(ArtifactStorageDeleteResult.Removed());
         }
 
-        public ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken) =>
+        /// <summary>Recorded before it throws, so a recovery that re-published is a COUNT a test can assert on rather than an exception the sweep's own recoverable-fault arm would swallow into an inconclusive pass.</summary>
+        public ValueTask<ArtifactStoragePutResult> PutAsync(ArtifactStoragePutRequest request, CancellationToken cancellationToken)
+        {
+            storage.Publishes.Add(request.ObjectKey);
+
             throw new InvalidOperationException("The resumer holds no content stream and must never upload.");
+        }
 
         public ValueTask<ArtifactStorageHeadResult> HeadAsync(ArtifactStorageHeadRequest request, CancellationToken cancellationToken)
         {
