@@ -56,4 +56,17 @@ public sealed record SandboxConfinement
     /// <c>AgentAutonomyPolicy.DirectModelCredentialCaveat</c> exists to say out loud.</para>
     /// </summary>
     public bool? ModelCredentialBrokered { get; init; }
+
+    /// <summary>
+    /// Whether this run's BROKERED model credential is no longer held by any live worker — stamped by a re-attach,
+    /// because the lease lives in the memory of the worker that minted it and dies with that process. The detached
+    /// CLI is still pointed at a broker port that no longer answers, so from the moment this is true the run has no
+    /// model access at all.
+    ///
+    /// <para>The consequence of the same design that makes revocation real, recorded rather than left to be
+    /// diagnosed: a run that stalls after a worker restart looks exactly like a provider outage otherwise. False (the
+    /// default) for every run whose launch is still being observed by the worker that opened its lease, and for every
+    /// unbrokered run — those have nothing to lose here, and say so by saying nothing.</para>
+    /// </summary>
+    public bool ModelCredentialLeaseLost { get; init; }
 }

@@ -28,6 +28,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -584,7 +585,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -601,6 +602,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    /// <summary>The exit reason a launch that threw something with no declared failure identity lands under — every throw that is not an <see cref="IFailure"/>.</summary>
+    public const string GenericExecutorExitReason = "executor-error";
+
+    /// <summary>
+    /// The exit reason for a launch the generic catch landed. A throw that DECLARES its failure identity
+    /// (<see cref="IFailure"/>) lands under that identity's own code, so a reader — and the classifier — sees which
+    /// wall the run hit rather than the single word every executor throw used to collapse to. Generic by
+    /// construction: nothing here enumerates codes, so a new failure type surfaces without touching this line.
+    /// </summary>
+    internal static string ExecutorExitReason(Exception exception) => exception is IFailure failure ? failure.Code : GenericExecutorExitReason;
 
     public Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken)
     {
@@ -647,6 +659,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var harness = _harnesses.Resolve((await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false)).HarnessKind);
 
         if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return;
+
+        // Before anything that can throw or return: a brokered run re-attached HERE has already lost its model
+        // access, and the record has to say so while this pass is still the one holding the fence.
+        await RecordLostBrokeredCredentialAsync(owner, run, handle, cancellationToken).ConfigureAwait(false);
 
         // Heartbeat spans the whole re-tail (its own DI scope, like ExecuteAsync) so the lease stays fresh and the
         // reconciler doesn't reclaim the run out from under this re-attach.
@@ -2984,14 +3000,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <see cref="IBrokeredModelCredentialProjector"/>), or a broker that declines. A THROW from the broker is
     /// swallowed to null rather than failing the run here: whether an unbrokered credential may proceed is one
     /// decision, taken in one place, by the fail-closed guard above.
+    ///
+    /// <para>The two STRUCTURAL reasons — no broker, an unbrokerable harness — are stated at Information rather than
+    /// passed over in silence: they decide whether this run is holding the tenant's long-lived key, and a deployment
+    /// that believed itself brokered has no other way to find out that every run took the direct path.</para>
     /// </summary>
     private async Task<BrokeredModelCredential?> OpenBrokeredCredentialAsync(IAgentHarness harness, ResolvedModelCredential? credential, Guid teamId, AgentRunOwnerToken? owner, CancellationToken cancellationToken)
     {
-        if (_credentialBroker is null || owner is null || credential is null || harness is not IBrokeredModelCredentialProjector) return null;
+        if (owner is null || credential is null) return null;   // a redaction-only re-resolve, or no credential to front at all
+
+        if (_credentialBroker is not { } broker) { LogUnbrokered(owner.RunId, "no model-credential broker is registered on this worker"); return null; }
+        if (harness is not IBrokeredModelCredentialProjector) { LogUnbrokered(owner.RunId, $"the {harness.Kind} harness cannot be re-pointed at a broker"); return null; }
 
         try
         {
-            return await _credentialBroker.OpenAsync(
+            return await broker.OpenAsync(
                 new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Upstream = credential, Ttl = Credentials.ModelCredentialLease.Ttl },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -3001,6 +3024,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return null;
         }
     }
+
+    /// <summary>Say WHY a run is taking the direct-credential path. Information, not Debug: it is the fact that decides what the run is holding, and a deployment reads its own posture off this line.</summary>
+    private void LogUnbrokered(Guid runId, string reason) =>
+        _logger.LogInformation("Agent run {RunId}: model credential NOT brokered — {Reason}; the deployment's confinement policy decides whether the key may be injected directly", runId, reason);
 
     /// <summary>The env the child actually receives: the BROKERED projection when a lease opened (base URL + run token, never the key), else the harness's direct projection, else nothing to inject at all.</summary>
     private static IReadOnlyDictionary<string, string> ProjectCredentialEnv(IAgentHarness harness, ResolvedModelCredential? credential, BrokeredModelCredential? brokered)
@@ -3478,6 +3505,37 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private static SandboxConfinement? WithCredentialPosture(SandboxConfinement? confinement, bool? brokered) =>
         confinement is null ? null : confinement with { ModelCredentialBrokered = brokered };
+
+    /// <summary>
+    /// Stamp the run's posture with what a re-attach has just made true: its BROKERED model credential is gone. The
+    /// lease lived in the launching worker's memory — that is what makes revocation real — so this pass re-opens
+    /// none, and the detached CLI still holds a base URL naming a port that died with that process. The run's model
+    /// access therefore ended THERE, and every model call it makes from here on fails to connect.
+    ///
+    /// <para>Said at WARNING as well as recorded, because that failure reads as a provider outage to whoever sees it
+    /// first. Merged onto what the launch recorded so the sandbox posture beside it survives; a run that recorded no
+    /// posture at all (an older handle stamped none) gets the log line only — inventing a confinement outcome to
+    /// carry this one bit would make the record claim something about the sandbox nobody observed.</para>
+    /// </summary>
+    private async Task RecordLostBrokeredCredentialAsync(AgentRunOwnerToken owner, AgentRun run, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        if (handle.ModelBrokerRunToken is null) return;
+
+        _logger.LogWarning("Agent run {RunId}: the brokered model lease is not held by this worker; the run's model access ended with the minting worker, so its detached agent cannot reach a model", owner.RunId);
+
+        if (DeserializeConfinement(run.SandboxConfinementJson) is not { } recorded) return;
+
+        await RecordConfinementAsync(owner, recorded with { ModelCredentialLeaseLost = true }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The posture a run's launch recorded, or null when it recorded none / the row cannot be read — a record nobody can parse is treated exactly like a record that was never written.</summary>
+    private static SandboxConfinement? DeserializeConfinement(string? confinementJson)
+    {
+        if (confinementJson is not { Length: > 0 } json) return null;
+
+        try { return JsonSerializer.Deserialize<SandboxConfinement>(json, AgentJson.Options); }
+        catch (JsonException) { return null; }
+    }
 
     /// <summary>
     /// Launch the run to its durable spool, persist the returned handle (keyed by the run id) BEFORE
