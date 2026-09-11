@@ -184,10 +184,10 @@ public sealed partial class ArtifactCasRuntimeCoordinator
             claim.Id, claim.TeamId, staging, claim.ProfileRevisionId);
     }
 
-    /// <summary>Says the bytes are still there and still named, which is the whole point of the record: the resume proceeds, and a later pass re-asks the destination once this claim's lease lapses.</summary>
+    /// <summary>Says the bytes are still there and still named. The key stays recorded, and a later pass reaches it only while the row remains non-terminal — 0226 gates the clearing write on a live lease and forces every terminal state to have released it, so a pass that also settles the transfer leaves the key orphaned for good.</summary>
     private void LeftStaged(IntentSnapshot claim, string staging, ArtifactStorageErrorCode? code) =>
         _logger.LogWarning(
-            "Abandoned transfer {IntentId} for team {TeamId} still has a staging object at {TemporaryObjectKey} that this pass could not discard ({Problem}); the row keeps naming it, so a later pass will re-ask",
+            "Abandoned transfer {IntentId} for team {TeamId} still has a staging object at {TemporaryObjectKey} that this pass could not discard ({Problem}); the key stays recorded, and a later pass reaches it only while the row remains non-terminal",
             claim.Id, claim.TeamId, staging, code);
 
     /// <summary>

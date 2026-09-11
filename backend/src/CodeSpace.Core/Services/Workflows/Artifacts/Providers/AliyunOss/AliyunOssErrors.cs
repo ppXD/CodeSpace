@@ -84,6 +84,7 @@ internal static class AliyunOssErrors
         HttpStatusCode.NotFound => ArtifactStorageErrorCode.Missing,
         HttpStatusCode.Conflict => ArtifactStorageErrorCode.AlreadyExists,
         HttpStatusCode.PreconditionFailed or HttpStatusCode.NotModified => ArtifactStorageErrorCode.ConditionNotMet,
+        HttpStatusCode.BadRequest when providerCode == "EntityTooLarge" => ArtifactStorageErrorCode.Unsupported,
         HttpStatusCode.RequestedRangeNotSatisfiable or HttpStatusCode.BadRequest => ArtifactStorageErrorCode.InvalidRequest,
         HttpStatusCode.Unauthorized => ArtifactStorageErrorCode.Unauthorized,
         HttpStatusCode.Forbidden => providerCode != null && CredentialCodes.Contains(providerCode) ? ArtifactStorageErrorCode.Unauthorized : ArtifactStorageErrorCode.Forbidden,
