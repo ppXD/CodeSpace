@@ -83,6 +83,12 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
             stream.CaptureSourceBaseOffsetBytes = stream.SourceOffsetBytes;
             stream.CaptureFinalizedAt = null;
         }
+        // The claim is where a stall marker DIES. It is one producer's statement about a segment it was holding in
+        // memory, and the producer that held it is the one this claim is superseding — so an inherited marker would
+        // make the Room report "held; storage unavailable" forever for a stream this session is capturing healthily.
+        // The in-memory clear only covers a recovery inside one session; a restart or a reclaim has no memory to clear.
+        stream.RemoteStallSince = null;
+        stream.RemoteStallCode = null;
         stream.Revision++;
         stream.LastModifiedAt = _clock.GetUtcNow();
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

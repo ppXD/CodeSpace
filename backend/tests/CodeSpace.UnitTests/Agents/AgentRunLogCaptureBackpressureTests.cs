@@ -80,25 +80,31 @@ public sealed class AgentRunLogCaptureBackpressureTests
         stalls.Cleared.Count.ShouldBeLessThanOrEqualTo(stalls.Held.Count, "the marker is written on transitions, not once per retry");
     }
 
+    /// <summary>The held span at the moment both ceilings are evaluated: the whole 2 MiB source, read out of the spool while the remote was refusing it.</summary>
+    private const long HeldBytes = 2L * 1024 * 1024;
+
     [Theory]
-    [InlineData(30, 64L * 1024 * 1024, 31)]          // the wait outlived the park window
-    [InlineData(240, 1536L * 1024, 2)]               // the window it drains the spool into filled first
+    [InlineData(30, 64L * 1024 * 1024, 30)]          // the wait reached the park window EXACTLY — the ceiling is inclusive
+    [InlineData(240, HeldBytes, 2)]                  // the held span reached the backlog window exactly — likewise inclusive
     public async Task An_outage_past_a_ceiling_parks_with_a_named_gap_instead_of_a_silent_loss(int parkAfterMinutes, long maxBacklogBytes, int advanceMinutes)
     {
         var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var logs = new FakeLogService { CurrentFence = 1, RemoteUnavailable = true };
         var gaps = new FakeCompletenessWriter();
+        var stalls = new FakeStallWriter();
         var source = new FakeLogSource();
-        source.Set("stdout", Payload(null, 2 * 1024 * 1024));
+        source.Set("stdout", Payload(null, (int)HeldBytes));
         source.Set("stderr", []);
         var backpressure = new CaptureBackpressureOptions { ParkAfter = TimeSpan.FromMinutes(parkAfterMinutes), MaxLocalBacklogBytes = maxBacklogBytes };
-        var bridge = Bridge(logs, clock, new FakeStallWriter(), gaps, backpressure);
+        var bridge = Bridge(logs, clock, stalls, gaps, backpressure);
         var expected = Result();
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
         var observing = capture.ObserveAsync(async (_, _) => { await release.Task; return expected; }, CancellationToken.None);
-        await WaitAsync(() => logs.AppendAttempts > 0, "the bridge never attempted the first append");
+        // The marker, not the append attempt: the stall's Since is stamped after the refusal, so a clock advanced on
+        // the attempt alone can land BEFORE it is stamped and reset the window this row is measuring to the minute.
+        await WaitAsync(() => stalls.Held.Count > 0, "the bridge never recorded the outage it is supposed to hold through");
         clock.Advance(TimeSpan.FromMinutes(advanceMinutes));
         await WaitAsync(() => logs.Head(AgentRunLogKinds.StandardOutput).Metadata.State != AgentRunLogStreamState.Open, "the stream never parked past its ceiling");
         release.TrySetResult();
@@ -119,6 +125,73 @@ public sealed class AgentRunLogCaptureBackpressureTests
         gap.RangeEnd.ShouldBeNull("\"from here on, and I do not know how much\" is the honest shape of an outage that ended the capture");
         gap.ReasonDetail.ShouldNotBeNullOrWhiteSpace();
         gap.CreatedAt.ShouldBeGreaterThanOrEqualTo(gap.NoticedAt);
+    }
+
+    [Theory]
+    [InlineData(30, 64L * 1024 * 1024, 29)]          // one minute inside the park window
+    [InlineData(240, HeldBytes + 1, 2)]              // one byte under the backlog window
+    public async Task An_outage_just_inside_a_ceiling_keeps_holding_and_still_commits_every_byte(int parkAfterMinutes, long maxBacklogBytes, int advanceMinutes)
+    {
+        // The held side of both boundaries. Without it the park theory above proves only that SOME ceiling fires: `>`
+        // and `>=` are indistinguishable when every row is past the line, and a ceiling that parks one attempt early
+        // throws away bytes the remote was about to take.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1, RemoteUnavailable = true };
+        var gaps = new FakeCompletenessWriter();
+        var stalls = new FakeStallWriter();
+        var source = new FakeLogSource();
+        source.Set("stdout", Payload(null, (int)HeldBytes));
+        source.Set("stderr", []);
+        var backpressure = new CaptureBackpressureOptions { ParkAfter = TimeSpan.FromMinutes(parkAfterMinutes), MaxLocalBacklogBytes = maxBacklogBytes };
+        var bridge = Bridge(logs, clock, stalls, gaps, backpressure);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
+        var observing = capture.ObserveAsync(async (_, _) => { await release.Task; return Result(); }, CancellationToken.None);
+        await WaitAsync(() => stalls.Held.Count > 0, "the bridge never recorded the outage it is supposed to hold through");
+        clock.Advance(TimeSpan.FromMinutes(advanceMinutes));
+        await WaitAsync(() => logs.AppendAttempts > 1, "the bridge never retried after the clock crossed the backoff, so no ceiling was evaluated at all");
+
+        var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
+        stdout.State.ShouldBe(AgentRunLogStreamState.Open, "one unit under a ceiling is still a wait, not a loss");
+        stdout.ErrorCode.ShouldBeNull();
+        gaps.Gaps.ShouldBeEmpty("a gap row is the record of a span this run will never have; nothing is lost yet");
+
+        // And the wait was worth making: the provider comes back inside the window and every held byte commits.
+        logs.RemoteUnavailable = false;
+        clock.Advance(TimeSpan.FromSeconds(30));
+        await WaitAsync(() => logs.Head(AgentRunLogKinds.StandardOutput).Metadata.SourceOffsetBytes == HeldBytes, "the span held at the boundary never drained after the provider recovered");
+        release.TrySetResult();
+        await observing;
+
+        logs.Bytes(AgentRunLogKinds.StandardOutput).Length.ShouldBe((int)HeldBytes);
+    }
+
+    [Fact]
+    public async Task An_outage_that_begins_during_the_final_drain_still_says_so_without_parking()
+    {
+        // The final drain is bounded by the finalization budget instead of the park ceiling, which is why it never
+        // parks — but it was also the one path that wrote no marker, so an incident starting here left the Room
+        // reading "Finalizing" for the whole budget with no health signal at all. The payload is under one minimum
+        // segment, so nothing is appended until the drain: the outage below can only be seen on the final path.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var stalls = new FakeStallWriter();
+        var gaps = new FakeCompletenessWriter();
+        var source = new FakeLogSource();
+        source.Set("stdout", Payload(null, 4096));
+        source.Set("stderr", []);
+        var bridge = Bridge(logs, clock, stalls, gaps, finalizationBudget: TimeSpan.FromSeconds(2));
+
+        var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
+        await capture.ObserveAsync((_, _) => { logs.RemoteUnavailable = true; return Task.FromResult(Result()); }, CancellationToken.None);
+
+        stalls.Held.ShouldNotBeEmpty("an outage that starts on the final drain is the same outage; the Room cannot read \"Finalizing\" through it");
+        stalls.Held[0].StallCode.ShouldBe("capture-backend-unavailable");
+        var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
+        stdout.State.ShouldBe(AgentRunLogStreamState.Open, "the final drain never parks: a stream its budget cancels stays Open and reconcilable");
+        stdout.ErrorCode.ShouldBeNull();
+        gaps.Gaps.ShouldBeEmpty("a marker is not a park, and only a park may declare a span lost");
     }
 
     [Fact]
@@ -166,9 +239,9 @@ public sealed class AgentRunLogCaptureBackpressureTests
         delays[^1].ShouldBeGreaterThan(options.RetryCeiling * 0.7, "a long outage settles at the ceiling so a recovery is still noticed within it");
     }
 
-    private static AgentRunLogCaptureBridge Bridge(FakeLogService logs, FakeTimeProvider clock, FakeStallWriter stalls, FakeCompletenessWriter? gaps = null, CaptureBackpressureOptions? backpressure = null) =>
+    private static AgentRunLogCaptureBridge Bridge(FakeLogService logs, FakeTimeProvider clock, FakeStallWriter stalls, FakeCompletenessWriter? gaps = null, CaptureBackpressureOptions? backpressure = null, TimeSpan? finalizationBudget = null) =>
         new(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance,
-            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(200), TimeSpan.FromSeconds(5)) { Backpressure = backpressure ?? CaptureBackpressureOptions.Default },
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(200), finalizationBudget ?? TimeSpan.FromSeconds(5)) { Backpressure = backpressure ?? CaptureBackpressureOptions.Default },
             stalls, gaps ?? new FakeCompletenessWriter(), clock);
 
     private static AgentRunLogCaptureOpenRequest Request(FakeLogSource source, SecretRedactor? redactor = null) => new()

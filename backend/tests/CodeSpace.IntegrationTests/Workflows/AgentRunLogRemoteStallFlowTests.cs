@@ -16,6 +16,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -27,10 +28,14 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// columns record is the one the production mapping reaches (<c>ProviderUnavailableTransient</c> →
 /// <c>BackendUnavailable</c>, retryable).
 ///
-/// <para>Two properties the schema alone cannot show: the stall marker is written under the producer's exact fence and
-/// then CLEARED once a segment commits (a marker nobody clears makes a live run read as permanently broken), and the
-/// recovered stream finalizes with a complete v3 manifest over every byte — so the wait cost the run nothing. The Room
-/// fold is asserted over those same real rows rather than a hand-built one.</para>
+/// <para>What the schema alone cannot show: the stall marker is written under the producer's exact fence and then
+/// CLEARED once a segment commits (a marker nobody clears makes a live run read as permanently broken), the recovered
+/// stream finalizes with a complete v3 manifest over every byte — so the wait cost the run nothing — and the marker
+/// dies at the next capture claim, because the session that could clear it is exactly the one a reclaim supersedes.
+/// The Room fold is asserted over those same real rows rather than a hand-built one.</para>
+///
+/// <para>The refusals are here for the same reason: the guard's fifth arm and the writer's fence are claims about what
+/// PostgreSQL will not admit, and only a statement it actually rejects can pin one.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -141,6 +146,125 @@ public sealed class AgentRunLogRemoteStallFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_stall_acknowledgement_lost_after_it_committed_still_lets_the_stream_finalize()
+    {
+        // The health write advances the row's revision and HANDS THE HEAD BACK, which is the only thing keeping it
+        // from breaking the finalize — and a return value is exactly what a killed connection or a cancelled read
+        // loses after the statement has already committed. The producer is then one revision behind the row, and
+        // FinalizeSourceAsync is fenced on that revision: re-offering the stale one is refused identically every
+        // time, so the capture re-polled itself until the finalization budget expired and the stream stayed Open with
+        // no final-drain receipt — a run whose log never completes because its own health write moved the row.
+        var world = await SeedWorldAsync();
+        var stdout = Payload(300 * 1024 + 19);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var scope = _fixture.BeginScope();
+        var outage = new TransientOutageCoordinator(scope.Resolve<IArtifactCasRuntimeCoordinator>()) { Unavailable = true };
+        var logs = new AgentRunLogService(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), outage, TimeProvider.System);
+        var stalls = new LostAckStallWriter(logs);
+        var backpressure = new CaptureBackpressureOptions { RetryBase = TimeSpan.FromMilliseconds(200), RetryCeiling = TimeSpan.FromMilliseconds(400) };
+        var bridge = new AgentRunLogCaptureBridge(logs, new StubStorageResolver(world.StorageProfileId), scope.Resolve<IAgentRunLogCaptureRecoveryService>(),
+            NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20)) { Backpressure = backpressure }, stalls);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var capture = await bridge.OpenAsync(OpenCapture(world, new StubLogSource(stdout)), deadline.Token);
+        var observing = capture.ObserveAsync(async (_, _) => { await release.Task; return SandboxResultOf(); }, deadline.Token);
+        await WaitAsync(async () => (await StreamAsync(world, deadline.Token)).RemoteStallSince != null, "the stall marker never reached agent_run_log_stream", deadline.Token);
+        outage.Unavailable = false;
+        await WaitAsync(async () => (await StreamAsync(world, deadline.Token)).RemoteStallSince == null, "the stall marker was never cleared after the provider recovered", deadline.Token);
+        release.TrySetResult();
+        await observing;
+        await bridge.CompleteRunAsync(world.TeamId, world.AgentRunId, 7, deadline.Token);
+
+        stalls.Dropped.ShouldBe(2, "the test proves nothing unless BOTH the stall and its clear committed with their answers thrown away");
+        var recovered = await StreamAsync(world, deadline.Token);
+        recovered.CaptureFinalizedAt.ShouldNotBeNull("the final-drain receipt has to survive a head the producer's own health write moved");
+        recovered.State.ShouldBe(AgentRunLogStreamState.Completed);
+        recovered.ManifestDigest.ShouldNotBeNull();
+        recovered.SourceOffsetBytes.ShouldBe(stdout.LongLength);
+    }
+
+    [Fact]
+    public async Task A_reclaim_at_a_newer_fence_clears_the_marker_its_dead_session_left_behind()
+    {
+        // The marker's opposite failure, and the one the in-memory clear cannot reach: that clear only fires for a
+        // stall THIS session is holding, so a worker killed mid-outage leaves a marker with nobody left to clear it,
+        // and the Room then reports "held; storage unavailable" forever for a stream the next session is capturing
+        // perfectly. The capture claim is where a marker dies — asserted here against the real guard, whose claim arm
+        // deliberately leaves the two stall columns out of its untouched-column list.
+        var world = await SeedWorldAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var scope = _fixture.BeginScope();
+        var logs = new AgentRunLogService(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactCasRuntimeCoordinator>(), TimeProvider.System);
+        var session = Guid.NewGuid();
+        var opened = (await logs.OpenAsync(Open(world, session, 7), deadline.Token)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+
+        (await logs.RecordRemoteStallAsync(Stall(world, opened.Metadata.StreamId, session, 7, DateTimeOffset.UtcNow), deadline.Token))
+            .ShouldNotBeNull("nothing below means anything unless the dead session's marker is really on the row");
+        await BumpFenceAsync(world, 8, deadline.Token);
+        (await logs.OpenAsync(Open(world, session, 8), deadline.Token)).ShouldBeOfType<AgentRunLogOpenResult.Opened>().WasReclaimed.ShouldBeTrue();
+
+        var reclaimed = await StreamAsync(world, deadline.Token);
+        reclaimed.WorkerFenceEpoch.ShouldBe(8);
+        reclaimed.RemoteStallSince.ShouldBeNull("a marker the claim inherits has no one left to clear it");
+        reclaimed.RemoteStallCode.ShouldBeNull();
+        reclaimed.State.ShouldBe(AgentRunLogStreamState.Open);
+        reclaimed.TotalBytes.ShouldBe(0, "clearing health may not move the byte head, and the guard's claim arm still says so");
+        RoomProjector.SummarizeLogs([Row(reclaimed)]).Status.ShouldBe(RoomAgentLogStatus.Finalizing, "the Room must not keep calling a healthily reclaimed stream stalled");
+    }
+
+    [Fact]
+    public async Task A_stall_write_from_a_superseded_worker_is_refused()
+    {
+        // The fence the interface claims it has. The row's own worker_fence_epoch only proves this producer wrote it
+        // LAST, so on a row nobody has reclaimed yet every other predicate of the statement still matches a zombie —
+        // and it could set or clear the health of a stream the run has moved past. Only agent_run's own epoch can
+        // refuse that, which is why the statement carries a correlated EXISTS over it.
+        var world = await SeedWorldAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var scope = _fixture.BeginScope();
+        var logs = new AgentRunLogService(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactCasRuntimeCoordinator>(), TimeProvider.System);
+        var session = Guid.NewGuid();
+        var opened = (await logs.OpenAsync(Open(world, session, 7), deadline.Token)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        await BumpFenceAsync(world, 8, deadline.Token);
+
+        var refused = await logs.RecordRemoteStallAsync(Stall(world, opened.Metadata.StreamId, session, 7, DateTimeOffset.UtcNow), deadline.Token);
+
+        refused.ShouldBeNull("a superseded worker may not restate the health of a stream it no longer owns");
+        var row = await StreamAsync(world, deadline.Token);
+        row.RemoteStallSince.ShouldBeNull();
+        row.RemoteStallCode.ShouldBeNull();
+        row.WorkerFenceEpoch.ShouldBe(7, "the row still names the superseded worker — so the refusal came from agent_run's epoch, not from the row disagreeing with the request");
+        row.Revision.ShouldBe(opened.Metadata.Revision, "a refused statement writes nothing at all, not even the revision");
+    }
+
+    [Theory]
+    [InlineData("total_bytes = total_bytes + 1")]
+    [InlineData("next_offset_bytes = next_offset_bytes + 1")]
+    public async Task A_health_write_that_smuggles_a_byte_head_change_is_refused_by_the_guard(string smuggled)
+    {
+        // The fifth arm's whole promise is that "my bytes are queued" can never be mistaken for "my bytes are
+        // stored", and that promise lives in its untouched-column list. Grepping the migration text pins the arm's
+        // NAME; only a statement Postgres actually refuses pins the list — and the production writer never offers one,
+        // so without this the admit path is the only shape the arm has ever been shown.
+        var world = await SeedWorldAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var scope = _fixture.BeginScope();
+        var logs = new AgentRunLogService(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactCasRuntimeCoordinator>(), TimeProvider.System);
+        var opened = (await logs.OpenAsync(Open(world, Guid.NewGuid(), 7), deadline.Token)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        var sql = "UPDATE agent_run_log_stream SET remote_stall_since = now(), remote_stall_code = 'capture-backend-unavailable', "
+            + smuggled + ", revision = revision + 1, last_modified_at = now() WHERE team_id = {0} AND id = {1}";
+
+        using var writing = _fixture.BeginScope();
+        var raised = await Should.ThrowAsync<Exception>(async () =>
+            await writing.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlRawAsync(sql, [world.TeamId, opened.Metadata.StreamId], deadline.Token));
+
+        PostgresErrorOf(raised).MessageText.ShouldContain("remote-stall statement cannot rewrite its claim, byte head or terminal state");
+        var row = await StreamAsync(world, deadline.Token);
+        row.RemoteStallSince.ShouldBeNull("a refused statement leaves the row exactly as it was");
+        row.TotalBytes.ShouldBe(0);
+    }
+
+    [Fact]
     public void The_container_supplies_both_health_planes_to_the_capture_bridge()
     {
         // These are optional constructor parameters (the blessed shape for a plane a focused test construction omits),
@@ -161,6 +285,34 @@ public sealed class AgentRunLogRemoteStallFlowTests : IDisposable
 
     private static RoomProjector.AgentLogRow Row(AgentRunLogStream stream) =>
         new(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null);
+
+    private static AgentRunLogOpenRequest Open(World world, Guid session, long fenceEpoch) => new()
+    {
+        TeamId = world.TeamId, AgentRunId = world.AgentRunId, WorkerFenceEpoch = fenceEpoch, CaptureSessionId = session,
+        StreamKind = AgentRunLogKinds.StandardOutput, ContentType = AgentRunLogRepresentations.PlainTextContentType,
+        ContentEncoding = AgentRunLogRepresentations.Utf8ContentEncoding, CaptureSource = "stub-spool/v1",
+    };
+
+    private static AgentRunLogRemoteStallRequest Stall(World world, Guid streamId, Guid session, long fenceEpoch, DateTimeOffset? since) => new()
+    {
+        TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = streamId, WorkerFenceEpoch = fenceEpoch,
+        CaptureSessionId = session, StalledSince = since, StallCode = since == null ? null : "capture-backend-unavailable",
+    };
+
+    /// <summary>The run is reclaimed by a newer worker; the stream row is left exactly as the superseded one wrote it.</summary>
+    private async Task BumpFenceAsync(World world, long fenceEpoch, CancellationToken cancellationToken)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().AgentRun.Where(value => value.TeamId == world.TeamId && value.Id == world.AgentRunId)
+            .ExecuteUpdateAsync(update => update.SetProperty(value => value.FenceEpoch, fenceEpoch), cancellationToken);
+    }
+
+    /// <summary>EF's execution strategy wraps the server error; the SQLSTATE and the guard's own message stay decisive.</summary>
+    private static PostgresException PostgresErrorOf(Exception error)
+    {
+        while (error is not PostgresException && error.InnerException is { } inner) error = inner;
+        return error.ShouldBeOfType<PostgresException>();
+    }
 
     private async Task<AgentRunLogStream> StreamAsync(World world, CancellationToken cancellationToken)
     {
@@ -281,6 +433,23 @@ public sealed class AgentRunLogRemoteStallFlowTests : IDisposable
         }
 
         public Task<ArtifactCasReadResult> OpenReadAsync(ArtifactCasReadRequest request, CancellationToken cancellationToken) => inner.OpenReadAsync(request, cancellationToken);
+    }
+
+    /// <summary>The real writer with its answer thrown away: the statement commits and the caller never learns the head it moved.</summary>
+    private sealed class LostAckStallWriter(IAgentRunLogRemoteStallWriter inner) : IAgentRunLogRemoteStallWriter
+    {
+        private int _dropped;
+
+        public int Dropped => Volatile.Read(ref _dropped);
+
+        public async Task<AgentRunLogMetadata?> RecordRemoteStallAsync(AgentRunLogRemoteStallRequest request, CancellationToken cancellationToken)
+        {
+            var head = await inner.RecordRemoteStallAsync(request, cancellationToken).ConfigureAwait(false);
+            if (head == null) return null;
+
+            Interlocked.Increment(ref _dropped);
+            return null;
+        }
     }
 
     private sealed class StubStorageResolver(Guid profileId) : IAgentRunLogStorageResolver

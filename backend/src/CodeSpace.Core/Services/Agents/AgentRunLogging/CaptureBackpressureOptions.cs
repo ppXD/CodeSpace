@@ -38,6 +38,12 @@ public sealed record CaptureBackpressureOptions
     /// default): the spool is the durable buffer, this is only the window being drained out of it, and a stall that
     /// fills this window has outgrown what a worker can hold and has to name its loss instead of pretending otherwise.
     /// Pinned by a test (Rule 8).
+    ///
+    /// <para><b>It is a ceiling checked BETWEEN reads, not a hard cap on the buffer.</b> The pump tests the window
+    /// before each read, so a read already in flight can carry the held span up to one maximum segment (1 MiB) past
+    /// this value, and the park lands on the next attempt. Sized for that on purpose: moving the test after the read
+    /// would buy an exactness nothing needs — the value is one worker's memory budget, not a correctness boundary —
+    /// at the cost of a hotter loop and a longer pump.</para>
     /// </summary>
     public const long DefaultMaxLocalBacklogBytes = 16L * 1024 * 1024;
 

@@ -9,10 +9,11 @@
 -- Both columns move together or neither does. A start with no cause is a shrug; a cause with no start cannot be aged
 -- out against the park ceiling that eventually names the loss.
 --
--- They are NOT part of the monotonic head, and the writer is fenced but revisionless on purpose: the producer that
--- writes one is mid-retry and still needs the exact revision it read before the outage, and bumping last_modified_at
--- on every failed attempt would hide a genuinely stuck stream from the staleness reconciler behind a freshly-touched
--- timestamp. So a stall statement is a side channel over an Open stream's health, never a claim about its content.
+-- They are NOT part of the monotonic head: a stall statement is a side channel over an Open stream's health, never a
+-- claim about its content. It is still a revisioned write like every other update to this table (the guard below
+-- demands revision = OLD.revision + 1, and the writer touches last_modified_at with it) because a side channel exempt
+-- from the monotonic rule is a row two writers can disagree about. The producer therefore re-reads the head it now
+-- needs instead of carrying the revision it held before the outage.
 ALTER TABLE agent_run_log_stream ADD COLUMN remote_stall_since timestamptz NULL;
 ALTER TABLE agent_run_log_stream ADD COLUMN remote_stall_code  varchar(128) NULL;
 
@@ -137,6 +138,10 @@ BEGIN
            OR NEW.content_digest IS DISTINCT FROM OLD.content_digest THEN
             RAISE EXCEPTION 'agent_run_log_stream capture claim cannot mutate byte or terminal state (id=%).', OLD.id;
         END IF;
+        -- The two stall columns are deliberately ABSENT from that list: a claim is the one statement that may clear
+        -- them. A marker is one producer's statement about a segment it holds in memory, and a claim supersedes that
+        -- producer -- so a marker the claim inherited would have no one left to clear it and every reader would call
+        -- a healthily-capturing stream stalled forever. Do not add them here.
         is_claim := TRUE;
     END IF;
 
