@@ -49,6 +49,7 @@ public class DeploymentCostCapSettingTests
     [InlineData("-1")]
     [InlineData("fifty")]
     [InlineData("50usd")]
+    [InlineData("1,5")]
     public void A_malformed_or_non_positive_amount_fails_startup(string configured) =>
         Should.Throw<InvalidOperationException>(() => Read(configured))
             .Message.ShouldContain(RuntimeSettings.DeploymentCostCapUsdKey, customMessage: "the refusal must name the key an operator has to fix");

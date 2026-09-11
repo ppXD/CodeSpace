@@ -119,9 +119,8 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
         }
 
         var committed = await CommittedInTxAsync(workflowRunId, teamId, cancellationToken).ConfigureAwait(false);
-        var refusal = await RefusalAsync(teamId, estimateUsd, capUsd, committed, cancellationToken).ConfigureAwait(false);
 
-        if (refusal is not null)
+        if (await RefusalAsync(teamId, estimateUsd, capUsd, committed, cancellationToken).ConfigureAwait(false) is { } refusal)
         {
             await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
             return refusal;

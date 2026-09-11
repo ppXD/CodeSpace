@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Budget;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Exceptions;
 using Serilog;
 
@@ -11,12 +12,18 @@ namespace CodeSpace.Core.Services.Workflows.Llm;
 /// and retry (the ledger will refuse forever). Deliberately NOT an <c>LlmApiException</c>: the park-don't-die
 /// transient-fault path must never swallow a budget refusal as an infra hiccup.
 /// </summary>
-public sealed class LlmBudgetExceededException(string kind, decimal committedUsd, decimal capUsd, string? reason = null)
+public sealed class LlmBudgetExceededException(string kind, decimal committedUsd, decimal capUsd, string? reason = null, BudgetCapGrain? refusedGrain = null)
     : InvalidOperationException($"Model call '{kind}' refused by the budget ledger: committed ${committedUsd:0.####} against cap ${capUsd:0.####}. {reason}".TrimEnd()), Messages.Failures.IFailure
 {
     public string Kind { get; } = kind;
     public decimal CommittedUsd { get; } = committedUsd;
     public decimal CapUsd { get; } = capUsd;
+
+    /// <summary>The ledger's own refusal reason, e.g. naming a TEAM cap by value — never the run's, when a different grain refused.</summary>
+    public string? Reason { get; } = reason;
+
+    /// <summary>WHICH cap refused this call — null when the refusal didn't come from a named grain (e.g. a replay mismatch). Distinguishes "this run exhausted its own cap" from "the team/deployment ceiling refused it".</summary>
+    public BudgetCapGrain? RefusedGrain { get; } = refusedGrain;
 
     // The failure taxonomy (#1353): a spent run budget is Exhausted — the caller's remedy is a bigger cap or a
     // narrower goal, never a retry of the same call.
@@ -84,7 +91,7 @@ public static class LlmBudgetGuard
 
         var admission = await budget.ReserveAsync(scope.RunId, scope.TeamId, kind, scopeKey, estimate.Value, capUsd, priceVersion: "realized-v1", parentReservationId: null, expiresAt: DateTimeOffset.UtcNow.Add(ReservationTtl), cancellationToken).ConfigureAwait(false);
 
-        if (!admission.Admitted) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, capUsd, admission.Reason);
+        if (!admission.Admitted) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, capUsd, admission.Reason, admission.RefusedGrain);
         if (admission.IsReplay) throw new LlmBudgetExceededException(scope.Kind, admission.CommittedUsd, capUsd, "An existing logical reservation cannot authorize another provider request.");
 
         try

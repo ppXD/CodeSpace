@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -155,6 +156,32 @@ public class SupervisorTurnServiceTests
         result.IsFinished.ShouldBeTrue("a budget refusal terminates the run on its own bound");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
         result.TerminalReason.ShouldBe(SupervisorStopReasons.CostCapReached);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(BudgetCapGrain.Run, false)]
+    [InlineData(BudgetCapGrain.Team, true)]
+    public void BudgetStopDetail_names_the_team_cap_only_on_a_team_grain_refusal(BudgetCapGrain? grain, bool expectTeamSentence)
+    {
+        // A Team (or Deployment) refusal must not be recited as if the RUN itself had exhausted its own cap — the
+        // base recitation's numbers are the run's, so a different grain's refusal needs its own sentence naming it.
+        var refused = new CodeSpace.Core.Services.Workflows.Llm.LlmBudgetExceededException("supervisor.decision", committedUsd: 4.9m, capUsd: 5m,
+            reason: "admission would commit 12.0000 past the 10.0000 team cap (30 days)", refusedGrain: grain);
+
+        var detail = SupervisorTurnService.BudgetStopDetail(refused, "$4.90 spent of $5.00 cap ($0.10 remaining)");
+
+        detail.ShouldContain("$5.00 cap", customMessage: "the run's own recitation numbers are always kept");
+
+        if (expectTeamSentence)
+        {
+            detail.ShouldContain("team", customMessage: "a team refusal must name the grain that actually refused");
+            detail.ShouldContain("10.0000", customMessage: "the team's OWN cap value must appear, not just the run's");
+        }
+        else
+        {
+            detail.ShouldBe("$4.90 spent of $5.00 cap ($0.10 remaining)", "a run (or ungraded) refusal recites nothing but the run's own numbers");
+        }
     }
 
     [Fact]

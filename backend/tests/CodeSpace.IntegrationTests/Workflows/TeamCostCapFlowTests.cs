@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Persistence.Db;
@@ -5,8 +6,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Commands.Budget;
+using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Budget;
@@ -58,6 +61,35 @@ public sealed class TeamCostCapFlowTests
         second.RefusedGrain.ShouldBe(BudgetCapGrain.Team);
         second.Reason.ShouldContain("team cap", customMessage: "the reason must name WHICH cap refused — the remedy for a team cap is not the remedy for a run cap");
         second.Reason.ShouldContain(TeamCostCap.RollingThirtyDays);
+    }
+
+    [Fact]
+    public async Task A_physical_admission_on_a_second_run_is_also_refused_by_the_team_cap()
+    {
+        // The physical POST path (AdmitPhysicalAsync) mints its own reservation through a completely separate
+        // method from ReserveAsync — a skipped team check there would be the one way to spend past this cap.
+        var (teamId, userId) = await Infrastructure.WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
+        await SeedCapAsync(teamId, 10m);
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId);
+        var workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = "physical-team-cap-fixture", Definition = Infrastructure.WorkflowsTestSeed.MinimalDefinition(), Activations = Array.Empty<WorkflowActivationInput>(), Enabled = true });
+        var exhaustingRunId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var physicalRunId = await Infrastructure.WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var exhausting = await scope.Resolve<IBudgetLedger>().ReserveAsync(exhaustingRunId, teamId, Kind, "physical-precursor", 9m, RunCap, "prices-v1", null, null, CancellationToken.None);
+        exhausting.Admitted.ShouldBeTrue("9 is under the team's 10 — this run alone must not be refused");
+
+        var admission = await scope.Resolve<IPhysicalLlmInvocationLedger>().AdmitPhysicalAsync(new PhysicalLlmAdmission
+        {
+            InvocationId = Guid.NewGuid(), LogicalCallId = Guid.NewGuid(), CandidateId = Guid.NewGuid(), CandidateOrdinal = 1,
+            RunId = physicalRunId, TeamId = teamId, Purpose = "physical-team-cap-test", Provider = "synthetic", RequestedModel = "fixture-model",
+            EstimateUsd = 3m, CapUsd = RunCap,
+            PricingSnapshotJson = JsonSerializer.Serialize(new Dictionary<string, ModelPrice> { ["fixture-model"] = new() { InputPerMillionUsd = 1m, OutputPerMillionUsd = 1m } }),
+            PricingVersion = "fixture-price-v1",
+        }, CancellationToken.None);
+
+        admission.Admitted.ShouldBeFalse("9 + 3 would commit 12 past the team's 10 — the physical path answers to the same standing cap as any other admission");
+        admission.RefusedGrain.ShouldBe(BudgetCapGrain.Team, "a mutation that skips the team check on the physical path must be caught here, not just on ReserveAsync");
     }
 
     [Fact]

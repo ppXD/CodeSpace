@@ -184,7 +184,9 @@ public sealed record RuntimeSettings
     private static decimal? PositiveUsd(string? raw, string key)
     {
         if (Trimmed(raw) is not { } value) return null;
-        if (decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var amount) && amount > 0m) return amount;
+        // Float, not Number: Number allows a thousands separator, so a European operator's "1,5" (meaning 1.5)
+        // would silently parse as 15 — a 10x cost cap error with no failure to catch it.
+        if (decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount) && amount > 0m) return amount;
 
         throw new InvalidOperationException($"Refusing to start: '{key}' must be a positive amount in USD when configured. Omit the setting for no deployment cost cap.");
     }
