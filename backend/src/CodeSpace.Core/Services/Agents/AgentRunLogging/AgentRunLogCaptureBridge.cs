@@ -11,7 +11,10 @@ namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
 public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 {
     private const int MinimumSegmentBytes = 256 * 1024;
-    private const int MaximumSegmentBytes = 1024 * 1024;
+
+    /// <summary>The ceiling on one read, and therefore on one segment: a log of any size is this many bytes per object, never one oversized PUT. Internal so the size tests can PREDICT the segment count from the same constant instead of mirroring it (InternalsVisibleTo) — a mirror would keep predicting the old count after this changed.</summary>
+    internal const int MaximumSegmentBytes = 1024 * 1024;
+
     private const int MaximumReadsPerPoll = 8;
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(5);

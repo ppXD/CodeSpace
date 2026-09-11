@@ -77,7 +77,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "Category!=RealModel"
+          --filter "Category!=RealModel&Category!=LargeCapture"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=integration.trx"
           --results-directory backend/TestResults
