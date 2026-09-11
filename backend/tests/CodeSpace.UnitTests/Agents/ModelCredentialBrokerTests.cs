@@ -298,7 +298,10 @@ public class ModelCredentialBrokerTests
     [InlineData("OpenAI", "/v1/chat/completions", true)]
     [InlineData("OpenAI", "/v1/models", true)]
     [InlineData("OpenAI", "/v1/files", false)]
-    [InlineData("OpenRouter", "/anything/at/all", true)]    // no table entry → unrestricted: an operator gateway's path surface is theirs to define
+    [InlineData("OpenRouter", "/v1/responses", true)]        // OpenRouter shares OpenAI's table: Codex drives it through the same Responses-wire override
+    [InlineData("OpenRouter", "/v1/models", true)]
+    [InlineData("OpenRouter", "/v1/files", false)]
+    [InlineData("Ollama", "/anything/at/all", true)]         // a real, named provider with no table row → unrestricted: an operator gateway's path surface is theirs to define
     [InlineData(null, "/v1/files", true)]
     public void The_relay_path_allowlist_is_per_provider_and_silent_for_a_provider_it_does_not_name(string? provider, string path, bool relayable) =>
         LoopbackModelCredentialBroker.IsRelayablePath(provider, path).ShouldBe(relayable,
