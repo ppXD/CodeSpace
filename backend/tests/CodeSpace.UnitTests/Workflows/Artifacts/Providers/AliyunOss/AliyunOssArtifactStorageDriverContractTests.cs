@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
@@ -238,6 +240,63 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
         result.Error.Message.ShouldContain("ContentLength", Case.Sensitive, "OSS rejects a chunked PutObject, so the caller must declare the size");
     }
 
+    /// <summary>
+    /// An object above the ceiling this driver's staged publish inherits is refused as a TYPED answer and refused
+    /// BEFORE the wire — driven by declared length alone, because the point of refusing up front is that the payload
+    /// is never touched and a test that allocated one would be measuring the opposite.
+    ///
+    /// <para>The two silent alternatives are what this pins against. One is paying for the whole upload and then
+    /// discovering that the copy which would publish it is impossible; the other is a fallback to writing the
+    /// destination key directly, which this driver must never do — an unverified object occupying a content-addressed
+    /// key is the exact accident the staged publish exists to prevent. There is no third option to fall back TO: the
+    /// driver speaks Put/Copy/Get/Head/Delete and has no multipart path.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_object_above_the_simple_copy_ceiling_is_refused_as_unsupported_before_a_byte_is_staged()
+    {
+        await using var driver = await CreateDriverAsync();
+        await using var input = new LengthOnlyStream(AliyunOssArtifactStorageDriver.SimpleCopyCeilingBytes + 1);
+
+        var result = await driver.PutAsync(new ArtifactStoragePutRequest("oversized/value", input), CancellationToken.None);
+
+        AliyunOssArtifactStorageDriver.SimpleCopyCeilingBytes.ShouldBe(5L * 1024 * 1024 * 1024,
+            "the ceiling is the provider's, not a tuning knob; raising it does not buy a larger object, it only moves the refusal onto the wire after a whole payload has been uploaded and billed for");
+        result.Error!.Code.ShouldBe(ArtifactStorageErrorCode.Unsupported,
+            "no repair and no retry makes this destination able to publish an object that large, so the code must be the one the CAS plane reads as final rather than a provider blip");
+        result.Error.IsRetryable.ShouldBeFalse();
+        result.Error.Message.ShouldContain(AliyunOssArtifactStorageDriver.SimpleCopyCeilingBytes.ToString(CultureInfo.InvariantCulture), Case.Sensitive, "an operator has to be told the limit, not just that one was hit");
+        _oss.Calls.ShouldBeEmpty("a refusal reached after the stage has already uploaded the payload is not a refusal an operator gets for free");
+        _oss.Keys.ShouldBeEmpty("neither the destination key nor a staging object may exist after a write the driver refused outright");
+    }
+
+    /// <summary>
+    /// The same ceiling as the destination itself enforces it. The client-side guard above is a floor and cannot be
+    /// the only one: the real service owns the true limit, it may be narrower than the documented one for a bucket,
+    /// region or storage class, and it moves without this code changing — so the refusal has to survive arriving on
+    /// the wire, at the one step that has no retry and no alternative.
+    ///
+    /// <para>What must hold is that a refused COPY is a refused WRITE: a typed, non-retryable error, the destination
+    /// key still empty, the staging object cleaned up, and — the half a fallback would break — no second PUT anywhere
+    /// near the destination key.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_publish_the_destination_refuses_as_too_large_places_nothing_and_never_re_uploads()
+    {
+        await using var driver = await CreateDriverAsync();
+        _oss.CopyRejection = (HttpStatusCode.BadRequest, "EntityTooLarge");
+        await using var input = new MemoryStream(Encoding.UTF8.GetBytes("bytes the destination would stage but not copy"), writable: false);
+
+        var result = await driver.PutAsync(new ArtifactStoragePutRequest("oversized/refused", input) { Condition = ArtifactStorageWriteCondition.CreateOnly }, CancellationToken.None);
+
+        result.IsSuccess.ShouldBeFalse();
+        result.Error!.ProviderCode.ShouldBe("EntityTooLarge", "the provider's own token is the only thing that tells an operator this was a size ceiling rather than any other 400");
+        result.Error.IsRetryable.ShouldBeFalse("a copy the destination refuses on the object's size refuses it again every time; retrying only burns the upload again");
+        _oss.Keys.ShouldBeEmpty("the destination key must stay empty and the staging upload must be discarded — a half-published write is the one outcome worse than a failed one");
+        _oss.Copies.ShouldHaveSingleItem("one copy was attempted and refused; repeating it would only burn the upload again");
+        _oss.Calls.Count(call => call.StartsWith("PUT /codespace/objects/", StringComparison.Ordinal)).ShouldBe(_oss.Copies.Count,
+            "every write at the published-object area must BE that copy: answering a refused publish with a direct upload would place bytes at a content-addressed key with nothing having verified them");
+    }
+
     [Fact]
     public async Task Provider_failures_never_echo_credential_material_that_the_endpoint_sent_back()
     {
@@ -404,6 +463,25 @@ public sealed class AliyunOssArtifactStorageDriverContractTests : ArtifactStorag
     {
         public override bool CanSeek => false;
         public override long Length => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A payload that exists only as a length. Nothing is allocated and nothing can be read, so it can declare a
+    /// multi-gibibyte object on a laptop — and a guard that stopped checking the declared length would be caught here
+    /// by the read it is not allowed to reach rather than by a soft assertion.
+    /// </summary>
+    private sealed class LengthOnlyStream(long length) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => length;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException("An object above the publish ceiling must be refused without its payload being touched.");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static async Task<byte[]> DrainAsync(ArtifactStorageReadResult result)
