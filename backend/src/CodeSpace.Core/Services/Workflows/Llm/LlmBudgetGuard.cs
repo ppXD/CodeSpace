@@ -176,7 +176,7 @@ public static class LlmBudgetGuard
     /// request was already on the wire, and the provider bills a completion it generated whether or not we managed
     /// to read it back.</para>
     /// </summary>
-    private static bool NeverReachedAServer(HttpRequestException http)
+    internal static bool NeverReachedAServer(HttpRequestException http)
     {
         for (var e = http.InnerException; e is not null; e = e.InnerException)
             if (e is SocketException socket)

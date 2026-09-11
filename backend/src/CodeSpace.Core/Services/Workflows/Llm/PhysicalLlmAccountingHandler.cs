@@ -13,13 +13,18 @@ public sealed class PhysicalLlmObservationOptions
     public TimeSpan EnvelopeTimeout { get; set; } = TimeSpan.FromSeconds(30);
 }
 
+/// <summary>Mutable per-logical-call marker riding the reused <see cref="HttpRequestMessage.Options"/> across a Polly retry (the SAME request instance is re-sent on each attempt): whether an EARLIER attempt of this request was sent and produced no response, so the provider may already have billed it. Set by <see cref="PhysicalLlmAccountingHandler"/> (the innermost handler — it sees every attempt); read by <see cref="LlmHttpTransport"/> when the last attempt's outcome becomes the surfaced exception.</summary>
+internal sealed class AmbiguousSendMarker { public bool Occurred { get; set; } }
+
 /// <summary>Registered INSIDE retry: each invocation admits, sends and settles its own durable identity.</summary>
 public sealed class PhysicalLlmAccountingHandler(IOptions<PhysicalLlmObservationOptions> options) : DelegatingHandler
 {
+    internal static readonly HttpRequestOptionsKey<AmbiguousSendMarker> AmbiguousSendKey = new("CodeSpace.LlmAmbiguousSend/v1");
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         if (!request.Options.TryGetValue(PhysicalLlmCallContext.DispatchKey, out var dispatch))
-            return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            return await SendTrackingAmbiguityAsync(request, cancellationToken).ConfigureAwait(false);
 
         var candidate = dispatch.Candidate;
         var operation = candidate.Operation;
@@ -49,7 +54,7 @@ public sealed class PhysicalLlmAccountingHandler(IOptions<PhysicalLlmObservation
         HttpResponseMessage? response = null;
         try
         {
-            response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            response = await SendTrackingAmbiguityAsync(request, cancellationToken).ConfigureAwait(false);
             receipt = receipt with { HttpStatusCode = (int)response.StatusCode, Status = response.IsSuccessStatusCode ? "Succeeded" : "Failed" };
             using var observation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             observation.CancelAfter(policy.EnvelopeTimeout);
@@ -97,6 +102,19 @@ public sealed class PhysicalLlmAccountingHandler(IOptions<PhysicalLlmObservation
                 usage = usage with { IsPartial = true };
             }
             operation.Observations.Enqueue(new PhysicalLlmCallContext.Observation(candidate.Id, receipt.ObservedModel, usage));
+        }
+    }
+
+    /// <summary>Send one attempt, marking <see cref="AmbiguousSendKey"/> when it throws a fault that does not prove the request never reached a server (see <see cref="LlmBudgetGuard.NeverReachedAServer"/>) — the same request rides every retry, so a LATER attempt's own clean outcome must not be read as proof this earlier one bought nothing.</summary>
+    private async Task<HttpResponseMessage> SendTrackingAmbiguityAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        try { return await base.SendAsync(request, cancellationToken).ConfigureAwait(false); }
+        catch (HttpRequestException ex) when (!LlmBudgetGuard.NeverReachedAServer(ex))
+        {
+            if (!request.Options.TryGetValue(AmbiguousSendKey, out var marker))
+                request.Options.Set(AmbiguousSendKey, marker = new AmbiguousSendMarker());
+            marker.Occurred = true;
+            throw;
         }
     }
 }
