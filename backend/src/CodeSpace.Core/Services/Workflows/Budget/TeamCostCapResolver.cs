@@ -13,8 +13,9 @@ namespace CodeSpace.Core.Services.Workflows.Budget;
 /// by it. The deployment cap is a floor under teams nobody has configured — an operator who raises one team above
 /// it has said so explicitly, and silently clamping that would make the management endpoint a lie.</para>
 ///
-/// <para>Tracked reads on purpose: the resolve runs inside the ledger's admission transaction on the SAME scoped
-/// <see cref="CodeSpaceDbContext"/>, so it sees that transaction's own writes and holds its locks.</para>
+/// <para><c>AsNoTracking</c> — this row is read, never mutated — but still resolved inside the ledger's admission
+/// transaction on the SAME scoped <see cref="CodeSpaceDbContext"/>, so it sees that transaction's own writes and
+/// holds its locks regardless of tracking.</para>
 /// </summary>
 public sealed class TeamCostCapResolver : ITeamCostCapResolver, IScopedDependency
 {

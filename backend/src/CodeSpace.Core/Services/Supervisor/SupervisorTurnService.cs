@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Plans;
 using Microsoft.Extensions.Logging;
@@ -223,7 +224,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
                 // ledger will refuse forever) and never an infra-shaped failure.
                 _logger.LogWarning("Supervisor run {RunId} hit the cost cap at the budget ledger (committed ${Committed} against ${Cap}) — forcing the cost-cap stop", context.SupervisorRunId, refused.CommittedUsd, refused.CapUsd);
 
-                return GateForcedStop(context, SupervisorStopReasons.CostCapReached, Deciders.SupervisorBudgetRecitation.Summary(refused.CapUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind));
+                return GateForcedStop(context, SupervisorStopReasons.CostCapReached, BudgetStopDetail(refused, Deciders.SupervisorBudgetRecitation.Summary(refused.CapUsd, context.AgentExecutionSpendUsd, context.BrainPlaneSpendUsd, context.BrainPlaneSpendByKind)));
             }
         }
 
@@ -539,6 +540,17 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         return GateSideEffectingDecision(context, decision);
     }
+
+    /// <summary>
+    /// The cost-cap stop / budget-skip detail every <see cref="Workflows.Llm.LlmBudgetExceededException"/> catch site
+    /// reports: <paramref name="baseDetail"/> unchanged when the RUN's own cap refused (the only grain
+    /// <paramref name="baseDetail"/>'s numbers ever speak to), plus the ledger's own reason — which names the OTHER
+    /// cap and its value — when a Team or Deployment refusal is recited instead. Without this, a team refusal reads
+    /// as if the run itself had exhausted its cap, which is a different situation with a different remedy. Internal
+    /// so this is unit-pinned directly (InternalsVisibleTo), not only through a full turn.
+    /// </summary>
+    internal static string BudgetStopDetail(Workflows.Llm.LlmBudgetExceededException refused, string baseDetail) =>
+        refused.RefusedGrain is null or BudgetCapGrain.Run ? baseDetail : $"{baseDetail} {refused.Reason}";
 
     /// <summary>
     /// A FORCED stop is still a STOP — the run's publish/delivery obligations do not evaporate because the server,

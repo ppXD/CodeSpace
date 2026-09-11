@@ -13,5 +13,7 @@ CREATE TABLE budget_team_cap (
 COMMENT ON TABLE budget_team_cap IS 'At most one standing cost cap per team; absence falls back to the deployment cap, and absence of that keeps a per-run ceiling only.';
 COMMENT ON COLUMN budget_team_cap.cap_window IS 'The rolling window the committed sum covers. Named cap_window because window is a reserved word.';
 
--- The team committed-sum query behind every admission: team + live/settled state, bounded to the cap's window.
-CREATE INDEX ix_budget_reservation_team_state_created ON budget_reservation (team_id, state, created_date);
+-- The team committed-sum query behind every admission: team + a created_date range scan, bounded to the cap's
+-- window. state is filtered by NOT-equal (Released/Expired excluded), so it cannot serve as an equality middle
+-- column here — a leading (team_id, created_date) index lets the range scan do the work instead.
+CREATE INDEX ix_budget_reservation_team_created ON budget_reservation (team_id, created_date);

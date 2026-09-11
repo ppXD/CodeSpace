@@ -697,7 +697,7 @@ public sealed partial class SupervisorTurnService
             // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
             // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
             // lands via the decider's own guarded call, which the same ledger refuses next.
-            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            _logger.LogWarning("Acceptance grading refused by the budget ledger ({Detail}) — leaving the verdict a budget-skip", BudgetStopDetail(refused, $"committed ${refused.CommittedUsd:0.####} against ${refused.CapUsd:0.####}"));
             return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -916,7 +916,7 @@ public sealed partial class SupervisorTurnService
             // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
             // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
             // lands via the decider's own guarded call, which the same ledger refuses next.
-            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            _logger.LogWarning("Acceptance grading refused by the budget ledger ({Detail}) — leaving the verdict a budget-skip", BudgetStopDetail(refused, $"committed ${refused.CommittedUsd:0.####} against ${refused.CapUsd:0.####}"));
             return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1058,7 +1058,7 @@ public sealed partial class SupervisorTurnService
             // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
             // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
             // lands via the decider's own guarded call, which the same ledger refuses next.
-            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            _logger.LogWarning("Acceptance grading refused by the budget ledger ({Detail}) — leaving the verdict a budget-skip", BudgetStopDetail(refused, $"committed ${refused.CommittedUsd:0.####} against ${refused.CapUsd:0.####}"));
             return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1417,7 +1417,7 @@ public sealed partial class SupervisorTurnService
         }
         catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
-            _logger.LogWarning("Branchless stop grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            _logger.LogWarning("Branchless stop grading refused by the budget ledger ({Detail}) — leaving the verdict a budget-skip", BudgetStopDetail(refused, $"committed ${refused.CommittedUsd:0.####} against ${refused.CapUsd:0.####}"));
             return (new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment }, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1591,7 +1591,7 @@ public sealed partial class SupervisorTurnService
             // The run's own cap refused the judge call — never the instrument's fault and never the candidate's:
             // an Environment-classed skip (InfraUnknown downstream, buys no retries), while the run-level stop
             // lands via the decider's own guarded call, which the same ledger refuses next.
-            _logger.LogWarning("Acceptance grading refused by the budget ledger (committed ${Committed} against ${Cap}) — leaving the verdict a budget-skip", refused.CommittedUsd, refused.CapUsd);
+            _logger.LogWarning("Acceptance grading refused by the budget ledger ({Detail}) — leaving the verdict a budget-skip", BudgetStopDetail(refused, $"committed ${refused.CommittedUsd:0.####} against ${refused.CapUsd:0.####}"));
             return new BenchmarkGrade { Passed = false, Detail = GradeSkippedBudgetExhausted, Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
