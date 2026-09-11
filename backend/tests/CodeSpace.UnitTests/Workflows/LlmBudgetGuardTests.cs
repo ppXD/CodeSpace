@@ -200,6 +200,7 @@ public class LlmBudgetGuardTests
         { new HttpRequestException("error while copying content to a stream"), false, "a truncated read of a 200 body — the completion was generated and billed, we just did not finish reading it" },
         { new LlmApiException("OpenAI", 200, LlmErrorCategory.Malformed, "not json"), false, "a 2xx MAY have billed — its own doc says so; never release on an ambiguous outcome" },
         { new LlmApiException("OpenAI", 429, LlmErrorCategory.RateLimited, "rate limited") { PriorBilledAttempt = true }, false, "a re-ask's 429 proves nothing about the first physical call, which was billed inside this same reservation" },
+        { new OperationCanceledException("cancelled", new LlmApiException("Anthropic", 502, LlmErrorCategory.Transient, "bad gateway")), false, "the OUTER cancellation is a veto — it wins over the INNER 502's own proof; a caller that wrapped its own cancellation around a released-worthy fault must not launder it into a release" },
         { new TaskCanceledException("HttpClient timeout"), false, "the request may well have been served and billed after we stopped listening" },
         { new TimeoutException("elapsed"), false, "same ambiguity as a cancellation" },
         { new InvalidOperationException("boom"), false, "an untyped fault proves nothing — the pre-existing pessimistic hold" },

@@ -43,9 +43,15 @@ public static class LlmHttpClientRegistration
             // RETRY ONLY — deliberately NO timeout strategy (the AddStandardResilienceHandler default 10s attempt /
             // 30s total would be WORSE than 100s for a long LLM generation; the real ceiling is HttpClient.Timeout +
             // the node's optional per-call budget) and NO circuit breaker (a shared breaker would bleed one team's
-            // bad gateway onto every team — a per-endpoint-keyed breaker is a deferred refinement).
+            // bad gateway onto every team — a per-endpoint-keyed breaker is a deferred refinement). ShouldHandle is
+            // STATUS-ONLY (5xx/408/429) and deliberately does NOT retry HttpRequestException: a connection reset
+            // AFTER send is ambiguous — the request may already have reached the gateway and been billed — so
+            // retrying it here would send a second billable attempt under the budget guard's single reservation for
+            // the first. The engine-level RetryPlan re-attempts a Transient failure at a higher layer instead, where
+            // each attempt gets its own reservation.
             client.AddResilienceHandler(ResilienceHandlerName, b => b.AddRetry(new HttpRetryStrategyOptions
                 {
+                    ShouldHandle = new PredicateBuilder<HttpResponseMessage>().HandleResult(r => (int)r.StatusCode is >= 500 or 408 or 429),
                     MaxRetryAttempts = 2,
                     BackoffType = DelayBackoffType.Exponential,
                     UseJitter = true,
