@@ -808,28 +808,44 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Resolve <see cref="SandboxSpec.ModelBrokerHostToken"/> in the spec's environment to the address THIS child can
-    /// actually reach the worker at: the filtered netns's own gateway when it runs inside one, else loopback (a run
-    /// sharing the host network). Total by construction — the token never survives into a child, because a base URL
-    /// still carrying it would be a broken URL rather than a visibly refused one.
+    /// Resolve <see cref="SandboxSpec.ModelBrokerHostToken"/> — everywhere it can appear in a spec — to the address
+    /// THIS child can actually reach the worker at: the filtered netns's own gateway when it runs inside one, else
+    /// loopback (a run sharing the host network). Total by construction: the token never survives into a child,
+    /// because a base URL still carrying it would be a broken URL rather than a visibly refused one.
     ///
-    /// <para>Returns the spec UNCHANGED when no value mentions the token, which is every run whose credential was
-    /// not brokered — byte-identical env, and no allocation.</para>
+    /// <para>The ENV is not the only carrier, and assuming it was is what broke brokered Codex runs: a harness whose
+    /// CLI ignores its base-URL env var re-emits the value on the ARGV instead (<c>CodexHarness</c>'s
+    /// <c>-c model_providers.…base_url=…</c>), so <see cref="SandboxSpec.Args"/> — and, for symmetry,
+    /// <see cref="SandboxSpec.Command"/> — are substituted by the same pass. The child then failed to build an HTTP
+    /// request at all, which reads like a provider outage rather than an unresolved token.</para>
+    ///
+    /// <para>Returns the spec UNCHANGED when nothing mentions the token, which is every run whose credential was
+    /// not brokered — byte-identical command, argv and env, and no allocation.</para>
     ///
     /// <para>A network-severed run (no netns, no shared network) resolves to loopback and cannot reach the broker —
     /// nor could it reach the provider directly, so brokerage neither adds nor removes anything for it.</para>
     /// </summary>
     internal static SandboxSpec ResolveModelBrokerHost(SandboxSpec spec, string? gatewayIp)
     {
-        if (!spec.Environment.Values.Any(value => value.Contains(SandboxSpec.ModelBrokerHostToken, StringComparison.Ordinal))) return spec;
+        if (!MentionsModelBrokerHost(spec)) return spec;
 
         var host = gatewayIp is { Length: > 0 } reachable ? reachable : "127.0.0.1";
-        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        foreach (var (key, value) in spec.Environment) resolved[key] = value.Replace(SandboxSpec.ModelBrokerHostToken, host, StringComparison.Ordinal);
-
-        return spec with { Environment = resolved };
+        return spec with
+        {
+            Command = WithModelBrokerHost(spec.Command, host),
+            Args = spec.Args.Select(arg => WithModelBrokerHost(arg, host)).ToList(),
+            Environment = spec.Environment.ToDictionary(entry => entry.Key, entry => WithModelBrokerHost(entry.Value, host), StringComparer.Ordinal),
+        };
     }
+
+    /// <summary>Whether any carrier in this spec still holds the broker-host token — the one read that decides whether a launch pays for the substitution at all.</summary>
+    private static bool MentionsModelBrokerHost(SandboxSpec spec) =>
+        MentionsModelBrokerHost(spec.Command) || spec.Args.Any(MentionsModelBrokerHost) || spec.Environment.Values.Any(MentionsModelBrokerHost);
+
+    private static bool MentionsModelBrokerHost(string value) => value.Contains(SandboxSpec.ModelBrokerHostToken, StringComparison.Ordinal);
+
+    private static string WithModelBrokerHost(string value, string host) => value.Replace(SandboxSpec.ModelBrokerHostToken, host, StringComparison.Ordinal);
 
     /// <summary>
     /// Whether this launch SHARES a network with the host rather than getting a fresh empty one. A non-empty egress

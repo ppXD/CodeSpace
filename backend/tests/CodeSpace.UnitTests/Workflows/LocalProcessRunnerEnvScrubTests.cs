@@ -296,22 +296,42 @@ public sealed class LocalProcessRunnerEnvScrubTests
     [InlineData("", "http://127.0.0.1:41234/r0uteId")]              // a netns that reported no address is treated as no netns, never left as a token
     public void The_model_broker_host_token_is_resolved_to_the_address_this_child_can_reach(string? gatewayIp, string expected)
     {
-        var spec = EnvSpec() with { Environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", ["ANTHROPIC_AUTH_TOKEN"] = "run-token" } };
+        // The ARGV carrier is not decoration. Codex ignores OPENAI_BASE_URL and re-emits the broker's URL as a `-c`
+        // model-provider override, so a pass that substituted only the ENV shipped a literal "{codespace:…}" host on
+        // the command line — the CLI then could not even build an HTTP request ("builder error"), which reads as a
+        // provider outage. Mutation: resolve Environment only, and the Args assertion below goes red.
+        var spec = EnvSpec() with
+        {
+            Args = new[] { "-c", $"model_providers.codespace.base_url=http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId/v1" },
+            Environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", ["ANTHROPIC_AUTH_TOKEN"] = "run-token" },
+        };
 
         var resolved = LocalProcessRunner.ResolveModelBrokerHost(spec, gatewayIp);
 
         resolved.Environment["ANTHROPIC_BASE_URL"].ShouldBe(expected,
             customMessage: "the token must never survive into a child — a base URL still carrying it is a broken URL the CLI reports as a network error, not as a refused credential");
         resolved.Environment["ANTHROPIC_AUTH_TOKEN"].ShouldBe("run-token", "only the host is substituted; the bearer is copied through untouched");
+        resolved.Args.ShouldBe(new[] { "-c", $"model_providers.codespace.base_url={expected}/v1" },
+            customMessage: "a harness whose CLI ignores its base-URL env var carries that URL on the ARGV, and the token has to be resolved there too or the brokered run cannot reach the broker at all");
+    }
+
+    [Fact]
+    public void A_command_carrying_the_broker_host_token_is_resolved_too()
+    {
+        // Not a shape a harness emits today (the URL rides the env or the argv), but the substitution is total by
+        // design: a carrier this pass skips is a token that reaches a child, and each skipped carrier cost a run.
+        var spec = EnvSpec() with { Command = $"/opt/reach-{SandboxSpec.ModelBrokerHostToken}" };
+
+        LocalProcessRunner.ResolveModelBrokerHost(spec, "10.63.12.1").Command.ShouldBe("/opt/reach-10.63.12.1");
     }
 
     [Fact]
     public void A_spec_with_no_broker_token_is_returned_untouched()
     {
-        var spec = EnvSpec();
+        var spec = EnvSpec() with { Args = new[] { "-c", "echo ok" } };
 
         LocalProcessRunner.ResolveModelBrokerHost(spec, "10.63.12.1").ShouldBeSameAs(spec,
-            "every run whose credential was not brokered must keep a byte-identical environment — and pay nothing for a feature it isn't using");
+            "every run whose credential was not brokered must keep a byte-identical command, argv and environment — and pay nothing for a feature it isn't using");
     }
 
     private static SandboxSpec EnvSpec() => new()

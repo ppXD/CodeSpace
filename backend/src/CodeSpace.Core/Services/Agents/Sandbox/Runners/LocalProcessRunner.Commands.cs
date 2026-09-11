@@ -24,9 +24,12 @@ public sealed partial class LocalProcessRunner
             var egress = await SetupEgressNetnsAsync(spec, key, cancellationToken).ConfigureAwait(false);
             invocation.EgressKey = egress.Key;
 
-            // Re-layer the spec env with the broker host resolved (the start info was built before the run's /30
-            // existed). A no-op for every run whose env does not mention the token — the values are identical.
-            foreach (var (name, value) in ResolveModelBrokerHost(spec, egress.GatewayIp).Environment) invocation.StartInfo.Environment[name] = value;
+            // Re-layer the spec with the broker host resolved (the start info was built before the run's /30 existed).
+            // The ARGV needs it as much as the env does — a harness whose CLI ignores its base-URL env var carries
+            // that URL on the command line instead — so the resolved spec, not `spec`, is what builds the child
+            // command below. A no-op for every run that does not mention the token: the values are identical.
+            var launched = ResolveModelBrokerHost(spec, egress.GatewayIp);
+            foreach (var (name, value) in launched.Environment) invocation.StartInfo.Environment[name] = value;
 
             if (spec.ConfigHomeEnvVars.Count > 0)
             {
@@ -39,7 +42,7 @@ public sealed partial class LocalProcessRunner
             var declaration = WriteMcpDeclaration(spec, invocation.ConfigHome);
             WriteConfigHomeFiles(spec.ConfigHomeFiles, invocation.ConfigHome);
             var argv = new Collection<string>();
-            AppendChildCommand(argv, new CommandIsolationContext(spec, invocation.ConfigHome, declaration, egress.ExecPrefix, cgroup.ExecPrefix));
+            AppendChildCommand(argv, new CommandIsolationContext(launched, invocation.ConfigHome, declaration, egress.ExecPrefix, cgroup.ExecPrefix));
             invocation.StartInfo.FileName = argv[0];
             invocation.StartInfo.ArgumentList.Clear();
             foreach (var arg in argv.Skip(1)) invocation.StartInfo.ArgumentList.Add(arg);
