@@ -4,11 +4,13 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Recovery;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Recovery;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -38,6 +40,13 @@ namespace CodeSpace.Core.Services.Agents;
 /// qualification: a run whose host never returns is terminalized at its own wall-clock deadline
 /// (<see cref="DeferToTheMintingHostAsync"/>), and a run launched with no deadline at all waits for that host or an
 /// operator.</para>
+///
+/// <para>That terminalization also has to account for what it CANNOT clean up. Every resource a run holds — its
+/// spool, its filtered-egress netns and the host-global subnet lease behind it, its cgroup leaf, its workspace clone
+/// — lives on the host that launched it, so an abandon performed anywhere else can free none of them. It therefore
+/// writes a typed <see cref="Messages.Agents.Recovery.RunCleanupReceipt"/> per resource instead of running local
+/// teardowns against foreign keys and swallowing the miss, and <c>AgentRunOrphanReaper</c> on the owning host is what
+/// settles those claims.</para>
 /// </summary>
 public interface IAgentRunReconcilerService
 {
@@ -77,6 +86,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// </summary>
     public static readonly TimeSpan AdoptionSweepBudget = TimeSpan.FromSeconds(10);
 
+    /// <summary>Recorded on a cleanup receipt when a teardown was attempted on the owning host and threw — the row that replaces a silent best-effort warning.</summary>
+    public const string TeardownFailedCode = "teardown-failed";
+
     /// <summary>Cap on reconciler re-attach attempts for one run: past it, a still-alive-but-unattachable run is abandoned rather than reclaimed forever (the no-livelock guarantee).</summary>
     public const int MaxReattachAttempts = 3;
 
@@ -103,12 +115,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly IToolCallLedgerService _ledger;
     private readonly Capture.ICaptureIntentService _captureIntents;
     private readonly Capture.INativeRecordPlane _nativeRecords;
+    private readonly IRunCleanupLedger _cleanup;
     // Withdraws an abandoned run's brokered model credential before its orphaned process is killed. Optional so a
     // deployment (or a hand-built double) without a broker has nothing to withdraw.
     private readonly Credentials.IModelCredentialBroker? _credentialBroker;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, IRunCleanupLedger cleanup, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _db = db;
         _runs = runs;
@@ -118,6 +131,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _ledger = ledger;
         _captureIntents = captureIntents;
         _nativeRecords = nativeRecords;
+        _cleanup = cleanup;
         _credentialBroker = credentialBroker;
         _logger = logger;
     }
@@ -364,7 +378,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             return await DeferToTheMintingHostAsync(candidate, handle, cancellationToken).ConfigureAwait(false);
 
         if (probe.State == SandboxRunState.Gone)
-            return await AbandonAsync(candidate, AgentRunAbandonCause.ProcessConfirmedDead, cancellationToken).ConfigureAwait(false);   // process already gone — nothing to kill
+            return await AbandonAsync(candidate, AgentRunAbandonCause.ProcessConfirmedDead, cancellationToken, handle: handle).ConfigureAwait(false);   // process already gone — nothing to kill (the handle rides along only so the resource receipts can name its keys)
 
         // Running: the supervised process is still ALIVE but its worker vanished. Past the re-attach ceiling, KILL
         // it and abandon — a permanently-unattachable-but-alive run must still reach a terminal state, and leaving
@@ -524,7 +538,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
 
         _logger.LogWarning("AgentRunReconciler: abandoning agent run {RunId} — its handle's host {LaunchHost} never answered and its deadline {Deadline} has passed, so no observer can still be completing it; its process cannot be reaped from here", runId, handle.LaunchHost, handle.Deadline);
-        return await AbandonAsync(candidate, AgentRunAbandonCause.LeaseLapsed, cancellationToken).ConfigureAwait(false);
+        return await AbandonAsync(candidate, AgentRunAbandonCause.LeaseLapsed, cancellationToken, handle: handle).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -566,8 +580,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         // P2 (capture-intent saga): an abandoned attempt died inside (or before) its capture window — every open
         // promise it holds is now permanently unknown. Visible, never silent.
-        if (transitioned > 0)
-            await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
+        var settledCaptures = transitioned > 0
+            ? await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false)
+            : 0;
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;
 
@@ -583,29 +598,87 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
-        await TearDownEgressNetnsQuietlyAsync(runId, cancellationToken).ConfigureAwait(false);
-        await TearDownCgroupQuietlyAsync(runId, cancellationToken).ConfigureAwait(false);
+        // The CAS above bumped fence_epoch by exactly one, so this is the generation every receipt below is stamped
+        // with. WHOSE resources these are decides what may be said about them: a handle minted on another host names
+        // a spool, a netns, a cgroup leaf and a clone that exist in namespaces this worker cannot address, and the
+        // teardowns below would run against keys that mean nothing here.
+        var stamp = new RunCleanupStamp(runId, candidate.Epoch + 1, LocalProcessRunner.CurrentHost, DateTimeOffset.UtcNow);
+
+        if (handle is not null && !LocalProcessRunner.PidAnswerableHere(handle))
+            await RecordForeignOrphansAsync(handle, stamp, settledCaptures, cancellationToken).ConfigureAwait(false);
+        else
+            await ReclaimLocalIsolationAsync(handle, stamp, settledCaptures, cancellationToken).ConfigureAwait(false);
 
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
         return StaleOutcome.Abandoned;
     }
 
     /// <summary>
-    /// Best-effort tear down an abandoned run's filtered-egress netns (B3 stability) — keyed by the RUN ID alone, so it
-    /// closes the one window the handle-keyed backstops (terminal teardown + spool reaper) can't see: a run that crashed
-    /// between the netns SETUP and the handle PERSIST left no handle carrying the reap key, so its netns/veth/nft-table
-    /// would otherwise leak permanently. The netns key IS the run id (the durable launch sets it up under
-    /// <c>runId.ToString("N")</c>), so a reconstruct-from-runId teardown reaps it. Idempotent + a no-op when the run had
-    /// no netns; gated on <see cref="FilteredEgressNetns.IsSupported"/> so a non-Linux host never spawns a doomed exec.
+    /// Record — never attempt — the cleanup of a run whose resources live on a host this worker cannot reach. This is
+    /// the whole slice: the abandon itself is legitimate (past the handle's own wall clock no observer can still be
+    /// completing the run), but every resource it held is standing on <see cref="SandboxHandle.LaunchHost"/>, and the
+    /// only honest act available here is to say so in a row addressed to that host's own sweep
+    /// (<c>AgentRunOrphanReaper</c>). Before this, the two teardowns below ran anyway against foreign keys and the
+    /// miss was swallowed as a best-effort warning — including the egress-subnet lease, which is released on the host
+    /// that HOLDS it, so the dead host's lease was never returned to a bounded pool and nothing recorded the loss.
     /// </summary>
-    private async Task TearDownEgressNetnsQuietlyAsync(Guid runId, CancellationToken cancellationToken)
+    private async Task RecordForeignOrphansAsync(SandboxHandle handle, RunCleanupStamp stamp, int settledCaptures, CancellationToken cancellationToken)
     {
-        if (!FilteredEgressNetns.IsSupported) return;
+        var receipts = RunCleanupReceipts.ForForeignAbandon(handle, stamp, settledCaptures);
 
-        try { await FilteredEgressNetns.TeardownAsync(runId.ToString("N"), cancellationToken).ConfigureAwait(false); }
+        _logger.LogWarning("AgentRunReconciler: agent run {RunId} was abandoned from host {Here}, but its resources live on {Owner} — recording {Count} cleanup receipt(s) for that host's own sweep instead of a teardown this worker cannot perform", stamp.AgentRunId, stamp.RecordedByHost, handle.LaunchHost, receipts.Count);
+
+        foreach (var receipt in receipts)
+            await UpsertQuietlyAsync(receipt, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Same-host abandon: run the isolation teardowns exactly as before, and record what they did. The spool and the
+    /// workspace clone are deliberately NOT claimed here — they are reclaimed on this host by the spool reaper's and
+    /// the workspace janitor's own retention policies, which this path has no authority to pre-empt — so a receipt is
+    /// written only for the resources this abandon itself is responsible for freeing. The capture promises are
+    /// reported only when this abandon actually settled some: unlike the foreign account, a sweep standing on the
+    /// run's own host that moved no intent knows there was nothing outstanding, so it has nothing to say.
+    /// </summary>
+    private async Task ReclaimLocalIsolationAsync(SandboxHandle? handle, RunCleanupStamp stamp, int settledCaptures, CancellationToken cancellationToken)
+    {
+        await TearDownEgressNetnsAsync(handle?.EgressNetnsKey, stamp, cancellationToken).ConfigureAwait(false);
+        await TearDownCgroupAsync(handle?.CgroupRunKey, stamp, cancellationToken).ConfigureAwait(false);
+
+        if (settledCaptures > 0)
+            await UpsertQuietlyAsync(stamp.Completed(RunResourceKind.LogSegments, stamp.RecordedByHost, null), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tear down an abandoned run's filtered-egress netns (B3 stability). When the handle NAMES the key the run
+    /// provably had one, so the attempt always leaves a receipt — <see cref="RunResourceOutcome.Completed"/>, or
+    /// <see cref="RunResourceOutcome.Unknown"/> when this host cannot even attempt it (no <c>ip</c>/<c>nft</c>) or the
+    /// attempt threw. When it does not, this is still the runId-keyed BACKSTOP for a run that crashed between the
+    /// netns setup and the handle persist (the netns key IS the run id), and a blind backstop that succeeds asserts
+    /// nothing — a resource that may never have existed earns no row. A blind backstop that FAILS does: that is the
+    /// silent warning this slice exists to replace.
+    /// </summary>
+    private async Task TearDownEgressNetnsAsync(string? netnsKey, RunCleanupStamp stamp, CancellationToken cancellationToken)
+    {
+        var declared = netnsKey is { Length: > 0 };
+        var key = declared ? netnsKey! : stamp.AgentRunId.ToString("N");
+
+        if (!FilteredEgressNetns.IsSupported)
+        {
+            if (declared) await UpsertQuietlyAsync(stamp.Unknown(RunResourceKind.EgressSubnet, stamp.RecordedByHost, key, RunCleanupReceipts.UnsupportedCode), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await FilteredEgressNetns.TeardownAsync(key, cancellationToken).ConfigureAwait(false);
+
+            if (declared) await UpsertQuietlyAsync(stamp.Completed(RunResourceKind.EgressSubnet, stamp.RecordedByHost, key), cancellationToken).ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "AgentRunReconciler: best-effort egress-netns teardown for abandoned run {RunId} failed", runId);
+            _logger.LogWarning(ex, "AgentRunReconciler: egress-netns teardown for abandoned run {RunId} failed", stamp.AgentRunId);
+            await UpsertQuietlyAsync(stamp.Unknown(RunResourceKind.EgressSubnet, stamp.RecordedByHost, key, TeardownFailedCode), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -618,21 +691,38 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         catch (Exception exception) { _logger.LogWarning(exception, "AgentRunReconciler: the brokered model credential for abandoned run {RunId} could not be revoked; it lapses on its own TTL instead", runId); }
     }
 
-    /// <summary>
-    /// Best-effort tear down an abandoned run's cgroup-v2 resource-cap leaf (B4) — the cgroup parallel of the egress
-    /// backstop: a run that crashed between the cgroup SETUP and the handle PERSIST left no handle carrying the reap
-    /// key, so its leaf would leak. The leaf name IS runId-derived (the durable launch creates it under
-    /// <c>runId.ToString("N")</c>), so a reconstruct-from-runId teardown reaps it. Idempotent + a no-op when the run had
-    /// no cap or no root is configured; gated on cgroup-v2 support.
-    /// </summary>
-    private async Task TearDownCgroupQuietlyAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>The cgroup parallel of <see cref="TearDownEgressNetnsAsync"/>, with the same declared-vs-backstop rule. A host with no delegated root can attempt nothing, so a declared leaf there is <see cref="RunResourceOutcome.Unknown"/> rather than quietly left.</summary>
+    private async Task TearDownCgroupAsync(string? cgroupKey, RunCleanupStamp stamp, CancellationToken cancellationToken)
     {
-        if (!CgroupResourceLimit.IsSupported || CgroupResourceLimit.CgroupRoot is not { } root) return;
+        var declared = cgroupKey is { Length: > 0 };
+        var key = declared ? cgroupKey! : stamp.AgentRunId.ToString("N");
 
-        try { await CgroupResourceLimit.TeardownAsync(root, runId.ToString("N"), cancellationToken).ConfigureAwait(false); }
+        if (!CgroupResourceLimit.IsSupported || CgroupResourceLimit.CgroupRoot is not { } root)
+        {
+            if (declared) await UpsertQuietlyAsync(stamp.Unknown(RunResourceKind.Cgroup, stamp.RecordedByHost, key, RunCleanupReceipts.UnsupportedCode), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await CgroupResourceLimit.TeardownAsync(root, key, cancellationToken).ConfigureAwait(false);
+
+            if (declared) await UpsertQuietlyAsync(stamp.Completed(RunResourceKind.Cgroup, stamp.RecordedByHost, key), cancellationToken).ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "AgentRunReconciler: best-effort cgroup teardown for abandoned run {RunId} failed", runId);
+            _logger.LogWarning(ex, "AgentRunReconciler: cgroup teardown for abandoned run {RunId} failed", stamp.AgentRunId);
+            await UpsertQuietlyAsync(stamp.Unknown(RunResourceKind.Cgroup, stamp.RecordedByHost, key, TeardownFailedCode), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The abandon must stand even if its bookkeeping cannot be written: the run reaching a terminal state is the no-stuck-run guarantee, and a receipt is evidence ABOUT that. A lost write is logged rather than raised, and the owning host's sweep simply never learns about that one resource.</summary>
+    private async Task UpsertQuietlyAsync(RunCleanupReceipt receipt, CancellationToken cancellationToken)
+    {
+        try { await _cleanup.UpsertAsync(receipt, cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: could not record the {Kind} cleanup receipt for agent run {RunId}", receipt.Kind, receipt.AgentRunId);
         }
     }
 

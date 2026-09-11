@@ -1950,6 +1950,7 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
       </button>
       {cls === "err" && a.error && <div className="room-arow-err" title={a.error}><Sym n="alert" s={11} cls="room-arow-erric" /> {a.error}</div>}
+      {a.recovery && <div className="room-arow-orphan" title="These resources were left on a host this run was abandoned FROM another worker — that host's own sweep reclaims them."><Sym n="alert" s={11} cls="room-arow-orphanic" /> {a.recovery.detail}</div>}
     </div>
   );
 }

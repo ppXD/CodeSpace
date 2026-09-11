@@ -101,6 +101,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<UserProviderIdentity> UserProviderIdentity => Set<UserProviderIdentity>();
     public DbSet<AgentRun> AgentRun => Set<AgentRun>();
     public DbSet<AgentRunEvent> AgentRunEvent => Set<AgentRunEvent>();
+    public DbSet<AgentRunCleanupReceiptRecord> AgentRunCleanupReceipt => Set<AgentRunCleanupReceiptRecord>();
     public DbSet<AgentDefinition> AgentDefinition => Set<AgentDefinition>();
     public DbSet<SkillDefinition> SkillDefinition => Set<SkillDefinition>();
     public DbSet<AgentSkillBinding> AgentSkillBinding => Set<AgentSkillBinding>();

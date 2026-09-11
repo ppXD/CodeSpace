@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Agents.Recovery;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Plans;
@@ -15,6 +16,7 @@ using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Recovery;
 using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
@@ -49,10 +51,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly ITeamCostService _costs;
     private readonly IBudgetLedger _budget;
     private readonly ITeamCostCapResolver _teamCaps;
+    private readonly IRunCleanupLedger _cleanup;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
 
-    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, IBudgetLedger budget, ITeamCostCapResolver teamCaps, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, IBudgetLedger budget, ITeamCostCapResolver teamCaps, IRunCleanupLedger cleanup, CodeSpaceDbContext db, ISessionTurnCache cache)
     {
         _sessions = sessions;
         _phases = phases;
@@ -67,6 +70,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _costs = costs;
         _budget = budget;
         _teamCaps = teamCaps;
+        _cleanup = cleanup;
         _db = db;
         _cache = cache;
     }
@@ -656,6 +660,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             AgentFiles = agentFiles,
             AgentFileIdentities = agentFileIdentities,
             AgentLogs = agentLogs,
+            AgentRecovery = await AgentRecoveryAsync(agentIds, teamId, cancellationToken).ConfigureAwait(false),
             Budget = await BudgetAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
             Subtasks = subtasks,
             ChangedFiles = changedFiles,
@@ -723,6 +728,49 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _ => state.ToString().ToLowerInvariant(),
     };
 
+    /// <summary>Read every cleanup receipt of the turn's agents in one narrow query and fold each run's UNSETTLED remainder. A run whose resources were all reclaimed folds to nothing and never reaches the card.</summary>
+    private async Task<IReadOnlyDictionary<Guid, RoomRunRecovery>> AgentRecoveryAsync(IReadOnlyCollection<Guid> agentIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (agentIds.Count == 0) return EmptyAgentRecovery;
+
+        var receipts = await _cleanup.ForRunsAsync(teamId, agentIds, cancellationToken).ConfigureAwait(false);
+
+        return receipts.GroupBy(receipt => receipt.AgentRunId)
+            .Select(group => (group.Key, Recovery: SummarizeRecovery(group.ToList())))
+            .Where(pair => pair.Recovery is not null)
+            .ToDictionary(pair => pair.Key, pair => pair.Recovery!);
+    }
+
+    /// <summary>
+    /// Fold one run's receipts into what is still outstanding, or null when nothing is. Settled receipts are
+    /// deliberately invisible: a resource that was cleaned up on its own host, or orphaned and later compensated, is
+    /// not something a reader has to act on — the Room's job here is to name what is still standing and where.
+    /// </summary>
+    internal static RoomRunRecovery? SummarizeRecovery(IReadOnlyList<RunCleanupReceipt> receipts)
+    {
+        var orphans = receipts.Where(receipt => receipt.Outcome == RunResourceOutcome.Orphaned).ToList();
+        var unknown = receipts.Count(receipt => receipt.Outcome == RunResourceOutcome.Unknown);
+
+        if (orphans.Count == 0 && unknown == 0) return null;
+
+        var hosts = orphans.Select(receipt => receipt.OwnerHost).OfType<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(host => host, StringComparer.Ordinal).ToList();
+
+        return new RoomRunRecovery { OrphanedCount = orphans.Count, OrphanHosts = hosts, UnknownCount = unknown, Detail = DescribeRecovery(orphans.Count, hosts, unknown) };
+    }
+
+    private static string DescribeRecovery(int orphaned, IReadOnlyList<string> hosts, int unknown)
+    {
+        if (orphaned == 0) return $"{Resources(unknown)} with an unknown cleanup state";
+
+        var orphanText = $"{Resources(orphaned)} orphaned on {(hosts.Count == 1 ? "host" : "hosts")} {string.Join(", ", hosts)}";
+
+        return unknown == 0 ? orphanText : $"{orphanText} \u00b7 {unknown} with an unknown cleanup state";
+    }
+
+    private static string Resources(int count) => $"{count} resource{(count == 1 ? "" : "s")}";
+
+    private static readonly IReadOnlyDictionary<Guid, RoomRunRecovery> EmptyAgentRecovery = new Dictionary<Guid, RoomRunRecovery>();
     private static readonly IReadOnlyDictionary<Guid, RoomAgentLogSummary> EmptyAgentLogs = new Dictionary<Guid, RoomAgentLogSummary>();
     private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
 

@@ -243,6 +243,20 @@ export interface RoomAgentCard {
   /// Whether the agent's self-report disagreed with its objective acceptance check ("over_claim" / "under_claim").
   /// On a journal card it comes from the backend; on a room card the journal→room adapter fills it, like `error`.
   contradiction?: string | null;
+  /// What this agent left behind on a host nobody could reach when it was abandoned. Null when it left nothing outstanding.
+  recovery?: RoomRunRecovery | null;
+}
+
+/// The unsettled part of one agent run's cleanup — the host-local resources (spool, egress netns + its subnet lease,
+/// cgroup leaf, workspace clone) still standing after the run was abandoned by a sweep on a DIFFERENT worker, which
+/// could not reach any of them. `detail` is backend-authored copy; the counts are for tone only.
+export interface RoomRunRecovery {
+  orphanedCount: number;
+  /// The distinct hosts those resources are on — who has to come back for them to be reclaimed.
+  orphanHosts?: string[] | null;
+  /// Resources whose state nobody can establish (a teardown no host could attempt; a credential possibly mid-use).
+  unknownCount: number;
+  detail: string;
 }
 
 export interface RoomDecisionOption {

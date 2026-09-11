@@ -678,6 +678,7 @@ public static class RoomNarrative
         LatestLine = facts.LatestLines.TryGetValue(a.AgentRunId, out var l) ? l : null,
         NodeId = a.NodeId,
         IterationKey = a.IterationKey,
+        Recovery = facts.AgentRecovery.TryGetValue(a.AgentRunId, out var recovery) ? recovery : null,
     };
 
     /// <summary>Absent rather than empty when the turn produced no files: an empty list reads as "it produced nothing", which is a claim about the run rather than about this surface.</summary>
