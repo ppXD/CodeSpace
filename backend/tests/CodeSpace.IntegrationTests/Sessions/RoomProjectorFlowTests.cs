@@ -7,6 +7,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Plans;
+using CodeSpace.Core.Services.Quality;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Supervisor;
@@ -22,6 +23,7 @@ using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
+using CodeSpace.Messages.Quality;
 using CodeSpace.Messages.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
@@ -556,6 +558,86 @@ public class RoomProjectorFlowTests
         subtasks.Label.ShouldBe("Plan");
         subtasks.Detail.ShouldBe("2 subtasks");
         subtasks.Items.Select(i => i.Text).ShouldBe(new[] { "Trace DI registration", "Analyze the template store" }, "the plan's subtask titles are surfaced from the decision tape");
+    }
+
+    [Fact]
+    public async Task A_supervisor_turn_surfaces_the_quality_recommendation_its_newest_decision_recorded()
+    {
+        // P22-9b. The recommendation is durable so an operator can see what the run was ADVISED to do beside what it
+        // actually did. Read VERBATIM off the frozen column rather than recomputed from today's policy table (which
+        // may since have changed its mind), so the Room and that turn's prompt can never disagree.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Advised");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the failing check", resultSummary: "Shipped it.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Repair the check");
+        await SeedQualityDecisionsAsync(teamId, run, sequence: 2,
+            Reading("s0", QualityMechanism.EscalateModel, "the declared check failed on 2 consecutive attempts over a localized diff"));
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        var quality = turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "quality");
+        quality.Label.ShouldBe("Quality policy");
+        quality.Detail.ShouldBe("recommended for 1 unit");
+
+        var item = quality.Items.ShouldHaveSingleItem();
+        item.Text.ShouldBe("s0 · EscalateModel", "the mechanism reaches the operator by name, keyed to the unit it is about");
+        item.Detail.ShouldBe("the declared check failed on 2 consecutive attempts over a localized diff", "the evidence travels with the mechanism — a verdict with no reason beside it is one a reader must take on trust");
+    }
+
+    [Fact]
+    public async Task A_turn_whose_decisions_recorded_no_recommendation_renders_no_quality_row()
+    {
+        // A pre-column run and a run no unit was attempted in must project EXACTLY as before — an empty row saying
+        // "recommended for 0 units" is prompt/UI tax for a run there is nothing to say about.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Unadvised");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Do the thing", resultSummary: "Shipped it.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Repair the check");
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        turn.Blocks.OfType<StatBlock>().ShouldNotContain(s => s.Kind == "quality");
+    }
+
+    [Fact]
+    public async Task The_newest_recorded_recommendation_wins_over_an_older_reading_of_the_same_unit()
+    {
+        // A recommendation is a reading of the evidence at ONE instant, and the latest one is the only one still
+        // current: an older row's reading is history the decision tape already holds. Rendering both would show an
+        // operator two contradictory mechanisms for one unit with nothing saying which is live.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Re-advised");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Fix the failing check", resultSummary: "Shipped it.");
+
+        await SeedPlanDecisionAsync(teamId, run, "Repair the check");
+        await SeedQualityDecisionsAsync(teamId, run, sequence: 2, Reading("s0", QualityMechanism.SingleAgent, "no blocking evidence yet"));
+        await SeedQualityDecisionsAsync(teamId, run, sequence: 3, Reading("s0", QualityMechanism.EscalateModel, "the check failed twice in a row"));
+
+        var room = await ProjectByRunAsync(run, teamId);
+        var turn = room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+
+        turn.Blocks.OfType<StatBlock>().Single(s => s.Kind == "quality").Items.ShouldHaveSingleItem()
+            .Text.ShouldBe("s0 · EscalateModel", "the newest reading is the live one");
+    }
+
+    private static SupervisorUnitQualityDecision Reading(string subtaskId, QualityMechanism mechanism, string reason) =>
+        new() { SubtaskId = subtaskId, Mechanism = mechanism, Reason = reason, Facts = new QualityDecisionInput() };
+
+    /// <summary>A SPAWN decision carrying the quality recommendations its turn's prompt was shown — written through the production codec, so a fixture cannot make the Room green on bytes production never emits.</summary>
+    private async Task SeedQualityDecisionsAsync(Guid teamId, Guid runId, long sequence, params SupervisorUnitQualityDecision[] readings)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var row = SupDecision(teamId, runId, sequence, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s0"]}""", """{"agentCount":0,"agentRunIds":[]}""");
+        row.QualityDecisionsJson = SupervisorQualityRecord.ToJson(readings);
+
+        db.SupervisorDecisionRecord.Add(row);
+        await db.SaveChangesAsync();
     }
 
     [Fact]

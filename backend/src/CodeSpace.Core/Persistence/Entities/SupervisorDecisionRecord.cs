@@ -90,6 +90,19 @@ public class SupervisorDecisionRecord : IEntity<Guid>, IAuditable
     /// <summary>Exact lesson ids exposed to the model on this turn. A frozen journal field; empty means no lesson text reached the prompt.</summary>
     public List<Guid> LessonIds { get; set; } = [];
 
+    /// <summary>
+    /// P22-9b — the quality policy's per-unit RECOMMENDATIONS the turn that emitted this decision was shown, as
+    /// durable JSON (<c>SupervisorQualityRecord</c>). A frozen JOURNAL field, for the same reason
+    /// <see cref="LessonArm"/> is one: a recommendation that could be rewritten after the decision it describes
+    /// would not be evidence about that decision.
+    ///
+    /// <para>Nothing branches on it — the model was free to reject the recommendation, and the roster it chose from
+    /// was untouched by it. It is kept so that "what was recommended" and "what the run did" can be compared after
+    /// the fact, which is exactly what P22-9c's same-budget ablation needs. NULL when no unit had been attempted
+    /// when this decision was emitted, and on every row written before the column existed.</para>
+    /// </summary>
+    public string? QualityDecisionsJson { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

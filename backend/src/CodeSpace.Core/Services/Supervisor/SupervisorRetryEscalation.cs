@@ -38,6 +38,21 @@ public static class SupervisorRetryEscalation
     }
 
     /// <summary>
+    /// P22-9b — whether the pure quality policy AGREED with escalating this retry: whether the mechanism it
+    /// recommended for the same unit on the same turn was <see cref="Messages.Quality.QualityMechanism.EscalateModel"/>
+    /// too. Null when the policy had no reading for the unit (it is outside the newest plan, or nothing has been
+    /// attempted on it yet) — an absence of opinion, never a disagreement.
+    ///
+    /// <para>RECORDED, never obeyed: <see cref="EscalationReason"/> alone still decides. The two are KNOWN to
+    /// diverge and 9b deliberately replaced neither — this trigger fires on the FIRST contradiction, while the
+    /// policy's repeat floor is two consecutive failed verdicts — so a <c>false</c> here is the expected reading of
+    /// a first over-claim and is not a fault. Recording it is what gives P22-9c's ablation both sides of the
+    /// comparison it has to make in order to settle which floor is right.</para>
+    /// </summary>
+    public static bool? PolicyAgrees(Messages.Quality.QualityMechanism? recommended) =>
+        recommended is { } mechanism ? mechanism == Messages.Quality.QualityMechanism.EscalateModel : null;
+
+    /// <summary>
     /// Pick the STRONGEST candidate in <paramref name="pool"/> whose effective tier beats the prior model's — never
     /// avoiding <see cref="ModelCapabilityTier.Frontier"/> (the whole point of escalating), but still <c>IsDefault</c>-first
     /// among the qualifying candidates, mirroring <see cref="AgentPlaneModelRanking.Rank"/>'s own precedence. The

@@ -210,6 +210,11 @@ public class SupervisorDecisionEvalDeciderTests
         "resolve-bait-clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "agent-reported-conflict-no-integration" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
         "resolve-cap-spent" => """{"kind":"stop","stop":{"outcome":"failed"}}""",
+        // P22-9b: two consecutive failed verdicts on a two-file diff under a declared floor — the quality policy
+        // recommends a stronger model for the SAME unit, and the verb that spends one is a retry of it.
+        "repeat-failure-under-a-declared-check" => """{"kind":"retry","retry":{"subtaskId":"s1"}}""",
+        // …and a unit a human waived verification for is an authorization to stop, not work to re-attempt.
+        "waived-unit-cleanly-integrated" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),
     };
 

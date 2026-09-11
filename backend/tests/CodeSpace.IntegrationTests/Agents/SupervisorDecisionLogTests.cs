@@ -3,11 +3,14 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Quality;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Quality;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
@@ -516,6 +519,125 @@ public class SupervisorDecisionLogTests
         using var verify = _fixture.BeginScope();
         SupervisorOutcome.ReadRationale((await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single().PayloadJson)
             .ShouldBe((null, null), "a plain decision replays with no rationale — the optional annotation never leaks");
+    }
+
+    // ── P22-9b: the quality recommendations the turn was shown are frozen onto the decision it emitted ──
+
+    [Fact]
+    public async Task The_quality_recommendations_a_turn_was_shown_survive_a_real_persist_and_replay()
+    {
+        // The column exists because a recommendation the model may REJECT is only auditable if what it was shown
+        // outlives the prompt that carried it: "the policy said escalate and the brain retried on the same model
+        // anyway" is not recoverable after the fact from a prompt nobody kept, and 9c's ablation is exactly that
+        // comparison. Written and read through the PRODUCTION codec, so the bytes the Room renders are the bytes the
+        // prompt carried — a hand-rolled fixture JSON would prove the column round-trips and nothing about the shape.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var shown = new[]
+        {
+            new SupervisorUnitQualityDecision
+            {
+                SubtaskId = "s1",
+                Mechanism = QualityMechanism.EscalateModel,
+                Reason = "the declared check failed on 2 consecutive attempts over a localized diff",
+                Facts = new QualityDecisionInput
+                {
+                    CheckDeclared = true,
+                    ChangedFileCount = 3,
+                    Attempts = new[]
+                    {
+                        new QualityAttemptFact { Disposition = VerificationDisposition.Failed },
+                        new QualityAttemptFact { Disposition = VerificationDisposition.Failed },
+                    },
+                },
+            },
+        };
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, "spawn:quality", Payload) with { QualityDecisionsJson = SupervisorQualityRecord.ToJson(shown) }, CancellationToken.None);
+
+        SupervisorDecisionRecord replayed;
+        using (var scope = _fixture.BeginScope())
+            replayed = (await Log(scope).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        var read = SupervisorQualityRecord.Read(replayed.QualityDecisionsJson).ShouldHaveSingleItem();
+        read.SubtaskId.ShouldBe("s1", "the unit the reading is about — the recommendation is useless without it");
+        read.Mechanism.ShouldBe(QualityMechanism.EscalateModel);
+        read.Reason.ShouldBe(shown[0].Reason, "the policy's own reason, verbatim through Postgres");
+        read.Facts.ConsecutiveFailedVerdicts.ShouldBe(2, "the FACTS travel with the recommendation — a mechanism with no evidence beside it can be neither audited nor rejected");
+        read.Facts.CheckDeclared.ShouldBeTrue();
+
+        using (var scope = _fixture.BeginScope())
+            (await Log(scope).GetTerminalDecisionsAsync(runId, teamId, CancellationToken.None)).ShouldBeEmpty("the row is still Pending — the surfaced-on-SupervisorPriorDecision read is pinned below on a settled row");
+    }
+
+    [Fact]
+    public async Task A_pre_spawn_decision_leaves_the_quality_column_null()
+    {
+        // Nothing attempted ⇒ nothing recommended ⇒ the column stays NULL rather than storing an empty array, so a
+        // pre-spawn decision's row is indistinguishable from every row written before the column existed. Both mean
+        // "there is nothing recorded to compare this decision against", and neither needs to be told apart.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(Claim(runId, teamId, "plan", "plan:noquality", Payload), CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var row = (await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        row.QualityDecisionsJson.ShouldBeNull();
+        SupervisorQualityRecord.Read(row.QualityDecisionsJson).ShouldBeEmpty("a NULL column reads as no recommendation, never as a throw on a live turn or a Room projection");
+    }
+
+    [Fact]
+    public async Task A_settled_decisions_quality_column_reaches_the_prior_decision_readers()
+    {
+        // The surfacing 9b promised: the Room projector and the turn rehydrate both read the tape as
+        // SupervisorPriorDecision, so a column that stopped at the entity would be durable and unreachable.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var json = SupervisorQualityRecord.ToJson(new[]
+        {
+            new SupervisorUnitQualityDecision { SubtaskId = "s1", Mechanism = QualityMechanism.Stop, Reason = "a human authorized forgoing verification", Facts = new QualityDecisionInput() },
+        });
+
+        Guid decisionId;
+        using (var scope = _fixture.BeginScope())
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, "spawn:surfaced", Payload) with { QualityDecisionsJson = json }, CancellationToken.None)).DecisionId;
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryBeginExecutionAsync(decisionId, teamId, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, """{"ok":true}""", null, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var prior = (await Log(verify).GetTerminalDecisionsAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
+
+        SupervisorQualityRecord.Read(prior.QualityDecisionsJson).ShouldHaveSingleItem().Mechanism.ShouldBe(QualityMechanism.Stop);
+    }
+
+    [Fact]
+    public async Task The_immutability_trigger_freezes_the_quality_column_too()
+    {
+        // The migration widened the frozen-column list for the same reason 0167 widened it to lesson_arm: a
+        // recommendation that can be rewritten AFTER the decision it describes is not evidence about that decision.
+        // The status path must stay mutable through the replaced trigger body — asserted here, not assumed.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        Guid decisionId;
+        using (var scope = _fixture.BeginScope())
+            decisionId = (await Log(scope).TryClaimAsync(Claim(runId, teamId, Kind, "spawn:frozen", Payload), CancellationToken.None)).DecisionId;
+
+        var rejected = await Should.ThrowAsync<PostgresException>(() =>
+            ExecRawAsync("UPDATE supervisor_decision SET quality_decisions = '[]'::jsonb WHERE id = @id", decisionId));
+        rejected.MessageText.ShouldContain("frozen", Case.Insensitive, "the trigger names the frozen-journal contract it enforced");
+
+        using (var scope = _fixture.BeginScope())
+            (await Log(scope).TryBeginExecutionAsync(decisionId, teamId, CancellationToken.None)).ShouldBeTrue("the replaced trigger body still lets the status CAS through — NULL-to-NULL on the new column is a no-op");
     }
 
     private static ISupervisorDecisionLog Log(ILifetimeScope scope) => scope.Resolve<ISupervisorDecisionLog>();

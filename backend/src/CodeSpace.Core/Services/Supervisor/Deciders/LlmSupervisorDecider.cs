@@ -978,6 +978,17 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine(bounds);
         }
 
+        // P22-9b — the QUALITY POLICY block: the pure policy's per-unit recommendation over the recorded evidence,
+        // placed AFTER the run bounds that constrain it and BEFORE the roster that says which verbs this turn may
+        // actually emit — so the model reads "here is what the evidence suggests" and then "here is what you may
+        // choose", in that order. The roster and the mask are deliberately untouched: a mechanism never masks a verb
+        // and never offers one. Null until a unit has been attempted ⇒ byte-identical prompt for a pre-spawn turn.
+        if (SupervisorQualityRecitation.Render(context.QualityDecisions) is { } quality)
+        {
+            builder.AppendLine();
+            builder.AppendLine(quality);
+        }
+
         // A1.5 — the turn's VERB ROSTER, offered half then masked half, both read off SupervisorActionMask. The
         // roster used to be a static sentence in the SYSTEM prompt naming all seven verbs on every turn, which
         // presented a masked verb as choosable three lines above the block forbidding it (golden

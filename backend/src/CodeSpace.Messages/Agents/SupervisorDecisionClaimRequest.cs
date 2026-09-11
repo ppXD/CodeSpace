@@ -38,4 +38,7 @@ public sealed record SupervisorDecisionClaimRequest
 
     /// <summary>Exact lesson ids exposed to the model for this decision. Empty when no lesson text reached the prompt.</summary>
     public IReadOnlyList<Guid> LessonIds { get; init; } = [];
+
+    /// <summary>P22-9b: the quality policy's per-unit recommendations this turn's prompt carried, as durable JSON. Null (the default, and every pre-spawn turn) ⇒ the column stays NULL.</summary>
+    public string? QualityDecisionsJson { get; init; }
 }

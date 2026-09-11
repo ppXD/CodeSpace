@@ -167,7 +167,7 @@ public sealed partial class SupervisorTurnService
         using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(supervisorRunId, teamId, nodeId, "", Learning.LlmLessonRelevanceEvaluator.CallKind, _recordLogger, _offloader, _budget, plan.MaxCostUsd, modelPrices)))
             lessons = await ResolveLessonInjectionAsync(goal, goalConfig, rows, teamId, cancellationToken).ConfigureAwait(false);
 
-        return new SupervisorTurnContext
+        var context = new SupervisorTurnContext
         {
             Goal = goal,
             LessonArm = lessons.Arm,
@@ -214,6 +214,12 @@ public sealed partial class SupervisorTurnService
             PendingChildDecisions = pendingChildDecisions,
             PublishedAgentRunIds = publishedAgentRunIds,
         };
+
+        // P22-9b — the per-unit quality recommendation, folded LAST because it is derived from the context the fold
+        // above just built (the tape, the run's spend + cap, the no-progress counters, the acceptance floor) rather
+        // than from any read of its own. Pure + DB-free, so it costs the turn nothing beyond one walk of the tape it
+        // already holds; empty until a unit has been attempted, which keeps a pre-spawn turn byte-identical.
+        return context with { QualityDecisions = Quality.SupervisorQualityFacts.DecideAll(context) };
     }
 
     /// <summary>The shared empty pending-decision list for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAgentResults analogue for D4c-2).</summary>
@@ -1779,6 +1785,7 @@ public sealed partial class SupervisorTurnService
         PayloadJson = row.PayloadJson,
         OutcomeJson = row.OutcomeJson,
         Error = row.Error,
+        QualityDecisionsJson = row.QualityDecisionsJson,
     };
 
     /// <summary>

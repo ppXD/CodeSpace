@@ -672,6 +672,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             PolicyBoundedStage = policyBoundedStage,
             RetrySteps = retrySteps,
             RespawnSteps = respawnSteps,
+            QualityRecommendations = QualityRecommendations(decisions),
             NetworkPosture = await NetworkPostureAsync(runId, teamId, cancellationToken).ConfigureAwait(false),
         };
     }
@@ -1480,6 +1481,18 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         return rows.Select(r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson)).ToList();
     }
 
+    /// <summary>
+    /// P22-9b — the quality recommendations the run's NEWEST decision that recorded any was shown. The newest,
+    /// because a recommendation is a reading of the evidence at one instant and the latest one is the only one still
+    /// current; an older row's reading is history the decision tape already holds. Read verbatim off the durable
+    /// column (never recomputed from today's policy table, which may since have changed its mind), so the Room and
+    /// that turn's prompt can never disagree. Empty for a pre-column run.
+    /// </summary>
+    private static IReadOnlyList<RoomQualityRecommendation> QualityRecommendations(IReadOnlyList<SupervisorDecisionRecord> decisions) =>
+        Core.Services.Quality.SupervisorQualityRecord.Read(decisions.LastOrDefault(d => d.QualityDecisionsJson is not null)?.QualityDecisionsJson)
+            .Select(q => new RoomQualityRecommendation(q.SubtaskId, q.Mechanism.ToString(), q.Reason))
+            .ToList();
+
     private static SupervisorPriorDecision ToPriorDecision(SupervisorDecisionRecord decision) => new()
     {
         Id = decision.Id,
@@ -1489,6 +1502,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         PayloadJson = decision.PayloadJson,
         OutcomeJson = decision.OutcomeJson,
         Error = decision.Error,
+        QualityDecisionsJson = decision.QualityDecisionsJson,
     };
 
     /// <summary>
