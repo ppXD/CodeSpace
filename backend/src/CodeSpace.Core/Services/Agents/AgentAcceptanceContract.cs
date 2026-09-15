@@ -157,8 +157,25 @@ public static class AgentAcceptanceContract
                    // W-hard: the run's own budget refused the judge call — the check never ran, and the compact
                    // fold carries only this string (the typed Environment class does not survive onto the tape).
                    || effective == "grade-skipped-budget-exhausted"
+                   // F1: the attempt's own DECLARED exit reason said THIS DEPLOYMENT ended it (a worker restart took
+                   // its brokered model-credential lease; a broker that could not bind), so the supervisor fold
+                   // stamped the verdict before any grader ran. Like tests-timed-out, it is infra regardless of
+                   // workPresent — a worker that went away is not evidence about the work either way. The unit
+                   // carries the TYPED disposition too; this arm is what lets the readers that only ever see the
+                   // detail string (the no-progress evidence discount, the receipts, the decider's verdict line,
+                   // the model-escalation trigger) reach the same answer it does.
+                   || effective.StartsWith(InfraExitDetailPrefix, StringComparison.Ordinal)
                    || (effective == "no-branch-or-repo" && workPresent));
     }
+
+    /// <summary>
+    /// The acceptance-detail an infra-classed verdict minted from an attempt's own DECLARED exit reason carries: this
+    /// prefix followed by that reason verbatim (<c>infra:model_credential_lease_lost</c>), so a reader sees WHICH
+    /// wall the attempt hit instead of the fail-closed <c>no-branch-or-repo</c> every absence collapses to. Minted by
+    /// <c>SupervisorTurnService.InfraExitVerdict</c> BEFORE any grader runs — unlike every prefix above, which names
+    /// a grader-side fault. Pinned by test (Rule 8): the producer and this consumer must never drift apart.
+    /// </summary>
+    public const string InfraExitDetailPrefix = "infra:";
 
     /// <summary>
     /// The multi-repo grade paths wrap a classifiable detail in a uniform machine-authored display tag

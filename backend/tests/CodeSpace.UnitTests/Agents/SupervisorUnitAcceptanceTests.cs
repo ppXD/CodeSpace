@@ -2,6 +2,9 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -83,6 +86,85 @@ public class SupervisorUnitAcceptanceTests
         var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Failed", AcceptancePassed = false, AcceptanceDetail = "no-branch-or-repo" };
 
         SupervisorOutcome.HasSettledEvidence(new[] { result }).ShouldBeFalse();
+    }
+
+    // ── F1: an attempt THIS DEPLOYMENT ended never reaches a grade at all ──────────────
+
+    [Fact]
+    public void An_attempt_this_deployment_ended_is_graded_InfraUnknown_before_any_check_can_run()
+    {
+        // The shape a worker that could not broker the run's model credential leaves behind: nothing pushed, nothing
+        // changed, no repo. Every grading arm past the short-circuit fails closed on that absence and hands back
+        // "no-branch-or-repo", whose text rule reads GENUINE with no work present — so the unit's failure became
+        // evidence that the MODEL could not do the work. Mutation: delete the short-circuit and this reads Failed.
+        var ended = Compact(AgentRunStatus.Failed, FailureCodes.ModelCredentialBrokerUnavailable);
+
+        var graded = SupervisorTurnService.InfraExitVerdict(ended).ShouldNotBeNull();
+
+        graded.AcceptanceVerdict.ShouldBe(VerificationDisposition.InfraUnknown, "the typed verdict is what the quality reading classifies on");
+        graded.AcceptanceDetail.ShouldBe("infra:model_credential_broker_unavailable", "the detail names the wall the attempt hit, verbatim");
+        graded.AcceptancePassed.ShouldBe(false, "unchanged from the arms this replaces: work nothing verified must stay withheld from the reviewable head");
+    }
+
+    [Theory]
+    [InlineData("non-zero-exit")]           // the agent ran and its command failed — a verdict about the work
+    [InlineData("timed-out")]               // the agent ran out of wall clock — still its own attempt
+    [InlineData("executor-error")]          // a throw that declared no failure identity — not ours to claim
+    [InlineData("completed")]               // a success whose per-unit check must still run
+    public void An_attempt_that_ran_is_left_for_the_grader(string exitReason)
+    {
+        // The falsifiable negative for the set: widen InfraExitReasons past what this deployment actually broke and
+        // every ordinary failure stops buying the retries that could fix it.
+        var ran = Compact(AgentRunStatus.Failed, exitReason);
+
+        ran.InfraExitReason.ShouldBeNull("an ordinary exit reason never enters the durable compact — an untouched tape stays byte-identical");
+        SupervisorTurnService.InfraExitVerdict(ran).ShouldBeNull("only an exit reason this codebase declares as its OWN infrastructure short-circuits the grade");
+    }
+
+    [Fact]
+    public void An_attempt_that_wrote_no_result_at_all_is_left_for_the_grader()
+    {
+        // A cancelled / abandoned agent sets the ROW error with no result_jsonb, so there is no declared exit reason
+        // to read. Silence is not a claim that this deployment ended it.
+        var abandoned = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(AgentRunStatus.Cancelled), "the worker never came back", resultJson: null);
+
+        abandoned.InfraExitReason.ShouldBeNull();
+        SupervisorTurnService.InfraExitVerdict(abandoned).ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(true)]    // the attempt had pushed work before the wall — already infra today, via no-branch-or-repo
+    [InlineData(false)]   // it had not — the gap: today this reads as failed work
+    public void The_infra_exit_detail_reads_as_infra_in_the_string_vocabulary_too(bool workPresent)
+    {
+        // The typed verdict is invisible to every reader that only ever sees the detail — the no-progress evidence
+        // discount, the receipts, the decider's verdict line, the model-escalation trigger. Without this the fold
+        // would REPLACE a detail those readers already classified as infra (work present) with one they do not.
+        AgentAcceptanceContract.IsInfraFailure("infra:model_credential_broker_unavailable", workPresent)
+            .ShouldBeTrue("a worker that went away is not evidence about the work in either direction");
+    }
+
+    [Fact]
+    public void An_attempt_this_deployment_ended_keeps_the_work_it_had_already_produced_as_evidence()
+    {
+        // The no-progress budget, end to end over the production verdict: a unit whose attempt was killed by a
+        // rolling restart AFTER it changed files must not have that work discounted, or a deploy marches the run
+        // into its own stall bound. Mutation: drop the infra: arm from IsInfraFailure and this reddens.
+        var ended = Compact(AgentRunStatus.Failed, FailureCodes.ModelCredentialBrokerUnavailable, changedFiles: new[] { "a.cs" });
+
+        SupervisorOutcome.HasSettledEvidence(new[] { SupervisorTurnService.InfraExitVerdict(ended)! }).ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// One attempt as the tape actually records it: through the SAME <see cref="SupervisorOutcome.ProjectCompact"/>
+    /// production folds a durable AgentRun row with, so a fixture can never carry an exit reason the projector would
+    /// have dropped — the membership test lives there, and a hand-built compact would route around it.
+    /// </summary>
+    private static SupervisorAgentResult Compact(AgentRunStatus status, string exitReason, IReadOnlyList<string>? changedFiles = null)
+    {
+        var result = new AgentRunResult { Status = status, ExitReason = exitReason, ChangedFiles = changedFiles ?? Array.Empty<string>() };
+
+        return SupervisorOutcome.ProjectCompact(Guid.NewGuid(), status.ToString(), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
     }
 
     // ── ReadPlanSubtasks: the per-unit acceptance source ───────────────────────────────

@@ -45,6 +45,21 @@ public sealed record SupervisorAgentResult
     /// <summary>The failure detail when the agent failed — taken from the result's error, else the ROW error (a cancelled/abandoned agent sets the row error with no result). Null on success.</summary>
     public string? Error { get; init; }
 
+    /// <summary>
+    /// The attempt's own DECLARED terminal reason (<c>AgentRunResult.ExitReason</c>) when — and ONLY when — it is one
+    /// this codebase declares as its OWN infrastructure (<see cref="Failures.FailureCodes.InfraExitReasons"/>): the
+    /// worker went away, the broker could not bind. It is what lets a post-hoc grade tell an attempt that FAILED
+    /// from one that was never allowed to run, without reading <see cref="Error"/> — prose, whose wording would then
+    /// decide whether a rolling restart buys a stronger model.
+    ///
+    /// <para>NARROW on purpose. Every result declares an exit reason, so carrying it unconditionally would change
+    /// the durable <c>agentResults</c> bytes of every tape ever folded and rewrite each one on its next rehydrate —
+    /// churn for a value nothing reads. An ordinary attempt ("completed", "non-zero-exit", "timed-out") carries null
+    /// here and serializes byte-identical; only the attempts this fact is about gain a field. Null-omitted.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? InfraExitReason { get; init; }
+
     /// <summary>The git ground-truth repo-relative paths the agent changed (never the diff body). Defaults to empty and NEVER serializes null, so a consumer can always treat it as an array.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 

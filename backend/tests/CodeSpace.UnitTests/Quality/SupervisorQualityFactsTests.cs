@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Quality;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Quality;
 using Shouldly;
 
@@ -309,6 +310,27 @@ public sealed class SupervisorQualityFactsTests
     public void No_reading_for_a_unit_is_an_absence_of_opinion_never_a_disagreement() =>
         SupervisorRetryEscalation.PolicyAgrees(null).ShouldBeNull();
 
+    // ─── F1: an attempt this deployment ended is not evidence about the model ───
+
+    [Theory]
+    [InlineData(true, 0, QualityMechanism.BoundedRepair)]    // the newest attempt never got to run its check
+    [InlineData(false, 2, QualityMechanism.EscalateModel)]   // the check ran, and failed, twice
+    public void An_attempt_this_deployment_ended_neither_extends_the_failure_streak_nor_buys_a_stronger_model(bool deploymentEndedTheNewest, int expectedStreak, QualityMechanism expected)
+    {
+        // The two tapes differ in ONE byte of evidence — what ended the second attempt — and the recorded facts have
+        // to answer differently: a worker that could not broker the run's model credential says nothing about
+        // whether a stronger model would have done the work. Mutation: revert the fold's short-circuit and the
+        // infra row grades as an ordinary failure, reaching the same EscalateModel the control row does.
+        var context = Context(PlanWithUnitOracles(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Failed()),
+            Retry(3, "s1", deploymentEndedTheNewest ? EndedByThisDeployment() : Failed()));
+
+        var facts = Facts("s1", context);
+
+        facts.ConsecutiveFailedVerdicts.ShouldBe(expectedStreak, "the streak counts recorded WORK-classed failures; an un-run check is not one of them");
+        SupervisorQualityFacts.DecideAll(context).Single().Mechanism.ShouldBe(expected);
+    }
+
     // ─── tape builders ─────────────────────────────────────────────────────────
 
     private static readonly IReadOnlyDictionary<string, ModelPrice> OneDollarPerMillionInputTokens =
@@ -367,6 +389,19 @@ public sealed class SupervisorQualityFactsTests
     /// <summary>The over-claim shape: the agent reported success, its own check FAILED, and the fold recorded the contradiction.</summary>
     private static object OverClaimed() =>
         new { agentRunId = Guid.NewGuid(), status = "Succeeded", acceptancePassed = false, acceptanceDetail = "tests-failed-exit-1", contradiction = AgentContradiction.OverClaim, changedFiles = new[] { "a.cs" } };
+
+    /// <summary>
+    /// A unit whose attempt THIS DEPLOYMENT ended (F1) — minted by the production fold's own
+    /// <see cref="SupervisorTurnService.InfraExitVerdict"/> rather than hand-written here, so the fixture cannot
+    /// carry a verdict the fold would never write (Rule 12.5). The tape it produces is what a rehydrate persists.
+    /// </summary>
+    private static object EndedByThisDeployment()
+    {
+        var attempt = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(attempt, AgentJson.Options));
+
+        return SupervisorTurnService.InfraExitVerdict(compact)!;
+    }
 
     /// <summary>A unit a human authorized forgoing verification for — the EXPLICIT verdict, with no <c>acceptancePassed</c> beside it (exactly how the co-sign overlay writes it).</summary>
     private static object Waived() =>

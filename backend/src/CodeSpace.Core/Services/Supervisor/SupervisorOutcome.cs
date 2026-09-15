@@ -748,6 +748,10 @@ public static class SupervisorOutcome
             Status = statusName,
             Summary = ClipCompactText(result?.Summary),
             Error = ClipCompactText(result?.Error ?? rowError),
+            // F1: the attempt's DECLARED terminal reason, kept ONLY when this codebase owns it — the one thing a
+            // post-hoc grade can read to tell an attempt that failed from one our own infrastructure never let run.
+            // Everything else stays absent so an ordinary tape's bytes are untouched (see the field's own doc).
+            InfraExitReason = InfraExitReasonOf(result),
             ChangedFiles = CompactChangedFiles(result?.ChangedFiles),
             TotalChangedFiles = result?.ChangedFiles.Count > CompactChangedFilesMax ? result.ChangedFiles.Count : null,
             ProducedBranch = result?.ProducedBranch,
@@ -797,6 +801,14 @@ public static class SupervisorOutcome
             ObservedModel = string.IsNullOrWhiteSpace(result?.Model) ? null : result!.Model,
         };
     }
+
+    /// <summary>
+    /// The attempt's exit reason when this codebase declares it as its OWN infrastructure, else null (F1). The ONE
+    /// place the membership test lives, so the projector and the supervisor fold that stamps the verdict cannot
+    /// disagree about which attempts were never allowed to run.
+    /// </summary>
+    private static string? InfraExitReasonOf(Messages.Agents.AgentRunResult? result) =>
+        result?.ExitReason is { } exitReason && Messages.Failures.FailureCodes.InfraExitReasons.Contains(exitReason) ? exitReason : null;
 
     /// <summary>
     /// The summed USD spend of these compact results, priced via <see cref="AgentCostPricing"/> (SOTA #4) — the pure

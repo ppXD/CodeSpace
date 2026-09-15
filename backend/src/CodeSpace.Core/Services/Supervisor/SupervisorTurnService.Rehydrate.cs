@@ -801,6 +801,22 @@ public sealed partial class SupervisorTurnService
                 continue;
             }
 
+            // F1 — the attempt died on OUR infrastructure (a worker restart took its brokered model-credential
+            // lease; a broker that could not bind), so the check below would be grading an attempt that never got
+            // to be about the work. Typed and FIRST, because every grading arm past this point fails closed on the
+            // absence the infra failure caused: a unit with no branch and no repo lands "no-branch-or-repo", which
+            // the text rule reads as GENUINE with no work present — which is how a rolling restart came to spend
+            // the unit's no-progress budget and buy a stronger model to fix a deploy.
+            if (InfraExitVerdict(results[i]) is { } infra)
+            {
+                graded.Add(infra);
+                anyGraded = true;
+
+                await _manifests.StampAcceptanceForAgentRunAsync(results[i].AgentRunId, VerificationDispositions.ToLegacyAcceptanceState(Messages.Contracts.VerificationDisposition.InfraUnknown), cancellationToken).ConfigureAwait(false);
+
+                continue;
+            }
+
             // The subtask authored its OWN oracle — the FULL spec rides (kind + rubric/schema payloads, triad S7).
             var fullSpec = spec! with { Command = command };
 
@@ -868,6 +884,37 @@ public sealed partial class SupervisorTurnService
             try { await heartbeat.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
         }
+    }
+
+    /// <summary>
+    /// F1 — the unit's verdict when its attempt's own DECLARED exit reason says this deployment, not the work, ended
+    /// it (<see cref="Messages.Failures.FailureCodes.InfraExitReasons"/>), else null for every ordinary attempt (the
+    /// grading arms below run unchanged).
+    ///
+    /// <para>Three fields, each load-bearing. The TYPED <c>AcceptanceVerdict</c> is what
+    /// <c>SupervisorQualityFacts.Fact</c> reads before any string, so the unit lands on
+    /// <c>QualityPolicy</c>'s machinery-failed row (bounded repair) instead of extending
+    /// <c>ConsecutiveFailedVerdicts</c> toward a model escalation. <c>AcceptancePassed = false</c> is what today's
+    /// fail-closed arms already write, and it is deliberately UNCHANGED: it is the withheld-from-head read
+    /// (<c>SupervisorOutcome.IsWithheldFromHead</c>), and work nothing verified must not become mergeable because
+    /// the reason it went unverified was ours. The DETAIL names the wall verbatim under
+    /// <see cref="Agents.AgentAcceptanceContract.InfraExitDetailPrefix"/>, which is the same answer in the string
+    /// vocabulary — so the readers that never see the typed field (the no-progress evidence discount, the receipts,
+    /// the decider's verdict line) agree with it rather than reading a worker restart as failed work.</para>
+    ///
+    /// <para>Internal (not private) so the classification is unit-pinned directly (InternalsVisibleTo), not only
+    /// through a full rehydrate against Postgres.</para>
+    /// </summary>
+    internal static SupervisorAgentResult? InfraExitVerdict(SupervisorAgentResult result)
+    {
+        if (result.InfraExitReason is not { } exitReason) return null;
+
+        return result with
+        {
+            AcceptancePassed = false,
+            AcceptanceVerdict = Messages.Contracts.VerificationDisposition.InfraUnknown,
+            AcceptanceDetail = Agents.AgentAcceptanceContract.InfraExitDetailPrefix + exitReason,
+        };
     }
 
     /// <summary>

@@ -121,6 +121,29 @@ public static class FailureCodes
     public const string ModelCredentialLeaseLost = "model_credential_lease_lost";
 
     /// <summary>
+    /// The codes that, worn as an agent attempt's <c>AgentRunResult.ExitReason</c>, say the attempt died on OUR
+    /// INFRASTRUCTURE — the worker went away, the broker could not bind — rather than on anything the agent did or
+    /// the model answered. A post-hoc grader that meets one of these is grading an attempt whose check never ran and
+    /// never could have, so no further agent pass can change its verdict.
+    ///
+    /// <para>Deliberately a SET of exit reasons, not of failure codes in general: <see cref="All"/> declares every
+    /// code this API can emit, and most of them (an invalid request, a missing rubric, a spent budget) are genuine
+    /// answers about the work. Membership here is the narrower claim that the run never got to be about the work at
+    /// all. Pinned member-by-member by a unit test — adding or removing one changes what buys a retry.</para>
+    ///
+    /// <para>TWO relatives are deliberately ABSENT, both for the same reason: nothing declares them as an exit
+    /// reason today. A worker that loses a run's brokered model-credential LEASE is the case this set was built for,
+    /// and it joins as one line here the moment its own code and producer exist. The gateway FORMAT fault
+    /// (<c>AgentRetryCauses.GatewayFormatFault</c>) is recognised by matching the harness's error TEXT, not by any
+    /// exit reason, and joins if it ever earns one — matching prose here would make this set's answer depend on
+    /// wording, which is the thing it exists to replace.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> InfraExitReasons = new HashSet<string>(StringComparer.Ordinal)
+    {
+        ModelCredentialBrokerUnavailable,
+    };
+
+    /// <summary>
     /// Every code declared above, computed by reflection so it can never drift from the constants themselves. For a
     /// caller that must treat ANY coded exit as this codebase's own diagnosis of what went wrong — never a downstream
     /// heuristic's guess — membership here is the check: see <c>RealModelRunClassifier.IsGatewayInfra</c>, which
