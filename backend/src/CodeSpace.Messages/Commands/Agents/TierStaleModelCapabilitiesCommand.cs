@@ -6,8 +6,12 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// Backfill the cached capability tier for every team that has a not-yet-tiered enabled pool model — fired by the
 /// recurring tiering job; can also be sent ad-hoc from a test. NOT tenant-scoped: a system-wide enrichment that runs
 /// without an actor context. Returns the number of teams processed for log surfacing.
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each team is tiered by its own model call, and one that
+/// fails is left un-tiered while the rest are still tiered. One command transaction around the whole tick would let a
+/// single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record TierStaleModelCapabilitiesCommand : ICommand<TierStaleModelCapabilitiesResponse>;
+public sealed record TierStaleModelCapabilitiesCommand : ICommand<TierStaleModelCapabilitiesResponse>, INonTransactionalCommand;
 
 /// <summary>Count of teams whose pending pool models the backfill tiered (0 in steady state).</summary>
 public sealed record TierStaleModelCapabilitiesResponse

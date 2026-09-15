@@ -6,8 +6,12 @@ namespace CodeSpace.Messages.Commands.Agents;
 /// Re-probe the cached availability of every team's stale-or-unprobed enabled Custom-gateway pool model — fired by the
 /// recurring availability job; can also be sent ad-hoc from a test. NOT tenant-scoped: a system-wide enrichment that
 /// runs without an actor context. Returns the number of teams processed for log surfacing.
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each team is probed over the network on its own, and one
+/// whose provider fails keeps its recorded availability while the rest are still probed. One command transaction around
+/// the whole tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ProbeStaleModelAvailabilityCommand : ICommand<ProbeStaleModelAvailabilityResponse>;
+public sealed record ProbeStaleModelAvailabilityCommand : ICommand<ProbeStaleModelAvailabilityResponse>, INonTransactionalCommand;
 
 /// <summary>Count of teams whose Custom-gateway pool models the backfill probed (re-probes each gateway once per back-off window).</summary>
 public sealed record ProbeStaleModelAvailabilityResponse

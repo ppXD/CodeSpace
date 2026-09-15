@@ -28,6 +28,60 @@ public class TransactionalBehaviorPostCommitTests
 
     private sealed record ProbeCommand : ICommand<Unit>;
 
+    private sealed record SweepProbeCommand : ICommand<Unit>, INonTransactionalCommand;
+
+    [Fact]
+    public async Task A_non_transactional_command_reaches_its_handler_with_no_ambient_transaction()
+    {
+        // The reconciler sweep's contract: its per-row CAS writes and its wait recovery both require that
+        // nothing above them has opened a transaction. The marker is what buys that.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var postCommit = new PostCommitActions(db, NullLogger<PostCommitActions>.Instance);
+        var behavior = new TransactionalBehavior<SweepProbeCommand, Unit>(db, postCommit, NullLogger<TransactionalBehavior<SweepProbeCommand, Unit>>.Instance);
+
+        var sawAmbientTransaction = true;
+
+        Task<Unit> Next(CancellationToken ct)
+        {
+            sawAmbientTransaction = db.Database.CurrentTransaction != null;
+            return Task.FromResult(Unit.Value);
+        }
+
+        await behavior.Handle(new SweepProbeCommand(), Next, CancellationToken.None).ConfigureAwait(false);
+
+        sawAmbientTransaction.ShouldBeFalse("an INonTransactionalCommand must run outside the behavior's transaction");
+    }
+
+    [Fact]
+    public async Task A_non_transactional_command_still_drains_an_action_deferred_behind_a_service_transaction()
+    {
+        // With no transaction open, RunAfterCommitAsync runs inline — but a sweep step that calls a service which
+        // opens its OWN transaction defers instead, and the pass-through path is then the only drain site there is.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var postCommit = new PostCommitActions(db, NullLogger<PostCommitActions>.Instance);
+        var behavior = new TransactionalBehavior<SweepProbeCommand, Unit>(db, postCommit, NullLogger<TransactionalBehavior<SweepProbeCommand, Unit>>.Instance);
+
+        var ranInsideHandler = true;
+        var ran = false;
+
+        async Task<Unit> Next(CancellationToken ct)
+        {
+            await using var serviceTransaction = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+            await postCommit.RunAfterCommitAsync(_ => { ran = true; return Task.CompletedTask; }, ct).ConfigureAwait(false);
+            await serviceTransaction.CommitAsync(ct).ConfigureAwait(false);
+
+            ranInsideHandler = ran;
+            return Unit.Value;
+        }
+
+        await behavior.Handle(new SweepProbeCommand(), Next, CancellationToken.None).ConfigureAwait(false);
+
+        ranInsideHandler.ShouldBeFalse("the action was deferred by the service-owned transaction, not run inline");
+        ran.ShouldBeTrue("the pass-through path must still drain what the handler deferred, or the dispatch is dropped");
+    }
+
     [Fact]
     public async Task Deferred_action_runs_after_commit_and_sees_the_committed_row()
     {

@@ -7,8 +7,12 @@ namespace CodeSpace.Messages.Commands.Storage;
 ///
 /// <para>No permission marker: dispatched by a recurring job on a processing pod, across every team. It changes no row
 /// a user owns — only the observed state of a location, and only ever on an answer that leaves no room for doubt.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): a destination that will not answer leaves its row
+/// exactly as it was and the batch carries on to the rows behind it. One command transaction around the whole tick
+/// would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record VerifyStaleArtifactLocationsCommand : ICommand<VerifyStaleArtifactLocationsResponse>;
+public sealed record VerifyStaleArtifactLocationsCommand : ICommand<VerifyStaleArtifactLocationsResponse>, INonTransactionalCommand;
 
 public sealed record VerifyStaleArtifactLocationsResponse
 {

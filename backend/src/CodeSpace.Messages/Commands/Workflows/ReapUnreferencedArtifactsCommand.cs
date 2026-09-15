@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Commands.Workflows;
 ///
 /// <para>NOT tenant-scoped — system-wide reclamation that runs without an actor context. Fired by the recurring
 /// reaper job; also sendable ad-hoc from an admin path or a test.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each retention row is claimed by bumping its own fence
+/// epoch and lease, and a purge that fails leaves only that row for the next pass. One command transaction around the
+/// whole tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ReapUnreferencedArtifactsCommand : ICommand<ReapUnreferencedArtifactsResponse>;
+public sealed record ReapUnreferencedArtifactsCommand : ICommand<ReapUnreferencedArtifactsResponse>, INonTransactionalCommand;
 
 /// <summary>The sweep's per-bucket counts, surfaced for logging and for the recurring job's result.</summary>
 public sealed record ReapUnreferencedArtifactsResponse
