@@ -492,21 +492,42 @@ public class SupervisorGoldenPromptFidelityTests
         "clean-integration", "resolve-bait-clean-integration", "waived-unit-cleanly-integrated",
     };
 
+    /// <summary>
+    /// The tapes whose merge the mask withholds under its SECOND arm: the newest staged work is a reconciliation the
+    /// tape records as NOT verified, so the executor cannot accept it and a merge re-runs the integrator over the
+    /// branches that already conflicted. Exactly the A/B pair — <c>resolve-cap-spent</c> (accepted {stop, ask_human},
+    /// the live miss both wires answered <c>merge</c> on) and <c>unverified-resolution</c> (accepted {resolve}) —
+    /// because the arm reads the resolution VERDICT and not the cap. <c>verified-resolution</c> is deliberately
+    /// absent: its reconciliation passed, so its merge is the one this mask has always preserved.
+    /// </summary>
+    private static readonly HashSet<string> UnacceptedReconciliationScenarios = new(StringComparer.Ordinal)
+    {
+        "resolve-cap-spent", "unverified-resolution",
+    };
+
     [Fact]
-    public void Only_cleanly_integrated_tapes_lose_the_remerge_invitation()
+    public void Only_the_tapes_the_merge_mask_names_lose_the_remerge_invitation()
     {
         var moved = new List<string>();
 
         foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
         {
             var after = LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context);
-            var before = AsRenderedBeforeCleanIntegrationMask(after, scenario.Context);
 
-            if (!string.Equals(before, after, StringComparison.Ordinal)) moved.Add(scenario.Name);
+            if (!string.Equals(AsRenderedBeforeTheMergeMask(after, scenario.Context), after, StringComparison.Ordinal)) moved.Add(scenario.Name);
+
+            // Attributed per tape rather than in aggregate: WHICH arm withheld the verb is the finding, and a union
+            // assertion alone would pass a tape that silently swapped one reason for the other.
+            var withheld = SupervisorActionMask.MergeUnavailableReason(scenario.Context);
+
+            (withheld == SupervisorActionMask.UnacceptedReconciliation).ShouldBe(UnacceptedReconciliationScenarios.Contains(scenario.Name),
+                $"'{scenario.Name}': the unaccepted-reconciliation arm must fire on exactly the tapes its receipt names");
+            (withheld is not null && withheld != SupervisorActionMask.UnacceptedReconciliation).ShouldBe(CleanIntegratedScenarios.Contains(scenario.Name),
+                $"'{scenario.Name}': the already-integrated arm must fire on exactly the tapes its receipt names");
         }
 
-        moved.ShouldBe(CleanIntegratedScenarios.ToList(), ignoreOrder: true,
-            "only a tape whose durable merge already landed a clean branch may lose merge; every unfinished or newly-staged tape must remain byte-identical");
+        moved.ShouldBe(CleanIntegratedScenarios.Concat(UnacceptedReconciliationScenarios).ToList(), ignoreOrder: true,
+            "a tape loses merge only when its durable frontier is already folded or its newest reconciliation was never accepted; every other tape must remain byte-identical");
     }
 
     /// <summary>
@@ -594,14 +615,41 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// LAST RE-PIN: a clean integration with no later staged agent work now withholds <c>merge</c> and closes by
+    /// THIS RE-PIN: <c>merge</c> is withheld from a tape whose newest staged work is a reconciliation the tape
+    /// records as NOT verified, and the two blocks that still named the verb unconditionally now defer to that mask —
+    /// the CURRENT PLAN STATE block's finished-plan line (<see cref="SupervisorRecitation.FinishedCannotMerge"/>) and,
+    /// for the budget-remaining half of the pair, the closing move
+    /// (<see cref="LlmSupervisorDecider.ClosingReconcileBeforeLanding"/>).
+    ///
+    /// <para>The evidence: golden <c>resolve-cap-spent</c> answered <c>merge</c> on BOTH wires of run 34940616446
+    /// (Anthropic 28/29 REQUIRED, OpenAI 28/29 informational — the same miss), after the same answer on 2026-09-11
+    /// and on run 34027621996. Two providers converging three times is a prompt fault, not variance, and the prompt
+    /// said so: the menu offered <c>merge</c> with no reason it could not land, and one block above it the
+    /// finished-plan line read "Every plan item is finished — merge the results and drive to a verified stop." That
+    /// was the last unconditional merge steer left after #1274 (the roster) and #1795 (the closing sentence), and it
+    /// sits in the one block whose header tells the model to recite it before deciding. The GOLDEN is right: the
+    /// executor accepts a resolution only on <see cref="SupervisorResolutionVerdict.Verified"/>
+    /// (<c>SupervisorOutcome.ResolvedBranch</c> → <c>RealSupervisorActionExecutor.AcceptedResolutionBranch</c>), so
+    /// a merge on this tape re-runs the integrator over the branches that already conflicted — "would just
+    /// re-conflict", in the executor's own words — and buys a synthesis model call on the way.</para>
+    ///
+    /// <para>The moved bytes are attributed per tape, not claimed: the roster's merge line and the finished-plan
+    /// line move on exactly <see cref="UnacceptedReconciliationScenarios"/>, the closing move on
+    /// <c>unverified-resolution</c> alone (<c>resolve-cap-spent</c> already carried
+    /// <see cref="LlmSupervisorDecider.ClosingCannotLand"/>), and nothing else moves —
+    /// <see cref="Only_the_tapes_the_merge_mask_names_lose_the_remerge_invitation"/> reconstructs every scenario's
+    /// prior bytes and pins both arms separately. No scenario's <c>AcceptedKinds</c> changed, and none acquired a
+    /// menu entry or a steer for a verb its own tape cannot reach. <c>verified-resolution</c> is byte-identical,
+    /// which is the whole point of keying the arm on the resolution VERDICT rather than on the cap.</para>
+    ///
+    /// PREVIOUS RE-PIN: a clean integration with no later staged agent work now withholds <c>merge</c> and closes by
     /// telling the supervisor to stop when the integrated result meets the goal. Exactly
-    /// <see cref="CleanIntegratedScenarios"/> move; <see cref="Only_cleanly_integrated_tapes_lose_the_remerge_invitation"/>
+    /// <see cref="CleanIntegratedScenarios"/> move; <see cref="Only_the_tapes_the_merge_mask_names_lose_the_remerge_invitation"/>
     /// reconstructs every scenario's prior bytes and pins that two-scenario delta. This removes a structurally
     /// futile choice that all three real-model wires selected on <c>resolve-bait-clean-integration</c>, while a
     /// later spawn/retry/resolve with an actually recorded agent run reopens merge.
     ///
-    /// THIS RE-PIN: the prompt gained the QUALITY POLICY block (P22-9b) — the pure <c>QualityPolicy</c>'s per-unit
+    /// EARLIER RE-PIN: the prompt gained the QUALITY POLICY block (P22-9b) — the pure <c>QualityPolicy</c>'s per-unit
     /// recommendation over the recorded evidence, rendered by <see cref="SupervisorQualityRecitation"/> between the
     /// run bounds that constrain it and the verb roster that says what this turn accepts. Every tape with an
     /// ATTEMPTED unit gains one line per unit, which is most of the corpus, so this re-pin moves nearly every
@@ -677,7 +725,7 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "63a7d3f31fb304428e22af81ca03c5118f8867420fd555c2d0a75b73e12742f4";
+    private const string GoldenPromptDigest = "2dafcdc7e52c3d22d1d2d209bb05bbe701191131defeb9e11f26360ef70bf5fb";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -1121,7 +1169,11 @@ public class SupervisorGoldenPromptFidelityTests
         return beforeQuality
             .Replace(roster, mask, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ResolveWithdrawnOnAConflictedIntegration, ResolveInvitedOnAConflictedIntegration, StringComparison.Ordinal)
+            // The finished-plan line and the closing move were both UNCONDITIONAL at the roster pin — each is a
+            // substitution, never an insertion, so winding them back is one Replace apiece.
+            .Replace(SupervisorRecitation.FinishedCannotMerge, SupervisorRecitation.FinishedLandsWithAMerge, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingCannotLand, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal)
+            .Replace(LlmSupervisorDecider.ClosingReconcileBeforeLanding, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingAlreadyIntegrated, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal);
     }
 
@@ -1136,7 +1188,8 @@ public class SupervisorGoldenPromptFidelityTests
         return kept.Count > 1 ? string.Join('\n', kept) : null;
     }
 
-    private static string AsRenderedBeforeCleanIntegrationMask(string prompt, SupervisorTurnContext context)
+    /// <summary>The prompt as it read before <c>merge</c> could be withheld at all: the verb back on the menu in its vocabulary position, and the three blocks that defer to the mask — the finished-plan line, the closing move — back to their unconditional wording. Derived from today's render rather than restated, so a reworded reason stays a one-file change.</summary>
+    private static string AsRenderedBeforeTheMergeMask(string prompt, SupervisorTurnContext context)
     {
         if (SupervisorActionMask.MergeUnavailableReason(context) is null) return prompt;
 
@@ -1147,6 +1200,8 @@ public class SupervisorGoldenPromptFidelityTests
         var priorRoster = string.Join('\n', lines);
 
         return prompt.Replace(roster, priorRoster, StringComparison.Ordinal)
+            .Replace(SupervisorRecitation.FinishedCannotMerge, SupervisorRecitation.FinishedLandsWithAMerge, StringComparison.Ordinal)
+            .Replace(LlmSupervisorDecider.ClosingReconcileBeforeLanding, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingAlreadyIntegrated, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal);
     }
 

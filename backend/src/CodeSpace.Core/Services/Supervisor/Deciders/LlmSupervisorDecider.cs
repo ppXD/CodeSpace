@@ -1020,6 +1020,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>The closing move once the current frontier is already cleanly integrated and nothing later produced work: finish instead of folding the same frontier again.</summary>
     internal const string ClosingAlreadyIntegrated = "then stop if the clean integrated result meets the goal; do not merge it again unless later agent work is recorded.";
 
+    /// <summary>The closing move once the newest staged work is an UNVERIFIED reconciliation and the resolve budget still has room — the other tape the merge mask now covers. Without its own arm it inherited the already-integrated ending, which on a conflicted tape with a failed reconciliation is simply untrue: there is no clean integrated result to stop on.</summary>
+    internal const string ClosingReconcileBeforeLanding = "then reconcile the conflict with another 'resolve' and land THAT; never merge a reconciliation the tape records as unverified.";
+
     /// <summary>
     /// How the prompt's LAST sentence ends — the recency slot, immediately under the turn's verb roster. It was
     /// unconditional, so on a tape with a conflicted integration and the resolve cap spent it stood as a standing
@@ -1033,10 +1036,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// </summary>
     private static string ClosingMoveFor(SupervisorTurnContext context)
     {
-        if (SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts) == SupervisorLandingReach.NoLandingReachable)
-            return ClosingCannotLand;
+        var reach = SupervisorActionMask.LandingReachFor(context.PriorDecisions, context.MaxResolveAttempts);
 
-        return SupervisorActionMask.MergeUnavailableReason(context) is null ? ClosingLandsWithAMerge : ClosingAlreadyIntegrated;
+        if (reach == SupervisorLandingReach.NoLandingReachable) return ClosingCannotLand;
+
+        if (SupervisorActionMask.MergeUnavailableReason(context) is not { } withheld) return ClosingLandsWithAMerge;
+
+        // The resolve-naming arm is gated on the reach as well as on the reason, so the one sentence that names a
+        // verb only ever names one this same prompt still offers.
+        return reach == SupervisorLandingReach.ReconcileFirst && withheld == SupervisorActionMask.UnacceptedReconciliation ? ClosingReconcileBeforeLanding : ClosingAlreadyIntegrated;
     }
 
     /// <summary>
