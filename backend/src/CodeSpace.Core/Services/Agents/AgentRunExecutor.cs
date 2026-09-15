@@ -60,6 +60,9 @@ public interface IAgentRunExecutor
 
 public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 {
+    /// <summary>The loss reason for a diff whose offload was interrupted rather than refused — a drain running out mid-upload. The patch and file list are intact; only the stored copy is absent.</summary>
+    internal const string PatchOffloadInterruptedReason = "offload-interrupted";
+
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
@@ -117,9 +120,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// How long this worker's tear-down will spend landing ONE brokered run it can no longer serve. Bounded because a
     /// drain budget is shared: Hangfire stops each of its servers on its own shutdown timeout (15s by default) and the
     /// host's <c>Shutdown:DrainSeconds</c> caps the whole process, so a run whose terminal write is slow must not
-    /// spend another run's share of it. Covers the whole landing — one revoke (in-memory), one row read, the kill and
-    /// its <see cref="AgentStopConfirmationBudget"/> confirmation, one fenced CAS — with room to spare, and a pass that
-    /// exceeds it simply defers to the re-attach half.
+    /// spend another run's share of it. Covers the whole landing, and every step inside it takes its share from one
+    /// deadline rather than assuming a full one: one revoke (in-memory), one row read, the kill plus its
+    /// <see cref="AgentStopConfirmationBudget"/> confirmation, the spool fold, the
+    /// <see cref="DurableFactReplayBudget"/> event replay, the <see cref="ShutdownWorkspaceCaptureBudget"/> git
+    /// capture, and finally the fenced CAS — which keeps <see cref="ShutdownLandingReserve"/> to itself. A pass that
+    /// exceeds the whole thing defers to the re-attach half.
     /// </summary>
     private static readonly TimeSpan ShutdownLeaseLandingBudget = TimeSpan.FromSeconds(10);
 
@@ -1749,7 +1755,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: its captured diff could not be offloaded; the run keeps the inline patch and the file list, and only the stored copy is missing", runId);
-            return captured;
+
+            // Say WHY the copy is missing, rather than leaving a null that reads as "nothing was attempted". The two
+            // shapes are different facts: TryOffloadPatchAsync's own failures come back as a loss reason, and this arm
+            // covers the one it cannot report on — a throw (a drain cancelling) that never reached its return.
+            return captured with { PatchLossReason = PatchOffloadInterruptedReason };
         }
     }
 
@@ -4231,7 +4241,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (folded is null) return false;   // could not safely observe — leave it Running for the re-attach half, which lands it from the stamped posture
 
-        folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+        folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, deadline, cancellationToken).ConfigureAwait(false);
         folded = await WithWorkspaceChangesWithinBudgetAsync(folded, owner.RunId, run.TeamId, handle, deadline, cancellationToken).ConfigureAwait(false);
 
         try
@@ -4326,9 +4336,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <see cref="AgentRunFacts.From(IEnumerable{AgentEvent}, IAgentHarness)"/> — the documented replay seam — and only
     /// the gaps are filled. A fold that already established a fact keeps it: the live stream is the better witness.</para>
     /// </summary>
-    private async Task<AgentRunResult> WithFactsFromDurableEventsAsync(AgentRunResult folded, Guid runId, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> WithFactsFromDurableEventsAsync(AgentRunResult folded, Guid runId, Guid teamId, IAgentHarness harness, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
         if (folded is { SessionId.Length: > 0, TokenUsage: not null }) return folded;
+
+        // Its own slice of the same deadline, for the same reason the capture has one: the offloaded-payload fallback
+        // below can issue up to one artifact round trip per row of the head window, and nothing bounds those in bytes.
+        // Un-budgeted it would spend the capture's share and the landing's reserve before either ran.
+        var affordable = deadline - DateTimeOffset.UtcNow - ShutdownLandingReserve;
+
+        if (affordable <= TimeSpan.Zero)
+        {
+            _logger.LogWarning("Agent run {RunId}: the drain had less than its {Reserve}s landing reserve left, so the session id and spend were not replayed from its events — it lands with whatever the fold established", runId, ShutdownLandingReserve.TotalSeconds);
+            return folded;
+        }
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(affordable < DurableFactReplayBudget ? affordable : DurableFactReplayBudget);
+        cancellationToken = budget.Token;
 
         try
         {
@@ -4345,7 +4370,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // beside a large tool catalog is exactly that shape, so the cheap read above can come back empty for a run
             // whose id is sitting in the artifact store. Only then is it worth fetching — bounded to the head window,
             // and only for the fact that is actually missing.
-            if (opening.SessionId is null or { Length: 0 })
+            // The fallback is the expensive half, so it is also the first thing dropped: if what is left of this
+            // pass's own slice is already gone, the run keeps the cheap answer rather than spending the landing's.
+            if (opening.SessionId is null or { Length: 0 } && !cancellationToken.IsCancellationRequested)
                 opening = AgentRunFacts.From(await ResolveOffloadedEventsAsync(head, teamId, cancellationToken).ConfigureAwait(false), harness);
 
             return folded with
@@ -4355,12 +4382,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 TokenUsage = folded.TokenUsage ?? closing.TokenUsage,
             };
         }
-        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
+        {
+            // Its OWN slice running out must never be the thing that kills the landing — this pass is repair, and the
+            // reserve exists precisely so the write still has a token. Swallowed unconditionally for the same reason
+            // the git capture's is: a filter that re-threw when the outer budget was the one that expired would abort
+            // the landing over an optional step.
+            _logger.LogWarning("Agent run {RunId}: its durable events could not be replayed inside the {Seconds}s the drain could give them; the result keeps whatever the fold established", runId, DurableFactReplayBudget.TotalSeconds);
+            return folded;
+        }
+        catch (Exception exception)
         {
             _logger.LogWarning(exception, "Agent run {RunId}: its durable events could not be replayed for run facts; the result keeps whatever the fold established", runId);
             return folded;
         }
     }
+
+    /// <summary>The ceiling on the durable-event replay — two bounded reads and, at most, one artifact round trip per row of the head window. Small because it is repair, not the landing.</summary>
+    private static readonly TimeSpan DurableFactReplayBudget = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// The most events either end of the replay reads. A bound, not a guess at sufficiency: a harness announces its
