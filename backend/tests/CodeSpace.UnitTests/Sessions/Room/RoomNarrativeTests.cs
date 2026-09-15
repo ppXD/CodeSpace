@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
@@ -213,6 +214,23 @@ public class RoomNarrativeTests
         diag.Title.ShouldBe("Authentication failed");
         diag.Actions.ShouldContain(a => a.Kind == RoomActionKind.FixCredentials);
         diag.RawDetail.ShouldNotBeNull("the raw 401 error is kept behind 'Show raw error'");
+    }
+
+    [Fact]
+    public void A_lost_model_credential_lease_is_NOT_dressed_up_as_a_rejected_credential()
+    {
+        // The sentence the executor writes when a worker restart ended a run's model access. It necessarily contains
+        // the word "credential", which the auth heuristic matches — so without the typed arm the Room rewrites OUR
+        // diagnosis into "Authentication failed … Fix credentials" and sends an operator to rotate a key that is
+        // perfectly good. That is the exact misdirection the typed failure exists to prevent, one layer up.
+        var facts = new RoomTurnFacts { RawError = $"Agent run did not succeed: {ModelCredentialLeaseLostException.Explanation}" };
+
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: facts).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.Title.ShouldNotBe("Authentication failed", "nothing was rejected — the worker holding the lease went away");
+        diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials, "rotating a working key fixes nothing and costs the operator the hour this failure exists to save");
+        diag.Text.ShouldContain("worker", Case.Insensitive, "the diagnostic must show what actually happened");
+        diag.Text.ShouldContain("Retry", Case.Insensitive, "and what to do about it");
     }
 
     [Fact]

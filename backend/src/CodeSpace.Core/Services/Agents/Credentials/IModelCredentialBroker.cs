@@ -49,6 +49,23 @@ public interface IModelCredentialBroker
     /// callers are teardown paths whose outcome must not depend on it.
     /// </summary>
     Task RevokeAsync(Guid runId, string reason, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether THIS worker is currently holding a live lease for the run — a statement about this process's memory and
+    /// nothing else. False therefore means "not here", never "nowhere": another worker's lease is invisible from here,
+    /// exactly as its revocation would be.
+    ///
+    /// <para>On the interface rather than a test seam because a caller now ACTS on it: a re-attaching worker is about
+    /// to kill an agent on the grounds that its model access is gone, and inferring that from "a re-attach happened"
+    /// relies on an emergent ordering between two unrelated TTLs (an observation lease expires after ~3 heartbeats, a
+    /// credential lease after 2). That inference was free while the consequence was a posture stamp. It is not free
+    /// when the consequence is a kill, so the question is asked instead.</para>
+    ///
+    /// <para>Deliberately NOT expressible as <see cref="RenewAsync"/>: a re-attach carries the reclaim-bumped epoch, so
+    /// a renewal fails against a perfectly live lease and would answer the opposite of the truth. Synchronous because
+    /// it reads one in-memory table — a caller must not be able to await a decision about liveness.</para>
+    /// </summary>
+    bool HasLease(Guid runId);
 }
 
 /// <summary>

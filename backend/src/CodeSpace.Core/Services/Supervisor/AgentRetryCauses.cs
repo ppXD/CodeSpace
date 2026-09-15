@@ -17,10 +17,32 @@ public static class AgentRetryCauses
     /// <summary>The env var the claude CLI reads as its extended-thinking budget — 0 disables thinking entirely. Pinned by test (Rule 8): the retry degrade writes it into the task environment, and a rename here would silently un-degrade every format-fault retry.</summary>
     public const string MaxThinkingTokensEnvVar = "MAX_THINKING_TOKENS";
 
+    /// <summary>
+    /// This deployment took the worker away mid-run: the agent's brokered model lease died with it, and we stopped the
+    /// attempt (<see cref="Messages.Failures.FailureCodes.ModelCredentialLeaseLost"/>). INFRA, and of the plainest
+    /// kind — the model was never asked, so the attempt is evidence about our rollout and about nothing else.
+    ///
+    /// <para>Its repair is simply the same attempt on a live worker, so unlike <see cref="GatewayFormatFault"/> it
+    /// carries NO mitigation: every consumer that applies one keys on that constant specifically
+    /// (<c>AgentCodeNode</c>, <c>BenchmarkRunner</c>, the supervisor's spawn retry), so they are unaffected and the
+    /// retry stays warm on the same model. The consumer that keys on a cause being present AT ALL is
+    /// <see cref="Agents.AgentModelEscalationTrigger"/>, and that is the one that must see this: without it a rolling
+    /// restart reads as the model hitting its limit and buys a more expensive one to fix a deploy.</para>
+    /// </summary>
+    public const string ModelAccessLost = "model-access-lost";
+
     /// <summary>Seen live 2026-08-30 (run wedge postmortem): the gateway's Anthropic-compat layer broke thinking-block continuation and killed the agent tail with exactly this text.</summary>
     private static readonly string[] FormatFaultMarkers = { "is not a thinking block" };
 
-    /// <summary>The prior attempt's retry-relevant cause, or null for every ordinary failure (default resume semantics stand unchanged).</summary>
+    /// <summary>
+    /// The prior attempt's retry-relevant cause, reading its DECLARED exit reason before any text. A typed code is this
+    /// codebase's own diagnosis and can never be prose about one, so it settles the question outright; only an attempt
+    /// that declared nothing falls through to the marker scan.
+    /// </summary>
+    public static string? Classify(string? exitReason, string? error) =>
+        exitReason == Messages.Failures.FailureCodes.ModelCredentialLeaseLost ? ModelAccessLost : Classify(error);
+
+    /// <summary>The prior attempt's retry-relevant cause read from its error TEXT alone, or null for every ordinary failure (default resume semantics stand unchanged). Prefer the overload above wherever the exit reason is in hand.</summary>
     public static string? Classify(string? error)
     {
         if (string.IsNullOrWhiteSpace(error)) return null;

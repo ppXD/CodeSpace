@@ -1,4 +1,6 @@
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Credentials;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Core.Services.Supervisor;
 using Shouldly;
 
@@ -64,6 +66,20 @@ public class AgentModelEscalationTriggerTests
     public void A_gateway_format_fault_never_escalates() =>
         AgentModelEscalationTrigger.Reason(AgentContradiction.OverClaim, acceptanceFailed: true, "tests-failed-exit-1", workPresent: true, error: "400 messages.1.content.0.type: is not a thinking block")
             .ShouldBeNull("the gateway mangled the wire FORMAT — the cause-aware retry already handles it by starting fresh with thinking disabled; a pricier model would hit the same gateway");
+
+    [Fact]
+    public void A_lost_model_credential_lease_never_escalates()
+    {
+        // The deploy took the worker away; the model was never asked. Buying a pricier tier to fix a rolling restart
+        // is the purest form of spending on the wrong thing, and the attempt is evidence about our rollout only.
+        AgentModelEscalationTrigger.Reason(AgentContradiction.OverClaim, acceptanceFailed: true, "tests-failed-exit-1", workPresent: true, error: ModelCredentialLeaseLostException.Explanation, exitReason: FailureCodes.ModelCredentialLeaseLost)
+            .ShouldBeNull("a worker restart says nothing about whether the model was the limit");
+
+        // And the TYPED reason is what decides it — the same attempt without the code still escalates, so the guard
+        // is not accidentally passing on some property of the sentence.
+        AgentModelEscalationTrigger.Reason(AgentContradiction.OverClaim, acceptanceFailed: true, "tests-failed-exit-1", workPresent: true, error: "the agent gave up", exitReason: "non-zero-exit")
+            .ShouldNotBeNull("control: an ordinary failed check with produced work is exactly what escalation is for");
+    }
 
     [Fact]
     public void A_passing_check_never_escalates() =>

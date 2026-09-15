@@ -309,6 +309,46 @@ public partial class AgentRunExecutorTests
             await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {pid} -o pid,stat,etime,command`");
     }
 
+    [Fact]
+    public async Task A_user_cancel_of_a_brokered_run_lands_Cancelled_and_never_the_lost_lease_verdict()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-user-cancel-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var broker = new LoopbackModelCredentialBroker();
+
+        // The HOST is fine. Only this run is being stopped, by a person — and the executor's tear-down arm is reached
+        // by an OperationCanceledException either way, because a cancel cancels the observer. Nothing about this run
+        // lost its model access to a restart, so nothing here may be dressed as if it had: a verdict that blamed a
+        // deploy for a user's own cancel is a lie that outlives the session, and (at an unbumped epoch) the same arm
+        // would have KILLED a healthy agent on those grounds.
+        // Tolerates the ownership loss too: a cancel bumps the run's fence, so this pass legitimately discovers it no
+        // longer owns the run. That IS the expected shape of a cancel — what the test asserts is what got written.
+        var execution = ExecuteUntilStoppedAsync(runId, broker, CancellationToken.None);
+
+        await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened a credential lease");
+        await WaitUntilAsync(() => HandleOf(runId) is not null, TimeSpan.FromSeconds(30), "the run never launched an agent to cancel");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue();
+
+        await execution;
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Cancelled, "a person stopped this run; the executor's own tear-down must not re-grade it");
+        (run.Error ?? "").ShouldNotContain("worker", Shouldly.Case.Insensitive, "no worker restarted — saying one did would send an operator hunting a deploy that never happened");
+
+        if (run.ResultJson is { Length: > 0 } json)
+            JsonSerializer.Deserialize<AgentRunResult>(json, AgentJson.Options)!.ExitReason
+                .ShouldNotBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost,
+                    "the tear-down arm fires on EVERY OperationCanceledException — an ownership loss, a client timeout, this cancel — and only a cancelled HOST token means the lease is going away");
+    }
+
     /// <summary>One brokered run driven to the tear-down arm. The cancel is the point of the test, so the <see cref="OperationCanceledException"/> it re-raises (the contract that leaves a non-brokered run recoverable) is expected, not a failure.</summary>
     private async Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown)
     {
@@ -316,6 +356,13 @@ public partial class AgentRunExecutorTests
 
         try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown); }
         catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
+    }
+
+    /// <summary>As above, but also tolerating the ownership loss a fence bump raises — the shape a user cancel takes, where the run is legitimately taken away from this pass rather than the pass being taken away from the host.</summary>
+    private async Task ExecuteUntilStoppedAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown)
+    {
+        try { await ExecuteUntilShutdownAsync(runId, broker, shutdown); }
+        catch (CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException) { /* the cancel bumped the fence; the row it wrote is what this test asserts */ }
     }
 
     private SandboxHandle? HandleOf(Guid runId)

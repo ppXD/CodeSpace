@@ -33,9 +33,9 @@ public static class AgentModelEscalationTrigger
     /// nothing about its model); <paramref name="workPresent"/> is git ground truth (changed files or a produced
     /// branch); <paramref name="error"/> is the terminal error the cause classifier reads.
     /// </summary>
-    public static string? Reason(string? contradiction, bool acceptanceFailed, string? acceptanceDetail, bool workPresent, string? error)
+    public static string? Reason(string? contradiction, bool acceptanceFailed, string? acceptanceDetail, bool workPresent, string? error, string? exitReason = null)
     {
-        if (Supervisor.AgentRetryCauses.Classify(error) is not null) return null;
+        if (Supervisor.AgentRetryCauses.Classify(exitReason, error) is not null) return null;
 
         if (!acceptanceFailed) return null;
 

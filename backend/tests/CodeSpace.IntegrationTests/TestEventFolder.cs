@@ -31,6 +31,9 @@ internal sealed class TestEventFolder : IAgentEventFolder
     /// <summary>The LAST recognizable token usage the stream carried — the executor's own facts, handed in at <see cref="BuildResult"/>. Null before the terminal, because the double never accumulates them itself: they are the executor's to drive.</summary>
     public AgentTokenUsage? TokenUsage => _facts?.TokenUsage;
 
+    /// <summary>The FIRST recognizable harness session/thread id the stream carried — same provenance as <see cref="TokenUsage"/>, and exposed for the same reason: a real folder carries these onto its result, so a double that could not would let a test pass while the executor dropped the one input a warm retry needs.</summary>
+    public string? SessionId => _facts?.SessionId;
+
     public void Add(AgentEvent normalized)
     {
         LastText = normalized.Text;
