@@ -577,9 +577,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // re-commit, never as a terminal run with an unresolved promise.
             await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result, effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            await SettleRunSpendAsync(spendClaim, result, cancellationToken).ConfigureAwait(false);
-
-            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken, spendClaim).ConfigureAwait(false);
         }
         catch (AgentRunLaunchAdmittedException admitted)
         {
@@ -617,9 +615,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // A launch that got as far as reserving may already have billed a provider, so this terminal settles the
             // claim PESSIMISTICALLY (no observed cost ⇒ Indeterminate at the reserved amount) rather than leaving it
             // live. A failure is not evidence that nothing was spent.
-            var failed = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) };
-            await SettleRunSpendAsync(spendClaim, failed, cancellationToken).ConfigureAwait(false);
-            await CompleteAndNotifyAsync(owner, run.TeamId, failed, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken, spendClaim).ConfigureAwait(false);
         }
         finally
         {
@@ -711,6 +707,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var expectedEpoch = owner.Epoch;
 
+        // The claim the ORIGINAL launch minted, rebuilt from facts the run row still carries — this worker never saw
+        // the reserve. Without it a run that finishes through re-attach (the normal shape after a deploy or a worker
+        // restart) would hold its whole estimate until the reservation's deadline, so every restart would burn cap.
+        var reattachSpendClaim = await RebuildRunSpendClaimAsync(run, task, cancellationToken).ConfigureAwait(false);
+
         // Resolve a redactor for the re-opened endpoint's tool-result text — fresh from the run's credential, in its
         // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
         // Independent of ReattachAndFoldAsync's own resolution (which still owns the fingerprint-gated re-tail).
@@ -762,7 +763,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result, task), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken, reattachSpendClaim).ConfigureAwait(false);
         }
         catch (AgentRunOwnershipLostException)
         {
@@ -776,7 +777,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during re-attach", agentRunId);
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, cancellationToken, reattachSpendClaim).ConfigureAwait(false);
         }
         finally
         {
@@ -993,12 +994,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>Land the terminal result under this invocation's explicit owner, then notify. A lost owner does neither notification nor terminal cleanup. Terminal-write ACK recovery and durable notification are separate from claim/activation recovery.</summary>
-    private async Task CompleteAndNotifyAsync(AgentRunOwnerToken owner, Guid teamId, AgentRunResult result, CancellationToken cancellationToken)
+    /// <summary>
+    /// Land the terminal result under this invocation's explicit owner, then notify. A lost owner does neither
+    /// notification nor terminal cleanup. Terminal-write ACK recovery and durable notification are separate from
+    /// claim/activation recovery.
+    ///
+    /// <para>This is also the executor's ONE settle site for a pre-launch budget claim (<paramref name="spendClaim"/>,
+    /// null for a launch that reserved nothing). Settling HERE rather than per catch arm is what makes the close
+    /// exhaustive: the clean fold, the executor-error catch and the RE-ATTACH landing all pass through this method,
+    /// so a run that finishes on a different worker after a restart still releases the headroom it did not spend.
+    /// Immediately AFTER the terminal CAS, never before — a CAS this observer loses means another owner will land the
+    /// run, and settling first would close a claim on that owner's behalf.</para>
+    /// </summary>
+    private async Task CompleteAndNotifyAsync(AgentRunOwnerToken owner, Guid teamId, AgentRunResult result, CancellationToken cancellationToken, RunSpendClaim? spendClaim = null)
     {
         var runId = owner.RunId;
         var expectedEpoch = owner.Epoch;
         await _runs.CompleteAsync(owner, result, cancellationToken).ConfigureAwait(false);
+
+        await SettleRunSpendAsync(spendClaim, result, cancellationToken).ConfigureAwait(false);
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
 
@@ -1058,43 +1072,105 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (run.WorkflowRunId is not { } workflowRunId) return null;
 
-        var capUsd = await RunCostCapAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+        var routePlanJson = await RunRoutePlanJsonAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+
+        // ENFORCE only where this agent OWNS the ceiling (see RunCostCap.AgentOwnsTheRunCap); everywhere else the
+        // fan-out that staged it already admitted the work at its own grain, so this run records unbudgeted rather
+        // than claiming the same money twice.
+        var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
         var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), run.Id.ToString("N"), task.BudgetSpentUsd ?? 0m);
 
         // The rates admission valued this launch at — stamped as price_version so a later price edit can never
         // silently re-value what was admitted. Null when nothing prices the dispatched model; an unpriced admission
         // is a materially different audit fact from a priced one, so it is recorded as such rather than as a rate.
+        //
+        // It names the DISPATCHED model, which is what admission could see. An in-run escalation (D3) can end the run
+        // on a different model, so the SETTLED figure may be priced from other rates — <c>SettleAsync</c> carries no
+        // price version, so the observed snapshot lives on the result (AgentRunResult.PriceSnapshot) instead, and an
+        // auditor reads the pair: this row says what the launch was admitted under, the result what it was billed at.
         var priceVersion = AgentCostPricing.SnapshotFor(task.Model, modelPrices)?.Digest ?? ModelPriceSnapshot.UnpricedVersion;
 
         // Its OWN DI scope: the ledger opens a transaction and takes advisory locks, which must not share this
         // executor's DbContext with the rest of the launch (the long-running-job pattern the critic's scope uses).
         using var scope = _scopeFactory.CreateScope();
-        var admission = await scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>()
-            .ReserveAsync(workflowRunId, run.TeamId, claim.Kind, claim.ScopeKey, RunSpendEstimate(task, capUsd), capUsd, priceVersion, parentReservationId: null, Supervisor.Executors.RealSupervisorActionExecutor.AttemptReservationDeadline(task), cancellationToken).ConfigureAwait(false);
+        var ledger = scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
+
+        if (capUsd is not { } cap)
+            return await ObserveRunSpendAsync(ledger, claim, task, priceVersion, cancellationToken).ConfigureAwait(false);
+
+        // Read what the run has already committed so the claim is the REMAINING headroom, never the whole ceiling:
+        // a second agent run must be admissible against what the first actually left. Advisory — the ledger re-reads
+        // it under the admission lock — so a stale value can only under-claim, never overshoot the cap.
+        var committed = await ledger.CommittedUsdAsync(workflowRunId, run.TeamId, cancellationToken).ConfigureAwait(false);
+
+        if (RunSpendEstimate(task, cap, committed) is not { } estimate)
+            return claim with { RefusedDetail = RunSpendExhaustedDetail(task, cap, committed) };
+
+        var admission = await ledger.ReserveAsync(workflowRunId, run.TeamId, claim.Kind, claim.ScopeKey, estimate, cap, priceVersion, parentReservationId: null, Supervisor.Executors.RealSupervisorActionExecutor.AttemptReservationDeadline(task), cancellationToken).ConfigureAwait(false);
 
         if (admission.Admitted) return claim;
 
         _logger.LogWarning("Agent run {RunId} was refused by the budget ledger before launch: {Reason}", run.Id, admission.Reason);
 
-        return claim with { RefusedDetail = RunSpendRefusalDetail(admission, claim.Kind, capUsd ?? 0m) };
+        return claim with { RefusedDetail = RunSpendRefusalDetail(admission, claim.Kind, cap) };
+    }
+
+    /// <summary>Record — never gate — the spend of a run nobody declared a ceiling for. A null cap can neither refuse nor be refused, and the reserve is ZERO because the Room sums an unbudgeted row's reserve AS spend; the settle lands the observed figure.</summary>
+    private async Task<RunSpendClaim> ObserveRunSpendAsync(Workflows.Budget.IBudgetLedger ledger, RunSpendClaim claim, AgentTask task, string priceVersion, CancellationToken cancellationToken)
+    {
+        await ledger.ReserveAsync(claim.WorkflowRunId, claim.TeamId, claim.Kind, claim.ScopeKey, 0m, capUsd: null, priceVersion, parentReservationId: null, Supervisor.Executors.RealSupervisorActionExecutor.AttemptReservationDeadline(task), cancellationToken).ConfigureAwait(false);
+
+        return claim;
     }
 
     /// <summary>
-    /// What this CLI may honestly spend, in the grain it is admitted against.
+    /// What this CLI may honestly spend — its own monitored ceiling, CLAMPED to what the run has LEFT
+    /// (<paramref name="capUsd"/> minus what it has already committed). Null means there is nothing to claim and the
+    /// launch must be refused.
     ///
-    /// <para>CLAMPED to the run's cap: a task whose own monitored ceiling sits ABOVE the run cap can never reach it
-    /// (the run cap is the harder bound), so claiming the larger number would refuse the very FIRST launch on a fresh
-    /// run — over money it could not have spent. The two are equal on the quick lane (both projections write
-    /// <c>Route.Caps.MaxCostUsd</c> into the node's config), so this only ever bites an authored node under a routed
-    /// run — which is exactly where a silent false refusal would be hardest to diagnose.</para>
+    /// <para>Remaining, not the whole cap: the two are the same number for the first run on a fresh workflow run, but
+    /// claiming the ceiling outright would make a run's FIRST agent consume all of it and refuse every later agent on
+    /// that same run — including one launched after the first had settled at a fraction of it. Clamped to the task's
+    /// own ceiling too, since a task ceiling ABOVE the run cap is unreachable (the run cap is the harder bound) and
+    /// claiming it would refuse a launch over money it could never have spent.</para>
     ///
-    /// <para>A task with NO ceiling of its own claims the whole cap: an opaque CLI has no wire bound, so the cap IS
-    /// its honest maximum. An UNCAPPED run claims ZERO — that row gates nothing, and the Room sums an unbudgeted
-    /// row's reserve as spend, so claiming a ceiling there would report money as spent while the run is still live.
-    /// The settle lands the observed figure either way.</para>
+    /// <para>Null in exactly two cases, both of which are refusals rather than free launches: the run's ceiling is
+    /// already committed (a spent cap must not start another CLI — the defect this slice exists to close), or the
+    /// task declares a NON-POSITIVE ceiling of its own. Zero means "spend nothing", which is a bound, not an absent
+    /// one; admitting it vacuously let a run authorized for nothing spend freely, and a negative value reached the
+    /// ledger's own <c>ArgumentOutOfRangeException</c> and surfaced as an untyped executor error.</para>
     /// </summary>
-    internal static decimal RunSpendEstimate(AgentTask task, decimal? capUsd) =>
-        capUsd is { } cap ? Math.Min(task.MaxCostUsd ?? cap, cap) : 0m;
+    internal static decimal? RunSpendEstimate(AgentTask task, decimal capUsd, decimal committedUsd)
+    {
+        var remaining = capUsd - committedUsd;
+        var ceiling = task.MaxCostUsd ?? remaining;
+
+        if (remaining <= 0 || ceiling <= 0) return null;
+
+        return Math.Min(ceiling, remaining);
+    }
+
+    /// <summary>Why a launch was refused before it reached the ledger — a spent run ceiling, or a task authorized to spend nothing. Two different remedies, so they are never collapsed into one sentence.</summary>
+    private static string RunSpendExhaustedDetail(AgentTask task, decimal capUsd, decimal committedUsd) =>
+        task.MaxCostUsd is { } declared && declared <= 0
+            ? $"the agent's own cost ceiling is ${declared.ToString(System.Globalization.CultureInfo.InvariantCulture)} — a run authorized to spend nothing cannot start"
+            : Messages.Budget.BudgetCapRefusal.Reason(Messages.Budget.BudgetCapGrain.Run, committedUsd, capUsd);
+
+    /// <summary>
+    /// The claim the ORIGINAL launch minted, rebuilt for a terminal this worker reaches through re-attach. The row is
+    /// keyed by facts the run row still carries (its workflow run, its team, its own id), so no state has to survive
+    /// the restart. Null when the launch could not have reserved. A settle against a row that never existed is a
+    /// no-op UPDATE, so rebuilding for a run that was refused — or never admitted — costs nothing and risks nothing.
+    /// </summary>
+    private async Task<RunSpendClaim?> RebuildRunSpendClaimAsync(AgentRun run, AgentTask task, CancellationToken cancellationToken)
+    {
+        if (run.WorkflowRunId is not { } workflowRunId) return null;
+
+        var routePlanJson = await RunRoutePlanJsonAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+        var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
+
+        return new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), run.Id.ToString("N"), task.BudgetSpentUsd ?? 0m);
+    }
 
     /// <summary>A capped run mints a real admission; a run whose route declares no ceiling records the same <c>unbudgeted:</c> observability row every other un-metered plane does, so "no cap" reads as a stated fact rather than a missing row.</summary>
     private static string RunSpendKind(decimal? capUsd) =>
@@ -2712,7 +2788,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>The owning workflow run's declared cost ceiling, read from the launch-stamped route the Room displays it from. One indexed single-column read per review pass (a review makes at most a verdict + a co-sign call), so it is not worth a cache that could go stale against a re-launched cap.</summary>
     private async Task<decimal?> RunCostCapAsync(Guid workflowRunId, CancellationToken cancellationToken) =>
-        Workflows.Budget.RunCostCap.Of(await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == workflowRunId).Select(r => r.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false));
+        Workflows.Budget.RunCostCap.Of(await RunRoutePlanJsonAsync(workflowRunId, cancellationToken).ConfigureAwait(false));
+
+    /// <summary>The launch-stamped route provenance itself, for the pre-launch admission — which needs BOTH the ceiling and the projection that says whether this agent owns it.</summary>
+    private async Task<string?> RunRoutePlanJsonAsync(Guid workflowRunId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == workflowRunId).Select(r => r.RoutePlanJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>Run the S8 AGENT reviewer from a fresh scope (it stages + executes a first-class run — the heartbeat-loop scope pattern). Authority and ownership refusal propagate; other failures become a failed verdict.</summary>
     private async Task<CriticVerdict> ReviewWithAgentAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)

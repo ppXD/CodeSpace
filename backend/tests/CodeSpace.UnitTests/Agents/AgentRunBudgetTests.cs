@@ -96,7 +96,7 @@ public sealed class AgentRunBudgetTests
         snapshot.Source.ShouldBe(ModelPriceSources.CredentialRow, "the operator's own per-model row priced this run, not the built-in table — an auditor must be able to tell which");
         snapshot.InputUsdPerMillion.ShouldBe(2m);
         snapshot.OutputUsdPerMillion.ShouldBe(10m);
-        snapshot.Digest.ShouldBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 10m).Digest);
+        snapshot.Digest.ShouldBe(AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2m, 10m).Digest);
     }
 
     [Fact]
@@ -132,7 +132,7 @@ public sealed class AgentRunBudgetTests
         var result = new AgentRunResult
         {
             Status = AgentRunStatus.Succeeded, ExitReason = "completed",
-            PriceSnapshot = ModelPriceSnapshot.Of(ModelPriceSources.EnvOverride, 2.5m, 10m),
+            PriceSnapshot = AgentCostPricing.SnapshotOf(ModelPriceSources.EnvOverride, 2.5m, 10m),
         };
 
         var rehydrated = System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(System.Text.Json.JsonSerializer.Serialize(result, AgentJson.Options), AgentJson.Options)!;
@@ -141,20 +141,36 @@ public sealed class AgentRunBudgetTests
     }
 
     [Theory]
-    [InlineData(5.0, 5.0, 5.0)]     // the quick lane: node cap and run cap are the SAME projected number
-    [InlineData(0.5, 5.0, 0.5)]     // a tighter task ceiling is the honest estimate
-    [InlineData(100.0, 12.0, 12.0)] // a task ceiling ABOVE the run cap is unreachable — claiming it would refuse the first launch outright
-    [InlineData(null, 5.0, 5.0)]    // no task ceiling: an opaque CLI's honest maximum IS the run cap
-    [InlineData(100.0, null, 0.0)]  // no run cap: the unbudgeted row gates nothing, and the Room reads its reserve as spend
-    [InlineData(null, null, 0.0)]
-    public void The_pre_launch_estimate_is_clamped_to_the_cap_it_is_admitted_against(double? taskCap, double? runCap, double expected)
+    [InlineData(5.0, 5.0, 0.0, 5.0)]      // the quick lane's first run: node cap and run cap are the SAME projected number
+    [InlineData(0.5, 5.0, 0.0, 0.5)]      // a tighter task ceiling is the honest estimate
+    [InlineData(100.0, 12.0, 0.0, 12.0)]  // a task ceiling ABOVE the run cap is unreachable — claiming it would refuse the first launch outright
+    [InlineData(null, 5.0, 0.0, 5.0)]     // no task ceiling: an opaque CLI's honest maximum IS what the run has left
+    [InlineData(5.0, 5.0, 0.5, 4.5)]      // a SECOND run after the first settled small — it claims the remainder, not the ceiling
+    [InlineData(null, 5.0, 4.9, 0.1)]
+    public void The_pre_launch_estimate_claims_what_the_run_has_left(double? taskCap, double runCap, double committed, double expected)
     {
-        // MUTATION THIS CATCHES: `task.MaxCostUsd ?? cap` without the clamp. Row 3 then claims $100 against a $12 run
-        // cap, so ReserveAsync refuses a launch on a run that has committed NOTHING — a false refusal over money the
-        // CLI could never have spent, and the hardest kind to diagnose because the cap it names is not the one it read.
+        // MUTATION THIS CATCHES: `min(task.MaxCostUsd ?? cap, cap)` — the whole ceiling instead of the remainder.
+        // Rows 5 and 6 then claim the full $5 against a run that has already committed some of it, so ReserveAsync
+        // refuses, and a workflow run's SECOND agent could never launch however little the first actually spent.
         var task = new AgentTask { Goal = "g", Harness = "h", MaxCostUsd = (decimal?)taskCap };
 
-        AgentRunExecutor.RunSpendEstimate(task, (decimal?)runCap).ShouldBe((decimal)expected);
+        AgentRunExecutor.RunSpendEstimate(task, (decimal)runCap, (decimal)committed).ShouldBe((decimal)expected);
+    }
+
+    [Theory]
+    [InlineData(null, 5.0, 5.0)]    // the run's ceiling is fully committed — a spent cap must not start another CLI
+    [InlineData(null, 5.0, 7.0)]    // over-committed (a settle up past the estimate) is just as spent
+    [InlineData(0.0, 5.0, 0.0)]     // "spend nothing" is a bound, not an absent one
+    [InlineData(-1.0, 5.0, 0.0)]    // a negative ceiling reached the ledger's own ArgumentOutOfRangeException and surfaced untyped
+    public void A_launch_with_nothing_left_to_claim_has_no_estimate(double? taskCap, double runCap, double committed)
+    {
+        // MUTATION THIS CATCHES: flooring the estimate at 0 and reserving it anyway. `committed + 0 > cap` is FALSE
+        // at exactly-cap, so the ledger would ADMIT a run whose ceiling is entirely spent — the precise hole this
+        // slice exists to close — and a MaxCostUsd of 0 would buy a CLI launch for a run authorized to spend nothing.
+        var task = new AgentTask { Goal = "g", Harness = "h", MaxCostUsd = (decimal?)taskCap };
+
+        AgentRunExecutor.RunSpendEstimate(task, (decimal)runCap, (decimal)committed)
+            .ShouldBeNull("nothing left to claim is a REFUSAL, never a free launch on a zero-dollar claim");
     }
 
     [Theory]

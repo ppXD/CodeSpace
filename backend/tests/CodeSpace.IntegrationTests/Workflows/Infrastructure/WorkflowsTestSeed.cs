@@ -197,8 +197,11 @@ public static class WorkflowsTestSeed
     }
 
     /// <summary>The launch-stamped route provenance a CAPPED run carries — the <c>route_plan_jsonb</c> column production writes at projection (<c>TaskRunSnapshotFactory</c>) and <c>RunCostCap</c> reads the run's own ceiling back from.</summary>
-    public static string RouteJsonWithCostCap(decimal capUsd) => JsonSerializer.Serialize(
-        new CodeSpace.Messages.Tasks.RoutePlan { ProjectionKind = CodeSpace.Messages.Tasks.TaskProjectionKinds.SingleAgent, Caps = new CodeSpace.Messages.Tasks.RouteCaps { MaxCostUsd = capUsd } },
+    public static string RouteJsonWithCostCap(decimal capUsd) => RouteJsonFor(CodeSpace.Messages.Tasks.TaskProjectionKinds.SingleAgent, capUsd);
+
+    /// <summary>The same provenance at an explicit PROJECTION kind — the half that decides whether ONE agent owns the run's ceiling (single-agent) or a fan-out already admitted the work at its own grain (plan-map, supervisor).</summary>
+    public static string RouteJsonFor(string projectionKind, decimal? capUsd) => JsonSerializer.Serialize(
+        new CodeSpace.Messages.Tasks.RoutePlan { ProjectionKind = projectionKind, Caps = new CodeSpace.Messages.Tasks.RouteCaps { MaxCostUsd = capUsd } },
         new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
     /// <summary>

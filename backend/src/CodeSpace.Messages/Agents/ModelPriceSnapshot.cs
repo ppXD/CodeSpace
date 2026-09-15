@@ -1,13 +1,10 @@
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
-
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// WHICH rates priced one agent run — the price-version the agent-run plane never had. A pure data noun (Rule 18.1):
 /// where the rates came from (<see cref="ModelPriceSources"/>), the two per-million rates themselves, and a stable
-/// <see cref="Digest"/> over both.
+/// <see cref="Digest"/> over both. The digest is MINTED in Core (<c>AgentCostPricing.SnapshotOf</c>) — this record
+/// carries it, never computes it, so Messages stays free of behaviour.
 ///
 /// <para>It exists because an agent run's cost is a DERIVED number, not a provider receipt: the CLI reports tokens,
 /// CodeSpace multiplies them by an operator-editable rate. Without this stamp, editing
@@ -24,29 +21,6 @@ public sealed record ModelPriceSnapshot(string Source, decimal InputUsdPerMillio
 {
     /// <summary>The <c>price_version</c> an admission stamps when NO table priced the run's model. A reservation still has to record SOMETHING (the column is NOT NULL), and "admitted without a price" is a materially different audit fact from "admitted under these rates" — collapsing the two would make an unpriceable launch indistinguishable from a priced one.</summary>
     public const string UnpricedVersion = "unpriced";
-
-    /// <summary>How many hex characters of the SHA-256 the <see cref="Digest"/> keeps. 16 (64 bits) is far past collision risk for a price table an operator types by hand, and short enough to read in a <c>budget_reservation.price_version</c> cell.</summary>
-    private const int DigestHexLength = 16;
-
-    /// <summary>The snapshot for rates resolved from <paramref name="source"/> — the ONE place a digest is minted, so a value written to the ledger and a value stamped on a result can never be computed two ways.</summary>
-    public static ModelPriceSnapshot Of(string source, decimal inputUsdPerMillion, decimal outputUsdPerMillion) =>
-        new(source, inputUsdPerMillion, outputUsdPerMillion, DigestOf(source, inputUsdPerMillion, outputUsdPerMillion));
-
-    /// <summary>The snapshot for an already-resolved <see cref="ModelPrice"/>.</summary>
-    public static ModelPriceSnapshot Of(string source, ModelPrice price) => Of(source, price.InputPerMillionUsd, price.OutputPerMillionUsd);
-
-    /// <summary>
-    /// A stable hash over the source AND both rates: change any one of the three and the digest changes, so a
-    /// reservation stamped under the old rates is distinguishable from one stamped under the new. Canonicalized with
-    /// the INVARIANT culture and a round-trip decimal format, so the same rates hash identically on every host —
-    /// a culture-dependent "2,5" vs "2.5" would otherwise mint two digests for one price.
-    /// </summary>
-    private static string DigestOf(string source, decimal inputUsdPerMillion, decimal outputUsdPerMillion)
-    {
-        var canonical = string.Create(CultureInfo.InvariantCulture, $"{source}|{inputUsdPerMillion:0.############################}|{outputUsdPerMillion:0.############################}");
-
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..DigestHexLength].ToLowerInvariant();
-    }
 }
 
 /// <summary>

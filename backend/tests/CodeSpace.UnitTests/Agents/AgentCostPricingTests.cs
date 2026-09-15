@@ -130,12 +130,12 @@ public sealed class AgentCostPricingTests
         // budget reservation stamps as its price_version and what a result carries as its audit stamp — if an output
         // rate doubling left the digest untouched, two admissions made under materially different prices would be
         // indistinguishable, which is the whole defect the snapshot exists to close.
-        var baseline = ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 10m);
+        var baseline = AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2m, 10m);
 
-        baseline.Digest.ShouldBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 10m).Digest, "the same source + rates must hash identically, or nothing can be compared across runs");
-        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest, "a changed INPUT rate must change the digest");
-        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 20m).Digest, "a changed OUTPUT rate must change the digest");
-        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.EnvOverride, 2m, 10m).Digest, "the same rates from a DIFFERENT table are a different pricing decision");
+        baseline.Digest.ShouldBe(AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2m, 10m).Digest, "the same source + rates must hash identically, or nothing can be compared across runs");
+        baseline.Digest.ShouldNotBe(AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest, "a changed INPUT rate must change the digest");
+        baseline.Digest.ShouldNotBe(AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2m, 20m).Digest, "a changed OUTPUT rate must change the digest");
+        baseline.Digest.ShouldNotBe(AgentCostPricing.SnapshotOf(ModelPriceSources.EnvOverride, 2m, 10m).Digest, "the same rates from a DIFFERENT table are a different pricing decision");
     }
 
     [Fact]
@@ -147,11 +147,11 @@ public sealed class AgentCostPricingTests
         try
         {
             System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
-            ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest
+            AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest
                 .ShouldBe("2a14725d968a2d08", "the canonical string is invariant-culture (sha256 of 'credential-model-row|2.5|10') — a host's locale must never change a price's identity");
 
             // Trailing scale is a storage artefact of NUMERIC(12,4), not a different price: 10 and 10.0000 must hash the same.
-            ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5000m, 10.0000m).Digest.ShouldBe("2a14725d968a2d08");
+            AgentCostPricing.SnapshotOf(ModelPriceSources.CredentialRow, 2.5000m, 10.0000m).Digest.ShouldBe("2a14725d968a2d08");
         }
         finally
         {

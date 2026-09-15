@@ -78,6 +78,13 @@ public sealed class BudgetSettlementService : IBudgetSettlementService, IScopedD
         // unknown and their estimates continue to count toward committed budget until confirmed evidence arrives.
         await _ledger.ReconcileDanglingAsync("llm:", batchSize, cancellationToken).ConfigureAwait(false);
 
+        // The quick lane's per-run claims (5c). The executor settles its own in band at every terminal it reaches —
+        // including a re-attach landing — so what is left for this pass is the claim whose worker died outright: the
+        // expiry sweep below moves it to Indeterminate at its deadline, and this closes the bookkeeping. Like every
+        // other kind here it does NOT free the headroom (Reconciled still counts its reserve); only a settled actual
+        // or a release does, and neither is knowable for a run nobody observed finishing.
+        await _ledger.ReconcileDanglingAsync(BudgetKinds.AgentRunMonitored, batchSize, cancellationToken).ConfigureAwait(false);
+
         // Map-branch AFTER the release pass above, never before: a Reconciled row is no longer RELEASABLE (release
         // only acts on Reserved/InFlight), so reconciling first would strand a terminal run's branch estimate
         // holding headroom permanently — the exact thing that pass exists to return. What is left for this call is
