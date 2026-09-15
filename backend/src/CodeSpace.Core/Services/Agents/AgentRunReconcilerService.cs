@@ -745,7 +745,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning(exception, "AgentRunReconciler: could not record log-capture owner loss for abandoned agent run {RunId}; its streams stay Open for a later sweep", stamp.AgentRunId);
+            // There is no later sweep. This run is terminal as of the CAS above, and the stale sweep that produced it
+            // only ever selects Running runs — so a refusal here is permanent, and the Room keeps folding those streams
+            // to "Finalizing" until someone repairs them by hand. Say the whole of that, with the identity to query on.
+            _logger.LogError(exception, "AgentRunReconciler: the log-capture owner-loss statement for abandoned agent run {RunId} at fence epoch {FenceEpoch} was refused; its capture streams in agent_run_log_stream are LEFT OPEN and no later sweep revisits them — the run is already terminal, so the Room reports them as still finalizing until this is repaired", stamp.AgentRunId, stamp.FenceEpoch);
         }
     }
 

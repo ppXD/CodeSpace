@@ -24,11 +24,25 @@ public sealed partial class AgentRunLogService
         // CALLER's authority: a sweep the run has already moved past states nothing. `target.worker_fence_epoch <
         // run.fence_epoch` is the SUBJECT's: only a stream whose own generation is over is orphaned, so a stream the
         // live worker still owns (equal fence) and a legacy stream with no fence at all (NULL) are both left alone.
+        //
+        // ONE reading of the clock, spent on both timestamp columns — the same `MATERIALIZED` stamp the other two
+        // writers of these columns use (CompleteUnderRecoveryClaimAsync / FailUnderRecoveryClaimAsync), and for the
+        // same reason. `clock_timestamp()` is VOLATILE: it re-reads a live clock at every occurrence, per row, and
+        // ck_agent_run_log_stream_time relates the two columns (`last_modified_at >= completed_at`). A projection is
+        // evaluated in the TABLE's column order rather than the order of the SET list, so `last_modified_at` (the
+        // earlier column) read first and `completed_at` read after it; on every microsecond tick that landed between
+        // the two the row arrived with completed_at AHEAD, Postgres refused the whole statement with 23514, and the
+        // stream this exists to close was left Open — permanently, because the sweep that produced it only ever looks
+        // at Running runs. A plain subquery is NOT enough: whether it is scanned once or rescanned per row is the
+        // planner's choice, and against these tables it rescanned. MATERIALIZED is the part that decides.
         return await db.Database.ExecuteSqlInterpolatedAsync($"""
+            WITH closed_at AS MATERIALIZED (
+                SELECT clock_timestamp() AS value
+            )
             UPDATE agent_run_log_stream AS target SET
                 state = 'CaptureFailed', error_code = {request.ErrorCode}, error_message = {OwnerLostMessage(request)},
-                revision = target.revision + 1, completed_at = clock_timestamp(), last_modified_at = clock_timestamp()
-            FROM agent_run AS run
+                revision = target.revision + 1, completed_at = closed_at.value, last_modified_at = closed_at.value
+            FROM agent_run AS run, closed_at
             WHERE run.team_id = target.team_id AND run.id = target.agent_run_id
               AND target.team_id = {request.TeamId} AND target.agent_run_id = {request.AgentRunId}
               AND target.state = 'Open'
