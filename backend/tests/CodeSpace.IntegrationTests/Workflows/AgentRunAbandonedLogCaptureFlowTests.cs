@@ -204,6 +204,68 @@ public sealed class AgentRunAbandonedLogCaptureFlowTests : IDisposable
     }
 
     /// <summary>
+    /// The flip states ONE instant, for every stream it closes.
+    ///
+    /// <para>This is the shape of a live defect, not a style preference. <c>ck_agent_run_log_stream_time</c> requires
+    /// <c>last_modified_at &gt;= completed_at</c>, and the flip wrote both from <c>clock_timestamp()</c> — two separate
+    /// readings of a live clock. A projection is evaluated in the TABLE's column order rather than the order of the SET
+    /// list, so <c>last_modified_at</c> (the earlier column) read first and <c>completed_at</c> read after it; on every
+    /// microsecond tick that landed between the two, the row arrived with completed_at AHEAD and Postgres refused the
+    /// whole statement with 23514. The reconciler swallows that, and the stream it was closing stayed Open for good —
+    /// the exact "forever finalizing" state this file exists to make impossible, reappearing a few percent of the time.
+    /// Against a single stream it cost roughly one abandon in ten and read as an unreproducible flake.</para>
+    ///
+    /// <para>One flip closes every orphaned stream of the run in ONE statement, so the invariant is directly readable
+    /// off the rows: a single reading spends the same value on both columns of every row, and separate readings cannot
+    /// — a 16-row statement took SEVEN distinct readings when measured. So "all rows share one completed_at, and each
+    /// row's completed_at is its last_modified_at" is false the moment the clock is read more than once, whether or not
+    /// this particular run happened to trip the constraint.</para>
+    /// </summary>
+    [Fact]
+    public async Task One_abandon_stamps_every_stream_it_closes_with_a_single_reading_of_the_clock()
+    {
+        var world = await StageRunCapturingOnAnotherHostAsync();
+        await OpenFurtherCapturesAsync(world);
+
+        await SweepFromTheSurvivingHostAsync(world);
+
+        var streams = await StreamsAsync(world);
+        streams.Count.ShouldBe(StreamsPerFlip, "precondition: the whole point is that ONE statement closes many streams");
+        streams.ShouldAllBe(stream => stream.State == AgentRunLogStreamState.CaptureFailed,
+            customMessage: "one refused row aborts the statement, so a single bad reading leaves EVERY stream of the run Open");
+
+        streams.ShouldAllBe(stream => stream.CompletedAt == stream.LastModifiedAt,
+            customMessage: "the two columns are one instant said twice; a row where they differ is a row the time constraint would have refused");
+        streams.Select(stream => stream.CompletedAt).Distinct().Count().ShouldBe(1,
+            customMessage: "every stream this abandon closed must carry the same reading — more than one means the statement read a live clock per row");
+    }
+
+    /// <summary>
+    /// Further live captures on the same run — the ordinary shape, where one run captures several kinds at once, and
+    /// what makes the single-reading invariant measurable: all of them are Open at the capture fence when the host
+    /// dies, so the one owner-loss statement closes all of them and every row it writes is evidence about that call.
+    /// </summary>
+    private async Task OpenFurtherCapturesAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+        var logs = Logs(scope);
+
+        foreach (var kind in FurtherStreamKinds)
+            (await logs.OpenAsync(new AgentRunLogOpenRequest
+            {
+                TeamId = world.TeamId, AgentRunId = world.AgentRunId, WorkerFenceEpoch = CaptureFence, CaptureSessionId = Guid.NewGuid(),
+                StreamKind = kind, ContentType = "text/plain", ContentEncoding = "utf-8", CaptureSource = "test-spool/v1",
+            }, CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+    }
+
+    private async Task<IReadOnlyList<AgentRunLogStream>> StreamsAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
+            .Where(row => row.TeamId == world.TeamId && row.AgentRunId == world.AgentRunId).ToListAsync();
+    }
+
+    /// <summary>
     /// The half of the merged guard that is NOT this change's own: 0230's remote-stall arm, exercised against the
     /// function 0232 installs.
     ///
@@ -385,6 +447,12 @@ public sealed class AgentRunAbandonedLogCaptureFlowTests : IDisposable
 
     /// <summary>The generation that does the capturing; the abandon's CAS bumps the run past it by exactly one.</summary>
     private const long CaptureFence = 1;
+
+    /// <summary>How many Open streams one abandon closes in <see cref="One_abandon_stamps_every_stream_it_closes_with_a_single_reading_of_the_clock"/>. Sixteen rows took seven distinct readings of a live clock when measured, so one reading per statement is the only way all sixteen can agree.</summary>
+    private const int StreamsPerFlip = 16;
+
+    private static readonly string[] FurtherStreamKinds =
+        [.. Enumerable.Range(2, StreamsPerFlip - 1).Select(ordinal => $"capture-{ordinal:D2}/v1")];
 
     public void Dispose()
     {
