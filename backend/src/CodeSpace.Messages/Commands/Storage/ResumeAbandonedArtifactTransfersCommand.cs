@@ -8,8 +8,12 @@ namespace CodeSpace.Messages.Commands.Storage;
 ///
 /// <para>No permission marker: dispatched by a recurring job on a processing pod, across every team. It never starts a
 /// transfer and never uploads anything — it only completes or closes one that a caller already began.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each abandoned transfer is taken over by bumping its own
+/// worker fence and lease; one that cannot be resumed simply lets its lease lapse again. One command transaction around
+/// the whole tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ResumeAbandonedArtifactTransfersCommand : ICommand<ResumeAbandonedArtifactTransfersResponse>;
+public sealed record ResumeAbandonedArtifactTransfersCommand : ICommand<ResumeAbandonedArtifactTransfersResponse>, INonTransactionalCommand;
 
 public sealed record ResumeAbandonedArtifactTransfersResponse
 {

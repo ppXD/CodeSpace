@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Commands.Agents;
 ///
 /// <para>NOT tenant-scoped — system-wide disk reclamation that runs without an actor context. Returns the
 /// count reaped for log surfacing + the recurring-job result.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): it locks each candidate in a transaction of its OWN
+/// before touching the filesystem — a transaction the pipeline's would refuse to nest. One command transaction around
+/// the whole tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ReapAgentRunSpoolsCommand : ICommand<ReapAgentRunSpoolsResponse>;
+public sealed record ReapAgentRunSpoolsCommand : ICommand<ReapAgentRunSpoolsResponse>, INonTransactionalCommand;
 
 /// <summary>Count of terminal-run spool directories reclaimed by the sweep.</summary>
 public sealed record ReapAgentRunSpoolsResponse

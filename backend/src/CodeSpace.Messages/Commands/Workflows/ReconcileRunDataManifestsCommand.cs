@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// <para>No permission marker: dispatched by a recurring job on a processing pod, across every team. Whether a run's
 /// record was ever established is not a question a team can ask on its own behalf, and the answer changes no row a
 /// user authored — only what the manifest claims about one.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each candidate is un-stated by its own CAS on the
+/// writer's own scope, and one that fails is logged while the pass carries on. One command transaction around the whole
+/// tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ReconcileRunDataManifestsCommand : ICommand<ReconcileRunDataManifestsResponse>;
+public sealed record ReconcileRunDataManifestsCommand : ICommand<ReconcileRunDataManifestsResponse>, INonTransactionalCommand;
 
 public sealed record ReconcileRunDataManifestsResponse
 {

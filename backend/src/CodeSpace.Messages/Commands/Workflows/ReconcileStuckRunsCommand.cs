@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// <para>NOT tenant-scoped (no <c>IRequireTeamMembership</c>) — this is a system-wide
 /// operation that runs without an actor context. Tenancy is enforced at the engine level
 /// (run rows carry team_id); the reconciler doesn't need to filter by tenant.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each stuck run is re-dispatched on its own, and a
+/// failure on one is logged and retried next tick rather than aborting the batch. One command transaction around the
+/// whole tick would let a single bad row undo every other row's work.</para>
 /// </summary>
-public sealed record ReconcileStuckRunsCommand : ICommand<ReconcileStuckRunsResponse>;
+public sealed record ReconcileStuckRunsCommand : ICommand<ReconcileStuckRunsResponse>, INonTransactionalCommand;
 
 /// <summary>Per-state counts returned to the caller for log surfacing.</summary>
 public sealed record ReconcileStuckRunsResponse

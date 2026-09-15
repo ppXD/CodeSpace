@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Commands.Storage;
 /// <para>No permission marker: this is dispatched by a recurring job on a processing pod, not by a caller with an
 /// identity. It reads and probes across every team by design — a per-team capability would make the deployment-wide
 /// question unaskable.</para>
+///
+/// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): one unreachable provider must not stop every other
+/// team's destination from being checked. One command transaction around the whole tick would let a single bad row undo
+/// every other row's work.</para>
 /// </summary>
-public sealed record ProbeStaleStorageDestinationsCommand : ICommand<ProbeStaleStorageDestinationsResponse>;
+public sealed record ProbeStaleStorageDestinationsCommand : ICommand<ProbeStaleStorageDestinationsResponse>, INonTransactionalCommand;
 
 public sealed record ProbeStaleStorageDestinationsResponse
 {
