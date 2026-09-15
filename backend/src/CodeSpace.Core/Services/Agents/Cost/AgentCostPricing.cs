@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Cost;
@@ -93,13 +95,34 @@ public static class AgentCostPricing
 
         var name = model.Trim();
 
-        if (rowPrices is not null && rowPrices.TryGetValue(name, out var row) && IsUsable(row)) return ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, row);
+        if (rowPrices is not null && rowPrices.TryGetValue(name, out var row) && IsUsable(row)) return SnapshotOf(ModelPriceSources.CredentialRow, row.InputPerMillionUsd, row.OutputPerMillionUsd);
 
         // Env BEFORE built-in, mirroring ResolveTable's overlay: the override wins for a model it names, and only a
         // model it does not name falls through to the seeded table.
-        if (EnvOverrides().TryGetValue(name, out var overridden)) return ModelPriceSnapshot.Of(ModelPriceSources.EnvOverride, overridden);
+        if (EnvOverrides().TryGetValue(name, out var over)) return SnapshotOf(ModelPriceSources.EnvOverride, over.InputPerMillionUsd, over.OutputPerMillionUsd);
 
-        return DefaultPrices.TryGetValue(name, out var builtIn) ? ModelPriceSnapshot.Of(ModelPriceSources.BuiltIn, builtIn) : null;
+        return DefaultPrices.TryGetValue(name, out var builtIn) ? SnapshotOf(ModelPriceSources.BuiltIn, builtIn.InputPerMillionUsd, builtIn.OutputPerMillionUsd) : null;
+    }
+
+    /// <summary>The snapshot for rates resolved from <paramref name="source"/> — the ONE place a digest is minted, so a value written to the budget ledger and a value stamped on a result can never be computed two ways.</summary>
+    public static ModelPriceSnapshot SnapshotOf(string source, decimal inputUsdPerMillion, decimal outputUsdPerMillion) =>
+        new(source, inputUsdPerMillion, outputUsdPerMillion, PriceDigest(source, inputUsdPerMillion, outputUsdPerMillion));
+
+    /// <summary>How many hex characters of the SHA-256 a <see cref="ModelPriceSnapshot.Digest"/> keeps. 16 (64 bits) is far past collision risk for a price table an operator types by hand, and short enough to read in a <c>budget_reservation.price_version</c> cell.</summary>
+    private const int DigestHexLength = 16;
+
+    /// <summary>
+    /// A stable hash over the source AND both rates: change any one of the three and the digest changes, so a
+    /// reservation stamped under the old rates is distinguishable from one stamped under the new. Canonicalized with
+    /// the INVARIANT culture and a trailing-zero-free decimal format, so the same rates hash identically on every
+    /// host and at every stored scale — a culture-dependent "2,5" vs "2.5", or a <c>NUMERIC(12,4)</c> row's
+    /// "10.0000" vs a literal "10", would otherwise mint two digests for one price.
+    /// </summary>
+    private static string PriceDigest(string source, decimal inputUsdPerMillion, decimal outputUsdPerMillion)
+    {
+        var canonical = string.Create(CultureInfo.InvariantCulture, $"{source}|{inputUsdPerMillion:0.############################}|{outputUsdPerMillion:0.############################}");
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..DigestHexLength].ToLowerInvariant();
     }
 
     /// <summary>Whether a price can be used in <see cref="CostUsd"/>'s arithmetic without risking an overflow throw — the same bound <see cref="TryParseEntry"/> enforces on an env entry, applied to an operator's DB row.</summary>

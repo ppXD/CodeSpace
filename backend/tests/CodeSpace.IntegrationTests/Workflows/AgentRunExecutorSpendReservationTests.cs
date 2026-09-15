@@ -242,16 +242,227 @@ public partial class AgentRunExecutorTests
             .ShouldBe(0m, "an unbudgeted row is excluded from every committed sum — it must never eat into another plane's real cap on the same run");
     }
 
+    [Theory]
+    [InlineData(CodeSpace.Messages.Tasks.TaskProjectionKinds.PlanMapSynth, "map-branch")]
+    [InlineData(CodeSpace.Messages.Tasks.TaskProjectionKinds.Supervisor, BudgetKinds.AgentAttempt)]
+    public async Task A_fan_out_lanes_agent_records_unbudgeted_instead_of_claiming_the_cap_a_second_time(string projectionKind, string ancestorKind)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Both fan-out lanes admit the work BEFORE the agent run exists — the map reserves cap÷N per branch
+        // (WorkflowEngine.AdmitBranchAsync), the supervisor one agent-attempt per staged agent
+        // (RealSupervisorActionExecutor) against the SAME workflow run id the agent run is bound to. So the money is
+        // already claimed on this agent's behalf.
+        // MUTATION THIS CATCHES: admitting every agent against the run cap regardless of projection. Both fixtures
+        // are a capped run mid-fan-out — with the projection check gone, the agent's own claim is summed ALONGSIDE
+        // the ancestor's by CommittedInTxAsync, so the run and team caps see this CLI twice and ReserveAsync refuses
+        // (committed == cap), killing every agent a capped Standard or Deep run staged. No other test in the suite
+        // drives a fan-out agent through the real executor.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedRoutedWorkflowRunAsync(teamId, WorkflowsTestSeed.RouteJsonFor(projectionKind, capUsd: 5m));
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IBudgetLedger>().ReserveAsync(workflowRunId, teamId, ancestorKind, "the-ancestors-own-claim", 5m, 5m, "prices-v1", null, null, CancellationToken.None))
+                .Admitted.ShouldBeTrue("the fan-out's own admission runs first and claims the run's ceiling");
+
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript));
+
+        // The real runner drives a real process, so a priced result IS the proof the CLI ran rather than being refused.
+        (await PersistedRunAsync(runId)).Status.ShouldBe(AgentRunStatus.Succeeded, "an agent the fan-out already admitted must still run — diagnose a failure here by comparing this run's budget_reservation kinds against its route's projectionKind");
+        (await PersistedResultAsync(runId)).CostUsd.ShouldBe(PricedUsageCostUsd, "a refused launch would have landed a zero-cost run_budget_exhausted result instead of a priced one");
+
+        (await ReservationOfAsync(workflowRunId, runId)).ShouldBeNull("a fan-out lane's agent mints no enforcing claim — the ancestor row above already holds this money");
+
+        var observed = await ReservationOfAsync(workflowRunId, runId, $"{BudgetKinds.UnbudgetedPrefix}{BudgetKinds.AgentRunMonitored}");
+        observed.ShouldNotBeNull("it still RECORDS what it spent — the Room must not go blind on the fan-out lanes");
+        observed.SettledUsd.ShouldBe(PricedUsageCostUsd);
+        observed.CapUsd.ShouldBeNull();
+
+        using var read = _fixture.BeginScope();
+        (await read.Resolve<IBudgetLedger>().CommittedUsdAsync(workflowRunId, teamId, CancellationToken.None))
+            .ShouldBe(5m, "the physical CLI is counted ONCE — by the ancestor's claim. A monitored row here would double it against both the run and the team cap");
+    }
+
+    [Fact]
+    public async Task A_second_run_claims_what_the_first_left_instead_of_the_whole_ceiling()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // MUTATION THIS CATCHES: estimating `min(task.MaxCostUsd ?? cap, cap)` — the whole ceiling rather than the
+        // remainder. The first run then holds all $5 even after settling at $0.50, and the second agent on the same
+        // workflow run is refused for money nobody spent.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+
+        var first = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+        await ExecuteAsync(first, new UsageReportingHarness(PricedUsageScript));
+
+        var second = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+        await ExecuteAsync(second, new UsageReportingHarness(PricedUsageScript));
+
+        (await PersistedRunAsync(second)).Status.ShouldBe(AgentRunStatus.Succeeded, "$0.50 of a $5 ceiling is spent — the second agent must be admissible against the $4.50 remaining");
+
+        var row = await ReservationOfAsync(workflowRunId, second);
+        row.ShouldNotBeNull();
+        row.ReservedUsd.ShouldBe(4.5m, "it claims the REMAINDER, not the ceiling");
+        row.SettledUsd.ShouldBe(PricedUsageCostUsd);
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IBudgetLedger>().CommittedUsdAsync(workflowRunId, teamId, CancellationToken.None))
+            .ShouldBe(1m, "two settled runs at $0.50 each — the ledger holds the observed total, not two ceilings");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task A_run_authorized_to_spend_nothing_is_refused_typed(int maxCostUsd)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // MUTATION THIS CATCHES: flooring the estimate at 0 and reserving anyway. A zero ceiling would then be
+        // admitted vacuously (committed + 0 is not > cap) and the CLI would launch for a run authorized to spend
+        // nothing; a NEGATIVE one reached the ledger's own ArgumentOutOfRangeException and surfaced as the untyped
+        // `executor-error`, which a node's retry policy treats as a transient worth re-buying.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: maxCostUsd, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+        var runner = new SpecRecordingDurableRunner();
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
+
+        runner.Launched.ShouldBeNull("a ceiling of zero or less authorizes no spend at all — check the run's result exit reason to diagnose");
+
+        var result = await PersistedResultAsync(runId);
+        result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.RunBudgetExhausted, "it is a budget refusal, not an executor fault");
+        result.Error.ShouldNotBeNull().ShouldContain("spend nothing", Case.Insensitive, "the operator must read WHICH ceiling refused — a spent run cap and a zero ceiling have different remedies");
+
+        (await ReservationOfAsync(workflowRunId, runId)).ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_run_that_lands_through_reattach_settles_the_claim_its_launch_minted()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The normal shape after a deploy or worker restart: the worker that reserved is gone, and a DIFFERENT one
+        // lands the run. MUTATION THIS CATCHES: settling only on the ExecuteAsync arms. The claim would then stay
+        // Reserved until its deadline, the expiry sweep would move it to Indeterminate — which still HOLDS the whole
+        // estimate in every committed sum — so each restart would permanently burn a run's and a team's cap.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+
+        // Exactly the row the launch mints (same kind, same scope key) — this worker never saw the reserve.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IBudgetLedger>().ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, runId.ToString("N"), 5m, 5m, "prices-v1", null, DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None))
+                .Admitted.ShouldBeTrue();
+
+        var reservation = await StrandRunningWithExitedProcessAsync(runId, teamId);
+
+        await ReattachAsync(reservation, new UsageReportingHarness(PricedUsageScript));
+
+        (await PersistedRunAsync(runId)).Status.ShouldBe(AgentRunStatus.Succeeded, "the re-attached observer tailed the exited process and landed the run");
+
+        var row = await ReservationOfAsync(workflowRunId, runId);
+        row.ShouldNotBeNull();
+        row.State.ShouldBe(BudgetReservationStates.Settled, "the terminal a re-attach reaches closes the claim the launch minted — diagnose by checking whether AgentRunExecutor threaded a rebuilt claim into CompleteAndNotifyAsync");
+        row.SettledUsd.ShouldBe(PricedUsageCostUsd);
+
+        using var read = _fixture.BeginScope();
+        (await read.Resolve<IBudgetLedger>().CommittedUsdAsync(workflowRunId, teamId, CancellationToken.None))
+            .ShouldBe(PricedUsageCostUsd, "the $4.50 this run did not spend is back in the run's headroom, not held until a deadline");
+    }
+
+    [Fact]
+    public async Task A_second_settle_on_a_landed_claim_is_a_no_op()
+    {
+        // A run can reach a terminal twice (an executor terminal, then a re-attach that lands the same run), and the
+        // second pass rebuilds the same claim. MUTATION THIS CATCHES: a settle that overwrites a confirmed receipt —
+        // the later pass carries no observed cost, so it would replace a real $0.50 with Indeterminate and the run's
+        // committed total would jump back to the full reserve.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        await ledger.ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, "twice", 5m, 5m, "prices-v1", null, null, CancellationToken.None);
+
+        await ledger.SettleAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, "twice", PricedUsageCostUsd, CancellationToken.None);
+        await ledger.SettleAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, "twice", null, CancellationToken.None);
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
+            .SingleAsync(r => r.WorkflowRunId == workflowRunId && r.ScopeKey == "twice");
+
+        row.State.ShouldBe(BudgetReservationStates.Settled, "a confirmed receipt is final — a later uncertain pass may not reopen it");
+        row.SettledUsd.ShouldBe(PricedUsageCostUsd);
+    }
+
+    [Fact]
+    public async Task The_settlement_sweep_closes_a_monitored_claim_whose_worker_never_came_back()
+    {
+        // The backstop for a claim no terminal ever reaches: the expiry sweep moves it to Indeterminate at its
+        // deadline and this pass closes the bookkeeping. MUTATION THIS CATCHES: leaving AgentRunMonitored out of the
+        // sweep's reconcile list — the row would sit Indeterminate forever, the one kind with no closing pass.
+        // NOTE it deliberately does NOT free headroom: Reconciled still counts its reserve, exactly like every other
+        // kind here. Only a settled actual releases the unspent remainder, which is why the terminal settle matters.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        await ledger.ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, "orphan", 5m, 5m, "prices-v1", null, DateTimeOffset.UtcNow.AddSeconds(-1), CancellationToken.None);
+
+        await ledger.ExpireOverdueAsync(100, CancellationToken.None);
+        await scope.Resolve<IBudgetSettlementService>().SweepAsync(100, CancellationToken.None);
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
+            .SingleAsync(r => r.WorkflowRunId == workflowRunId && r.ScopeKey == "orphan");
+
+        row.State.ShouldBe(BudgetReservationStates.Reconciled, "the orphan's bookkeeping is closed rather than left Indeterminate forever");
+        row.SettledUsd.ShouldBeNull("closing the label never invents a bill");
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>A real workflow run carrying the launch-stamped route provenance <c>RunCostCap</c> reads a run's own ceiling back from — the exact column the quick lane's projection writes.</summary>
-    private async Task<Guid> SeedCappedWorkflowRunAsync(Guid teamId, decimal? capUsd)
+    /// <summary>
+    /// Leave the run exactly as a vanished worker leaves it: Running, with a durable handle to a REAL process that
+    /// has already written its output and exited, and a lapsed lease — then reserve the re-attach the reconciler
+    /// would. The re-attached observer tails that spool from offset 0 and folds a genuine result.
+    /// </summary>
+    private async Task<AgentRunReattachReservation> StrandRunningWithExitedProcessAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var runs = scope.Resolve<IAgentRunService>();
+        var runner = (ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+
+        var handle = await runner.LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", PricedUsageScript }, TimeoutSeconds = 60 }, runId.ToString("N"), CancellationToken.None);
+
+        // Running with a durable handle — the row a vanished worker leaves behind.
+        await runs.MarkRunningAsync(runId, CancellationToken.None);
+        await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+        // Wait for the real process to finish writing, then lapse the lease so the re-attach can be reserved.
+        while ((await runner.ProbeAsync(handle, CancellationToken.None)).State == SandboxRunState.Running)
+            await Task.Delay(50);
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+
+        return (await runs.ReserveReattachAsync(runId, CancellationToken.None))!;
+    }
+
+    /// <summary>A real workflow run carrying the QUICK lane's launch-stamped route provenance — the exact column and projection the single-agent builder writes, which is what makes its agent the sole claimant of the ceiling.</summary>
+    private Task<Guid> SeedCappedWorkflowRunAsync(Guid teamId, decimal? capUsd) =>
+        SeedRoutedWorkflowRunAsync(teamId, capUsd is { } cap ? WorkflowsTestSeed.RouteJsonWithCostCap(cap) : null);
+
+    private async Task<Guid> SeedRoutedWorkflowRunAsync(Guid teamId, string? routePlanJson)
     {
         Guid workflowId;
         using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
             workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = $"quick-lane-{Guid.NewGuid():N}", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = Array.Empty<WorkflowActivationInput>(), Enabled = true });
 
-        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, routePlanJson: capUsd is { } cap ? WorkflowsTestSeed.RouteJsonWithCostCap(cap) : null);
+        return await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, routePlanJson: routePlanJson);
     }
 
     private async Task SeedTeamCapAsync(Guid teamId, decimal capUsd)

@@ -32,17 +32,34 @@ public static class RunCostCap
     /// <summary>The cost ceiling stamped in a run's route provenance JSON, or null when absent / unreadable / non-positive.</summary>
     public static decimal? Of(string? routePlanJson)
     {
+        var cap = Read(routePlanJson)?.Caps.MaxCostUsd;
+
+        return cap is > 0 ? cap : null;
+    }
+
+    /// <summary>
+    /// Whether this route's projection makes ONE agent run the SOLE claimant of the run's ceiling — the single-agent
+    /// (quick) lane, where the agent IS the run and may therefore admit against the whole cap.
+    ///
+    /// <para>Every other projection fans work out and admits it at the FAN-OUT's own grain BEFORE any agent run
+    /// exists: <c>WorkflowEngine.AdmitBranchAsync</c> reserves cap÷N per map branch, and
+    /// <c>RealSupervisorActionExecutor</c> reserves one <c>agent-attempt</c> per staged agent. An agent under those
+    /// must not claim the ceiling a second time — the money is already claimed on its behalf, so a second claim
+    /// would refuse its own siblings, and on a map whose branches already sum to the whole cap it would refuse
+    /// EVERY agent the run staged. Those agents still RECORD their spend; they just record it unbudgeted.</para>
+    ///
+    /// <para>A run with no route (manual / trigger / subworkflow) returns false the same way a malformed column
+    /// does: nobody declared a ceiling, so nothing here may enforce one.</para>
+    /// </summary>
+    public static bool AgentOwnsTheRunCap(string? routePlanJson) =>
+        Read(routePlanJson)?.ProjectionKind == Messages.Tasks.TaskProjectionKinds.SingleAgent;
+
+    /// <summary>The one parse every reader above shares. A malformed / legacy column degrades to null, never to a fabricated route.</summary>
+    private static Messages.Tasks.RoutePlan? Read(string? routePlanJson)
+    {
         if (string.IsNullOrWhiteSpace(routePlanJson)) return null;
 
-        try
-        {
-            var cap = JsonSerializer.Deserialize<Messages.Tasks.RoutePlan>(routePlanJson, RouteJson)?.Caps.MaxCostUsd;
-
-            return cap is > 0 ? cap : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
+        try { return JsonSerializer.Deserialize<Messages.Tasks.RoutePlan>(routePlanJson, RouteJson); }
+        catch (JsonException) { return null; }
     }
 }

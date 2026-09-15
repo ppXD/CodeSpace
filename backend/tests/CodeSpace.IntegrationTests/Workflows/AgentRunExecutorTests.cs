@@ -1685,6 +1685,20 @@ public partial class AgentRunExecutorTests
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         using var scope = _fixture.BeginScope();
+
+        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker).ExecuteAsync(runId, CancellationToken.None);
+    }
+
+    /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch.</summary>
+    private async Task ReattachAsync(AgentRunReattachReservation reservation, IAgentHarness harness)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await NewExecutor(scope, harness).ReattachAsync(reservation, CancellationToken.None);
+    }
+
+    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
+    {
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
@@ -1705,7 +1719,7 @@ public partial class AgentRunExecutorTests
             logCapture,
             credentialBroker: credentialBroker);
 
-        await executor.ExecuteAsync(runId, CancellationToken.None);
+        return executor;
     }
 
     /// <summary>
