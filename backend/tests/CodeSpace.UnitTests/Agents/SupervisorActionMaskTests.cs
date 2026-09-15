@@ -38,6 +38,22 @@ public class SupervisorActionMaskTests
 
     private static string StagedOutcome() => JsonSerializer.Serialize(new { agentRunIds = new[] { Guid.NewGuid() }, agentCount = 1 }, AgentJson.Options);
 
+    /// <summary>A resolve whose resolver agent terminated, folded by the PRODUCTION folder so the verdict is read off bytes the server really writes — <paramref name="verified"/> carries the resolver recipe's own tested marker, which is the only thing that makes <c>SupervisorOutcome.ReadResolutionVerdict</c> say Verified.</summary>
+    private static SupervisorPriorDecision ResolveDecision(long sequence, bool verified)
+    {
+        var resolver = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(),
+            Status = "Succeeded",
+            ProducedBranch = "codespace/resolve/head",
+            Summary = verified ? $"reconciled the conflict; build and tests pass {SupervisorResolverRecipe.TestsPassedMarker}" : "attempted to reconcile, but the build still fails",
+        };
+
+        var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { resolver.AgentRunId }, agentCount = 1 }, AgentJson.Options);
+
+        return Decision(sequence, SupervisorDecisionKinds.Resolve, SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
+    }
+
     private static SupervisorTurnContext Context(params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship it", TurnNumber = prior.Length, PriorDecisions = prior };
 
@@ -100,12 +116,38 @@ public class SupervisorActionMaskTests
     [Theory]
     [InlineData(SupervisorDecisionKinds.Spawn)]
     [InlineData(SupervisorDecisionKinds.Retry)]
-    [InlineData(SupervisorDecisionKinds.Resolve)]
     public void Real_staged_work_after_a_clean_merge_makes_merge_available_again(string kind)
     {
         var context = Context(Decision(1, SupervisorDecisionKinds.Merge, CleanOutcome()), Decision(2, kind, StagedOutcome()));
 
-        SupervisorActionMask.MergeUnavailableReason(context).ShouldBeNull("new agent work must still be folded, including a verified resolver's work");
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBeNull("new agent work must still be folded");
+    }
+
+    [Fact]
+    public void A_verified_resolution_is_the_one_reconciliation_a_merge_may_accept()
+    {
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, ConflictedOutcome()), ResolveDecision(2, verified: true));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBeNull("a VERIFIED resolution is exactly the state whose merge surfaces the resolver's tested branch — the required merge this mask has always preserved");
+    }
+
+    // ── The unaccepted-reconciliation arm: the live miss on golden `resolve-cap-spent` ─────────────
+
+    [Theory]
+    [InlineData(false)]   // the resolver terminated without the verified marker — Unverified
+    [InlineData(null)]    // nothing folded from the resolver at all — Unknown
+    public void A_reconciliation_the_tape_never_accepted_does_not_re_open_merge(bool? folded)
+    {
+        // The executor accepts a resolution ONLY on Verified (SupervisorOutcome.ResolvedBranch → AcceptedResolutionBranch),
+        // so a merge here does not surface the resolver's branch — it re-runs the integrator over the branches that
+        // already conflicted. Both wires answered 'merge' on exactly this tape (run 34940616446, 28/29 each) while
+        // the menu still offered the verb.
+        var resolve = folded is null ? Decision(2, SupervisorDecisionKinds.Resolve, StagedOutcome()) : ResolveDecision(2, folded.Value);
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, ConflictedOutcome()), resolve);
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBe(SupervisorActionMask.UnacceptedReconciliation);
+        SupervisorActionRoster.Offerable(context).ShouldNotContain(SupervisorDecisionKinds.Merge, "a verb the mask withholds must never be on the menu above it");
+        SupervisorActionRoster.Withheld(context).ShouldContain(SupervisorDecisionKinds.Merge);
     }
 
     [Fact]

@@ -411,7 +411,56 @@ public sealed class SupervisorRecitationTests
         SupervisorRecitation.Render(priors)!.ShouldNotContain("[escalated");
     }
 
+    [Fact]
+    public void A_finished_plan_whose_merge_the_turn_withholds_is_never_told_to_merge()
+    {
+        // The live miss (run 34940616446, Anthropic 28/29 AND OpenAI 28/29 on golden `resolve-cap-spent`): every
+        // unit is done, the integration CONFLICTED, and the reconciliation is recorded unverified — so the executor
+        // cannot accept it and the roster withholds `merge`. This line was the last unconditional "merge the
+        // results" left in the prompt, and it sits in the one block whose header says to recite it before deciding.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: true)),
+            ConflictedMerge(3),
+            UnverifiedResolve(4),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain(SupervisorRecitation.FinishedCannotMerge);
+        recitation.ShouldNotContain(SupervisorRecitation.FinishedLandsWithAMerge, customMessage: "the block must not name a verb the AVAILABLE ACTIONS block three screens below withholds");
+    }
+
+    [Fact]
+    public void A_finished_plan_whose_merge_is_genuinely_available_keeps_its_merge_line()
+    {
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: true)),
+        };
+
+        SupervisorRecitation.Render(priors)!.ShouldContain(SupervisorRecitation.FinishedLandsWithAMerge,
+            customMessage: "an ordinary finished plan must render byte-identically to before — the arm is keyed on the mask, not on the plan being finished");
+    }
+
     // ─── fixtures ────────────────────────────────────────────────────────────
+
+    private static SupervisorPriorDecision ConflictedMerge(int seq) =>
+        Prior(seq, SupervisorDecisionKinds.Merge, "{}", JsonSerializer.Serialize(new
+        {
+            integration = new { status = "Conflicted", conflictedFiles = new[] { "src/Foo.cs" }, preservedBranches = new[] { "codespace/agent/s1" }, outcomes = Array.Empty<object>() },
+        }, AgentJson.Options));
+
+    /// <summary>A resolve whose resolver terminated WITHOUT the recipe's tested marker, folded by the production folder — the shape <c>SupervisorOutcome.ReadResolutionVerdict</c> reads as Unverified.</summary>
+    private static SupervisorPriorDecision UnverifiedResolve(int seq)
+    {
+        var resolver = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "codespace/resolve/head", Summary = "attempted to reconcile, but the build still fails" };
+        var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { resolver.AgentRunId }, agentCount = 1 }, AgentJson.Options);
+
+        return Prior(seq, SupervisorDecisionKinds.Resolve, "{}", SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
+    }
 
     private static SupervisorPriorDecision Retry(int seq, string subtaskId, object result, string? escalatedTo = null, string? escalatedFrom = null, string? reason = null) =>
         Prior(seq, SupervisorDecisionKinds.Retry,

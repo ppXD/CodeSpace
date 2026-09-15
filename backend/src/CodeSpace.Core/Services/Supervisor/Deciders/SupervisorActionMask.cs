@@ -24,14 +24,20 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// <c>amend_acceptance</c> joined it once <see cref="SupervisorAmendPrecondition"/> (B4) made eligibility a
 /// server verdict: with no unit whose latest check is an INFRA-classed failure, the proposal is rejected
 /// synchronously — no card posted, no human spent, the turn gone — so it belongs beside <c>resolve</c> rather
-/// than in the model's judgement. <c>merge</c> is withheld only after an executed clean integration when no later
-/// staging decision actually produced an agent run: the current frontier is already folded, so repeating the same
-/// fold cannot advance it.</para>
+/// than in the model's judgement. <c>merge</c> has TWO withheld states, both server-decided: after an executed clean
+/// integration when no later staging decision actually produced an agent run (the current frontier is already folded,
+/// so repeating the same fold cannot advance it), and when the newest staged work is a reconciliation the tape
+/// records as NOT verified — the executor accepts a resolution only on
+/// <see cref="SupervisorResolutionVerdict.Verified"/> (<c>SupervisorOutcome.ResolvedBranch</c>), so a merge there
+/// re-runs the integrator over the branches that already conflicted rather than surfacing the resolver's branch.
+/// That is the state golden <c>resolve-cap-spent</c> answered <c>merge</c> in on BOTH wires (run 34940616446, and
+/// again on 2026-09-11 / 34027621996): the menu offered the verb, and nothing in the prompt said it could not
+/// land.</para>
 ///
 /// <para>Deliberately masks NOTHING else. <c>plan</c>, <c>ask_human</c> and <c>stop</c> are the escape hatches out
 /// of every dead end and must always be offerable. <c>merge</c> is never masked from a guessed "nothing folded"
-/// predicate: a later resolver/spawn/retry that really staged an agent reopens it, including the state where merging
-/// a VERIFIED resolution is correct. <c>spawn</c>/<c>retry</c> against an empty plan are not masked either — a
+/// predicate: a later resolver/spawn/retry that really staged an agent reopens it, and a VERIFIED resolution keeps
+/// the merge that accepts it. <c>spawn</c>/<c>retry</c> against an empty plan are not masked either — a
 /// plan-less run keeps its goal-driven semantics, so their futility is a judgement, not a structural fact.</para>
 /// </summary>
 public static class SupervisorActionMask
@@ -66,20 +72,24 @@ public static class SupervisorActionMask
     };
 
     /// <summary>
-    /// The non-null reason another merge cannot advance the durable frontier, else null. A reverse walk asks one
-    /// narrow question: has a REAL agent run been staged since the latest clean integration? Plan/ask/stop do not
-    /// manufacture work. Spawn/retry/resolve reopen merge only when their recorded outcome says they actually staged
-    /// at least one run, preserving the required merge after a verified resolver while keeping rejected/no-op staging
-    /// from resurrecting an already-folded frontier.
+    /// The non-null reason another merge cannot advance the durable frontier, else null. A reverse walk asks two
+    /// narrow questions: has a REAL agent run been staged since the latest clean integration, and is the newest such
+    /// staging one a merge could actually ACCEPT? Plan/ask/stop do not manufacture work. Spawn/retry/resolve reopen
+    /// merge only when their recorded outcome says they actually staged at least one run, which keeps rejected/no-op
+    /// staging from resurrecting an already-folded frontier; and a resolve reopens it only when its resolution is
+    /// VERIFIED (<see cref="UnacceptedReconciliationReason"/>), which is the one resolution the executor accepts.
     /// </summary>
-    internal static string? MergeUnavailableReason(SupervisorTurnContext context)
+    internal static string? MergeUnavailableReason(SupervisorTurnContext context) => MergeUnavailableReason(context.PriorDecisions);
+
+    /// <summary>The same answer over the RAW tape facts, for the callers that hold them without a <see cref="SupervisorTurnContext"/> — the plan recitation's finished-plan line reads it while it is still pure over the tape. Both entry points funnel here, exactly like <see cref="ResolveUnavailableReason(IReadOnlyList{SupervisorPriorDecision}, int?)"/>, so no caller can read a second opinion about whether this turn may merge.</summary>
+    internal static string? MergeUnavailableReason(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
-        foreach (var decision in context.PriorDecisions.OrderByDescending(d => d.Sequence))
+        foreach (var decision in priorDecisions.OrderByDescending(d => d.Sequence))
         {
             if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
                 && decision.Status == SupervisorDecisionStatus.Succeeded
                 && SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0)
-                return null;
+                return UnacceptedReconciliationReason(decision);
 
             if (SupervisorOutcome.MergeIntegratedABranch(decision))
                 return "the latest integration is already clean and no later agent or resolver produced new work — another merge would fold the same frontier and cannot advance the run; stop if the goal is met";
@@ -87,6 +97,25 @@ public static class SupervisorActionMask
 
         return null;
     }
+
+    /// <summary>The withheld-merge line once the newest staged work is a reconciliation the tape never accepted — a FACT and no third steer, for the reason the rest of this class states: the resolution verdict above it is already three-way and cap-aware, and the closing move below it is already reach-aware.</summary>
+    internal const string UnacceptedReconciliation = "the newest work on this run is a reconciliation the tape records as NOT verified, and a merge cannot accept one — the integrator would re-run over the SAME branches that already conflicted and conflict again; the resolution verdict above names what is left";
+
+    /// <summary>
+    /// Why the newest agent-staging decision does NOT re-open <c>merge</c>: it is a <c>resolve</c> whose resolution
+    /// the tape does not record as <see cref="SupervisorResolutionVerdict.Verified"/>. Reads the SAME verdict the
+    /// executor's own acceptance rule reads (<c>SupervisorOutcome.ResolvedBranch</c> → <c>AcceptedResolutionBranch</c>),
+    /// so the menu and the merge it would run can never disagree: without an ACCEPTED resolution that merge does not
+    /// surface the resolver's branch, it re-runs the integrator over the original conflicting branches — the thing
+    /// the executor's own comment says "would just re-conflict" — and buys a synthesis model call on the way.
+    ///
+    /// <para>Null for every other staging decision, so fresh spawn/retry work reopens merge exactly as before, and a
+    /// VERIFIED resolution keeps the required merge this mask has always preserved.</para>
+    /// </summary>
+    private static string? UnacceptedReconciliationReason(SupervisorPriorDecision staging) =>
+        staging.DecisionKind == SupervisorDecisionKinds.Resolve && SupervisorOutcome.ReadResolutionVerdict(staging.OutcomeJson) != SupervisorResolutionVerdict.Verified
+            ? UnacceptedReconciliation
+            : null;
 
     /// <summary>The non-null reason an amend proposal cannot advance the run this turn, else null. Reads <see cref="SupervisorAmendPrecondition"/> — the SAME gate the executor applies before any card is posted — so the mask and the refusal can never disagree about which units are amendable. What to do instead is NOT steered here: an outstanding co-sign already has its own banner, and a work-classed failure already has its own verdict line; a third steer authored here could only disagree with one of them.</summary>
     internal static string? AmendUnavailableReason(SupervisorTurnContext context) =>

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
@@ -184,4 +185,38 @@ public class SupervisorDecisionSchemaTests
         baseSubtaskId.GetProperty("type").GetString().ShouldBe("string");
         baseSubtaskId.GetProperty("description").GetString().ShouldContain("dependsOn", Case.Insensitive, "the description must say it overrides the plan's dependsOn");
     }
+
+    // ── The per-kind payload branch: declared for the two kinds whose miss costs a stop, and no others ───
+
+    [Theory]
+    [InlineData("""{"kind":"stop"}""")]
+    [InlineData("""{"kind":"stop","rationale":{"why":"done","evidence":"tests green"}}""")]
+    [InlineData("""{"kind":"amend_acceptance"}""")]
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent"}}""")]
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":false}}""")]
+    public void A_declared_kind_without_its_payload_is_a_schema_violation(string reply) =>
+        JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldNotBeEmpty(
+            "the validator the provider clients run over every reply must refuse this, so a payload-less decision earns a bounded transport re-ask that names the missing object");
+
+    [Theory]
+    [InlineData("""{"kind":"stop","stop":{"outcome":"completed","summary":"shipped"}}""")]
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":true}}""")]
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","acceptance":{"command":["dotnet","test"]}}}""")]
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":true,"acceptance":{"command":["dotnet","test"]}}}""")]
+    public void Every_executable_shape_of_those_two_kinds_stays_expressible(string reply) =>
+        JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldBeEmpty(
+            "a branch that refuses a shape the executor accepts would fail a decision the model got right");
+
+    [Theory]
+    [InlineData("""{"kind":"plan"}""")]
+    [InlineData("""{"kind":"spawn"}""")]
+    [InlineData("""{"kind":"retry"}""")]
+    [InlineData("""{"kind":"ask_human"}""")]
+    [InlineData("""{"kind":"merge"}""")]
+    [InlineData("""{"kind":"resolve"}""")]
+    public void The_verbs_that_carry_the_work_stay_schema_valid_without_their_payload(string reply) =>
+        JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldBeEmpty(
+            "a schema violation is FATAL after one transport re-ask and fails the decider closed to NonConformantStop — ENDING the run. "
+          + "For these six that would trade today's fail-OPEN ladder (two bounded repairs, then the executor's refusal and one wasted turn) for a dead run, "
+          + "so SupervisorDecisionCoherence keeps them. Widening the root oneOf to cover them is that trade, not a tightening.");
 }

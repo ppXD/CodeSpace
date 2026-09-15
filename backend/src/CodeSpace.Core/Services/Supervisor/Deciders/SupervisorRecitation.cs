@@ -80,7 +80,7 @@ public static class SupervisorRecitation
         }
 
         builder.AppendLine().Append(unfinished.Count == 0
-            ? "Every plan item is finished — merge the results and drive to a verified stop."
+            ? FinishedMoveFor(priorDecisions)
             : $"Unfinished: {string.Join(", ", unfinished)}.");
 
         // A re-plan issued after a wave finished leaves those results OUTSIDE this plan's generation, so nothing in
@@ -103,6 +103,26 @@ public static class SupervisorRecitation
 
         return builder.ToString();
     }
+
+    /// <summary>The finished-plan line's ordinary move — fold the units and drive to a verified stop. Named so the withheld-merge arm below is a substitution rather than a second sentence, mirroring <c>LlmSupervisorDecider.ClosingLandsWithAMerge</c>.</summary>
+    public const string FinishedLandsWithAMerge = "Every plan item is finished — merge the results and drive to a verified stop.";
+
+    /// <summary>The same line once this turn's roster WITHHOLDS <c>merge</c>. It states the fact and names where the reason and the move live; it authors no third steer, for the reason <see cref="SupervisorActionMask"/> states — the resolution verdict above and the closing move below already own that, and a steer written here could only disagree with one of them.</summary>
+    public const string FinishedCannotMerge = "Every plan item is finished, but 'merge' is UNAVAILABLE this turn — the AVAILABLE ACTIONS block names why, and the closing line below names the move that is left. Do not choose it, and do not report the goal met over work that was never landed.";
+
+    /// <summary>
+    /// Which finished-plan line this tape earns. The line was UNCONDITIONAL, so on a tape whose merge the same
+    /// prompt withholds it stood as a standing instruction to "merge the results" inside the one block whose header
+    /// tells the model to recite it before deciding — the last merge steer in this prompt that the action mask had
+    /// not reached. That is what golden <c>resolve-cap-spent</c> followed on BOTH wires (run 34940616446: Anthropic
+    /// 28/29 and OpenAI 28/29, the same miss, after the same answer on 2026-09-11).
+    ///
+    /// <para>Read off <see cref="SupervisorActionMask.MergeUnavailableReason(IReadOnlyList{SupervisorPriorDecision})"/>
+    /// — the SAME reader that decides whether the verb is on the menu — so this line and the roster cannot disagree,
+    /// and every tape that may genuinely merge keeps a byte-identical block.</para>
+    /// </summary>
+    private static string FinishedMoveFor(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        SupervisorActionMask.MergeUnavailableReason(priorDecisions) is null ? FinishedLandsWithAMerge : FinishedCannotMerge;
 
     /// <summary>Whether the authoring lint may defer its verb to the exit the results block named: an exit fired AND the item's latest verdict is one of the shapes that block substitutes the ramp into (<see cref="SupervisorReplanStanding.VerdictNamesTheExit"/>). A unit with no folded verdict at all — pending, or staged and unfolded — has no verdict line above to defer to.</summary>
     private static bool DefersToItsExit(SupervisorReplanExit replanExit, SupervisorAgentResult? latest) =>
