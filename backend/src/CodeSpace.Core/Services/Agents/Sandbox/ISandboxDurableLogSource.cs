@@ -28,6 +28,17 @@ public sealed record SandboxDurableLogReadRequest
 public abstract record SandboxDurableLogReadResult
 {
     private SandboxDurableLogReadResult() { }
+    /// <summary>
+    /// One durable-source read. <paramref name="Bytes"/> transfers ownership to the caller: once this returns, the
+    /// producer must never mutate that memory or hand out the same backing storage again on a later call —
+    /// allocate a fresh buffer per read (or otherwise guarantee the bytes are never touched again).
+    ///
+    /// <para>Ownership transfers because a caller may retain <paramref name="Bytes"/> well past this call's
+    /// return without copying it — the capture bridge keeps it, unmodified, in a local backlog until the
+    /// corresponding append durably lands, which can span several more reads while a destination stalls. A
+    /// producer that reused its buffer across calls would silently corrupt an earlier, still-queued chunk with
+    /// later content.</para>
+    /// </summary>
     public sealed record Available(ReadOnlyMemory<byte> Bytes) : SandboxDurableLogReadResult;
     /// <summary>The producer is gone and the durable byte source remained quiescent across the runner's seal check. This is the only result that authorizes a final capture receipt. <paramref name="Truncated"/> is true when the source hit its own size cap and therefore proves only the CAPPED HEAD of what the producer wrote — the receipt is complete, the content is not.</summary>
     public sealed record EndOfSource(bool Truncated = false) : SandboxDurableLogReadResult;

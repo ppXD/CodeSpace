@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
@@ -220,6 +221,43 @@ public sealed class AgentRunLogCaptureBackpressureTests
     }
 
     [Fact]
+    public async Task A_chunk_held_behind_a_stall_lands_byte_identical_despite_a_later_read_of_a_distinct_buffer()
+    {
+        // With nothing to redact (SecretRedactor.None) the bridge does not copy a chunk — it retains the source's
+        // own memory in its backlog until the append durably lands. This pins that retention from the consumer
+        // side: the destination refuses the FIRST chunk's append, the pump reads a SECOND chunk from a genuinely
+        // DISTINCT array while the first is still queued behind the stall, and only then does the destination
+        // recover. If the bridge (or the redactor pass-through) ever aliased across reads instead of truly holding
+        // each producer buffer untouched, this is the shape that would show it as corrupted content — the same
+        // shape a producer that reused its own buffer across reads (AgentRunLogSyntheticCapture's
+        // SyntheticLogSource, before it was fixed to allocate fresh per read) got wrong.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1, RemoteUnavailable = true };
+        var stalls = new FakeStallWriter();
+        var first = Encoding.UTF8.GetBytes("first-chunk-from-its-own-array");
+        var second = Encoding.UTF8.GetBytes("second-chunk-from-a-different-array");
+        var source = new TwoChunkLogSource(first, second);
+        var bridge = Bridge(logs, clock, stalls);
+        var expected = Result();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
+        var observing = capture.ObserveAsync(async (_, _) => { await release.Task; return expected; }, CancellationToken.None);
+        await WaitAsync(() => source.ReadsServed >= 2, "the second read never happened while the first chunk was still queued behind the stall");
+        logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBeEmpty("both chunks must still be unlanded here, or the test proves nothing about retention");
+
+        logs.RemoteUnavailable = false;
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await WaitAsync(() => logs.Bytes(AgentRunLogKinds.StandardOutput).Length == first.Length + second.Length, "the backlog never drained after the destination recovered");
+        release.TrySetResult();
+        var observed = await observing;
+        await bridge.CompleteRunAsync(TeamId, RunId, 1, CancellationToken.None);
+
+        observed.ShouldBeSameAs(expected);
+        logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBe(first.Concat(second).ToArray(), "a chunk retained behind a stall must land exactly as its own distinct buffer held it, never mixed with a later read");
+    }
+
+    [Fact]
     public void The_committed_backpressure_ceilings_are_pinned_and_the_backoff_stays_inside_them()
     {
         // Rule 8: these are the values an operator reasons about during an incident. A rename or a quiet retune has to
@@ -245,7 +283,7 @@ public sealed class AgentRunLogCaptureBackpressureTests
             new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(200), finalizationBudget ?? TimeSpan.FromSeconds(5)) { Backpressure = backpressure ?? CaptureBackpressureOptions.Default },
             stalls, gaps ?? new FakeCompletenessWriter(), clock);
 
-    private static AgentRunLogCaptureOpenRequest Request(FakeLogSource source, SecretRedactor? redactor = null) => new()
+    private static AgentRunLogCaptureOpenRequest Request(ISandboxDurableLogSource source, SecretRedactor? redactor = null) => new()
     {
         TeamId = TeamId, AgentRunId = RunId, ActorId = ActorId, WorkerFenceEpoch = 1,
         Handle = new SandboxHandle { Kind = "fake", ProcessId = 1, SpoolDirectory = "/opaque", Deadline = DateTimeOffset.MaxValue, AgentRunLogCaptureSessionId = Guid.NewGuid() },
@@ -345,6 +383,38 @@ public sealed class AgentRunLogCaptureBackpressureTests
         }
 
         public void Set(string key, byte[] bytes) => _sources[key] = bytes;
+    }
+
+    /// <summary>
+    /// Serves stdout as two fixed chunks from two DISTINCT backing arrays — never the same buffer sliced twice —
+    /// so a bridge or redactor bug that aliased across reads would show up as corrupted content instead of passing
+    /// by coincidence. Stderr is always empty; only stdout's retention behaviour is under test.
+    /// </summary>
+    private sealed class TwoChunkLogSource(byte[] first, byte[] second) : ISandboxDurableLogSource
+    {
+        private const string StdoutSourceKey = "stdout";
+
+        public int ReadsServed { get; private set; }
+
+        public IReadOnlyList<SandboxDurableLogDescriptor> DescribeLogs(SandboxHandle handle) =>
+        [
+            new(StdoutSourceKey, AgentRunLogKinds.StandardOutput, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "two-chunk-spool/v1"),
+            new("stderr", AgentRunLogKinds.StandardError, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "two-chunk-spool/v1"),
+        ];
+
+        public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
+        {
+            if (request.SourceKey != StdoutSourceKey)
+                return Task.FromResult<SandboxDurableLogReadResult>(request.FinalDrain ? new SandboxDurableLogReadResult.EndOfSource(false) : new SandboxDurableLogReadResult.NoData());
+
+            ReadsServed++;
+            return Task.FromResult<SandboxDurableLogReadResult>(ReadsServed switch
+            {
+                1 => new SandboxDurableLogReadResult.Available(first),
+                2 => new SandboxDurableLogReadResult.Available(second),
+                _ => request.FinalDrain ? new SandboxDurableLogReadResult.EndOfSource(false) : new SandboxDurableLogReadResult.NoData(),
+            });
+        }
     }
 
     /// <summary>A head the bridge can actually stall against: <see cref="RemoteUnavailable"/> is the provider being out, and every contiguity guard is real so a dropped or reordered segment is refused rather than absorbed.</summary>
