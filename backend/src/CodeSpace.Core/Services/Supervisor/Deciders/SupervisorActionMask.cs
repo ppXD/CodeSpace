@@ -72,24 +72,27 @@ public static class SupervisorActionMask
     };
 
     /// <summary>
-    /// The non-null reason another merge cannot advance the durable frontier, else null. A reverse walk asks two
-    /// narrow questions: has a REAL agent run been staged since the latest clean integration, and is the newest such
-    /// staging one a merge could actually ACCEPT? Plan/ask/stop do not manufacture work. Spawn/retry/resolve reopen
-    /// merge only when their recorded outcome says they actually staged at least one run, which keeps rejected/no-op
-    /// staging from resurrecting an already-folded frontier; and a resolve reopens it only when its resolution is
-    /// VERIFIED (<see cref="UnacceptedReconciliationReason"/>), which is the one resolution the executor accepts.
+    /// The non-null reason another merge cannot advance the durable frontier, else null — two questions, asked in
+    /// the order the executor would hit them. FIRST, would the merge land on a reconciliation the executor cannot
+    /// accept (<see cref="UnacceptedReconciliationReason"/>, read through the executor's own newest-staging
+    /// selector)? THEN the reverse walk: has a REAL agent run been staged since the latest clean integration?
+    /// Plan/ask/stop do not manufacture work; spawn/retry/resolve reopen merge only when their recorded outcome says
+    /// they actually staged at least one run, which keeps rejected/no-op staging from resurrecting an already-folded
+    /// frontier.
     /// </summary>
     internal static string? MergeUnavailableReason(SupervisorTurnContext context) => MergeUnavailableReason(context.PriorDecisions);
 
     /// <summary>The same answer over the RAW tape facts, for the callers that hold them without a <see cref="SupervisorTurnContext"/> — the plan recitation's finished-plan line reads it while it is still pure over the tape. Both entry points funnel here, exactly like <see cref="ResolveUnavailableReason(IReadOnlyList{SupervisorPriorDecision}, int?)"/>, so no caller can read a second opinion about whether this turn may merge.</summary>
     internal static string? MergeUnavailableReason(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
+        if (UnacceptedReconciliationReason(priorDecisions) is { } unaccepted) return unaccepted;
+
         foreach (var decision in priorDecisions.OrderByDescending(d => d.Sequence))
         {
             if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
                 && decision.Status == SupervisorDecisionStatus.Succeeded
                 && SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0)
-                return UnacceptedReconciliationReason(decision);
+                return null;
 
             if (SupervisorOutcome.MergeIntegratedABranch(decision))
                 return "the latest integration is already clean and no later agent or resolver produced new work — another merge would fold the same frontier and cannot advance the run; stop if the goal is met";
@@ -103,19 +106,35 @@ public static class SupervisorActionMask
 
     /// <summary>
     /// Why the newest agent-staging decision does NOT re-open <c>merge</c>: it is a <c>resolve</c> whose resolution
-    /// the tape does not record as <see cref="SupervisorResolutionVerdict.Verified"/>. Reads the SAME verdict the
-    /// executor's own acceptance rule reads (<c>SupervisorOutcome.ResolvedBranch</c> → <c>AcceptedResolutionBranch</c>),
-    /// so the menu and the merge it would run can never disagree: without an ACCEPTED resolution that merge does not
-    /// surface the resolver's branch, it re-runs the integrator over the original conflicting branches — the thing
-    /// the executor's own comment says "would just re-conflict" — and buys a synthesis model call on the way.
+    /// the tape does not record as <see cref="SupervisorResolutionVerdict.Verified"/>. Without an ACCEPTED resolution
+    /// the merge does not surface the resolver's branch — it re-runs the integrator over the original conflicting
+    /// branches, the thing the executor's own comment says "would just re-conflict" — and buys a synthesis model
+    /// call on the way.
+    ///
+    /// <para>The "newest staging" it asks about is the EXECUTOR's own selection, not a second one: the same plan
+    /// window and the same <c>LastOrDefault(StagesAgents)</c> that <c>RealSupervisorActionExecutor.AcceptedResolutionBranch</c>
+    /// uses, with no status or staged-count filter of its own. Asking a differently-shaped question would be how the
+    /// mask and the merge it describes drift apart, and it is what makes an in-flight or FAILED resolve withhold the
+    /// verb here too — the walk below would have skipped both and offered a merge mid-reconciliation.</para>
+    ///
+    /// <para>Keyed on the VERDICT rather than on <c>SupervisorOutcome.ResolvedBranch</c> being non-null, deliberately:
+    /// that reader is single-repo only and returns null for every MULTI-repo verified resolution, so keying on it
+    /// would withhold the merge that lands multi-repo reconciled work. The residual gap is the mirror image — a
+    /// verified single-repo resolution whose resolver pushed NO branch (a publish guard blocked it) still offers a
+    /// merge the executor will re-integrate. That is pre-existing, unchanged here, and fixable only by exposing the
+    /// executor's acceptance predicate itself.</para>
     ///
     /// <para>Null for every other staging decision, so fresh spawn/retry work reopens merge exactly as before, and a
     /// VERIFIED resolution keeps the required merge this mask has always preserved.</para>
     /// </summary>
-    private static string? UnacceptedReconciliationReason(SupervisorPriorDecision staging) =>
-        staging.DecisionKind == SupervisorDecisionKinds.Resolve && SupervisorOutcome.ReadResolutionVerdict(staging.OutcomeJson) != SupervisorResolutionVerdict.Verified
+    private static string? UnacceptedReconciliationReason(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        var staging = SupervisorPlanWindow.Read(priorDecisions).Decisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+
+        return staging is { DecisionKind: SupervisorDecisionKinds.Resolve } && SupervisorOutcome.ReadResolutionVerdict(staging.OutcomeJson) != SupervisorResolutionVerdict.Verified
             ? UnacceptedReconciliation
             : null;
+    }
 
     /// <summary>The non-null reason an amend proposal cannot advance the run this turn, else null. Reads <see cref="SupervisorAmendPrecondition"/> — the SAME gate the executor applies before any card is posted — so the mask and the refusal can never disagree about which units are amendable. What to do instead is NOT steered here: an outstanding co-sign already has its own banner, and a work-classed failure already has its own verdict line; a third steer authored here could only disagree with one of them.</summary>
     internal static string? AmendUnavailableReason(SupervisorTurnContext context) =>

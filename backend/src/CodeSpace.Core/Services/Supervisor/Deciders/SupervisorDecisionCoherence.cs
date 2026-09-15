@@ -3,14 +3,17 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
 /// <summary>
-/// The invariant <see cref="SupervisorDecisionSchema"/> does not express for the six verbs that carry the work: the
-/// chosen <c>kind</c>'s payload sub-object must actually be PRESENT. A per-kind conditional <c>required</c> written
-/// as <c>if/then</c> would not enforce it anyway — the forced-tool wire accepts it and does not apply it
-/// (live-probed 2026-08-07: the gateway 200s on <c>allOf</c>+<c>if/then</c> and still emits payload-less and
-/// top-level-flattened spawns) — and the <c>oneOf</c> form that IS enforced (by the validator the provider clients
-/// run over every reply) is fatal after one bounded transport re-ask, which would end the run rather than cost a
-/// turn. So the schema declares it for <c>stop</c> and <c>amend_acceptance</c>, whose worst case is a clean stop,
-/// and this fail-OPEN check keeps the other six. Checked on the RAW bound decision BEFORE projection, because
+/// The ONE invariant <see cref="SupervisorDecisionSchema"/> must not express: the chosen <c>kind</c>'s payload
+/// sub-object must actually be PRESENT. The schema's top level requires only <c>kind</c>, and both ways of tightening
+/// it are refuted rather than merely unbuilt. A per-kind conditional <c>required</c> needs <c>if/then</c>, which the
+/// forced-tool wire accepts but does not enforce — live-probed 2026-08-07: the gateway 200s on <c>allOf</c>+<c>if/then</c>
+/// and still emits payload-less and top-level-flattened spawns. A <c>oneOf</c> discriminated by <c>kind</c> IS enforced,
+/// by the validator the provider clients run over every reply — and that is the worse option, because its root-path
+/// violation is FATAL after one transport re-ask and lands BEFORE <see cref="SupervisorDecisionPayloadLift"/> can
+/// repair the same shape for free (probed 2026-09-15 against the live fixture from run 33755336097, a CORRECT
+/// payload-less <c>stop</c> on a cap-spent conflicted tape: the branch turns it into a billed re-ask and then a
+/// <c>no-decision</c> terminal that discards the model's own outcome and words). So the check lives HERE, downstream
+/// of the lift and fail-OPEN. Checked on the RAW bound decision BEFORE projection, because
 /// <see cref="SupervisorDecisionProjector"/> substitutes an empty payload for a missing sub-object — past that
 /// point the executor rejects a payload the model never wrote, the rendered correction quotes that substitute,
 /// and the model re-authors the same defective shape (live-observed: 140 rejected spawns in one eval run).

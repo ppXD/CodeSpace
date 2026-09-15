@@ -186,37 +186,38 @@ public class SupervisorDecisionSchemaTests
         baseSubtaskId.GetProperty("description").GetString().ShouldContain("dependsOn", Case.Insensitive, "the description must say it overrides the plan's dependsOn");
     }
 
-    // ── The per-kind payload branch: declared for the two kinds whose miss costs a stop, and no others ───
+    // ── Why the root declares no per-kind payload requirement, pinned so a "tightening" cannot land silently ───
 
     [Theory]
-    [InlineData("""{"kind":"stop"}""")]
-    [InlineData("""{"kind":"stop","rationale":{"why":"done","evidence":"tests green"}}""")]
-    [InlineData("""{"kind":"amend_acceptance"}""")]
-    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent"}}""")]
-    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":false}}""")]
-    public void A_declared_kind_without_its_payload_is_a_schema_violation(string reply) =>
-        JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldNotBeEmpty(
-            "the validator the provider clients run over every reply must refuse this, so a payload-less decision earns a bounded transport re-ask that names the missing object");
-
-    [Theory]
-    [InlineData("""{"kind":"stop","stop":{"outcome":"completed","summary":"shipped"}}""")]
-    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":true}}""")]
-    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","acceptance":{"command":["dotnet","test"]}}}""")]
-    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent","waive":true,"acceptance":{"command":["dotnet","test"]}}}""")]
-    public void Every_executable_shape_of_those_two_kinds_stays_expressible(string reply) =>
+    // The LIVE fixture from real-model run 33755336097 (2026-09-03), verbatim — a CORRECT stop on a cap-spent
+    // conflicted tape, carrying only kind + rationale. SupervisorDecisionPayloadLift.LiftStopNarration exists to
+    // repair exactly this, for free, keeping the model's own words.
+    [InlineData("""{"kind":"stop","rationale":{"why":"the resolve cap is spent, so the only honest path is to stop","evidence":"Resolve outcome: 'resolution NOT verified'."}}""")]
+    // The generic lift's shape — a root-flattened payload (68 of them in ONE eval run, 2026-08-19).
+    [InlineData("""{"kind":"spawn","subtaskIds":["s1"]}""")]
+    [InlineData("""{"kind":"retry","subtaskId":"s2"}""")]
+    [InlineData("""{"kind":"amend_acceptance","subtaskId":"s1","reason":"npm is absent","waive":true}""")]
+    // The half-flattened amendment the lift completes by moving `waive` into the object the model did start.
+    [InlineData("""{"kind":"amend_acceptance","amendAcceptance":{"subtaskId":"s1","reason":"npm is absent"},"waive":true}""")]
+    public void A_shape_the_deterministic_lift_repairs_must_stay_schema_valid(string reply) =>
         JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldBeEmpty(
-            "a branch that refuses a shape the executor accepts would fail a decision the model got right");
+            "this validator runs inside the provider client, STRICTLY BEFORE SupervisorDecisionPayloadLift. A root-path violation is fatal after one "
+          + "transport re-ask and fails the decider closed to NonConformantStop — so a per-kind `oneOf` requiring the payload would convert every "
+          + "zero-round-trip deterministic repair into a billed re-ask, and on a second miss into a 'no-decision' terminal that discards the model's "
+          + "own outcome and words. Payload presence is SupervisorDecisionCoherence's fail-OPEN job, downstream of the lift; it must not move here.");
 
-    [Theory]
-    [InlineData("""{"kind":"plan"}""")]
-    [InlineData("""{"kind":"spawn"}""")]
-    [InlineData("""{"kind":"retry"}""")]
-    [InlineData("""{"kind":"ask_human"}""")]
-    [InlineData("""{"kind":"merge"}""")]
-    [InlineData("""{"kind":"resolve"}""")]
-    public void The_verbs_that_carry_the_work_stay_schema_valid_without_their_payload(string reply) =>
-        JsonSchemaValidator.Validate(JsonDocument.Parse(reply).RootElement, Schema).ShouldBeEmpty(
-            "a schema violation is FATAL after one transport re-ask and fails the decider closed to NonConformantStop — ENDING the run. "
-          + "For these six that would trade today's fail-OPEN ladder (two bounded repairs, then the executor's refusal and one wasted turn) for a dead run, "
-          + "so SupervisorDecisionCoherence keeps them. Widening the root oneOf to cover them is that trade, not a tightening.");
+    [Fact]
+    public void The_amendment_payload_tells_the_model_the_either_or_its_required_list_cannot()
+    {
+        // The observed miss (lane run 34940616446): "the 'amendAcceptance' object proposes neither a replacement
+        // 'acceptance' nor 'waive: true'". `required` can only demand subtaskId + reason, so the model satisfied the
+        // schema and still wrote something unexecutable — and the bounded repair prompt quotes THIS fragment
+        // (SupervisorDecisionSchema.PayloadSchemaFor), so a fragment that stays silent about the rule shows the model
+        // a shape it already matched. Description-only on purpose: any validating form is the trap pinned above.
+        var amend = Schema.GetProperty("properties").GetProperty("amendAcceptance");
+
+        amend.GetProperty("description").GetString().ShouldContain("EITHER a replacement 'acceptance' object OR 'waive': true", Case.Sensitive);
+        SupervisorDecisionSchema.PayloadSchemaFor("amendAcceptance").ShouldContain("EITHER a replacement 'acceptance' object OR 'waive': true", Case.Sensitive,
+            "the repair prompt quotes this fragment — the rule has to be inside it, not only in prose elsewhere");
+    }
 }

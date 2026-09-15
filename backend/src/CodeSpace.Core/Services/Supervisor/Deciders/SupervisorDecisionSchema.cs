@@ -21,18 +21,21 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// decision the SERVER turns into a side effect (the ledger key, the agent-run waits, the node id are all
 /// server-derived). A unit test pins this "no graph-ref" guard.</para>
 ///
-/// <para><b>The root <c>oneOf</c> covers exactly TWO kinds, and the omission is the design.</b> A per-kind
-/// conditional <c>required</c> written as <c>allOf</c>+<c>if/then</c> buys nothing here — the forced-tool wire
-/// 200s on it and still emits payload-less replies (live-probed 2026-08-07), and
-/// <c>JsonSchemaValidator</c> does not read either keyword, so no server check sees it. A <c>oneOf</c> discriminated
-/// by <c>kind</c> IS read: by the model as a self-describing branch, and by the validator the provider clients run
-/// over every reply, which turns a payload-less decision into a schema violation that earns one bounded transport
-/// re-ask naming the exact missing property. That enforcement is not free — a violation this class declares is
-/// FATAL, so a reply the re-ask does not fix throws <c>Malformed</c> and the decider fails closed to
-/// <c>NonConformantStop</c>, ENDING the run. For <c>stop</c> that is benign (the terminus the model asked for) and
-/// for <c>amend_acceptance</c> it is a rare, unexecutable proposal; for <c>plan</c> / <c>spawn</c> / <c>retry</c> it
-/// would trade today's fail-OPEN ladder (two bounded repairs in <c>LlmSupervisorDecider</c>, then the executor's
-/// refusal and a wasted turn) for a dead run on the verbs that carry the work. So those six stay declared only by
+/// <para><b>The root requires <c>kind</c> and nothing else, and that is deliberate — a per-kind payload constraint
+/// here is REFUTED, not merely unimplemented.</b> Written as <c>allOf</c>+<c>if/then</c> it buys nothing: the
+/// forced-tool wire 200s on it and still emits payload-less replies (live-probed 2026-08-07), and
+/// <c>JsonSchemaValidator</c> reads neither keyword, so no server check sees it either. Written as a <c>oneOf</c>
+/// discriminated by <c>kind</c> it IS read — and that is worse. The validator the provider clients run over every
+/// reply reports a root <c>oneOf</c> miss at the ROOT path, where <c>StructuredResponseValidation</c> classes it
+/// FATAL and no advisory may claim it, so the reply gets ONE transport re-ask and then throws <c>Malformed</c> —
+/// which <c>LlmSupervisorDecider</c> fails closed into <c>NonConformantStop</c>, ending the run with a
+/// <c>no-decision</c> terminal. That verdict lands strictly BEFORE
+/// <see cref="SupervisorDecisionPayloadLift"/>, whose whole job is to repair exactly these shapes for free: the
+/// generic lift re-nests a root-flattened payload (68 of them in ONE eval run, 2026-08-19), and
+/// <c>LiftStopNarration</c> rescues the live <c>{"kind":"stop","rationale":{…}}</c> reply recorded in run
+/// 33755336097 — a CORRECT answer on a cap-spent conflicted tape — keeping the model's own outcome and words. A
+/// root <c>oneOf</c> converts every one of those zero-round-trip repairs into a billed re-ask and, on a second
+/// miss, a downgraded terminal. So payload presence is enforced downstream of the lift by
 /// <c>SupervisorDecisionCoherence</c>, whose miss costs a turn and never the run.</para>
 /// </summary>
 public static class SupervisorDecisionSchema
@@ -250,39 +253,10 @@ public static class SupervisorDecisionSchema
                 "reason": { "type": "string", "description": "REQUIRED: the concrete evidence that the CURRENT check is wrong (e.g. its failing detail shows it invokes test tooling this repository does not have) — quoted onto the human approval card." }
               },
               "required": ["subtaskId", "reason"],
-              "anyOf": [
-                {
-                  "title": "amendment proposing a replacement check",
-                  "properties": { "acceptance": { "type": "object" } },
-                  "required": ["subtaskId", "reason", "acceptance"]
-                },
-                {
-                  "title": "amendment waiving verification",
-                  "properties": { "waive": { "type": "boolean", "enum": [true] } },
-                  "required": ["subtaskId", "reason", "waive"]
-                }
-              ],
               "description": "Required when kind == 'amend_acceptance'. Carry EITHER a replacement 'acceptance' object OR 'waive': true — a proposal with neither is not executable and is refused. Propose to REWRITE or WAIVE one subtask's acceptance check when evidence shows the CHECK ITSELF cannot pass regardless of the work (wrong tooling, impossible assertion, broken rubric). It never executes directly: the server parks it on a human approval card, and only the approved proposal changes the oracle. Use it INSTEAD of retrying a unit whose grade detail proves the check is broken."
             }
           },
-          "required": ["kind"],
-          "oneOf": [
-            {
-              "title": "stop decision",
-              "properties": { "kind": { "type": "string", "enum": ["stop"] } },
-              "required": ["kind", "stop"]
-            },
-            {
-              "title": "amend_acceptance decision",
-              "properties": { "kind": { "type": "string", "enum": ["amend_acceptance"] } },
-              "required": ["kind", "amendAcceptance"]
-            },
-            {
-              "title": "every other decision",
-              "properties": { "kind": { "type": "string", "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve"] } },
-              "required": ["kind"]
-            }
-          ]
+          "required": ["kind"]
         }
         """).RootElement.Clone();
 

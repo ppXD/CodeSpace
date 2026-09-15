@@ -150,6 +150,33 @@ public class SupervisorActionMaskTests
         SupervisorActionRoster.Withheld(context).ShouldContain(SupervisorDecisionKinds.Merge);
     }
 
+    [Theory]
+    [InlineData(SupervisorDecisionStatus.Running)]
+    [InlineData(SupervisorDecisionStatus.Failed)]
+    public void A_resolve_that_is_still_running_or_failed_outright_withholds_merge_too(SupervisorDecisionStatus status)
+    {
+        // The arm asks the EXECUTOR's question — the last staging decision in the plan window, with no status or
+        // staged-count filter of its own (RealSupervisorActionExecutor.AcceptedResolutionBranch). A reverse walk
+        // filtered on Succeeded would skip both of these, land on the older spawn, and offer a merge mid-reconciliation.
+        var resolve = ResolveDecision(2, verified: false) with { Status = status };
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, ConflictedOutcome()), resolve);
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBe(SupervisorActionMask.UnacceptedReconciliation);
+    }
+
+    [Fact]
+    public void A_later_staging_decision_displaces_the_resolution_question_exactly_as_the_executor_does()
+    {
+        // Mask and executor now select the same "newest staging" decision, so they agree that this tape's merge is
+        // NOT about a reconciliation. What the executor then does with it — re-running the integrator instead of
+        // surfacing the earlier VERIFIED resolution a failed spawn displaced — is an executor-side gap that predates
+        // this arm (RealSupervisorActionExecutor.Integrate.cs, AcceptedResolutionBranch); the mask's job is to stop
+        // describing a different merge than the one that would run.
+        var context = Context(Decision(1, SupervisorDecisionKinds.Merge, ConflictedOutcome()), ResolveDecision(2, verified: true), Decision(3, SupervisorDecisionKinds.Spawn));
+
+        SupervisorActionMask.MergeUnavailableReason(context).ShouldBeNull();
+    }
+
     [Fact]
     public void A_rejected_staging_decision_after_a_clean_merge_does_not_make_the_old_work_mergeable_again()
     {

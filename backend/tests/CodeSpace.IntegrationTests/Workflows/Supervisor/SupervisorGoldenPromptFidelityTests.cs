@@ -530,6 +530,22 @@ public class SupervisorGoldenPromptFidelityTests
             "a tape loses merge only when its durable frontier is already folded or its newest reconciliation was never accepted; every other tape must remain byte-identical");
     }
 
+    [Fact]
+    public void The_verified_half_of_the_resolution_pair_keeps_every_byte_of_its_merge()
+    {
+        // The receipt above cannot speak for this tape and neither can the digest anchors: AsRenderedBeforeTheMergeMask
+        // early-returns verbatim wherever the mask is silent (so "absent from `moved`" is x == x), and every wind-back
+        // routed through AsRenderedBeforeTheTurnRoster replaces the whole roster with a merge-stripped mask block, so a
+        // merge-mask change is invisible to all four digests. `verified-resolution` is the A/B partner that differs from
+        // `resolve-cap-spent` ONLY in the resolution verdict — the thing this arm keys on — so its bytes are asserted
+        // directly here or nowhere.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "verified-resolution").Context);
+
+        OfferedInPrompt(prompt).ShouldContain(SupervisorDecisionKinds.Merge, "a VERIFIED resolution is the state whose merge surfaces the resolver's tested branch — withholding it there would break the move the scenario grades");
+        WithheldInPrompt(prompt).ShouldNotContain(SupervisorDecisionKinds.Merge);
+        prompt.ShouldContain(SupervisorRecitation.FinishedLandsWithAMerge, Case.Sensitive, "its finished-plan line must still be the unconditional one");
+    }
+
     /// <summary>
     /// The scenarios whose tape leaves a Required upstream stage unevidenced, and therefore the ONLY scenarios whose
     /// prompt moved when the corpus started rendering through the full tape mirror. Pinned as data so the re-pin
@@ -636,11 +652,15 @@ public class SupervisorGoldenPromptFidelityTests
     /// <para>The moved bytes are attributed per tape, not claimed: the roster's merge line and the finished-plan
     /// line move on exactly <see cref="UnacceptedReconciliationScenarios"/>, the closing move on
     /// <c>unverified-resolution</c> alone (<c>resolve-cap-spent</c> already carried
-    /// <see cref="LlmSupervisorDecider.ClosingCannotLand"/>), and nothing else moves —
-    /// <see cref="Only_the_tapes_the_merge_mask_names_lose_the_remerge_invitation"/> reconstructs every scenario's
-    /// prior bytes and pins both arms separately. No scenario's <c>AcceptedKinds</c> changed, and none acquired a
-    /// menu entry or a steer for a verb its own tape cannot reach. <c>verified-resolution</c> is byte-identical,
-    /// which is the whole point of keying the arm on the resolution VERDICT rather than on the cap.</para>
+    /// <see cref="LlmSupervisorDecider.ClosingCannotLand"/>), and nothing else moves. The corpus-wide receipt is the
+    /// three superseded digests below, each recomputed through <see cref="AsRenderedBeforeTheTurnRoster"/>, which
+    /// this commit extended with one wind-back per moved block — an unrelated drift fails there, where the named
+    /// blocks are still separable from it. <see cref="Only_the_tapes_the_merge_mask_names_lose_the_remerge_invitation"/>
+    /// then attributes each withheld tape to its own arm, and — because those digests replace the whole roster with a
+    /// merge-stripped mask block and are therefore blind to this arm —
+    /// <see cref="The_verified_half_of_the_resolution_pair_keeps_every_byte_of_its_merge"/> asserts the one tape that
+    /// must not move directly. No scenario's <c>AcceptedKinds</c> changed, and none acquired a menu entry or a steer
+    /// for a verb its own tape cannot reach.</para>
     ///
     /// PREVIOUS RE-PIN: a clean integration with no later staged agent work now withholds <c>merge</c> and closes by
     /// telling the supervisor to stop when the integrated result meets the goal. Exactly
@@ -1188,7 +1208,7 @@ public class SupervisorGoldenPromptFidelityTests
         return kept.Count > 1 ? string.Join('\n', kept) : null;
     }
 
-    /// <summary>The prompt as it read before <c>merge</c> could be withheld at all: the verb back on the menu in its vocabulary position, and the three blocks that defer to the mask — the finished-plan line, the closing move — back to their unconditional wording. Derived from today's render rather than restated, so a reworded reason stays a one-file change.</summary>
+    /// <summary>The prompt as it read before <c>merge</c> could be withheld at all: the verb back on the menu in its vocabulary position, and the two blocks that defer to the mask — the finished-plan line and the closing move — back to their unconditional wording. Derived from today's render rather than restated, so a reworded reason stays a one-file change.</summary>
     private static string AsRenderedBeforeTheMergeMask(string prompt, SupervisorTurnContext context)
     {
         if (SupervisorActionMask.MergeUnavailableReason(context) is null) return prompt;
