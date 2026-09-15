@@ -37,6 +37,15 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// root <c>oneOf</c> converts every one of those zero-round-trip repairs into a billed re-ask and, on a second
 /// miss, a downgraded terminal. So payload presence is enforced downstream of the lift by
 /// <c>SupervisorDecisionCoherence</c>, whose miss costs a turn and never the run.</para>
+///
+/// <para>MEASURED, not argued (live-probed 2026-09-15, run 34964436636): a root <c>oneOf</c> requiring only
+/// <c>stop</c> and <c>amendAcceptance</c> took the golden decision eval from 28/29 to <b>20/29 on EVERY wire</b> —
+/// Anthropic, OpenAI and Custom alike — and 0/4 on session-continue. The wire itself never objected: neither
+/// gateway rejected the schema, and nothing fell to the prompt-only floor. All nine new failures were the lift's
+/// own shapes, in its own words: five scenarios "produced no conformant decision (fail-closed 'no-decision' stop)"
+/// and four answered "retry authored NO target — the 'retry' object was absent and the bounded payload re-ask never
+/// recovered one". The constraint did not make the model author better payloads; it deleted the repair that was
+/// already fixing them.</para>
 /// </summary>
 public static class SupervisorDecisionSchema
 {
