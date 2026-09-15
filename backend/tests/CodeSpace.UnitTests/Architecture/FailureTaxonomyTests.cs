@@ -102,6 +102,18 @@ public class FailureTaxonomyTests
         FailureCodes.SandboxOutputIncomplete.ShouldBe("sandbox_output_incomplete");
         FailureCodes.Internal.ShouldBe("internal_error");
         FailureCodes.UnscopedModelCall.ShouldBe("unscoped_model_call");
+        FailureCodes.ModelCredentialBrokerUnavailable.ShouldBe("model_credential_broker_unavailable");
+    }
+
+    [Fact]
+    public void The_infra_exit_reasons_are_pinned_member_by_member()
+    {
+        // Membership decides whether a supervisor unit's failed attempt reads as "the model failed" or as "this
+        // deployment ended it". Too wide and a genuine failure stops buying the retries that could fix it; too
+        // narrow and a worker restart buys a stronger model. Either way the drift is silent, so the set is spelled
+        // out here as literals rather than compared against the constants it is built from.
+        FailureCodes.InfraExitReasons.ShouldBe(new[] { "model_credential_broker_unavailable" }, ignoreOrder: true,
+            customMessage: "adding an exit reason here changes what a post-hoc grade can be — state the new member's producer in the PR, and add it to this list deliberately");
     }
 
     [Fact]

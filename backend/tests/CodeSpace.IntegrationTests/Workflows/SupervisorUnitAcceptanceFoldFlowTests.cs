@@ -223,6 +223,57 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
             "the manifest mirror keeps the scorecard's oracle leg honest — a waived-only run never reads Solved (B2)");
     }
 
+    // ── F1: an attempt THIS DEPLOYMENT ended never reaches the oracle at all ─────────────────────────
+
+    [Fact]
+    public async Task A_unit_this_deployment_ended_folds_InfraUnknown_without_ever_running_its_oracle()
+    {
+        // The shape a worker that could not broker the run's model credential leaves on the tape: nothing pushed,
+        // nothing changed, and an exit reason naming OUR wall. Before this, the fold ran the oracle against an
+        // absence and recorded "no-branch-or-repo" — which classifies GENUINE with no work present, so the unit's
+        // failure became evidence about the MODEL: it extended ConsecutiveFailedVerdicts toward an escalation and
+        // spent the run's no-progress budget on a deploy. MUTATION, run: delete the short-circuit and the verdict
+        // assertion below reddens (the fold records the fail-closed absence instead). The grader call count is the
+        // WIDER invariant rather than this case's discriminator — this attempt pushed nothing, so the arm it would
+        // have taken needs no clone; a member of this set that HAD pushed would otherwise pay for a full grade.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(EndedByThisDeployment(agentId)));
+        await SeedManifestAsync(teamId, agentId, repoId, branch: null, baseSha: null, patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+        var ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(0, "there is nothing for an oracle to grade — the attempt never got to be about the work");
+
+        var folded = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+        folded.AcceptanceVerdict.ShouldBe(CodeSpace.Messages.Contracts.VerificationDisposition.InfraUnknown, "the typed verdict is what the quality reading classifies on");
+        folded.AcceptanceDetail.ShouldBe("infra:model_credential_broker_unavailable", "the detail names the wall, verbatim — never the fail-closed absence every other arm reports");
+        folded.AcceptancePassed.ShouldBe(false, "unchanged: work nothing verified stays withheld from the reviewable head");
+
+        (await ManifestAcceptanceStateAsync(agentId)).ShouldBe(PublishAcceptanceState.Failed,
+            "the legacy 3-value manifest vocabulary has no infra word — an infra-classed false projected to Failed before this too, so the delivery scorecard does not shift");
+
+        SupervisorOutcome.ReadAgentResults(await LedgerSpawnOutcomeAsync(runId, teamId)).Single().AcceptanceVerdict
+            .ShouldBe(CodeSpace.Messages.Contracts.VerificationDisposition.InfraUnknown, "the verdict is PERSISTED — a replay reads it off the tape rather than re-deciding it");
+    }
+
+    /// <summary>
+    /// One unit as the tape actually records it after its worker could not broker the run's model credential —
+    /// projected by the SAME <see cref="SupervisorOutcome.ProjectCompact"/> a rehydrate folds the durable AgentRun
+    /// row with, so this fixture cannot carry a fact production would not have put there (Rule 12.5).
+    /// </summary>
+    private static SupervisorAgentResult EndedByThisDeployment(Guid agentRunId)
+    {
+        var result = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
+
+        return SupervisorOutcome.ProjectCompact(agentRunId, nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
+    }
+
     private async Task SeedAmendCardAsync(Guid runId, Guid teamId, int sequence, SupervisorAmendAcceptancePayload payload, string? answer)
     {
         var card = SupervisorAmendAcceptance.IntoAskHuman(payload);
