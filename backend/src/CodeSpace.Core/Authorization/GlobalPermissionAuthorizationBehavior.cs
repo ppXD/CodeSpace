@@ -18,7 +18,7 @@ public sealed class GlobalPermissionAuthorizationBehavior<TRequest, TResponse> :
         // where nobody can grant anything.
         if (_currentUser.HasRole(Roles.Admin)) return await next().ConfigureAwait(false);
 
-        if (!_currentUser.HasPermission(request.RequiredGlobalPermission)) throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"permission '{request.RequiredGlobalPermission}' required");
+        if (!_currentUser.HasPermission(request.RequiredGlobalPermission)) throw TenantAccessDeniedException.MissingGlobalPermission(_currentUser.Id, request.RequiredGlobalPermission);
 
         return await next().ConfigureAwait(false);
     }

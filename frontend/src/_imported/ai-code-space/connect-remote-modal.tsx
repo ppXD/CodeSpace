@@ -909,7 +909,8 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
       </form>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">Any team member can add a provider</div>
+        {/* AddProviderInstanceCommand requires TeamPermissions.ReposManage, whose minimum role is Admin. The old line promised any Member could, and a Member who believed it got a bare 403. */}
+        <div className="mdl-foot-info">Adding a provider needs the Admin role</div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={onBack} disabled={add.isPending}>Cancel</button>
           <button className="btn btn-primary cn-submit" disabled={submitDisabled} onClick={submit}>

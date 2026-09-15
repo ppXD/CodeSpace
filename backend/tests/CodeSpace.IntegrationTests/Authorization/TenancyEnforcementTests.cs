@@ -207,6 +207,64 @@ public class TenancyEnforcementTests
 
     // ── Seed helpers ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The refusal an operator actually met: a Member of their OWN team pressing an Admin-only action.
+    /// Asserted through the real pipeline rather than on the exception alone, because what reaches the
+    /// browser is what matters — the behavior, the matrix and the message have to agree end to end.
+    /// </summary>
+    [Fact]
+    public async Task A_member_denied_an_admin_action_is_told_which_role_it_needs()
+    {
+        var (member, team) = await SeedMemberAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(member, team);
+        var mediator = scope.Resolve<IMediator>();
+        var act = async () => await mediator.Send(new AddProviderInstanceCommand { Provider = ProviderKind.GitLab, DisplayName = "gl", BaseUrl = $"https://gl-{Guid.NewGuid():N}.local" }).ConfigureAwait(false);
+
+        var denied = await act.ShouldThrowAsync<TenantAccessDeniedException>().ConfigureAwait(false);
+        denied.ClientMessage.ShouldContain("Member");
+        denied.ClientMessage.ShouldContain("Admin");
+        denied.Details!["requiredPermission"].ShouldBe(TeamPermissions.ReposManage);
+    }
+
+    /// <summary>
+    /// The negative control for the test above, and the half that must never regress: a request about a
+    /// team the caller cannot see is refused with a sentence that confirms nothing — no role, no ids,
+    /// nothing that separates "not yours" from "does not exist".
+    /// </summary>
+    [Fact]
+    public async Task A_cross_team_request_is_still_refused_without_saying_anything_about_the_team()
+    {
+        var (userA, _, teamB) = await SeedTwoTeamsAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(userA, teamB);
+        var mediator = scope.Resolve<IMediator>();
+        var act = async () => await mediator.Send(new ListRepositoriesQuery()).ConfigureAwait(false);
+
+        var denied = await act.ShouldThrowAsync<TenantAccessDeniedException>().ConfigureAwait(false);
+        denied.ClientMessage.ShouldBe("You don't have access to this.");
+        denied.Details.ShouldBeNull();
+        denied.ClientMessage.ShouldNotContain(teamB.ToString(), Case.Insensitive);
+    }
+
+    private async Task<(Guid UserId, Guid TeamId)> SeedMemberAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
+        var user = new User { Id = Guid.NewGuid(), Email = $"m-{suffix}@x", Name = "member" };
+        var team = new Team { Id = Guid.NewGuid(), Slug = $"m-{suffix}", Name = "MemberTeam" };
+
+        db.User.Add(user);
+        db.Team.Add(team);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = user.Id, Role = TeamRole.Member });
+        db.Project.Add(TestProjectSeed.BuildDefaultProject(team.Id, user.Id));
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return (user.Id, team.Id);
+    }
+
     private async Task<(Guid UserA, Guid TeamA, Guid TeamB)> SeedTwoTeamsAsync()
     {
         using var scope = _fixture.BeginScope();

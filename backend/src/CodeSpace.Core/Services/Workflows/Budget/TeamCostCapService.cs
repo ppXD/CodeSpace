@@ -61,5 +61,5 @@ public sealed class TeamCostCapService : ITeamCostCapService, IScopedDependency
         existing.CapWindow = TeamCostCap.RollingThirtyDays;
     }
 
-    private Guid RequireTeam() => _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+    private Guid RequireTeam() => _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 }

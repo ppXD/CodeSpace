@@ -28,7 +28,7 @@ public sealed class RepositoryAccessAuthorizationBehavior<TRequest, TResponse> :
         // legitimately act on any repo and "row missing" should surface from the handler.
         if (_currentUser.HasRole(Roles.Admin)) return await next().ConfigureAwait(false);
 
-        var headerTeamId = _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+        var headerTeamId = _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 
         var entityTeamId = await _db.Repository.AsNoTracking()
             .Where(r => r.Id == request.RepositoryId && r.DeletedDate == null)

@@ -19,7 +19,7 @@ public sealed class TeamMembershipAuthorizationBehavior<TRequest, TResponse> : I
 
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
     {
-        var teamId = _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+        var teamId = _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 
         await _resolver.EnsureMembershipAsync(teamId, cancellationToken).ConfigureAwait(false);
 
