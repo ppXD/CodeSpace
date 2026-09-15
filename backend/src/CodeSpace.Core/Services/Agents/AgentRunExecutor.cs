@@ -647,6 +647,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // and the fence is still ours — so the CAS would succeed and this would fail and kill a working agent and
             // tell its owner a worker restarted. ApplicationStopping is true only when one actually is.
             //
+            // The window this runs in is real, not notional: Hangfire's StopAsync cancels its jobs' tokens and only
+            // afterwards does the container dispose the broker's listener, so the agent's model access is still LIVE
+            // while this arm runs — which is why the revoke leads and why the fold can still read a spool. A host that
+            // is killed outright instead (no token cancel) reaches none of this and simply leaves the run Running for
+            // the re-attach half, which is the same outcome one sweep later.
+            //
             // Best-effort by construction: a drain budget is finite, and a run this misses is caught by the re-attach
             // half, which reaches the identical outcome one sweep later rather than at the spec timeout.
             if (brokeredHere && _lifetime?.ApplicationStopping.IsCancellationRequested == true && await EndBrokeredAttemptOnShutdownAsync(owner, run.TeamId, agentRunId).ConfigureAwait(false))
@@ -4014,7 +4020,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var failure = new Credentials.ModelCredentialLeaseLostException();
 
-        return folded with { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(failure), Error = failure.Message };
+        // The disposition moves with the status, and that is not bookkeeping. A STALLED fold carries
+        // CompletionDisposition.Blocked, which is what puts a run in the human decision queue — so keeping it here
+        // would file a run for a person to unblock while its own error text tells them to retry, and the two readers
+        // of that row would act on different stories. Whatever the agent looked like when we stopped it, the run
+        // ENDED, and Completed is what every other terminal this executor lands says.
+        return folded with
+        {
+            Status = AgentRunStatus.Failed,
+            CompletionDisposition = CompletionDisposition.Completed,
+            ExitReason = ExecutorExitReason(failure),
+            Error = failure.Message,
+        };
     }
 
     /// <summary>What asking "can this run still reach a model?" found, and therefore what its caller may do about it.</summary>
@@ -4053,6 +4070,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// lease, ~3 heartbeats; a credential lease lapses after 2). That inference was free when its cost was a stale
     /// posture stamp; it is not free when its cost is killing a live agent. <c>RenewAsync</c> would NOT do — this pass
     /// carries the reclaim-bumped epoch, so a renewal fails against a perfectly live lease.</para>
+    ///
+    /// <para><b>The invariant this arm rests on:</b> a lease-lost posture implies the agent is DEAD, because nothing
+    /// today can rebind a run to a new broker — the lease died with its worker and no code path re-opens one. The
+    /// stable per-run address (2b) breaks that: a run whose lease is re-bound would carry the stamp while being
+    /// perfectly alive, and this read would become a lie that kills it. 2b MUST clear the posture on a successful
+    /// rebind (or give this arm a freshness bound); this comment is the note that says so.</para>
     ///
     /// <para>An agent that is ALREADY gone still owes the verdict when the posture recorded before this pass says a
     /// lost lease is why: that is a worker which revoked, stamped and killed on its way out and then could not land
@@ -4188,6 +4211,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (folded is null) return false;   // could not safely observe — leave it Running for the re-attach half, which lands it from the stamped posture
 
         folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+        folded = await WithWorkspaceChangesWithinBudgetAsync(folded, owner.RunId, run.TeamId, handle, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -4204,6 +4228,44 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // reached because this landing does NOT bump the fence the stream was opened at.
             _logger.LogWarning(exception, "Agent run {RunId}: its lost-lease terminal was written but the bookkeeping after it was cut off by the drain", owner.RunId);
             return await TerminalAlreadyLandedAsync(owner.RunId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The share of the drain one run's git capture may spend. Its own sub-budget because it is the ONE step here whose
+    /// cost is not bounded by anything this code controls — a diff is proportional to what the agent changed, on a
+    /// repo whose size is the tenant's — and because it is the step whose absence is survivable. Everything else in the
+    /// landing is a bounded read, a signal, or a single row write.
+    /// </summary>
+    private static readonly TimeSpan ShutdownWorkspaceCaptureBudget = TimeSpan.FromSeconds(4);
+
+    /// <summary>
+    /// Capture what the stopped agent CHANGED, under a bound, and land the result either way.
+    ///
+    /// <para>Work presence is not cosmetic here. An attempt that landed with an empty <see cref="AgentRunResult.ChangedFiles"/>
+    /// reads to <c>AgentWorkPresence.ShowsWork</c> as having produced nothing, which makes the supervisor's post-hoc
+    /// unit grade <c>no-branch-or-repo</c> with no work — a real verdict failure rather than infra — and a rolling
+    /// restart then burns a turn's no-progress budget in seconds. The folder's own list cannot supply it on this path:
+    /// it only ever sees frames after the checkpoint, and this process's live tail already consumed the rest.</para>
+    ///
+    /// <para>So the same capture the re-attach half runs is run here — but on a budget of its own, and a timeout LANDS
+    /// ANYWAY rather than abandoning the run. An honest terminal that under-reports the diff beats no terminal at all:
+    /// the alternative leaves the run Running with a dead agent for a sweep to find, which costs more than the missing
+    /// file list. The Warning names which one happened.</para>
+    /// </summary>
+    private async Task<AgentRunResult> WithWorkspaceChangesWithinBudgetAsync(AgentRunResult folded, Guid runId, Guid teamId, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        using var capture = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        capture.CancelAfter(ShutdownWorkspaceCaptureBudget);
+
+        try
+        {
+            return await EnrichWithReattachWorkspaceChangesAsync(runId, teamId, handle, folded, capture.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Agent run {RunId}: its workspace diff did not finish inside the drain's {Seconds}s capture budget, so it lands lease-lost WITHOUT a file list — the work it did is on the clone, but this row under-reports it", runId, ShutdownWorkspaceCaptureBudget.TotalSeconds);
+            return folded;
         }
     }
 
@@ -4227,10 +4289,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            var stored = await _runs.GetEventsAsync(runId, teamId, 0, cancellationToken).ConfigureAwait(false);
-            var facts = AgentRunFacts.From(stored.Select(ReplayedEvent), harness);
+            var (head, tail) = await ReadFactBearingEventsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-            return folded with { SessionId = folded.SessionId ?? facts.SessionId, TokenUsage = folded.TokenUsage ?? facts.TokenUsage, Model = folded.Model ?? facts.Model };
+            // The two facts are read from the two ENDS for the reason AgentRunFacts states: a session id and a model
+            // are FIRST-wins (a harness announces them in its opening lines), a token usage is LAST-wins (the newest
+            // total supersedes every earlier one). Nothing in the middle can change either answer.
+            var opening = AgentRunFacts.From(head.Select(ReplayedEvent), harness);
+            var closing = AgentRunFacts.From(tail.Select(ReplayedEvent), harness);
+
+            return folded with
+            {
+                SessionId = folded.SessionId is { Length: > 0 } ? folded.SessionId : opening.SessionId,
+                Model = folded.Model is { Length: > 0 } ? folded.Model : opening.Model,
+                TokenUsage = folded.TokenUsage ?? closing.TokenUsage,
+            };
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -4239,8 +4311,33 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
+    /// <summary>
+    /// The most events either end of the replay reads. A bound, not a guess at sufficiency: a harness announces its
+    /// session in the first handful of structured lines and its running total in the last, so a window this wide holds
+    /// both with room to spare — while an unbounded read would materialise every row of a long run, for every brokered
+    /// run in parallel, inside a finite drain. The failure mode of a too-small window is a null fact, which is exactly
+    /// what this method is repairing and never worse than not running at all.
+    /// </summary>
+    private const int DurableFactReplayWindow = 64;
+
+    /// <summary>
+    /// The oldest and newest fact-BEARING events of a run — only rows with an inline structured payload, because
+    /// <c>AgentRunFacts.Add</c> reads nothing else, so a run whose output is mostly prose does not spend its window on
+    /// lines that can carry no facts. Both halves come back in ascending order, which is the direction the fold folds.
+    /// Team-scoped like <c>IAgentRunService.GetEventsAsync</c>, so a foreign run id reads nothing.
+    /// </summary>
+    private async Task<(IReadOnlyList<AgentRunEvent> Head, IReadOnlyList<AgentRunEvent> Tail)> ReadFactBearingEventsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var bearing = _db.AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId && e.DataJson != null && _db.AgentRun.Any(r => r.Id == runId && r.TeamId == teamId));
+
+        var head = await bearing.OrderBy(e => e.Sequence).Take(DurableFactReplayWindow).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var tail = await bearing.OrderByDescending(e => e.Sequence).Take(DurableFactReplayWindow).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return (head, ((IReadOnlyList<AgentRunEvent>)tail).Reverse().ToList());
+    }
+
     /// <summary>One persisted event read back as the normalized event it was written from. Only the two fields the fact readers consult survive the round trip — an offloaded payload (DataJson null, artifact id set) simply carries no facts, which is the same answer the original parse would have given for a line with no structured root.</summary>
-    private static AgentEvent ReplayedEvent(Persistence.Entities.AgentRunEvent stored)
+    private static AgentEvent ReplayedEvent(AgentRunEvent stored)
     {
         if (stored.DataJson is not { Length: > 0 } json) return new AgentEvent { Kind = stored.Kind, Text = stored.Text };
 

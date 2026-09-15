@@ -34,6 +34,12 @@ internal sealed class TestEventFolder : IAgentEventFolder
     /// <summary>The FIRST recognizable harness session/thread id the stream carried — same provenance as <see cref="TokenUsage"/>, and exposed for the same reason: a real folder carries these onto its result, so a double that could not would let a test pass while the executor dropped the one input a warm retry needs.</summary>
     public string? SessionId => _facts?.SessionId;
 
+    /// <summary>The FIRST recognizable model the CLI named — same provenance as the two above.</summary>
+    public string? Model => _facts?.Model;
+
+    /// <summary>The distinct <see cref="AgentEventKind.FileChanged"/> texts the stream reported, from the double's own <see cref="AgentResultFold"/> — the fold's list, exactly the one both production folders read.</summary>
+    public IReadOnlyList<string> ChangedFiles => _fold.ChangedFiles;
+
     public void Add(AgentEvent normalized)
     {
         LastText = normalized.Text;

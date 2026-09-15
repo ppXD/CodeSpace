@@ -621,11 +621,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = data } };
         }
 
-        // Carries the executor's accumulated facts onto the result, exactly as ClaudeCodeResultFolder and
-        // CodexResultFolder do. A double that dropped them would let this test pass while production lost the spend
-        // and the resumable conversation — the fixture would be measuring itself.
-        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
-            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = exitCode == 0 ? "completed" : "non-zero-exit", Summary = fold.LastText, SessionId = fold.SessionId, TokenUsage = fold.TokenUsage });
+        // Every fact production reports, via the one shared construction AgentFolderDoubleFidelityTests measures.
+        public IAgentEventFolder CreateFolder() => ScriptedFolders.Result();
     }
 
     /// <summary>The detached agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>

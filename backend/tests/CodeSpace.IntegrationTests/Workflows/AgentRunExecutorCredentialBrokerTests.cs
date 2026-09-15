@@ -634,11 +634,8 @@ public partial class AgentRunExecutorTests
             return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = data } };
         }
 
-        // Carries the executor's accumulated facts onto the result, as ClaudeCodeResultFolder and CodexResultFolder do.
-        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
-            exitCode == 0
-                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText, SessionId = fold.SessionId, TokenUsage = fold.TokenUsage }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}", SessionId = fold.SessionId, TokenUsage = fold.TokenUsage });
+        // Every fact production reports, via the one shared construction AgentFolderDoubleFidelityTests measures.
+        public IAgentEventFolder CreateFolder() => ScriptedFolders.Result();
 
         public IReadOnlyList<string> SupportedProviders { get; } = new[] { provider };
 
