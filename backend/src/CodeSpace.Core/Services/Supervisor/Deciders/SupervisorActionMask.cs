@@ -28,7 +28,7 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// integration when no later staging decision actually produced an agent run (the current frontier is already folded,
 /// so repeating the same fold cannot advance it), and when the newest staged work is a reconciliation the tape
 /// records as NOT verified — the executor accepts a resolution only on
-/// <see cref="SupervisorResolutionVerdict.Verified"/> (<c>SupervisorOutcome.ResolvedBranch</c>), so a merge there
+/// <see cref="SupervisorResolutionVerdict.Verified"/>, so a merge there
 /// re-runs the integrator over the branches that already conflicted rather than surfacing the resolver's branch.
 /// That is the state golden <c>resolve-cap-spent</c> answered <c>merge</c> in on BOTH wires (run 34940616446, and
 /// again on 2026-09-11 / 34027621996): the menu offered the verb, and nothing in the prompt said it could not
