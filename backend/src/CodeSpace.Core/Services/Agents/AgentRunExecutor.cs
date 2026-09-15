@@ -1718,21 +1718,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (handle.WorkspaceDirectory is not { Length: > 0 } directory || handle.WorkspaceBaseSha is not { Length: > 0 } baseSha) return result;
         if (_workspaces.Resolve(handle.Kind) is not IWorkspacePathCapture capture) return result;
 
+        AgentRunResult captured;
+        WorkspaceChanges changes;
+
         try
         {
-            var changes = await capture.CaptureChangesFromPathAsync(directory, baseSha, cancellationToken).ConfigureAwait(false);
-
-            result = result with { ChangedFiles = changes.ChangedFiles, FileStats = changes.FileStats, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
-
-            // Separate best-effort step (see TryOffloadPatchAsync) — an artifact-store hiccup must never discard the
-            // git capture just assigned above.
-            var reattachOffload = await TryOffloadPatchAsync(runId, teamId, changes.Patch, "patch:primary", cancellationToken).ConfigureAwait(false);
-            return result with { PatchArtifactId = reattachOffload.ArtifactId, PatchLossReason = reattachOffload.LossReason };
+            changes = await capture.CaptureChangesFromPathAsync(directory, baseSha, cancellationToken).ConfigureAwait(false);
+            captured = result with { ChangedFiles = changes.ChangedFiles, FileStats = changes.FileStats, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: failed to capture workspace changes on re-attach (the clone may already be reclaimed); keeping the harness-reported file list", runId);
             return result;
+        }
+
+        // The offload is a SEPARATE try, and the enriched result is already in hand before it starts. That ordering is
+        // the whole point: the diff is computed, it is the evidence that this attempt did work, and nothing about
+        // storing a copy of it may throw it away. The old shape assigned then awaited inside one try whose filter
+        // excluded OperationCanceledException — so a cancel during the offload (a drain running out) escaped past a
+        // COMPLETED capture and the caller fell back to an empty file list, which is exactly the regression the
+        // capture exists to prevent, in the one window where the data was already there.
+        //
+        // A run that loses only the offload keeps its INLINE patch (bounded by MaxPatchChars) and no artifact
+        // reference; the loss reason records that the copy is missing, not the diff.
+        try
+        {
+            var offload = await TryOffloadPatchAsync(runId, teamId, changes.Patch, "patch:primary", cancellationToken).ConfigureAwait(false);
+            return captured with { PatchArtifactId = offload.ArtifactId, PatchLossReason = offload.LossReason };
+        }
+        catch (Exception ex) when (ex is not AgentRunOwnershipLostException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: its captured diff could not be offloaded; the run keeps the inline patch and the file list, and only the stored copy is missing", runId);
+            return captured;
         }
     }
 
@@ -4020,11 +4037,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var failure = new Credentials.ModelCredentialLeaseLostException();
 
-        // The disposition moves with the status, and that is not bookkeeping. A STALLED fold carries
-        // CompletionDisposition.Blocked, which is what puts a run in the human decision queue — so keeping it here
-        // would file a run for a person to unblock while its own error text tells them to retry, and the two readers
-        // of that row would act on different stories. Whatever the agent looked like when we stopped it, the run
-        // ENDED, and Completed is what every other terminal this executor lands says.
+        // The disposition moves with the status because the ENUM'S OWN CONTRACT requires it: every non-Completed value
+        // exists to pair with AgentRunStatus.NeedsReview (see CompletionDisposition — Completed is "a clean success or
+        // a failure whose status is the final word. No human overlay."), so Failed + Blocked is a pair that cannot
+        // mean anything. A stalled fold carries Blocked, and keeping it would write exactly that pair.
+        //
+        // Stated narrowly on purpose: nothing in backend/src or the frontend BRANCHES on this field today, so the cost
+        // of getting it wrong is an incoherent row rather than a misrouted run. The row still has to be coherent.
         return folded with
         {
             Status = AgentRunStatus.Failed,
@@ -4174,6 +4193,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         await RevokeBrokeredCredentialQuietlyAsync(runId, "worker-shutdown").ConfigureAwait(false);
 
+        // One deadline, so every step below can ask what is LEFT rather than assume it has its own full share.
+        var deadline = DateTimeOffset.UtcNow + ShutdownLeaseLandingBudget;
         using var budget = new CancellationTokenSource(ShutdownLeaseLandingBudget);
 
         try
@@ -4187,7 +4208,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (await StopAgentWithoutModelAccessAsync(runId, durable, handle, budget.Token).ConfigureAwait(false) != LostModelAccess.AgentStopped) return false;
 
-            return await FoldAndLandLostModelAccessAsync(owner, run, durable, handle, budget.Token).ConfigureAwait(false);
+            return await FoldAndLandLostModelAccessAsync(owner, run, durable, handle, deadline, budget.Token).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -4201,7 +4222,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// on top of what it produced. Shared so the two halves cannot drift into reporting different things about the
     /// same event — the reason the shutdown half used to land a bare result, and the reason that was wrong.
     /// </summary>
-    private async Task<bool> FoldAndLandLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    private async Task<bool> FoldAndLandLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
         var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options) ?? throw new InvalidOperationException($"AgentRun {owner.RunId} has an empty task envelope.");
         var harness = _harnesses.Resolve((await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false)).HarnessKind);
@@ -4211,7 +4232,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (folded is null) return false;   // could not safely observe — leave it Running for the re-attach half, which lands it from the stamped posture
 
         folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
-        folded = await WithWorkspaceChangesWithinBudgetAsync(folded, owner.RunId, run.TeamId, handle, cancellationToken).ConfigureAwait(false);
+        folded = await WithWorkspaceChangesWithinBudgetAsync(folded, owner.RunId, run.TeamId, handle, deadline, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -4240,6 +4261,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private static readonly TimeSpan ShutdownWorkspaceCaptureBudget = TimeSpan.FromSeconds(4);
 
     /// <summary>
+    /// The slice of the drain held back for the LANDING itself — the fenced write, the notify, the harness-execution
+    /// close. Reserved rather than hoped for: the steps before it (a kill confirmation of up to
+    /// <see cref="AgentStopConfirmationBudget"/>, then a capture of up to <see cref="ShutdownWorkspaceCaptureBudget"/>)
+    /// can together consume almost all of <see cref="ShutdownLeaseLandingBudget"/>, and a landing that runs out of
+    /// token writes nothing at all — which is strictly worse than landing without a file list.
+    /// </summary>
+    private static readonly TimeSpan ShutdownLandingReserve = TimeSpan.FromSeconds(3);
+
+    /// <summary>
     /// Capture what the stopped agent CHANGED, under a bound, and land the result either way.
     ///
     /// <para>Work presence is not cosmetic here. An attempt that landed with an empty <see cref="AgentRunResult.ChangedFiles"/>
@@ -4253,18 +4283,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// the alternative leaves the run Running with a dead agent for a sweep to find, which costs more than the missing
     /// file list. The Warning names which one happened.</para>
     /// </summary>
-    private async Task<AgentRunResult> WithWorkspaceChangesWithinBudgetAsync(AgentRunResult folded, Guid runId, Guid teamId, SandboxHandle handle, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> WithWorkspaceChangesWithinBudgetAsync(AgentRunResult folded, Guid runId, Guid teamId, SandboxHandle handle, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
+        // What is actually left, minus what the landing needs. The capture's own budget is a CEILING, never the whole
+        // remainder: taking all of it would leave the fenced write with no token and land nothing.
+        var affordable = deadline - DateTimeOffset.UtcNow - ShutdownLandingReserve;
+
+        if (affordable <= TimeSpan.Zero)
+        {
+            _logger.LogWarning("Agent run {RunId}: the drain had less than its {Reserve}s landing reserve left, so its workspace diff was skipped entirely — it lands lease-lost WITHOUT a file list, which is the trade this reserve exists to make", runId, ShutdownLandingReserve.TotalSeconds);
+            return folded;
+        }
+
         using var capture = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        capture.CancelAfter(ShutdownWorkspaceCaptureBudget);
+        capture.CancelAfter(affordable < ShutdownWorkspaceCaptureBudget ? affordable : ShutdownWorkspaceCaptureBudget);
 
         try
         {
             return await EnrichWithReattachWorkspaceChangesAsync(runId, teamId, handle, folded, capture.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            _logger.LogWarning("Agent run {RunId}: its workspace diff did not finish inside the drain's {Seconds}s capture budget, so it lands lease-lost WITHOUT a file list — the work it did is on the clone, but this row under-reports it", runId, ShutdownWorkspaceCaptureBudget.TotalSeconds);
+            // UNCONDITIONALLY, unlike a filter on the outer token: the point of the reserve is that a capture overrun
+            // never costs the landing, and a filter that re-threw when the OUTER budget was the one that expired would
+            // make "it lands anyway" true only in the case that was never the problem.
+            _logger.LogWarning("Agent run {RunId}: its workspace diff did not finish inside the {Seconds}s it could be given, so it lands lease-lost WITHOUT a file list — the work it did is on the clone, but this row under-reports it", runId, ShutdownWorkspaceCaptureBudget.TotalSeconds);
             return folded;
         }
     }
@@ -4297,6 +4340,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var opening = AgentRunFacts.From(head.Select(ReplayedEvent), harness);
             var closing = AgentRunFacts.From(tail.Select(ReplayedEvent), harness);
 
+            // An OFFLOADED payload carries no facts inline: AgentRunService nulls DataJson for anything over the
+            // inline threshold and keeps only DataArtifactId. A harness opening line that announced the session id
+            // beside a large tool catalog is exactly that shape, so the cheap read above can come back empty for a run
+            // whose id is sitting in the artifact store. Only then is it worth fetching — bounded to the head window,
+            // and only for the fact that is actually missing.
+            if (opening.SessionId is null or { Length: 0 })
+                opening = AgentRunFacts.From(await ResolveOffloadedEventsAsync(head, teamId, cancellationToken).ConfigureAwait(false), harness);
+
             return folded with
             {
                 SessionId = folded.SessionId is { Length: > 0 } ? folded.SessionId : opening.SessionId,
@@ -4328,7 +4379,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private async Task<(IReadOnlyList<AgentRunEvent> Head, IReadOnlyList<AgentRunEvent> Tail)> ReadFactBearingEventsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
-        var bearing = _db.AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId && e.DataJson != null && _db.AgentRun.Any(r => r.Id == runId && r.TeamId == teamId));
+        // Rows with EITHER carrier: an inline payload, or an offloaded one whose bytes live in the artifact store.
+        // Filtering on DataJson alone would step straight past the large opening line that is the most likely place a
+        // session id and a tool catalog were written together.
+        var bearing = _db.AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId && (e.DataJson != null || e.DataArtifactId != null) && _db.AgentRun.Any(r => r.Id == runId && r.TeamId == teamId));
 
         var head = await bearing.OrderBy(e => e.Sequence).Take(DurableFactReplayWindow).ToListAsync(cancellationToken).ConfigureAwait(false);
         var tail = await bearing.OrderByDescending(e => e.Sequence).Take(DurableFactReplayWindow).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -4336,13 +4390,38 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return (head, ((IReadOnlyList<AgentRunEvent>)tail).Reverse().ToList());
     }
 
-    /// <summary>One persisted event read back as the normalized event it was written from. Only the two fields the fact readers consult survive the round trip — an offloaded payload (DataJson null, artifact id set) simply carries no facts, which is the same answer the original parse would have given for a line with no structured root.</summary>
-    private static AgentEvent ReplayedEvent(AgentRunEvent stored)
+    /// <summary>
+    /// The same window, with every OFFLOADED payload fetched back. Bounded by construction — it is only ever handed the
+    /// head window, and only when the cheap inline pass found no session id — because each miss is an artifact-store
+    /// round trip and this runs inside a drain. A payload that cannot be resolved (missing, cross-team) simply carries
+    /// no facts, which is the same answer the inline read gave.
+    /// </summary>
+    private async Task<IReadOnlyList<AgentEvent>> ResolveOffloadedEventsAsync(IReadOnlyList<AgentRunEvent> window, Guid teamId, CancellationToken cancellationToken)
     {
-        if (stored.DataJson is not { Length: > 0 } json) return new AgentEvent { Kind = stored.Kind, Text = stored.Text };
+        var resolved = new List<AgentEvent>(window.Count);
 
-        try { using var doc = JsonDocument.Parse(json); return new AgentEvent { Kind = stored.Kind, Text = stored.Text, Data = doc.RootElement.Clone() }; }
-        catch (JsonException) { return new AgentEvent { Kind = stored.Kind, Text = stored.Text }; }
+        foreach (var stored in window)
+        {
+            if (stored.DataJson is { Length: > 0 } || stored.DataArtifactId is not { } artifactId) { resolved.Add(ReplayedEvent(stored)); continue; }
+
+            var payload = await _offloader.ResolveAsync(teamId, null, artifactId, cancellationToken).ConfigureAwait(false);
+
+            resolved.Add(payload is { Length: > 0 } ? ReplayedEvent(stored.Kind, stored.Text, payload) : ReplayedEvent(stored));
+        }
+
+        return resolved;
+    }
+
+    /// <summary>One persisted event read back as the normalized event it was written from. Only the two fields the fact readers consult survive the round trip — an offloaded payload (DataJson null, artifact id set) simply carries no facts, which is the same answer the original parse would have given for a line with no structured root.</summary>
+    private static AgentEvent ReplayedEvent(AgentRunEvent stored) => ReplayedEvent(stored.Kind, stored.Text, stored.DataJson);
+
+    /// <summary>The same reconstruction from a payload that came from somewhere other than the row — an offloaded one fetched back out of the artifact store.</summary>
+    private static AgentEvent ReplayedEvent(AgentEventKind kind, string? text, string? dataJson)
+    {
+        if (dataJson is not { Length: > 0 } json) return new AgentEvent { Kind = kind, Text = text };
+
+        try { using var doc = JsonDocument.Parse(json); return new AgentEvent { Kind = kind, Text = text, Data = doc.RootElement.Clone() }; }
+        catch (JsonException) { return new AgentEvent { Kind = kind, Text = text }; }
     }
 
     /// <summary>Ask the row, on a token of its own, whether the run actually reached a terminal state — the only honest answer to "did the landing take?" once an exception has been raised somewhere after the fenced write.</summary>
