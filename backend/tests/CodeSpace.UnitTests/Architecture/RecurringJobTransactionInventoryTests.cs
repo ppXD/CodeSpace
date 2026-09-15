@@ -99,6 +99,12 @@ public class RecurringJobTransactionInventoryTests
 
     private static (Type Job, Type Command) DispatchedCommand(Type jobType)
     {
+        var parameters = jobType.GetConstructors().Single().GetParameters();
+
+        parameters.Select(p => p.ParameterType).ShouldBe([typeof(IMediator)],
+            $"{jobType.Name} must take IMediator and nothing else (Rule 14 — a thin Mediator dispatcher). This scan " +
+            "constructs each job by hand to observe what it dispatches, and cannot supply anything else.");
+
         var recorder = new RecordingMediator();
         var job = (IRecurringJob)Activator.CreateInstance(jobType, recorder)!;
 
