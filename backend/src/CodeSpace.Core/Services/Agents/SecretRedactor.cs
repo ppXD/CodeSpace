@@ -95,12 +95,16 @@ public sealed class SecretUtf8RedactionStream
         _maximumPatternLength = _patterns.Count == 0 ? 0 : _patterns.Max(value => value.Length);
     }
 
-    public SecretUtf8Redaction Transform(ReadOnlySpan<byte> source, bool final)
+    public SecretUtf8Redaction Transform(ReadOnlyMemory<byte> source, bool final)
     {
+        // No pattern can ever match, so nothing can straddle a chunk boundary either — the scan below would just
+        // copy every byte verbatim. Skip it and hand back the caller's own memory rather than an identical copy.
+        if (_maximumPatternLength == 0) return new SecretUtf8Redaction(source, source.Length);
+
         var combined = new byte[_carry.Length + source.Length];
         _carry.CopyTo(combined, 0);
-        source.CopyTo(combined.AsSpan(_carry.Length));
-        var safeStartLimit = final || _maximumPatternLength == 0 ? combined.Length : Math.Max(0, combined.Length - _maximumPatternLength + 1);
+        source.Span.CopyTo(combined.AsSpan(_carry.Length));
+        var safeStartLimit = final ? combined.Length : Math.Max(0, combined.Length - _maximumPatternLength + 1);
         var output = new ArrayBufferWriter<byte>(Math.Max(combined.Length, 1));
         var offset = 0;
 

@@ -267,7 +267,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                     await FailStreamAsync(request, captureSessionId, stream, new CaptureFailure("source-protocol-invalid", "The durable source emitted EOF outside the final-drain protocol."), cancellationToken).ConfigureAwait(false);
                     return;
                 }
-                var tail = stream.Redactor.Transform([], final: true);
+                var tail = stream.Redactor.Transform(ReadOnlyMemory<byte>.Empty, final: true);
                 if (tail.SourceBytesConsumed > 0) stream.Enqueue(new PendingAppend(tail.Bytes, tail.SourceBytesConsumed));
                 if (await FlushBacklogAsync(request, captureSessionId, stream, final: true, cancellationToken).ConfigureAwait(false) != DrainOutcome.Drained) return;
                 var expectedLocal = stream.Metadata.SourceOffsetBytes - stream.SourceBaseOffset;
@@ -283,7 +283,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 
             var bytes = ((SandboxDurableLogReadResult.Available)read).Bytes;
             stream.LocalReadOffset += bytes.Length;
-            var transformed = stream.Redactor.Transform(bytes.Span, final: false);
+            var transformed = stream.Redactor.Transform(bytes, final: false);
             if (transformed.SourceBytesConsumed > 0) stream.Enqueue(new PendingAppend(transformed.Bytes, transformed.SourceBytesConsumed));
             reads++;
         }

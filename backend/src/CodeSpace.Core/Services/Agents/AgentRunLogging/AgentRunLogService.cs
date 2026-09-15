@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Data;
 using System.Data.Common;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.Persistence.Db;
@@ -103,7 +104,7 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         var before = await ReadAppendHeadAsync(request, digest, cancellationToken).ConfigureAwait(false);
         if (before.Result != null) return before.Result;
 
-        await using var content = new MemoryStream(request.Bytes.ToArray(), writable: false);
+        await using var content = ReadOnlyStream(request.Bytes);
         var transfer = await _artifacts.PutAsync(new ArtifactCasTransferRequest
         {
             TeamId = request.TeamId, StorageProfileId = request.StorageProfileId, StorageProfileRevision = request.StorageProfileRevision,
@@ -604,6 +605,19 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         new("stream_id", DbType.Guid, identity.StreamId), new("recovery_owner_id", DbType.Guid, payload.Claim.OwnerId),
         new("recovery_fence_epoch", DbType.Int64, payload.Claim.FenceEpoch), new("expected_revision", DbType.Int64, identity.ExpectedRevision),
     ];
+
+    /// <summary>
+    /// A read-only stream over these bytes, with no copy when they are already array-backed — true for every
+    /// producer today: an unredacted chunk is the redactor's own source memory returned verbatim, and both a
+    /// redacted chunk's rebuilt buffer and a raw sandbox log read are plain arrays. Safe to skip a defensive copy
+    /// here because <see cref="IArtifactCasRuntimeCoordinator.PutAsync"/> always finishes reading its content
+    /// stream — even a timed-out attempt drains the abandoned provider task first — before it returns, so nothing
+    /// can still be reading this buffer once the call this stream feeds has completed.
+    /// </summary>
+    private static MemoryStream ReadOnlyStream(ReadOnlyMemory<byte> bytes) =>
+        MemoryMarshal.TryGetArray(bytes, out var segment)
+            ? new MemoryStream(segment.Array!, segment.Offset, segment.Count, writable: false)
+            : new MemoryStream(bytes.ToArray(), writable: false);
 
     private CodeSpaceDbContext CreateDb() => new(_dbOptions);
     private static AgentRunLogOpenResult.Opened Opened(AgentRunLogStream value, bool alreadyOpen, bool reclaimed) => new(Project(value), alreadyOpen, reclaimed) { CaptureSourceBaseOffsetBytes = value.CaptureSourceBaseOffsetBytes, CaptureFinalizedAt = value.CaptureFinalizedAt };
