@@ -1682,11 +1682,11 @@ public partial class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false)
     {
         using var scope = _fixture.BeginScope();
 
-        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic).ExecuteAsync(runId, cancellationToken);
+        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic, lifetime, productionCapturePlanes).ExecuteAsync(runId, cancellationToken);
     }
 
     /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch.</summary>
@@ -1697,7 +1697,7 @@ public partial class AgentRunExecutorTests
         await NewExecutor(scope, harness).ReattachAsync(reservation, CancellationToken.None);
     }
 
-    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null)
+    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false)
     {
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
@@ -1717,6 +1717,9 @@ public partial class AgentRunExecutorTests
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance,
             logCapture,
+            // The native record plane is DI-registered in production (NativeRecordPlane : IScopedDependency), so a
+            // test that leaves it null is not running the shape production runs.
+            nativeRecords: productionCapturePlanes ? scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>() : null,
             credentialBroker: credentialBroker,
             logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
             lifetime: lifetime);
