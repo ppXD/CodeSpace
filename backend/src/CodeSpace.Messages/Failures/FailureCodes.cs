@@ -117,6 +117,9 @@ public static class FailureCodes
     /// <summary>A run's model credential could not be brokered on a deployment that requires confinement, so the run is refused rather than handed the tenant's long-lived provider key. Remedy: make the worker able to bind a broker listener, use a harness that honours a base-URL override, or store an upstream endpoint on the credential — a retry on the same host cannot help.</summary>
     public const string ModelCredentialBrokerUnavailable = "model_credential_broker_unavailable";
 
+    /// <summary>The worker holding this run's brokered model-credential lease went away, so the detached agent's model access ended with it and its attempt can make no further model call. Remedy: a retry, which starts a fresh attempt on a live worker — nothing about the run's own inputs is wrong, and nothing on the provider's side is down.</summary>
+    public const string ModelCredentialLeaseLost = "model_credential_lease_lost";
+
     /// <summary>
     /// Every code declared above, computed by reflection so it can never drift from the constants themselves. For a
     /// caller that must treat ANY coded exit as this codebase's own diagnosis of what went wrong — never a downstream

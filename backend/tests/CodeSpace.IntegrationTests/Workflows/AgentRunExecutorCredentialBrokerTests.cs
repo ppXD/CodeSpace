@@ -266,6 +266,74 @@ public partial class AgentRunExecutorTests
         finally { Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, priorWindow); }
     }
 
+    [Fact]
+    public async Task A_worker_shutting_down_ends_every_brokered_run_it_owns_typed_rather_than_leaving_them_running()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-shutdown-drain-fixture");
+        var runIds = new[] { await CreateRunWithCredentialAsync(teamId, credId), await CreateRunWithCredentialAsync(teamId, credId) };
+
+        using var broker = new LoopbackModelCredentialBroker();
+        using var shutdown = new CancellationTokenSource();
+
+        // Two agents this worker brokered, both still working when the pod takes its SIGTERM. Their leases live in
+        // THIS process's memory behind THIS process's listener, so neither survives the restart — and each child
+        // sleeps far past its own deadline, so anything that left them Running would be a run degrading in silence.
+        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token)).ToArray();
+
+        await WaitUntilAsync(() => runIds.All(broker.HasLease), TimeSpan.FromSeconds(30), "the runs never opened their credential leases");
+        await WaitUntilAsync(() => runIds.All(id => HandleOf(id) is not null), TimeSpan.FromSeconds(30), "the runs never persisted a durable handle, so there was no launched agent for a shutdown to account for");
+
+        var pids = runIds.Select(id => HandleOf(id)!.ProcessId).ToArray();
+        pids.ShouldAllBe(pid => ProcessIsAlive(pid), "precondition: both agents are alive at the moment the worker is told to go");
+
+        shutdown.Cancel();
+        await Task.WhenAll(executions);
+
+        foreach (var runId in runIds)
+        {
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+            run.Status.ShouldBe(AgentRunStatus.Failed,
+                $"run {runId} was left Running by a worker that was taking its model access with it — the outcome has to land here, inside the drain, not at the agent's spec timeout");
+            JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost);
+            run.Error!.ShouldNotContain("provider", Shouldly.Case.Insensitive, "a restart of ours must never be dressed as a provider outage");
+
+            broker.HasLease(runId).ShouldBeFalse("the credential is withdrawn before the kill, so the agent cannot spend on the seconds it has left");
+        }
+
+        foreach (var pid in pids)
+            await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {pid} -o pid,stat,etime,command`");
+    }
+
+    /// <summary>One brokered run driven to the tear-down arm. The cancel is the point of the test, so the <see cref="OperationCanceledException"/> it re-raises (the contract that leaves a non-brokered run recoverable) is expected, not a failure.</summary>
+    private async Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown)
+    {
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo working; sleep 120");
+
+        try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown); }
+        catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
+    }
+
+    private SandboxHandle? HandleOf(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var json = scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.RunnerHandleJson).Single();
+
+        return string.IsNullOrWhiteSpace(json) ? null : JsonSerializer.Deserialize<SandboxHandle>(json, AgentJson.Options);
+    }
+
+    /// <summary>The agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
+    private static bool ProcessIsAlive(int pid)
+    {
+        try { using var process = System.Diagnostics.Process.GetProcessById(pid); return !process.HasExited; }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+    }
+
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan budget, string failure)

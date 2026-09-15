@@ -6,6 +6,8 @@ using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 
@@ -368,6 +370,27 @@ public class ModelCredentialBrokerTests
             "the bearer rides the child's env, so a CLI that echoes its environment or a 401 body writes it into the append-only log — which cannot be edited afterwards");
         redactor.Redact($"and the key was {UpstreamKey}").Contains(UpstreamKey, StringComparison.Ordinal).ShouldBeFalse(
             "the upstream key stays a needle under brokerage — the broker holds it, and a broker error can echo it");
+    }
+
+    [Fact]
+    public void A_lost_lease_lands_a_declared_code_whose_words_never_blame_the_provider()
+    {
+        var result = AgentRunExecutor.ModelCredentialLeaseLostResult();
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost);
+        result.ExitReason.ShouldBe("model_credential_lease_lost", "the exit reason is read by the lane classifier and by the retry verdict — renaming it is a wire break, not a refactor");
+
+        FailureCodes.All.ShouldContain(FailureCodes.ModelCredentialLeaseLost,
+            "RealModelRunClassifier.IsGatewayInfra reserves every code in this set as OUR fault; outside it, a run this codebase deliberately ended would be re-read as a gateway skip and let a real gate go green");
+
+        // The words are the change. What it replaced was a run that went on failing to connect until its spec
+        // timeout — indistinguishable, to the first reader, from the provider being down.
+        var error = result.Error.ShouldNotBeNull();
+        error.ShouldContain("worker", Case.Insensitive, "the cause has to name the worker restart, or the reader is left to guess");
+        error.ShouldContain("Retry", Case.Insensitive, "an operator-facing terminal that does not say what to do next is a dead end");
+        error.ShouldNotContain("provider", Case.Insensitive, "the provider is fine; sending a reader to check one costs them the hour this sentence exists to save");
+        error.ShouldNotContain("gateway", Case.Insensitive, "same reason — a gateway-shaped word here is exactly the misdiagnosis this outcome removes");
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────

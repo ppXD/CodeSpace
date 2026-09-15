@@ -61,3 +61,32 @@ public sealed class ModelCredentialBrokerUnavailableException : Exception, IFail
 
     public ModelCredentialBrokerUnavailableException(string message) : base(message) { }
 }
+
+/// <summary>
+/// The worker holding a run's brokered lease went away, so the detached agent's model access ended with it. The lease
+/// is process-local — that is what makes revocation real — so nothing any later pass does can re-open it: the child
+/// still holds a base URL naming a port that died, and every model call it makes from here fails to connect.
+///
+/// <para>Unavailable, like its sibling above, and for the same reason: nothing about the LAUNCH can be changed to make
+/// it work, and the identical launch succeeds untouched on a live worker. That is also why the remedy it states is a
+/// plain retry — this is the one brokerage failure that is nobody's mistake.</para>
+/// </summary>
+public sealed class ModelCredentialLeaseLostException : Exception, IFailure
+{
+    /// <summary>
+    /// What an operator is told. It names the cause, says the attempt is over, and says what to do — deliberately in
+    /// OUR vocabulary, because what it replaced was a run that silently degraded to its spec timeout while every model
+    /// call failed to connect, which reads as a provider outage to whoever sees it first. Nothing here may say
+    /// "provider" or "gateway": the provider is fine, and a reader who goes looking at one loses the hour this sentence
+    /// exists to save. Pinned by a unit test — the words ARE the fix.
+    /// </summary>
+    public const string Explanation =
+        "The worker holding this run's model credential lease restarted, so the agent's model access ended with it. " +
+        "This attempt cannot continue — it can make no further model call — and was stopped rather than left running without one. " +
+        "Retry to start a fresh attempt on a live worker; nothing about the run's own inputs needs to change.";
+
+    FailureKind IFailure.Kind => FailureKind.Unavailable;
+    string IFailure.Code => FailureCodes.ModelCredentialLeaseLost;
+
+    public ModelCredentialLeaseLostException() : base(Explanation) { }
+}
