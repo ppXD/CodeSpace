@@ -229,11 +229,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
         var redactor = SecretRedactor.None;
 
-        // The pre-launch budget claim, once this run makes one. Declared OUT here (not inside the try) so EVERY
-        // terminal — the clean fold and the executor-error catch — settles the same row; a tear-down leaves it live
-        // for the expiry sweep, which is what its deadline is for.
-        RunSpendClaim? spendClaim = null;
-
         // The workspace clone is disposed in the finally on a TERMINAL exit (success / failure), but DELIBERATELY
         // left in place when the worker is torn down (OperationCanceledException): the setsid-detached agent is
         // still running with its cwd inside this clone, so deleting it would pull the directory out from under the
@@ -449,9 +444,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             // 5c: RESERVE the CLI's spend before the CLI starts. Until here the quick lane was MONITORED only — every
-            // dollar it spent became visible to admission and to the team cap after the money was gone. The claim is
-            // settled at the terminal fold below.
-            spendClaim = await AdmitRunSpendAsync(run, effectiveTask, modelPrices, cancellationToken).ConfigureAwait(false);
+            // dollar it spent became visible to admission and to the team cap after the money was gone. One claim per
+            // CLI INVOCATION, settled the moment that invocation exits (below).
+            var spendClaim = await AdmitRunSpendAsync(run, effectiveTask, modelPrices, RunSpendScopeKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
 
             if (spendClaim is { RefusedDetail: { } refusedDetail })
             {
@@ -464,6 +459,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
             result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
+
+            // The CLI has exited, so its spend is OBSERVED — settle the claim NOW, before verification. Everything
+            // below (the output-review critic, the S8 agent reviewer, its co-sign) admits against this same run's
+            // ceiling, so a claim still holding the remaining cap here refuses all of them: the critic degrades
+            // silently to ReviewFailed and the reviewer's own run fails `run_budget_exhausted`. Settling first means
+            // they are judged against what the agent ACTUALLY spent, which is the only honest comparison anyway.
+            spendClaim = await SettleInvocationSpendAsync(spendClaim, result, effectiveTask, modelPrices, cancellationToken).ConfigureAwait(false);
 
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
             // individually best-effort side effects (diff, offload, push, manifest). A crash inside the window
@@ -540,8 +542,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // the string join's empty short-circuits did.
                 transcript.MarkSeam(ReviseTranscriptSeam);
 
+                // This round is ANOTHER physical CLI invocation, so it gets its OWN claim against whatever the run
+                // has left — the previous round's is already settled at its observed spend. A refusal stops the loop
+                // rather than failing the run: the round that already succeeded produced a real result, and throwing
+                // it away because the NEXT attempt has no headroom would lose work the operator already paid for.
+                spendClaim = await AdmitRunSpendAsync(run, reviseTask, modelPrices, RunSpendScopeKey(agentRunId, round), cancellationToken).ConfigureAwait(false);
+
+                if (spendClaim is { RefusedDetail: { } roundRefusal })
+                {
+                    spendClaim = null;
+                    await AppendReviseBudgetStopEventAsync(owner, roundRefusal, cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
                 var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
+
+                // This invocation has exited too — settle before ITS verification, for the same reason round 0 does.
+                spendClaim = await SettleInvocationSpendAsync(spendClaim, result, reviseTask, modelPrices, cancellationToken).ConfigureAwait(false);
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
@@ -577,7 +595,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // re-commit, never as a terminal run with an unresolved promise.
             await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result, effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken, spendClaim).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunLaunchAdmittedException admitted)
         {
@@ -615,7 +633,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // A launch that got as far as reserving may already have billed a provider, so this terminal settles the
             // claim PESSIMISTICALLY (no observed cost ⇒ Indeterminate at the reserved amount) rather than leaving it
             // live. A failure is not evidence that nothing was spent.
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken, spendClaim).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -710,7 +728,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // The claim the ORIGINAL launch minted, rebuilt from facts the run row still carries — this worker never saw
         // the reserve. Without it a run that finishes through re-attach (the normal shape after a deploy or a worker
         // restart) would hold its whole estimate until the reservation's deadline, so every restart would burn cap.
-        var reattachSpendClaim = await RebuildRunSpendClaimAsync(run, task, cancellationToken).ConfigureAwait(false);
+        // Round 0's key, because that is the invocation this re-attach is observing: any later round's claim belongs
+        // to an invocation that only the original worker's loop could have made, and the backstop closes those.
+        var reattachSpendClaim = await RebuildRunSpendClaimAsync(run, task, RunSpendScopeKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
 
         // Resolve a redactor for the re-opened endpoint's tool-result text — fresh from the run's credential, in its
         // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
@@ -756,14 +776,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // here either — null keeps the fail-closed posture.
             result = await GradeAcceptanceIfPresentAsync(new(run, task, null, owner), result, cancellationToken).ConfigureAwait(false);
 
-            result = AgentRunBudget.Apply(task, result, task.MaxCostUsd is null ? ModelPriceResolver.Empty : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false));
+            var reattachPrices = await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
+            result = AgentRunBudget.Apply(task, result, reattachPrices);
+
+            // The observed invocation is priced — settle the claim its LAUNCH minted, exactly as the live path settles
+            // at each invocation's exit. The re-attach has no revise loop and no critic of its own, but settling here
+            // rather than at the terminal keeps one rule: a claim closes when the invocation it paid for has exited.
+            await SettleInvocationSpendAsync(reattachSpendClaim, result, task, reattachPrices, cancellationToken).ConfigureAwait(false);
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
 
             await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result, task), cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken, reattachSpendClaim).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunOwnershipLostException)
         {
@@ -777,7 +803,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during re-attach", agentRunId);
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, cancellationToken, reattachSpendClaim).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -999,20 +1025,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// notification nor terminal cleanup. Terminal-write ACK recovery and durable notification are separate from
     /// claim/activation recovery.
     ///
-    /// <para>This is also the executor's ONE settle site for a pre-launch budget claim (<paramref name="spendClaim"/>,
-    /// null for a launch that reserved nothing). Settling HERE rather than per catch arm is what makes the close
-    /// exhaustive: the clean fold, the executor-error catch and the RE-ATTACH landing all pass through this method,
-    /// so a run that finishes on a different worker after a restart still releases the headroom it did not spend.
-    /// Immediately AFTER the terminal CAS, never before — a CAS this observer loses means another owner will land the
-    /// run, and settling first would close a claim on that owner's behalf.</para>
+    /// <para>It is also the BACKSTOP that closes any budget claim this run left live. Each CLI invocation settles its
+    /// own claim at its own exit (that is what keeps the run's remaining cap available to the output-review ladder
+    /// that runs right after), so on a clean path there is nothing here to do. What this catches is the abnormal
+    /// exit — a throw between a reserve and its settle, a landing arm that never held the claim at all. It takes no
+    /// claim argument ON PURPOSE: it finds this run's still-live rows by scope-key prefix, so EVERY caller, present
+    /// and future, closes them by construction rather than by remembering to thread a parameter. Immediately AFTER
+    /// the terminal CAS, never before — a CAS this observer loses means another owner will land the run, and
+    /// settling first would close a claim on that owner's behalf.</para>
     /// </summary>
-    private async Task CompleteAndNotifyAsync(AgentRunOwnerToken owner, Guid teamId, AgentRunResult result, CancellationToken cancellationToken, RunSpendClaim? spendClaim = null)
+    private async Task CompleteAndNotifyAsync(AgentRunOwnerToken owner, Guid teamId, AgentRunResult result, CancellationToken cancellationToken)
     {
         var runId = owner.RunId;
         var expectedEpoch = owner.Epoch;
         await _runs.CompleteAsync(owner, result, cancellationToken).ConfigureAwait(false);
 
-        await SettleRunSpendAsync(spendClaim, result, cancellationToken).ConfigureAwait(false);
+        await CloseLiveRunSpendClaimsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
 
@@ -1068,7 +1096,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// never refuse, is excluded from every committed sum, and surfaces in the Room's own unbudgeted total rather than
     /// as an absence. Only a CAPPED run mints a real admission.</para>
     /// </summary>
-    private async Task<RunSpendClaim?> AdmitRunSpendAsync(AgentRun run, AgentTask task, IReadOnlyDictionary<string, ModelPrice> modelPrices, CancellationToken cancellationToken)
+    private async Task<RunSpendClaim?> AdmitRunSpendAsync(AgentRun run, AgentTask task, IReadOnlyDictionary<string, ModelPrice> modelPrices, string scopeKey, CancellationToken cancellationToken)
     {
         if (run.WorkflowRunId is not { } workflowRunId) return null;
 
@@ -1078,7 +1106,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // fan-out that staged it already admitted the work at its own grain, so this run records unbudgeted rather
         // than claiming the same money twice.
         var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
-        var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), run.Id.ToString("N"), task.BudgetSpentUsd ?? 0m);
+        var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey, task.BudgetSpentUsd ?? 0m);
 
         // The rates admission valued this launch at — stamped as price_version so a later price edit can never
         // silently re-value what was admitted. Null when nothing prices the dispatched model; an unpriced admission
@@ -1162,14 +1190,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// the restart. Null when the launch could not have reserved. A settle against a row that never existed is a
     /// no-op UPDATE, so rebuilding for a run that was refused — or never admitted — costs nothing and risks nothing.
     /// </summary>
-    private async Task<RunSpendClaim?> RebuildRunSpendClaimAsync(AgentRun run, AgentTask task, CancellationToken cancellationToken)
+    private async Task<RunSpendClaim?> RebuildRunSpendClaimAsync(AgentRun run, AgentTask task, string scopeKey, CancellationToken cancellationToken)
     {
         if (run.WorkflowRunId is not { } workflowRunId) return null;
 
         var routePlanJson = await RunRoutePlanJsonAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
         var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
 
-        return new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), run.Id.ToString("N"), task.BudgetSpentUsd ?? 0m);
+        return new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey, task.BudgetSpentUsd ?? 0m);
     }
 
     /// <summary>A capped run mints a real admission; a run whose route declares no ceiling records the same <c>unbudgeted:</c> observability row every other un-metered plane does, so "no cap" reads as a stated fact rather than a missing row.</summary>
@@ -1192,31 +1220,107 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         Error = $"Agent run refused before launch: {Supervisor.SupervisorStopReasons.CostCapReached} ({detail}).",
     };
 
+    /// <summary>The ledger scope key for ONE CLI invocation of this run. Round 0 keeps the bare run id — the key every existing row carries — and each revise round gets its own suffix, so a run that invokes the CLI N times holds N claims and settles each when ITS invocation exits.</summary>
+    private static string RunSpendScopeKey(Guid agentRunId, int round) => round == 0 ? agentRunId.ToString("N") : $"{agentRunId:N}/r{round}";
+
     /// <summary>
-    /// Settle the pre-launch claim at the terminal fold. A known spend settles EXACTLY, including UP past the
-    /// reservation — a CLI has no wire ceiling, so an overshoot is a real bill and recording the estimate instead
-    /// would under-count the team's cap. An unpriceable or unobserved outcome settles null, which the ledger records
-    /// as Indeterminate at the reserved amount: pessimistic, never a fabricated zero.
+    /// Settle ONE invocation's claim the moment that invocation exits. Returns null so the caller's live-claim
+    /// variable is cleared in the same statement.
     ///
-    /// <para>Best-effort, exactly like the ledger's other settle sites: the run has produced its result, and an
-    /// accounting failure must not replace it. A settle this never reaches (a worker tear-down) is what the
-    /// reservation's deadline exists for — the expiry sweep moves it to Indeterminate, still holding its headroom.</para>
+    /// <para>The timing is the point. Everything the executor does AFTER a CLI exits — the output-review critic, the
+    /// S8 agent reviewer, its co-sign — admits against this same run's ceiling, and a claim still holding the run's
+    /// remaining cap refuses all of them: the critic degrades silently to <c>ReviewFailed</c> and the reviewer's own
+    /// agent run fails <c>run_budget_exhausted</c>. Settling at the invocation's exit means the review ladder is
+    /// judged against what the agent ACTUALLY spent — which is also the only figure worth comparing a cap to.</para>
+    ///
+    /// <para>A known spend settles EXACTLY, including UP past the reservation: a CLI has no wire ceiling, so an
+    /// overshoot is a real bill and recording the estimate instead would under-count the team's cap. An unpriceable
+    /// outcome settles null, which the ledger records as Indeterminate at the reserved amount — pessimistic, never a
+    /// fabricated zero. Best-effort, like the ledger's other settle sites: the invocation has produced its result and
+    /// an accounting failure must not replace it.</para>
     /// </summary>
-    private async Task SettleRunSpendAsync(RunSpendClaim? claim, AgentRunResult result, CancellationToken cancellationToken)
+    private async Task<RunSpendClaim?> SettleInvocationSpendAsync(RunSpendClaim? claim, AgentRunResult result, AgentTask task, IReadOnlyDictionary<string, ModelPrice> modelPrices, CancellationToken cancellationToken)
     {
-        if (claim is null) return;
+        if (claim is null) return null;
 
         using var scope = _scopeFactory.CreateScope();
-        var ledger = scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
 
-        try { await ledger.SettleAsync(claim.WorkflowRunId, claim.TeamId, claim.Kind, claim.ScopeKey, ObservedRunSpendUsd(claim, result), cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            await WarnOnMissingSpendRowAsync(scope, claim, cancellationToken).ConfigureAwait(false);
+            await scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>()
+                .SettleAsync(claim.WorkflowRunId, claim.TeamId, claim.Kind, claim.ScopeKey, ObservedInvocationUsd(result, task, modelPrices), cancellationToken).ConfigureAwait(false);
+        }
         catch (OperationCanceledException) { /* torn down — the expiry sweep reconciles the live reservation */ }
-        catch (Exception ex) { _logger.LogWarning(ex, "Agent run {RunId} could not settle its budget reservation; the expiry sweep reconciles it pessimistically", claim.ScopeKey); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Agent run {RunId} could not settle budget reservation {Kind}/{ScopeKey}; the expiry sweep reconciles it pessimistically", claim.WorkflowRunId, claim.Kind, claim.ScopeKey); }
+
+        return null;
     }
 
-    /// <summary>THIS run's own observed spend: the retry chain's cumulative total minus what earlier attempts already settled on their own rows. Null — the honest unknown — whenever the fold could not price the CLI's usage.</summary>
-    private static decimal? ObservedRunSpendUsd(RunSpendClaim claim, AgentRunResult result) =>
-        result is { CostIndeterminate: false, CumulativeCostUsd: { } chainTotal } ? Math.Max(0m, chainTotal - claim.PriorChainSpendUsd) : null;
+    /// <summary>A settle that matches no row is a KEY mismatch, not a no-op — the reserve and the settle disagreeing on kind or scope key would silently leave every claim live. Louder than the silence it replaces, and cheap: one indexed lookup per invocation.</summary>
+    private async Task WarnOnMissingSpendRowAsync(IServiceScope scope, RunSpendClaim claim, CancellationToken cancellationToken)
+    {
+        if (await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
+                .AnyAsync(r => r.WorkflowRunId == claim.WorkflowRunId && r.Kind == claim.Kind && r.ScopeKey == claim.ScopeKey, cancellationToken).ConfigureAwait(false))
+            return;
+
+        _logger.LogWarning("Agent run spend settle found no reservation to close on run {RunId} for kind {Kind} scope {ScopeKey} — the reserve and the settle disagree on the row's identity", claim.WorkflowRunId, claim.Kind, claim.ScopeKey);
+    }
+
+    /// <summary>
+    /// What THIS invocation cost, for the ledger. Prefers the fold's own figure, and prices the observed usage
+    /// directly when the fold declined to.
+    ///
+    /// <para>The fallback is not redundant: <c>AgentRunBudget.Apply</c> returns early for a task with no
+    /// <c>MaxCostUsd</c>, so a run capped only by its ROUTE (the S8 reviewer's own agent run is exactly this shape)
+    /// produced no cost at all — and a null here settles Indeterminate at the full reserve, holding that headroom for
+    /// the run forever and for the team's rolling window. The ledger needs the observation whenever prices resolve,
+    /// not only when a task declared its own ceiling. <c>Apply</c>'s contract is deliberately untouched:
+    /// <c>CostIndeterminate</c> still means "a CAPPED run could not be priced", which is what every consumer of the
+    /// result — the node's cap check, the qualification numerator — reads it as.</para>
+    /// </summary>
+    private static decimal? ObservedInvocationUsd(AgentRunResult result, AgentTask task, IReadOnlyDictionary<string, ModelPrice> modelPrices)
+    {
+        if (result.CostIndeterminate) return null;
+        if (result.CostUsd is { } priced) return Math.Max(0m, priced);
+        if (result.TokenUsage is not { } usage) return null;
+
+        return LlmUsageCost.Usd(result.Model ?? task.Model, new LlmUsage { InputTokens = usage.InputTokens, OutputTokens = usage.OutputTokens }, modelPrices);
+    }
+
+    /// <summary>
+    /// The BACKSTOP: close every claim this run still holds, pessimistically. Each invocation settles its own claim
+    /// at its own exit, so on a clean path this finds nothing; what it catches is a throw between a reserve and its
+    /// settle, and any terminal that never held a claim at all.
+    ///
+    /// <para>It finds the rows by SCOPE-KEY PREFIX rather than taking a claim argument, so every caller of
+    /// <see cref="CompleteAndNotifyAsync"/> — including ones added later — closes them by construction instead of by
+    /// remembering to thread a parameter. The run id is a GUID, so the prefix cannot reach another run's row; the
+    /// team filter is belt-and-braces. Settling null keeps the pessimism the ledger already applies to an unknown
+    /// bill, and a row already Settled in band is untouched (<c>SettleAsync</c> never reopens a confirmed receipt).</para>
+    /// </summary>
+    private async Task CloseLiveRunSpendClaimsAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var prefix = agentRunId.ToString("N");
+        var unbudgeted = $"{Workflows.Budget.BudgetKinds.UnbudgetedPrefix}{Workflows.Budget.BudgetKinds.AgentRunMonitored}";
+
+        using var scope = _scopeFactory.CreateScope();
+
+        try
+        {
+            var live = await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
+                .Where(r => r.TeamId == teamId && r.ScopeKey.StartsWith(prefix) && (r.Kind == Workflows.Budget.BudgetKinds.AgentRunMonitored || r.Kind == unbudgeted) && r.State != Workflows.Budget.BudgetReservationStates.Settled)
+                .Select(r => new { r.WorkflowRunId, r.Kind, r.ScopeKey })
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            var ledger = scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
+
+            foreach (var row in live)
+                await ledger.SettleAsync(row.WorkflowRunId, teamId, row.Kind, row.ScopeKey, actualUsd: null, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* torn down — the expiry sweep reconciles whatever is still live */ }
+        catch (Exception ex) { _logger.LogWarning(ex, "Agent run {RunId} could not close its live budget reservations; the expiry sweep reconciles them pessimistically", agentRunId); }
+    }
 
     /// <summary>
     /// Close the run's live harness execution. This is the ONE place every executor terminal passes through — the
@@ -2323,6 +2427,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-stalled event", runId);
+        }
+    }
+
+    /// <summary>The budget-stopped-revision announcement's pinned prefix — the operator-visible marker that a round was never bought, not that it ran and failed.</summary>
+    internal const string ReviseBudgetStoppedPrefix = "Revision stopped — the run's cost cap had no headroom for another attempt";
+
+    /// <summary>Announce that the revise loop stopped because the ledger refused the NEXT invocation's claim. The round that already succeeded keeps its result: throwing away finished work because the following attempt cannot be afforded would lose what the operator already paid for. Best-effort, exactly like the stalled announcement above.</summary>
+    private async Task AppendReviseBudgetStopEventAsync(AgentRunOwnerToken owner, string detail, CancellationToken cancellationToken)
+    {
+        var runId = owner.RunId;
+        try
+        {
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseBudgetStoppedPrefix}. {detail}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-budget-stop event", runId);
         }
     }
 

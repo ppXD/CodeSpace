@@ -254,10 +254,11 @@ public partial class AgentRunExecutorTests
         // (RealSupervisorActionExecutor) against the SAME workflow run id the agent run is bound to. So the money is
         // already claimed on this agent's behalf.
         // MUTATION THIS CATCHES: admitting every agent against the run cap regardless of projection. Both fixtures
-        // are a capped run mid-fan-out — with the projection check gone, the agent's own claim is summed ALONGSIDE
-        // the ancestor's by CommittedInTxAsync, so the run and team caps see this CLI twice and ReserveAsync refuses
-        // (committed == cap), killing every agent a capped Standard or Deep run staged. No other test in the suite
-        // drives a fan-out agent through the real executor.
+        // are a capped run mid-fan-out — with the projection check gone the agent's own claim is summed ALONGSIDE the
+        // ancestor's by CommittedInTxAsync, so the ancestor's claim leaves ZERO remaining and the agent is REFUSED
+        // typed (run_budget_exhausted) before it launches, killing every agent a capped Standard or Deep run staged.
+        // The committed assertion at the end is what pins the other half: once admitted, the CLI must be counted
+        // once, not twice, against the run and team caps. No other test drives a fan-out agent through the executor.
         var teamId = await SeedTeamAsync();
         var workflowRunId = await SeedRoutedWorkflowRunAsync(teamId, WorkflowsTestSeed.RouteJsonFor(projectionKind, capUsd: 5m));
 
@@ -424,6 +425,121 @@ public partial class AgentRunExecutorTests
         row.SettledUsd.ShouldBeNull("closing the label never invents a bill");
     }
 
+    [Fact]
+    public async Task The_output_review_ladder_is_admitted_against_what_the_agent_actually_spent()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // THE ordering invariant. The claim is minted for 100% of the run's remaining cap; everything the executor
+        // does after the CLI exits — the output-review critic, the S8 agent reviewer, its co-sign — admits against
+        // that SAME run ceiling. Settle the claim only at the terminal and the critic's own ReserveAsync sees
+        // committed == cap and is refused, which LlmStructuredCritic swallows into a silent ReviewFailed: a Gate-
+        // configured run ships unreviewed and says nothing. The probe below runs the REAL LlmBudgetGuard admission
+        // against the REAL scope BuildCriticCallScopeAsync pushed, at the exact moment the executor calls the critic.
+        // MUTATION THIS CATCHES: moving the settle back to CompleteAndNotifyAsync (or after VerifyProducedWorkAsync).
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateReviewedRunAsync(teamId, workflowRunId, maxCostUsd: 5m);
+        var critic = new BudgetProbingCritic();
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript), critic: critic);
+
+        critic.Invoked.ShouldBeTrue("the run was configured for Gate review — if the critic never ran, this test proves nothing");
+        critic.CommittedAtReview.ShouldBe(PricedUsageCostUsd, "at review time the run's committed total must be the agent's OBSERVED spend, not the estimate it was admitted for");
+        critic.Admitted.ShouldBe(true, "the critic's own model call must be admissible — diagnose by checking whether the invocation's claim was settled before VerifyProducedWorkAsync");
+
+        (await ReservationOfAsync(workflowRunId, runId)).ShouldNotBeNull().State.ShouldBe(BudgetReservationStates.Settled);
+    }
+
+    [Fact]
+    public async Task A_reviewer_shaped_run_under_a_route_cap_settles_to_observed_not_indeterminate()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The S8 agent reviewer stages its own agent run bound to the SAME workflow run, and its task declares no
+        // MaxCostUsd of its own. AgentRunBudget.Apply returns at its first line for such a task, so the fold produces
+        // no cost at all.
+        // MUTATION THIS CATCHES: taking the ledger's observation from the fold alone. The claim would settle null →
+        // Indeterminate at the FULL remaining cap, held for the run forever and for the team's 30-day window — so one
+        // reviewer run would exhaust the ceiling it was supposed to be reviewing under.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: null, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript));
+
+        var row = await ReservationOfAsync(workflowRunId, runId);
+        row.ShouldNotBeNull();
+        row.State.ShouldBe(BudgetReservationStates.Settled, "the usage was priceable, so the ledger must record it — the fold declining to price an uncapped task is not the ledger's ignorance");
+        row.SettledUsd.ShouldBe(PricedUsageCostUsd);
+
+        // Apply's own contract is deliberately untouched: CostIndeterminate still means "a CAPPED run could not be
+        // priced", which is what the node's cap check and the qualification numerator read it as.
+        var result = await PersistedResultAsync(runId);
+        result.CostUsd.ShouldBeNull("an uncapped task's result is unchanged — only the LEDGER's observation was widened");
+        result.CostIndeterminate.ShouldBeFalse();
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IBudgetLedger>().CommittedUsdAsync(workflowRunId, teamId, CancellationToken.None))
+            .ShouldBe(PricedUsageCostUsd, "the $4.50 it did not spend is back in the ceiling this reviewer was reviewing under");
+    }
+
+    [Fact]
+    public async Task Each_CLI_invocation_gets_its_own_claim_and_settles_it_at_its_own_exit()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A revise round is ANOTHER physical CLI invocation. MUTATION THIS CATCHES: one claim for the whole run —
+        // round 1 would then spend under a claim that was already settled at round 0's figure, so the second
+        // invocation's money is admitted against nothing and the team cap never sees it.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateReviewedRunAsync(teamId, workflowRunId, maxCostUsd: 5m, mode: ReviewMode.Improve, reviseRounds: 1);
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript), critic: new BudgetProbingCritic { Approve = false, Critique = "tighten the answer" });
+
+        (await PersistedResultAsync(runId)).ReviseRounds.ShouldBe(1, "the Improve critic flagged the output, so a second CLI invocation ran — without it this test proves nothing");
+
+        var first = await ReservationOfAsync(workflowRunId, runId);
+        var second = await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1");
+
+        first.ShouldNotBeNull("round 0 keeps the bare run-id key every existing row carries");
+        first.State.ShouldBe(BudgetReservationStates.Settled);
+        second.ShouldNotBeNull("round 1 is a separate invocation and mints a separate claim");
+        second.State.ShouldBe(BudgetReservationStates.Settled, "each claim closes when ITS invocation exits");
+        // $5 ceiling − round 0's observed $0.50 − the critic's own settled $0.01. The critic's cent appearing here is
+        // itself the proof of the ordering above: it could only have been admitted, spent and settled because round
+        // 0's claim was already closed when the review ran.
+        second.ReservedUsd.ShouldBe(4.49m, "the second invocation claims what the first invocation AND its review left, not the whole ceiling");
+    }
+
+    [Fact]
+    public async Task A_terminal_that_holds_no_claim_still_closes_the_rows_the_run_left_live()
+    {
+        // The backstop, found by scope-key PREFIX rather than by a threaded parameter — so a landing arm added later
+        // (a lost-model-access fold, a future recovery path) closes this run's claims by construction.
+        // MUTATION THIS CATCHES: settling only the claim a caller happened to pass. A stray row from a throw between
+        // reserve and settle would sit live until its deadline, then hold its whole estimate as Indeterminate.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
+
+        // Two rows the run's own invocations would have minted, left live exactly as a mid-flight throw leaves them.
+        using (var scope = _fixture.BeginScope())
+        {
+            var ledger = scope.Resolve<IBudgetLedger>();
+            await ledger.ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, $"{runId:N}/r1", 1m, 5m, "prices-v1", null, null, CancellationToken.None);
+            await ledger.ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, $"{runId:N}/r2", 1m, 5m, "prices-v1", null, null, CancellationToken.None);
+        }
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript));
+
+        foreach (var round in new[] { 1, 2 })
+            (await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r{round}"))
+                .ShouldNotBeNull().State.ShouldBe(BudgetReservationStates.Indeterminate,
+                    customMessage: $"round {round}'s stray claim must be closed pessimistically at the terminal — an unobserved invocation is not evidence that nothing was spent");
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -476,12 +592,59 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>The ONE row this test's own run owns — never a sweep tally, which a bounded global pass can fill with other tests' rows.</summary>
-    private async Task<BudgetReservation?> ReservationOfAsync(Guid workflowRunId, Guid agentRunId, string? kind = null)
+    private async Task<BudgetReservation?> ReservationOfAsync(Guid workflowRunId, Guid agentRunId, string? kind = null, string? scopeKey = null)
     {
         using var scope = _fixture.BeginScope();
+        var key = scopeKey ?? agentRunId.ToString("N");
 
         return await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
-            .SingleOrDefaultAsync(r => r.WorkflowRunId == workflowRunId && r.Kind == (kind ?? BudgetKinds.AgentRunMonitored) && r.ScopeKey == agentRunId.ToString("N"));
+            .SingleOrDefaultAsync(r => r.WorkflowRunId == workflowRunId && r.Kind == (kind ?? BudgetKinds.AgentRunMonitored) && r.ScopeKey == key);
+    }
+
+    /// <summary>A run configured for output review — the mainstream quick-lane shape, since TaskLaunchService floors review at Gate for Delivery and Improve for Unattended.</summary>
+    private async Task<Guid> CreateReviewedRunAsync(Guid teamId, Guid workflowRunId, decimal? maxCostUsd, ReviewMode mode = ReviewMode.Gate, int? reviseRounds = null)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "claude-opus-4-8", TimeoutSeconds = 1800, MaxCostUsd = maxCostUsd, OutputReviewMode = mode, MaxReviseRounds = reviseRounds },
+            teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
+
+        return run.Id;
+    }
+
+    /// <summary>
+    /// Stands in for the reviewer's MODEL CALL only. It drives the REAL <c>LlmBudgetGuard</c> admission against the
+    /// REAL scope <c>AgentRunExecutor.BuildCriticCallScopeAsync</c> pushed, at the exact moment the executor invokes
+    /// the critic — so what it records is whether the run's own ledger would have let the output review happen. A
+    /// stubbed verdict would have proved nothing about admission; this is the admission.
+    /// </summary>
+    private sealed class BudgetProbingCritic : CodeSpace.Core.Services.Review.IStructuredCritic
+    {
+        public bool Invoked { get; private set; }
+        public bool? Admitted { get; private set; }
+        public decimal? CommittedAtReview { get; private set; }
+        public bool Approve { get; init; } = true;
+        public string? Critique { get; init; }
+
+        public async Task<CodeSpace.Messages.Review.CriticVerdict> ReviewAsync(CodeSpace.Core.Services.Review.CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
+        {
+            Invoked = true;
+            var scope = CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Current;
+
+            if (scope is { Budget: { } budget })
+                CommittedAtReview = await budget.CommittedUsdAsync(scope.RunId, scope.TeamId, cancellationToken);
+
+            try
+            {
+                await CodeSpace.Core.Services.Workflows.Llm.LlmBudgetGuard.GuardedAsync(
+                    scope, "claude-opus-4-8", "review this", "the artifact", 256,
+                    _ => Task.FromResult(0.01m), usd => usd, cancellationToken);
+                Admitted = true;
+            }
+            catch (CodeSpace.Core.Services.Workflows.Llm.LlmBudgetExceededException) { Admitted = false; }
+
+            return new CodeSpace.Messages.Review.CriticVerdict { Mode = request.Mode, Approved = Approve, Rationale = "probe", Critique = Critique };
+        }
     }
 
     private async Task<AgentRun> PersistedRunAsync(Guid runId)
