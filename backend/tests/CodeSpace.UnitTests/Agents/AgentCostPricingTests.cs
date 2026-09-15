@@ -123,6 +123,86 @@ public sealed class AgentCostPricingTests
     public void MaxPricePerMillionUsd_const_is_pinned() =>
         AgentCostPricing.MaxPricePerMillionUsd.ShouldBe(100_000m);
 
+    [Fact]
+    public void Digest_changes_when_any_rate_or_source_changes()
+    {
+        // MUTATION THIS CATCHES: hashing only the model name, or only one of the two rates. The digest is what a
+        // budget reservation stamps as its price_version and what a result carries as its audit stamp — if an output
+        // rate doubling left the digest untouched, two admissions made under materially different prices would be
+        // indistinguishable, which is the whole defect the snapshot exists to close.
+        var baseline = ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 10m);
+
+        baseline.Digest.ShouldBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 10m).Digest, "the same source + rates must hash identically, or nothing can be compared across runs");
+        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest, "a changed INPUT rate must change the digest");
+        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2m, 20m).Digest, "a changed OUTPUT rate must change the digest");
+        baseline.Digest.ShouldNotBe(ModelPriceSnapshot.Of(ModelPriceSources.EnvOverride, 2m, 10m).Digest, "the same rates from a DIFFERENT table are a different pricing decision");
+    }
+
+    [Fact]
+    public void Digest_is_culture_invariant_so_two_hosts_agree_on_one_price()
+    {
+        // A culture-dependent decimal format ("2,5" on de-DE) would mint two digests for one price, so a run admitted
+        // on one worker would look re-priced on another. Pinned by driving the mint under a comma-decimal culture.
+        var original = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5m, 10m).Digest
+                .ShouldBe("2a14725d968a2d08", "the canonical string is invariant-culture (sha256 of 'credential-model-row|2.5|10') — a host's locale must never change a price's identity");
+
+            // Trailing scale is a storage artefact of NUMERIC(12,4), not a different price: 10 and 10.0000 must hash the same.
+            ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, 2.5000m, 10.0000m).Digest.ShouldBe("2a14725d968a2d08");
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = original;
+        }
+    }
+
+    [Fact]
+    public void SnapshotFor_names_which_of_the_three_tables_priced_the_model()
+    {
+        // The resolution ORDER is the contract PriceFor already promises (row → env → built-in); this pins that the
+        // snapshot NAMES the winner rather than guessing. MUTATION: checking the built-in table before the env would
+        // attribute an operator's correction to the seeded defaults.
+        var rowPrices = new Dictionary<string, ModelPrice> { ["claude-opus-4-8"] = new() { InputPerMillionUsd = 7m, OutputPerMillionUsd = 9m } };
+
+        WithPriceEnv("claude-opus-4-8=6/30;gpt-5.4-codex=2/8", () =>
+        {
+            AgentCostPricing.SnapshotFor("claude-opus-4-8", rowPrices).ShouldNotBeNull().Source.ShouldBe(ModelPriceSources.CredentialRow, "the operator's own row outranks both the env and the built-in table");
+            AgentCostPricing.SnapshotFor("gpt-5.4-codex", rowPrices).ShouldNotBeNull().Source.ShouldBe(ModelPriceSources.EnvOverride, "a model only the env names is priced BY the env");
+            AgentCostPricing.SnapshotFor("claude-sonnet-4-6", rowPrices).ShouldNotBeNull().Source.ShouldBe(ModelPriceSources.BuiltIn, "a model neither the row nor the env names falls through to the seeded table");
+        });
+
+        AgentCostPricing.SnapshotFor("no-such-model").ShouldBeNull("an unpriced model has no snapshot — the same honest null PriceFor returns");
+        AgentCostPricing.SnapshotFor(null).ShouldBeNull();
+    }
+
+    [Fact]
+    public void SnapshotFor_carries_exactly_the_rates_PriceFor_would_use()
+    {
+        // The two must never diverge: a snapshot claiming rates the pricer did not apply is worse than no snapshot.
+        WithPriceEnv("gpt-5.4-codex=2/8", () =>
+        {
+            var snapshot = AgentCostPricing.SnapshotFor("gpt-5.4-codex").ShouldNotBeNull();
+            var price = AgentCostPricing.PriceFor("gpt-5.4-codex").ShouldNotBeNull();
+
+            snapshot.InputUsdPerMillion.ShouldBe(price.InputPerMillionUsd);
+            snapshot.OutputUsdPerMillion.ShouldBe(price.OutputPerMillionUsd);
+        });
+    }
+
+    [Fact]
+    public void Price_source_names_are_durable_state_and_pinned()
+    {
+        // These literals land in result_json and in budget_reservation.price_version (through the digest's input).
+        // Renaming one splits the audit trail into two vocabularies and changes every future digest silently.
+        ModelPriceSources.CredentialRow.ShouldBe("credential-model-row");
+        ModelPriceSources.EnvOverride.ShouldBe("env-override");
+        ModelPriceSources.BuiltIn.ShouldBe("built-in-table");
+        ModelPriceSnapshot.UnpricedVersion.ShouldBe("unpriced");
+    }
+
     private static void WithPriceEnv(string value, Action body)
     {
         var original = Environment.GetEnvironmentVariable(AgentCostPricing.PriceTableEnvVar);

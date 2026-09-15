@@ -39,6 +39,16 @@ public static class BudgetKinds
     /// nothing to settle. Pinned by test, since the string is durable state in every existing row.
     /// </summary>
     public const string AgentAttempt = "agent-attempt";
+
+    /// <summary>
+    /// The QUICK lane's admission grain: one row per agent run, minted by <c>AgentRunExecutor</c> before the coding
+    /// CLI starts and settled at its terminal fold. Named "monitored" deliberately — a CLI has no wire ceiling, so
+    /// this reservation buys ADMISSION (refuse a launch whose run or team cap is already spent) and TEAM-CAP
+    /// accounting, never enforcement of the amount it claims. Pinned by test: the string is durable state in every
+    /// existing row, and a rename that reached only the reserve site or only the settle site would split the ledger
+    /// into reservations nothing settles.
+    /// </summary>
+    public const string AgentRunMonitored = "agent-run-monitored";
 }
 
 public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal CommittedUsd, decimal? CapUsd, string? Reason)

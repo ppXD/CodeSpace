@@ -52,5 +52,10 @@ public class SupervisorAttemptReservationTests
         // some of them splits the ledger into reservations nothing settles and a sweep that finds nothing.
         BudgetKinds.AgentAttempt.ShouldBe("agent-attempt");
         BudgetKinds.UnbudgetedPrefix.ShouldBe("unbudgeted:");
+
+        // The QUICK lane's own grain (5c). Same argument, two sites this time: AgentRunExecutor reserves under it
+        // before the CLI starts and settles under it at the terminal fold — a rename reaching only one leaves every
+        // quick-lane run holding its full cap forever.
+        BudgetKinds.AgentRunMonitored.ShouldBe("agent-run-monitored");
     }
 }

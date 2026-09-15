@@ -22,18 +22,25 @@ public static class AgentRunBudget
     {
         if (task.MaxCostUsd is null) return result;
 
+        var model = result.Model ?? task.Model;
         var usage = result.TokenUsage;
-        var cost = usage is null ? null : LlmUsageCost.Usd(result.Model ?? task.Model, new LlmUsage { InputTokens = usage.InputTokens, OutputTokens = usage.OutputTokens }, prices);
 
-        if (cost is not { } actual || task.BudgetSpentUsd is < 0) return result with { CostUsd = null, CumulativeCostUsd = null, CostIndeterminate = true };
+        // WHICH rates this fold used, stamped on EVERY priced outcome including the indeterminate ones: a run whose
+        // usage was incomplete was still valued against a specific table, and an auditor asking "what would this have
+        // cost" needs the rates as much as a run that landed a number. Null only when no table prices the model,
+        // which is also exactly when the cost below is unknowable.
+        var snapshot = AgentCostPricing.SnapshotFor(model, prices);
+        var cost = usage is null ? null : LlmUsageCost.Usd(model, new LlmUsage { InputTokens = usage.InputTokens, OutputTokens = usage.OutputTokens }, prices);
+
+        if (cost is not { } actual || task.BudgetSpentUsd is < 0) return result with { CostUsd = null, CumulativeCostUsd = null, CostIndeterminate = true, PriceSnapshot = snapshot };
 
         try
         {
-            return result with { CostUsd = actual, CumulativeCostUsd = (task.BudgetSpentUsd ?? 0m) + actual, CostIndeterminate = false };
+            return result with { CostUsd = actual, CumulativeCostUsd = (task.BudgetSpentUsd ?? 0m) + actual, CostIndeterminate = false, PriceSnapshot = snapshot };
         }
         catch (OverflowException)
         {
-            return result with { CostUsd = null, CumulativeCostUsd = null, CostIndeterminate = true };
+            return result with { CostUsd = null, CumulativeCostUsd = null, CostIndeterminate = true, PriceSnapshot = snapshot };
         }
     }
 }

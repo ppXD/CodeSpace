@@ -119,6 +119,14 @@ public sealed class RealModelAnswerReviewE2ETests
             result.CumulativeCostUsd.ShouldBe(expectedCost, "a first attempt's cumulative spend equals its observed attempt spend");
             result.CostIndeterminate.ShouldBeFalse("a live priced CLI result cannot silently degrade into unknown accounting");
 
+            // 5c: the RATES behind that figure, on the one E2E that asserts a live CLI's cost. Without the stamp the
+            // number above is unauditable — the price column has no effective-from, so editing this credential's row
+            // tomorrow silently re-values this run and nothing records what produced it.
+            var snapshot = result.PriceSnapshot.ShouldNotBeNull("a priced live run must record WHICH rates priced it");
+            snapshot.Source.ShouldBe(ModelPriceSources.CredentialRow, "the seeded credential row priced this run, not the built-in table");
+            snapshot.InputUsdPerMillion.ShouldBe(1m, "the stamp must carry the rates the fold actually applied, not a placeholder");
+            snapshot.OutputUsdPerMillion.ShouldBe(1m);
+
             var reviewed = await read.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
                 .CountAsync(r => r.RunId == workflowRunId
                                  && r.RecordType == WorkflowRunRecordTypes.InteractionCompleted

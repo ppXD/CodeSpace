@@ -81,6 +81,27 @@ public static class AgentCostPricing
         return ResolveTable().TryGetValue(name, out var price) ? price : null;
     }
 
+    /// <summary>
+    /// The same resolution <see cref="PriceFor"/> performs, plus WHICH of the three tables answered — the audit fact
+    /// a <see cref="ModelPriceSnapshot"/> carries onto a result and into a budget reservation's <c>price_version</c>.
+    /// Null exactly when <see cref="PriceFor"/> is null (the model is null/blank/unpriced everywhere), so a caller can
+    /// read "no snapshot" as "nothing priced this" without a second lookup. Pure, like everything else here.
+    /// </summary>
+    public static ModelPriceSnapshot? SnapshotFor(string? model, IReadOnlyDictionary<string, ModelPrice>? rowPrices = null)
+    {
+        if (string.IsNullOrWhiteSpace(model)) return null;
+
+        var name = model.Trim();
+
+        if (rowPrices is not null && rowPrices.TryGetValue(name, out var row) && IsUsable(row)) return ModelPriceSnapshot.Of(ModelPriceSources.CredentialRow, row);
+
+        // Env BEFORE built-in, mirroring ResolveTable's overlay: the override wins for a model it names, and only a
+        // model it does not name falls through to the seeded table.
+        if (EnvOverrides().TryGetValue(name, out var overridden)) return ModelPriceSnapshot.Of(ModelPriceSources.EnvOverride, overridden);
+
+        return DefaultPrices.TryGetValue(name, out var builtIn) ? ModelPriceSnapshot.Of(ModelPriceSources.BuiltIn, builtIn) : null;
+    }
+
     /// <summary>Whether a price can be used in <see cref="CostUsd"/>'s arithmetic without risking an overflow throw — the same bound <see cref="TryParseEntry"/> enforces on an env entry, applied to an operator's DB row.</summary>
     private static bool IsUsable(ModelPrice price) =>
         price.InputPerMillionUsd >= 0 && price.OutputPerMillionUsd >= 0
@@ -89,18 +110,32 @@ public static class AgentCostPricing
     /// <summary>The seeded defaults overlaid by the lenient env CSV. Internal so a test can drive the env override + the malformed-entry tolerance.</summary>
     internal static IReadOnlyDictionary<string, ModelPrice> ResolveTable()
     {
-        var raw = Environment.GetEnvironmentVariable(PriceTableEnvVar);
+        var overrides = EnvOverrides();
 
-        if (string.IsNullOrWhiteSpace(raw)) return DefaultPrices;
+        if (overrides.Count == 0) return DefaultPrices;
 
         var table = new Dictionary<string, ModelPrice>(DefaultPrices, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (TryParseEntry(entry, out var model, out var price)) table[model] = price;
-        }
+        foreach (var (model, price) in overrides) table[model] = price;
 
         return table;
+    }
+
+    /// <summary>ONLY the models the env override supplies a usable entry for — the half of <see cref="ResolveTable"/> that lets <see cref="SnapshotFor"/> name the env rather than the built-in table as a price's source. Empty when the variable is unset or every entry is malformed (lenient, exactly as before).</summary>
+    private static IReadOnlyDictionary<string, ModelPrice> EnvOverrides()
+    {
+        var raw = Environment.GetEnvironmentVariable(PriceTableEnvVar);
+
+        if (string.IsNullOrWhiteSpace(raw)) return ModelPriceResolver.Empty;
+
+        var overrides = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (TryParseEntry(entry, out var model, out var price)) overrides[model] = price;
+        }
+
+        return overrides;
     }
 
     /// <summary>Parse one <c>model=in/out</c> entry. Lenient: any shape error → false (the entry is skipped, never throws).</summary>

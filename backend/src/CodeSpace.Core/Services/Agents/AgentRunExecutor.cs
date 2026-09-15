@@ -229,6 +229,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
         var redactor = SecretRedactor.None;
 
+        // The pre-launch budget claim, once this run makes one. Declared OUT here (not inside the try) so EVERY
+        // terminal — the clean fold and the executor-error catch — settles the same row; a tear-down leaves it live
+        // for the expiry sweep, which is what its deadline is for.
+        RunSpendClaim? spendClaim = null;
+
         // The workspace clone is disposed in the finally on a TERMINAL exit (success / failure), but DELIBERATELY
         // left in place when the worker is torn down (OperationCanceledException): the setsid-detached agent is
         // still running with its cwd inside this clone, so deleting it would pull the directory out from under the
@@ -435,8 +440,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
+
+            // The team's operator-typed prices, loaded ONCE for BOTH the admission's price stamp and the post-hoc
+            // fold below — the same table, so the rates a reservation records are the rates the result is priced
+            // with. Skipped (and the path is byte-identical) only for a run that can neither be admitted nor priced.
+            var modelPrices = effectiveTask.MaxCostUsd is null && run.WorkflowRunId is null
+                ? ModelPriceResolver.Empty
+                : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
+
+            // 5c: RESERVE the CLI's spend before the CLI starts. Until here the quick lane was MONITORED only — every
+            // dollar it spent became visible to admission and to the team cap after the money was gone. The claim is
+            // settled at the terminal fold below.
+            spendClaim = await AdmitRunSpendAsync(run, effectiveTask, modelPrices, cancellationToken).ConfigureAwait(false);
+
+            if (spendClaim is { RefusedDetail: { } refusedDetail })
+            {
+                // Refused BEFORE any physical invocation — so the accounting fact is a known zero, exactly like the
+                // acceptance-unavailable exit above, and nothing was reserved to settle.
+                spendClaim = null;
+                await CompleteAndNotifyAsync(owner, run.TeamId, AgentRunBudget.WithoutInvocation(effectiveTask, RunSpendRefusedResult(refusedDetail)), cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
-            var modelPrices = effectiveTask.MaxCostUsd is null ? ModelPriceResolver.Empty : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
             result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
 
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
@@ -551,6 +577,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // re-commit, never as a terminal run with an unresolved promise.
             await _captureIntents.CommitAsync(agentRunId, claimedEpoch, CaptureFactsOf(result, effectiveTask), cancellationToken).ConfigureAwait(false);
 
+            await SettleRunSpendAsync(spendClaim, result, cancellationToken).ConfigureAwait(false);
+
             await CompleteAndNotifyAsync(owner, run.TeamId, result, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunLaunchAdmittedException admitted)
@@ -585,7 +613,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
+
+            // A launch that got as far as reserving may already have billed a provider, so this terminal settles the
+            // claim PESSIMISTICALLY (no observed cost ⇒ Indeterminate at the reserved amount) rather than leaving it
+            // live. A failure is not evidence that nothing was spent.
+            var failed = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) };
+            await SettleRunSpendAsync(spendClaim, failed, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, failed, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -989,6 +1023,124 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Whether observed accounting leaves no honest budget for another physical CLI invocation. Exactly-at-cap stops only further calls; the already-produced result still proceeds to its normal terminal fold.</summary>
     internal static bool CostBudgetStopsFurtherCalls(AgentTask task, AgentRunResult result) =>
         task.MaxCostUsd is { } cap && (result.CostIndeterminate || result.CumulativeCostUsd is null || result.CumulativeCostUsd >= cap);
+
+    /// <summary>
+    /// What this run's pre-launch admission claimed, so the terminal fold settles exactly that row. Private and
+    /// executor-internal: it crosses no seam, so it is not a Messages noun.
+    /// </summary>
+    /// <param name="PriorChainSpendUsd">What EARLIER attempts in this retry chain already spent — subtracted at settle, because each of those attempts settled its own row and this one must not re-claim their money.</param>
+    /// <param name="RefusedDetail">Set ONLY when the ledger refused the launch: the operator-facing stop detail, in the supervisor lane's own words. A refused claim holds no row.</param>
+    private sealed record RunSpendClaim(Guid WorkflowRunId, Guid TeamId, string Kind, string ScopeKey, decimal PriorChainSpendUsd)
+    {
+        public string? RefusedDetail { get; init; }
+    }
+
+    /// <summary>
+    /// 5c: admit this run's CLI spend against the RUN's own cost ceiling (and, through the ledger, the team's) BEFORE
+    /// the sandbox launches. The quick lane previously reserved nothing at all — <c>AgentRunBudget.Apply</c> prices
+    /// usage only AFTER the CLI has exited — so a run's spend was invisible to admission and to
+    /// <c>CommittedTeamUsdAsync</c> until the money was gone, and a launch over an already-exhausted cap still ran.
+    ///
+    /// <para><b>Reservation is not enforcement here, and cannot be.</b> The plan's "CLI 事後報價只能標 monitored cap":
+    /// an opaque coding CLI reports its usage only when it exits, so nothing can bound the bill mid-flight the way the
+    /// platform's own model calls are bounded per request. What this row buys is (a) ADMISSION — a launch whose run or
+    /// team cap is already spent fails typed before it can spend anything — and (b) TEAM-CAP ACCOUNTING, so a second
+    /// run cannot be admitted against headroom this one is about to consume. The claim is settled UP to the observed
+    /// spend at the terminal fold when the CLI overshot it; clamping down would record a bill nobody was charged.</para>
+    ///
+    /// <para>Three shapes: a BARE launch (no owning workflow run) has no run-grain cap to admit against and no Room
+    /// budget block to appear in, so it reserves nothing and reads as unadmitted — null. A run whose route declares NO
+    /// cost cap records an <c>unbudgeted:</c> row, the same shape <c>LlmBudgetGuard</c>'s null-cap path records: it can
+    /// never refuse, is excluded from every committed sum, and surfaces in the Room's own unbudgeted total rather than
+    /// as an absence. Only a CAPPED run mints a real admission.</para>
+    /// </summary>
+    private async Task<RunSpendClaim?> AdmitRunSpendAsync(AgentRun run, AgentTask task, IReadOnlyDictionary<string, ModelPrice> modelPrices, CancellationToken cancellationToken)
+    {
+        if (run.WorkflowRunId is not { } workflowRunId) return null;
+
+        var capUsd = await RunCostCapAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
+        var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), run.Id.ToString("N"), task.BudgetSpentUsd ?? 0m);
+
+        // The rates admission valued this launch at — stamped as price_version so a later price edit can never
+        // silently re-value what was admitted. Null when nothing prices the dispatched model; an unpriced admission
+        // is a materially different audit fact from a priced one, so it is recorded as such rather than as a rate.
+        var priceVersion = AgentCostPricing.SnapshotFor(task.Model, modelPrices)?.Digest ?? ModelPriceSnapshot.UnpricedVersion;
+
+        // Its OWN DI scope: the ledger opens a transaction and takes advisory locks, which must not share this
+        // executor's DbContext with the rest of the launch (the long-running-job pattern the critic's scope uses).
+        using var scope = _scopeFactory.CreateScope();
+        var admission = await scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>()
+            .ReserveAsync(workflowRunId, run.TeamId, claim.Kind, claim.ScopeKey, RunSpendEstimate(task, capUsd), capUsd, priceVersion, parentReservationId: null, Supervisor.Executors.RealSupervisorActionExecutor.AttemptReservationDeadline(task), cancellationToken).ConfigureAwait(false);
+
+        if (admission.Admitted) return claim;
+
+        _logger.LogWarning("Agent run {RunId} was refused by the budget ledger before launch: {Reason}", run.Id, admission.Reason);
+
+        return claim with { RefusedDetail = RunSpendRefusalDetail(admission, claim.Kind, capUsd ?? 0m) };
+    }
+
+    /// <summary>
+    /// What this CLI may honestly spend, in the grain it is admitted against.
+    ///
+    /// <para>CLAMPED to the run's cap: a task whose own monitored ceiling sits ABOVE the run cap can never reach it
+    /// (the run cap is the harder bound), so claiming the larger number would refuse the very FIRST launch on a fresh
+    /// run — over money it could not have spent. The two are equal on the quick lane (both projections write
+    /// <c>Route.Caps.MaxCostUsd</c> into the node's config), so this only ever bites an authored node under a routed
+    /// run — which is exactly where a silent false refusal would be hardest to diagnose.</para>
+    ///
+    /// <para>A task with NO ceiling of its own claims the whole cap: an opaque CLI has no wire bound, so the cap IS
+    /// its honest maximum. An UNCAPPED run claims ZERO — that row gates nothing, and the Room sums an unbudgeted
+    /// row's reserve as spend, so claiming a ceiling there would report money as spent while the run is still live.
+    /// The settle lands the observed figure either way.</para>
+    /// </summary>
+    internal static decimal RunSpendEstimate(AgentTask task, decimal? capUsd) =>
+        capUsd is { } cap ? Math.Min(task.MaxCostUsd ?? cap, cap) : 0m;
+
+    /// <summary>A capped run mints a real admission; a run whose route declares no ceiling records the same <c>unbudgeted:</c> observability row every other un-metered plane does, so "no cap" reads as a stated fact rather than a missing row.</summary>
+    private static string RunSpendKind(decimal? capUsd) =>
+        capUsd is null ? $"{Workflows.Budget.BudgetKinds.UnbudgetedPrefix}{Workflows.Budget.BudgetKinds.AgentRunMonitored}" : Workflows.Budget.BudgetKinds.AgentRunMonitored;
+
+    /// <summary>The refusal in the SUPERVISOR lane's own words — built through the same <c>LlmBudgetExceededException</c> surface and the same <c>BudgetStopDetail</c> reducer, so a run stopped by a team cap reads identically whichever lane hit it (a team refusal must never read as the run exhausting its own cap).</summary>
+    private static string RunSpendRefusalDetail(Workflows.Budget.BudgetAdmission admission, string kind, decimal capUsd)
+    {
+        var refused = new Workflows.Llm.LlmBudgetExceededException(kind, admission.CommittedUsd, capUsd, admission.Reason, admission.RefusedGrain);
+
+        return SupervisorTurnService.BudgetStopDetail(refused, $"${admission.CommittedUsd:0.####} committed of ${capUsd:0.####} cap");
+    }
+
+    /// <summary>The terminal result for a launch the ledger refused. Typed as the failure taxonomy's exhausted-budget code (never the generic executor error) so the classifier, the node's retry verdict and the Room all read "the cap is spent" rather than "something went wrong".</summary>
+    private static AgentRunResult RunSpendRefusedResult(string detail) => new()
+    {
+        Status = AgentRunStatus.Failed,
+        ExitReason = FailureCodes.RunBudgetExhausted,
+        Error = $"Agent run refused before launch: {Supervisor.SupervisorStopReasons.CostCapReached} ({detail}).",
+    };
+
+    /// <summary>
+    /// Settle the pre-launch claim at the terminal fold. A known spend settles EXACTLY, including UP past the
+    /// reservation — a CLI has no wire ceiling, so an overshoot is a real bill and recording the estimate instead
+    /// would under-count the team's cap. An unpriceable or unobserved outcome settles null, which the ledger records
+    /// as Indeterminate at the reserved amount: pessimistic, never a fabricated zero.
+    ///
+    /// <para>Best-effort, exactly like the ledger's other settle sites: the run has produced its result, and an
+    /// accounting failure must not replace it. A settle this never reaches (a worker tear-down) is what the
+    /// reservation's deadline exists for — the expiry sweep moves it to Indeterminate, still holding its headroom.</para>
+    /// </summary>
+    private async Task SettleRunSpendAsync(RunSpendClaim? claim, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (claim is null) return;
+
+        using var scope = _scopeFactory.CreateScope();
+        var ledger = scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
+
+        try { await ledger.SettleAsync(claim.WorkflowRunId, claim.TeamId, claim.Kind, claim.ScopeKey, ObservedRunSpendUsd(claim, result), cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* torn down — the expiry sweep reconciles the live reservation */ }
+        catch (Exception ex) { _logger.LogWarning(ex, "Agent run {RunId} could not settle its budget reservation; the expiry sweep reconciles it pessimistically", claim.ScopeKey); }
+    }
+
+    /// <summary>THIS run's own observed spend: the retry chain's cumulative total minus what earlier attempts already settled on their own rows. Null — the honest unknown — whenever the fold could not price the CLI's usage.</summary>
+    private static decimal? ObservedRunSpendUsd(RunSpendClaim claim, AgentRunResult result) =>
+        result is { CostIndeterminate: false, CumulativeCostUsd: { } chainTotal } ? Math.Max(0m, chainTotal - claim.PriorChainSpendUsd) : null;
 
     /// <summary>
     /// Close the run's live harness execution. This is the ONE place every executor terminal passes through — the
