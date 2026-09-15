@@ -436,35 +436,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
 
-            // The team's operator-typed prices, loaded ONCE for BOTH the admission's price stamp and the post-hoc
-            // fold below — the same table, so the rates a reservation records are the rates the result is priced
-            // with. Skipped (and the path is byte-identical) only for a run that can neither be admitted nor priced.
-            var modelPrices = effectiveTask.MaxCostUsd is null && run.WorkflowRunId is null
-                ? ModelPriceResolver.Empty
-                : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
-
-            // 5c: RESERVE the CLI's spend before the CLI starts. Until here the quick lane was MONITORED only — every
-            // dollar it spent became visible to admission and to the team cap after the money was gone. One claim per
-            // CLI INVOCATION, settled the moment that invocation exits (below).
+            var modelPrices = await ResolveSpendPricesAsync(run, effectiveTask, cancellationToken).ConfigureAwait(false);
             var spendClaim = await AdmitRunSpendAsync(run, effectiveTask, modelPrices, RunSpendScopeKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
 
             if (spendClaim is { RefusedDetail: { } refusedDetail })
             {
-                // Refused BEFORE any physical invocation — so the accounting fact is a known zero, exactly like the
-                // acceptance-unavailable exit above, and nothing was reserved to settle.
-                spendClaim = null;
-                await CompleteAndNotifyAsync(owner, run.TeamId, AgentRunBudget.WithoutInvocation(effectiveTask, RunSpendRefusedResult(refusedDetail)), cancellationToken).ConfigureAwait(false);
+                await RefuseLaunchForSpendAsync(owner, run.TeamId, effectiveTask, refusedDetail, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
             result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
 
-            // The CLI has exited, so its spend is OBSERVED — settle the claim NOW, before verification. Everything
-            // below (the output-review critic, the S8 agent reviewer, its co-sign) admits against this same run's
-            // ceiling, so a claim still holding the remaining cap here refuses all of them: the critic degrades
-            // silently to ReviewFailed and the reviewer's own run fails `run_budget_exhausted`. Settling first means
-            // they are judged against what the agent ACTUALLY spent, which is the only honest comparison anyway.
             spendClaim = await SettleInvocationSpendAsync(spendClaim, result, effectiveTask, modelPrices, cancellationToken).ConfigureAwait(false);
 
             // P2 (capture-intent saga): the harness exited — the capture window opens HERE, before any of its
@@ -542,10 +525,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // the string join's empty short-circuits did.
                 transcript.MarkSeam(ReviseTranscriptSeam);
 
-                // This round is ANOTHER physical CLI invocation, so it gets its OWN claim against whatever the run
-                // has left — the previous round's is already settled at its observed spend. A refusal stops the loop
-                // rather than failing the run: the round that already succeeded produced a real result, and throwing
-                // it away because the NEXT attempt has no headroom would lose work the operator already paid for.
+                // This round is ANOTHER physical CLI invocation, so it gets its OWN claim against whatever the run has left.
                 spendClaim = await AdmitRunSpendAsync(run, reviseTask, modelPrices, RunSpendScopeKey(agentRunId, round), cancellationToken).ConfigureAwait(false);
 
                 if (spendClaim is { RefusedDetail: { } roundRefusal })
@@ -558,8 +538,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
 
-                // This invocation has exited too — settle before ITS verification, for the same reason round 0 does.
-                spendClaim = await SettleInvocationSpendAsync(spendClaim, result, reviseTask, modelPrices, cancellationToken).ConfigureAwait(false);
+                spendClaim = await SettleInvocationSpendAsync(spendClaim, InvocationObservation(result, roundResult), reviseTask, modelPrices, cancellationToken).ConfigureAwait(false);
 
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
@@ -1070,9 +1049,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// What this run's pre-launch admission claimed, so the terminal fold settles exactly that row. Private and
     /// executor-internal: it crosses no seam, so it is not a Messages noun.
     /// </summary>
-    /// <param name="PriorChainSpendUsd">What EARLIER attempts in this retry chain already spent — subtracted at settle, because each of those attempts settled its own row and this one must not re-claim their money.</param>
     /// <param name="RefusedDetail">Set ONLY when the ledger refused the launch: the operator-facing stop detail, in the supervisor lane's own words. A refused claim holds no row.</param>
-    private sealed record RunSpendClaim(Guid WorkflowRunId, Guid TeamId, string Kind, string ScopeKey, decimal PriorChainSpendUsd)
+    private sealed record RunSpendClaim(Guid WorkflowRunId, Guid TeamId, string Kind, string ScopeKey)
     {
         public string? RefusedDetail { get; init; }
     }
@@ -1106,7 +1084,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // fan-out that staged it already admitted the work at its own grain, so this run records unbudgeted rather
         // than claiming the same money twice.
         var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
-        var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey, task.BudgetSpentUsd ?? 0m);
+        var claim = new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey);
 
         // The rates admission valued this launch at — stamped as price_version so a later price edit can never
         // silently re-value what was admitted. Null when nothing prices the dispatched model; an unpriced admission
@@ -1197,7 +1175,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var routePlanJson = await RunRoutePlanJsonAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
         var capUsd = Workflows.Budget.RunCostCap.AgentOwnsTheRunCap(routePlanJson) ? Workflows.Budget.RunCostCap.Of(routePlanJson) : null;
 
-        return new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey, task.BudgetSpentUsd ?? 0m);
+        return new RunSpendClaim(workflowRunId, run.TeamId, RunSpendKind(capUsd), scopeKey);
     }
 
     /// <summary>A capped run mints a real admission; a run whose route declares no ceiling records the same <c>unbudgeted:</c> observability row every other un-metered plane does, so "no cap" reads as a stated fact rather than a missing row.</summary>
@@ -1219,6 +1197,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         ExitReason = FailureCodes.RunBudgetExhausted,
         Error = $"Agent run refused before launch: {Supervisor.SupervisorStopReasons.CostCapReached} ({detail}).",
     };
+
+    /// <summary>The team's operator-typed prices, loaded ONCE per run for BOTH the admission's price stamp and the post-hoc fold — the same table, so the rates a reservation records are the rates the result is priced with. Skipped (and the path is byte-identical) only for a run that can neither be admitted nor priced.</summary>
+    private async Task<IReadOnlyDictionary<string, ModelPrice>> ResolveSpendPricesAsync(AgentRun run, AgentTask task, CancellationToken cancellationToken) =>
+        task.MaxCostUsd is null && run.WorkflowRunId is null
+            ? ModelPriceResolver.Empty
+            : await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Land the terminal for a launch the ledger refused. Refused BEFORE any physical invocation, so the accounting fact is a known ZERO — exactly like the acceptance-unavailable exit — and nothing was reserved to settle.</summary>
+    private async Task RefuseLaunchForSpendAsync(AgentRunOwnerToken owner, Guid teamId, AgentTask task, string refusedDetail, CancellationToken cancellationToken) =>
+        await CompleteAndNotifyAsync(owner, teamId, AgentRunBudget.WithoutInvocation(task, RunSpendRefusedResult(refusedDetail)), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// What ONE invocation observed, for the ledger — the run's folded result narrowed back to the usage of the
+    /// invocation that just exited.
+    ///
+    /// <para>The fold carries this round's own <c>CostUsd</c> (<c>Apply</c> prices each round against the chain's
+    /// prior spend) but the run's SUMMED <c>TokenUsage</c>, because the durable record reports the whole run. That
+    /// summed figure is invisible to a CAPPED task, whose <c>CostUsd</c> is already per-round — but an UNCAPPED one
+    /// has no <c>CostUsd</c> at all (<c>Apply</c> returns early), so the ledger's own pricer reads the summed usage
+    /// and charges round N for rounds 0..N. It compounds every round, and it is charged BEFORE that round's review
+    /// admits — re-entering, narrowly, the starvation the per-invocation settle exists to prevent.</para>
+    /// </summary>
+    private static AgentRunResult InvocationObservation(AgentRunResult folded, AgentRunResult invocation) =>
+        folded with { TokenUsage = invocation.TokenUsage };
 
     /// <summary>The ledger scope key for ONE CLI invocation of this run. Round 0 keeps the bare run id — the key every existing row carries — and each revise round gets its own suffix, so a run that invokes the CLI N times holds N claims and settles each when ITS invocation exits.</summary>
     private static string RunSpendScopeKey(Guid agentRunId, int round) => round == 0 ? agentRunId.ToString("N") : $"{agentRunId:N}/r{round}";

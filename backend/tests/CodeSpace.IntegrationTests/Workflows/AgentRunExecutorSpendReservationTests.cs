@@ -540,6 +540,71 @@ public partial class AgentRunExecutorTests
                     customMessage: $"round {round}'s stray claim must be closed pessimistically at the terminal — an unobserved invocation is not evidence that nothing was spent");
     }
 
+    [Fact]
+    public async Task An_uncapped_revise_round_settles_its_own_usage_not_the_runs_running_total()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The fold reports the RUN's summed token usage (SumTokenUsage), while each round's claim must be settled at
+        // what THAT invocation cost. A capped task hides the difference — Apply gives it a per-round CostUsd — but an
+        // uncapped one has no CostUsd at all, so the ledger's own pricer reads the summed usage.
+        // MUTATION THIS CATCHES: settling the round from the accumulated result. Round 1 is then charged $1.00 (both
+        // invocations) instead of its own $0.50, compounding every round, and the over-charge lands BEFORE that
+        // round's review admits — a narrow re-entry of the starvation the per-invocation settle exists to prevent.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 20m);
+        var runId = await CreateReviewedRunAsync(teamId, workflowRunId, maxCostUsd: null, mode: ReviewMode.Improve, reviseRounds: 1);
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript), critic: new BudgetProbingCritic { Approve = false, Critique = "tighten the answer" });
+
+        var result = await PersistedResultAsync(runId);
+        result.ReviseRounds.ShouldBe(1, "the Improve critic flagged the output, so a second CLI invocation ran — without it this test proves nothing");
+        result.CostUsd.ShouldBeNull("an uncapped task is still not priced by the fold — that is exactly why the ledger prices the usage itself");
+        result.TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(200_000, "the durable record reports the RUN's summed usage — the figure the mutation would settle from");
+
+        (await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1")).ShouldNotBeNull()
+            .SettledUsd.ShouldBe(PricedUsageCostUsd, "round 1 is charged for round 1 — not for rounds 0 AND 1");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IBudgetLedger>().CommittedUsdAsync(workflowRunId, teamId, CancellationToken.None))
+            .ShouldBe(1.02m, "two invocations at $0.50 plus the two reviews' $0.01 each — the run's real spend, counted once per invocation");
+    }
+
+    [Fact]
+    public async Task A_revise_round_the_ledger_refuses_stops_the_loop_and_keeps_the_verified_result()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A refused NEXT round must not throw away the round that already ran and was verified: the operator paid for
+        // that work. MUTATION THIS CATCHES: treating the round's refusal like a launch refusal (a typed terminal) —
+        // the run would land run_budget_exhausted with a zero cost and lose a real, verified result.
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: 5m);
+
+        // An earlier claim on the same run leaves only $0.40 — round 0 fits, and its $0.50 overshoot exhausts the rest.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IBudgetLedger>().ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, "an-earlier-agent", 4.6m, 5m, "prices-v1", null, null, CancellationToken.None))
+                .Admitted.ShouldBeTrue();
+
+        var runId = await CreateReviewedRunAsync(teamId, workflowRunId, maxCostUsd: 5m, mode: ReviewMode.Improve, reviseRounds: 1);
+
+        await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript), critic: new BudgetProbingCritic { Approve = false, Critique = "tighten the answer" });
+
+        var run = await PersistedRunAsync(runId);
+        var result = await PersistedResultAsync(runId);
+
+        result.ReviseRounds.ShouldBe(0, "the second invocation was never bought");
+        result.ExitReason.ShouldNotBe(CodeSpace.Messages.Failures.FailureCodes.RunBudgetExhausted, "a refused NEXT round is not a refused launch — the round that already ran keeps its verdict");
+        result.CostUsd.ShouldBe(PricedUsageCostUsd, "the work that DID happen is still priced and reported");
+        run.CompletedAt.ShouldNotBeNull();
+
+        (await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1")).ShouldBeNull("a refused round mints no row");
+
+        (await EventsOfAsync(runId, teamId)).Select(e => e.Text)
+            .ShouldContain(text => text != null && text.StartsWith(AgentRunExecutor.ReviseBudgetStoppedPrefix, StringComparison.Ordinal),
+                customMessage: "the operator must be told the round was never BOUGHT — silence here reads as 'the agent chose not to revise'");
+    }
+
     // ── fixtures ───────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
