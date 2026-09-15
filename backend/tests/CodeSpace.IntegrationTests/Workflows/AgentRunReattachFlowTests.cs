@@ -1085,10 +1085,10 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
-        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
-            exitCode == 0
-                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
+        // Via ScriptedFolders so AgentFolderDoubleFidelityTests actually measures this double. Note the behaviour
+        // change that came with it: a non-zero exit now also reports the facts the fold established, where before it
+        // reported only the exit code.
+        public IAgentEventFolder CreateFolder() => ScriptedFolders.Result();
     }
 
     /// <summary>A scripted harness that also projects a model credential — so ReattachAsync can RE-RESOLVE the credential (via this projector's provider) purely to rebuild the redactor for the resumed tail.</summary>
@@ -1115,8 +1115,9 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
-        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
-            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "completed", Summary = fold.LastText });
+        // Via ScriptedFolders, as above. Its exit reason on a non-zero exit becomes "non-zero-exit" rather than
+        // "completed" — the shared shape's answer, and the honest one.
+        public IAgentEventFolder CreateFolder() => ScriptedFolders.Result();
 
         public IReadOnlyList<string> SupportedProviders => new[] { _provider };
 

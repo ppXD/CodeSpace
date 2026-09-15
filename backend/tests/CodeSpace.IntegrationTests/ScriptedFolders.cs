@@ -19,14 +19,12 @@ namespace CodeSpace.IntegrationTests;
 /// </summary>
 internal static class ScriptedFolders
 {
-    /// <summary>The default shape: exit 0 succeeds with the last line as its summary, anything else fails naming the code.</summary>
-    internal static IAgentEventFolder Result() => Result((fold, exitCode) => exitCode == 0
-        ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-        : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
-
-    /// <summary>A double that decides its own status/summary but still reports every fact production reports. <paramref name="verdict"/> supplies only what is genuinely the double's business.</summary>
-    internal static IAgentEventFolder Result(Func<TestEventFolder, int, AgentRunResult> verdict) =>
-        new TestEventFolder((fold, exitCode) => WithFoldedFacts(verdict(fold, exitCode), fold));
+    /// <summary>The one shape: exit 0 succeeds with the last line as its summary, anything else fails naming the code — and either way every fact the fold established rides along.</summary>
+    internal static IAgentEventFolder Result() => new TestEventFolder((fold, exitCode) => WithFoldedFacts(
+        exitCode == 0
+            ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
+            : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" },
+        fold));
 
     /// <summary>
     /// Attach everything the fold established, exactly as the two production folders do — the run's session id, its

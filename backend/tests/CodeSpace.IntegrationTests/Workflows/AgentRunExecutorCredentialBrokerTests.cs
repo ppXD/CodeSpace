@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -282,7 +283,10 @@ public partial class AgentRunExecutorTests
         // THIS process's memory behind THIS process's listener, so neither survives the restart — and each child
         // sleeps far past its own deadline, so anything that left them Running would be a run degrading in silence.
         var lifetime = new FakeHostLifetime();
-        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime)).ToArray();
+        // PRODUCTION SHAPE: a real INativeRecordPlane, because the drain's fold re-opens a resumed capture at the SAME
+        // worker fence epoch as this pass's still-open one. With a null plane that second open is a no-op and the test
+        // proves nothing about the deployment that has one.
+        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true)).ToArray();
 
         await WaitUntilAsync(() => runIds.All(broker.HasLease), TimeSpan.FromSeconds(30), "the runs never opened their credential leases");
         await WaitUntilAsync(() => runIds.All(id => HandleOf(id) is not null), TimeSpan.FromSeconds(30), "the runs never persisted a durable handle, so there was no launched agent for a shutdown to account for");
@@ -321,11 +325,75 @@ public partial class AgentRunExecutorTests
             confinement.ModelCredentialLeaseLost.ShouldBeTrue("the posture is stamped under the fence BEFORE the kill, so a landing that fails still leaves the next sweep the cause");
 
             broker.HasLease(runId).ShouldBeFalse("the credential is withdrawn before the kill, so the agent cannot spend on the seconds it has left");
+
+            // The landing does NOT bump the fence, so the capture claim still matches and the recovery sweep can reach
+            // the stream — unlike the re-attach half, where the reservation's bump strands it and the executor has to
+            // record the owner loss itself. Assert the shape that makes that true rather than the sweep's later write:
+            // no stream is left at a SUPERSEDED generation for nothing to ever close.
+            var streams = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
+                .Where(s => s.AgentRunId == runId).Select(s => new { s.State, s.WorkerFenceEpoch }).ToListAsync();
+
+            streams.ShouldAllBe(s => s.State != AgentRunLogStreamState.Open || s.WorkerFenceEpoch == null || s.WorkerFenceEpoch >= run.FenceEpoch,
+                $"run {runId} left an Open capture stream at a generation the run has already moved past — nothing writes one of those, and the Room reports it as Finalizing forever");
         }
 
         foreach (var pid in pids)
             await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {pid} -o pid,stat,etime,command`");
     }
+
+    [Fact]
+    public async Task A_drained_run_lands_with_the_files_its_agent_actually_changed()
+    {
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        using var remote = new DrainRemoteFixture();
+        await remote.SeedAsync();
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-drain-diff-fixture");
+        var repoId = await SeedClonableRepositoryAsync(teamId, remote.RemoteUrl);
+        var runId = await CreateRepoBackedRunAsync(teamId, credId, repoId);
+
+        using var broker = new LoopbackModelCredentialBroker();
+        using var shutdown = new CancellationTokenSource();
+        var lifetime = new FakeHostLifetime();
+
+        // The agent WRITES A FILE and then hangs — the shape that makes work presence mean anything. A landing with an
+        // empty ChangedFiles reads to AgentWorkPresence.ShowsWork as having produced nothing, which makes the
+        // supervisor's post-hoc unit grade "no-branch-or-repo with no work": a real verdict failure rather than infra.
+        // The folder cannot supply the list on this path (this process's own tail already consumed those frames), so
+        // the landing has to run the git capture, and this test is the thing that says it does.
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; printf 'agent wrote this\\n' > {DrainedFile}; sleep 120");
+        var execution = ExecuteUntilShutdownWithAsync(runId, harness, broker, shutdown.Token, lifetime, productionCapturePlanes: true);
+
+        await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened a credential lease");
+        await WaitUntilAsync(() => HandleOf(runId)?.WorkspaceBaseSha is { Length: > 0 }, TimeSpan.FromSeconds(30), "the run never stamped a repo-backed workspace on its handle, so there would be no diff for the drain to capture");
+        await WaitUntilAsync(() => AgentWroteItsFile(runId), TimeSpan.FromSeconds(30), "the agent never wrote its file, so the assertion below would prove nothing");
+
+        lifetime.Stop();
+        shutdown.Cancel();
+        await execution;
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options).ShouldNotBeNull();
+
+        result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost);
+
+        result.ChangedFiles.ShouldContain(DrainedFile,
+            "the drain must capture what the agent CHANGED, or the run lands claiming it produced nothing and a deploy is graded as a failed unit of work");
+        result.BaseSha.ShouldNotBeNullOrWhiteSpace("a diff is only interpretable against the sha it was taken from");
+        result.Patch.ShouldContain("agent wrote this", Case.Insensitive, "the captured diff has to carry the agent's actual content, not just a file name");
+
+        CodeSpace.Core.Services.Agents.AgentWorkPresence.ShowsWork(result).ShouldBeTrue(
+            "this is the reading the supervisor's grade keys on — false here is the no-progress-budget regression this landing exists to avoid");
+    }
+
+    /// <summary>The file the drained agent writes into its clone before hanging.</summary>
+    private const string DrainedFile = "agent-output.txt";
+
+    private bool AgentWroteItsFile(Guid runId) =>
+        HandleOf(runId)?.WorkspaceDirectory is { Length: > 0 } dir && File.Exists(Path.Combine(dir, DrainedFile));
 
     [Fact]
     public async Task A_parent_cancelling_a_brokered_run_on_a_LIVE_host_never_lands_the_lost_lease_verdict()
@@ -406,11 +474,12 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>One brokered run driven to the tear-down arm. The cancel is the point of the test, so the <see cref="OperationCanceledException"/> it re-raises (the contract that leaves a non-brokered run recoverable) is expected, not a failure.</summary>
-    private async Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
-    {
-        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; sleep 120");
+    private Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false) =>
+        ExecuteUntilShutdownWithAsync(runId, new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; sleep 120"), broker, shutdown, lifetime, productionCapturePlanes);
 
-        try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown, lifetime: lifetime); }
+    private async Task ExecuteUntilShutdownWithAsync(Guid runId, IAgentHarness harness, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime, bool productionCapturePlanes)
+    {
+        try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown, lifetime: lifetime, productionCapturePlanes: productionCapturePlanes); }
         catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
     }
 
@@ -427,6 +496,76 @@ public partial class AgentRunExecutorTests
         var json = scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.RunnerHandleJson).Single();
 
         return string.IsNullOrWhiteSpace(json) ? null : JsonSerializer.Deserialize<SandboxHandle>(json, AgentJson.Options);
+    }
+
+    /// <summary>A Repository row the executor's resolver can clone — a bare local repo standing in for the provider's, which a file:// URL reaches with no network and no real token.</summary>
+    private async Task<Guid> SeedClonableRepositoryAsync(Guid teamId, string cloneUrl)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var instanceId = Guid.NewGuid();
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = "https://local" });
+
+        var repoId = Guid.NewGuid();
+        db.Repository.Add(new Repository
+        {
+            Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId,
+            ExternalId = repoId.ToString(), NamespacePath = "org", Name = "repo", FullPath = "org/repo",
+            DefaultBranch = "main", CloneUrlHttps = cloneUrl, WebUrl = "https://local/org/repo",
+        });
+
+        await db.SaveChangesAsync();
+        return repoId;
+    }
+
+    private async Task<Guid> CreateRepoBackedRunAsync(Guid teamId, Guid modelCredentialId, Guid repositoryId)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId, RepositoryId = repositoryId, TimeoutSeconds = 1800 },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    /// <summary>A bare repo with one commit, standing in for the provider's remote so the executor performs a REAL clone and the handle carries a real base sha.</summary>
+    private sealed class DrainRemoteFixture : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-drain-remote-" + Guid.NewGuid().ToString("N"));
+        private readonly string _bare;
+
+        public DrainRemoteFixture()
+        {
+            Directory.CreateDirectory(_root);
+            _bare = Path.Combine(_root, "remote.git");
+        }
+
+        public string RemoteUrl => new Uri(_bare).AbsoluteUri;
+
+        public async Task SeedAsync()
+        {
+            await GitAsync(_root, "init", "--bare", "-b", "main", _bare);
+
+            var seed = Path.Combine(_root, "seed");
+            Directory.CreateDirectory(seed);
+            await GitAsync(seed, "clone", _bare, seed);
+            await File.WriteAllTextAsync(Path.Combine(seed, "README.md"), "base");
+            await GitAsync(seed, "-c", "user.email=t@codespace.dev", "-c", "user.name=T", "add", ".");
+            await GitAsync(seed, "-c", "user.email=t@codespace.dev", "-c", "user.name=T", "-c", "commit.gpgsign=false", "commit", "-m", "seed");
+            await GitAsync(seed, "push", "origin", "main");
+        }
+
+        private static async Task GitAsync(string workdir, params string[] args)
+        {
+            var result = await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+
+            if (result.Status != SandboxStatus.Success) throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     /// <summary>The harness session id the shutdown fixture's agent announces before it hangs — the input a WARM retry needs, and the thing a bare landing used to throw away.</summary>
