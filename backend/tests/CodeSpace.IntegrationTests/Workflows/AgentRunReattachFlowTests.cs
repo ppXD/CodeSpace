@@ -15,6 +15,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -482,6 +483,90 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Unleashed, confinement)
             .ShouldEndWith(AgentAutonomyPolicy.LostBrokeredModelCredentialCaveat,
                 customMessage: "the recorded fact has to reach the sentence a reader actually sees, or it is a column nobody consults");
+    }
+
+    [Fact]
+    public async Task A_re_attached_brokered_run_whose_agent_is_still_alive_is_ended_typed_instead_of_left_to_degrade()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string brokerRunToken = "brokered-run-token-whose-listener-died-with-its-worker";
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        // A REAL detached agent that outlives its worker and keeps running — the case that matters. Its lease lived
+        // in the vanished worker's memory, so every model call it makes from here fails to connect, and nothing any
+        // later pass can do restores it. The deadline is SHORTER than the child's own sleep, so the mutation (revert
+        // to log-only) is bounded: the re-attach would tail this live process to its timeout and land TimedOut, which
+        // is the silent degrade-until-the-spec-timeout this test exists to forbid.
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "echo working; sleep 120" }, TimeoutSeconds = 30 };
+
+        SandboxHandle handle;
+        using (var scope = _fixture.BeginScope())
+        {
+            var runner = (ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+            var runs = scope.Resolve<IAgentRunService>();
+
+            var fingerprint = AgentRunExecutor.WithModelBrokerRunToken(AgentRunExecutor.BuildRunRedactor(new Dictionary<string, string>(), null), brokerRunToken).Fingerprint;
+            handle = (await runner.LaunchAsync(spec, runId.ToString("N"), CancellationToken.None)) with { ModelBrokerRunToken = brokerRunToken, InjectedKeyFingerprint = fingerprint };
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+
+            await runs.SetSandboxConfinementAsync(runId, JsonSerializer.Serialize(new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, ModelCredentialBrokered = true }, AgentJson.Options), CancellationToken.None);
+            await runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+        }
+
+        ProcessIsAlive(handle.ProcessId).ShouldBeTrue("precondition: the detached agent outlived its worker and is what a re-attach would find");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+        }
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed,
+            "an agent with no model access cannot finish its attempt; leaving it Running only hides that until the spec timeout");
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost,
+            "the outcome has to be attributable — an operator must be able to tell a worker restart from a model that refused the work");
+
+        run.Error.ShouldNotBeNull();
+        run.Error!.ShouldNotContain("provider", Case.Insensitive, "the provider is up; a word here that sends an operator to check one is the misdiagnosis this change removes");
+        run.Error!.ShouldNotContain("gateway", Case.Insensitive, "same reason — the failure is ours, and the text has to say so");
+
+        var confinement = JsonSerializer.Deserialize<SandboxConfinement>(run.SandboxConfinementJson!, AgentJson.Options).ShouldNotBeNull();
+        confinement.ModelCredentialLeaseLost.ShouldBeTrue("the posture stamp survives the typed landing — the two say different things and a reader needs both");
+        confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Confined, "the launch's own posture is merged onto, never replaced");
+
+        await WaitUntilProcessGoneAsync(handle.ProcessId);
+    }
+
+    /// <summary>The detached agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
+    private static bool ProcessIsAlive(int pid)
+    {
+        try { using var process = Process.GetProcessById(pid); return !process.HasExited; }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private static async Task WaitUntilProcessGoneAsync(int pid)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (!ProcessIsAlive(pid)) return;
+            await Task.Delay(100);
+        }
+
+        throw new Shouldly.ShouldAssertException($"The detached agent (pid {pid}) was still alive 15s after its run was landed {FailureCodes.ModelCredentialLeaseLost}. A run that can make no model call must be STOPPED, not just marked — otherwise it holds its workspace and burns its wall clock for nothing. Diagnose manually with `ps -p {pid} -o pid,stat,etime,command`.");
     }
 
     [Fact]

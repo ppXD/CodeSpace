@@ -1682,11 +1682,11 @@ public partial class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default)
     {
         using var scope = _fixture.BeginScope();
 
-        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic).ExecuteAsync(runId, CancellationToken.None);
+        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic).ExecuteAsync(runId, cancellationToken);
     }
 
     /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch.</summary>
