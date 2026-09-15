@@ -287,16 +287,15 @@ public partial class AgentRunExecutorTests
         // THIS process's memory behind THIS process's listener, so neither survives the restart — and each child
         // sleeps far past its own deadline, so anything that left them Running would be a run degrading in silence.
         var lifetime = new FakeHostLifetime();
-        // PRODUCTION SHAPE, and both halves of it matter. The real INativeRecordPlane, because the drain's fold
-        // re-opens a resumed capture at the SAME worker fence epoch as this pass's still-open one — with a null plane
-        // that second open is a no-op. And the real LOG-CAPTURE BRIDGE, because it is the only thing that ever writes
-        // an agent_run_log_stream row: without it the executor takes its passthrough branch and the stream assertion
-        // below would be an assertion over the empty set.
-        var storageProfileId = await SeedStorageProfileAsync(teamId);
-        using var captureScope = _fixture.BeginScope();
-        var logCapture = ProductionLogCapture(captureScope, storageProfileId);
-
-        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true, logCapture: logCapture)).ToArray();
+        // PRODUCTION SHAPE: a real INativeRecordPlane, because the drain's fold re-opens a resumed capture at the
+        // SAME worker fence epoch as this pass's still-open one, and with a null plane that second open is a no-op.
+        //
+        // NO log-capture bridge, and that is ALSO the production shape: AgentRunLogCaptureBridge carries no
+        // IDependency marker and is registered nowhere in backend/src, so a deployed executor's _logCapture is null
+        // and it always takes its PassthroughLogCaptureSession branch. An earlier revision hand-built the bridge to
+        // assert something about capture streams; that asserted a property of a component no deployment runs, and
+        // building it also exposed a pre-existing hang that killed a CI host. Both are in the PR body.
+        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true)).ToArray();
 
         await WaitUntilAsync(() => runIds.All(broker.HasLease), TimeSpan.FromSeconds(30), "the runs never opened their credential leases");
         await WaitUntilAsync(() => runIds.All(id => HandleOf(id) is not null), TimeSpan.FromSeconds(30), "the runs never persisted a durable handle, so there was no launched agent for a shutdown to account for");
@@ -308,7 +307,11 @@ public partial class AgentRunExecutorTests
         // That announcement — not the cancelled token — is what the tear-down arm is allowed to act on.
         lifetime.Stop();
         shutdown.Cancel();
-        await Task.WhenAll(executions);
+        // BOUNDED, and the reason is a CI incident: an unbounded WhenAll here produced no output for five minutes
+        // and the blame collector killed the test host, which reports as a crash rather than as whatever actually
+        // went wrong. Every wait in this test names the signal it waits on (Rule 12.10).
+        await AwaitWithinAsync(Task.WhenAll(executions), TimeSpan.FromSeconds(120),
+            "the draining executors never returned — the landing is bounded by ShutdownLeaseLandingBudget, so a wait this long means something inside it is not honouring its token");
 
         foreach (var runId in runIds)
         {
@@ -336,17 +339,6 @@ public partial class AgentRunExecutorTests
 
             broker.HasLease(runId).ShouldBeFalse("the credential is withdrawn before the kill, so the agent cannot spend on the seconds it has left");
 
-            var streams = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
-                .Where(s => s.AgentRunId == runId).Select(s => new { s.State, s.WorkerFenceEpoch }).ToListAsync();
-
-            // FIRST, because every claim under it is vacuous without it: the run really did open a capture stream.
-            streams.ShouldNotBeEmpty($"run {runId} opened no log stream at all, so nothing below this line is being tested — check that the real capture bridge reached the executor rather than its passthrough branch");
-
-            // The landing does NOT bump the fence, so the capture claim still matches and the recovery sweep can reach
-            // the stream — unlike the re-attach half, where the reservation's bump strands it and the executor has to
-            // record the owner loss itself.
-            streams.ShouldAllBe(s => s.State != AgentRunLogStreamState.Open || s.WorkerFenceEpoch == null || s.WorkerFenceEpoch >= run.FenceEpoch,
-                $"run {runId} left an Open capture stream at a generation the run has already moved past — nothing writes one of those, and the Room reports it as Finalizing forever");
         }
 
         foreach (var pid in pids)
@@ -384,7 +376,7 @@ public partial class AgentRunExecutorTests
 
         lifetime.Stop();
         shutdown.Cancel();
-        await execution;
+        await AwaitWithinAsync(execution, TimeSpan.FromSeconds(120), "the executor never returned after the run was stopped — every path out of it is bounded, so this means one is not honouring its token");
 
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
@@ -430,7 +422,7 @@ public partial class AgentRunExecutorTests
 
         var pid = HandleOf(runId)!.ProcessId;
         parent.Cancel();
-        await execution;
+        await AwaitWithinAsync(execution, TimeSpan.FromSeconds(120), "the executor never returned after the run was stopped — every path out of it is bounded, so this means one is not honouring its token");
 
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
@@ -471,7 +463,7 @@ public partial class AgentRunExecutorTests
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue();
 
-        await execution;
+        await AwaitWithinAsync(execution, TimeSpan.FromSeconds(120), "the executor never returned after the run was stopped — every path out of it is bounded, so this means one is not honouring its token");
 
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
@@ -493,80 +485,6 @@ public partial class AgentRunExecutorTests
     {
         try { await ExecuteAsync(runId, harness, logCapture: logCapture, credentialBroker: broker, cancellationToken: shutdown, lifetime: lifetime, productionCapturePlanes: productionCapturePlanes); }
         catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
-    }
-
-    /// <summary>
-    /// The REAL capture bridge over the real log service, which is the only thing that ever opens an
-    /// <c>agent_run_log_stream</c> row. Without it the executor takes its PassthroughLogCaptureSession branch, no row
-    /// is ever written, and an assertion over "this run's streams" is an assertion over the empty set — true before
-    /// the code under test does anything, which is how a vacuous version of this survived a review round.
-    ///
-    /// <para>Storage routing is pinned rather than resolved: which destination a team's logs go to is a different
-    /// slice's subject, and the real resolver would decline a team with no configured route and send the bridge back
-    /// down the same degrade path.</para>
-    /// </summary>
-    private IAgentRunLogCaptureBridge ProductionLogCapture(ILifetimeScope scope, Guid storageProfileId) =>
-        new AgentRunLogCaptureBridge(scope.Resolve<IAgentRunLogService>(), new PinnedStorageResolver(storageProfileId),
-            scope.Resolve<IAgentRunLogCaptureRecoveryService>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunLogCaptureBridge>.Instance);
-
-    private sealed class PinnedStorageResolver(Guid profileId) : IAgentRunLogStorageResolver
-    {
-        public Task<AgentRunLogStorageResolution> ResolveAsync(Guid teamId, CancellationToken cancellationToken) =>
-            Task.FromResult<AgentRunLogStorageResolution>(new AgentRunLogStorageResolution.Ready(profileId, 1));
-    }
-
-    /// <summary>A real writable directory for the local-rwx driver, cleaned up with the test class.</summary>
-    private string StorageRoot()
-    {
-        Directory.CreateDirectory(_storageRoot);
-        return _storageRoot;
-    }
-
-    private readonly string _storageRoot = Path.Combine(Path.GetTempPath(), "cs-drain-logs-" + Guid.NewGuid().ToString("N"));
-
-    /// <summary>A storage credential + profile for the team, so the capture bridge has a destination to open a stream against. Mirrors AgentRunLogSyntheticCaptureHarness's world, but over the REAL driver.</summary>
-    private async Task<Guid> SeedStorageProfileAsync(Guid teamId)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        var now = DateTimeOffset.UtcNow;
-        var actorId = await db.TeamMembership.AsNoTracking().Where(m => m.TeamId == teamId).Select(m => m.UserId).FirstAsync();
-        var credentialId = Guid.NewGuid();
-        var profileId = Guid.NewGuid();
-
-        var credential = new StorageCredential
-        {
-            Id = credentialId, TeamId = teamId, StableName = $"drain-{credentialId:N}",
-            CurrentRevision = 1, State = StorageCredentialState.Active, CreatedDate = now, CreatedBy = actorId,
-        };
-        credential.Revisions.Add(new StorageCredentialRevision
-        {
-            Id = Guid.NewGuid(), TeamId = teamId, StorageCredentialId = credentialId, Revision = 1,
-            ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, EncryptedPayload = scope.Resolve<IPayloadEncryptor>().Encrypt("{}"),
-            SafeHint = "safe", EnvelopeFingerprint = $"sha256:{new string('b', 64)}", CreatedDate = now, CreatedBy = actorId,
-        });
-
-        var profile = new StorageProfile
-        {
-            Id = profileId, TeamId = teamId, StableName = $"drain-{profileId:N}", State = StorageProfileState.Active,
-            CurrentRevision = 1, CreatedDate = now, CreatedBy = actorId, LastModifiedDate = now, LastModifiedBy = actorId,
-        };
-        profile.Revisions.Add(new StorageProfileRevision
-        {
-            Id = Guid.NewGuid(), TeamId = teamId, StorageProfileId = profileId, Revision = 1,
-            // A REAL writable root, not a placeholder: this test keeps the production local-rwx driver rather than
-            // substituting a ledger one, so an unwritable path would have the capture failing and retrying — and the
-            // budget exhaustion that produced would look exactly like a drain that is too short. That would be a
-            // fixture measuring itself.
-            ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = $"{{\"rootPath\":\"{StorageRoot().Replace("\\", "/")}\"}}",
-            CredentialRef = $"db:{credentialId:D}:1", NamespaceFingerprint = $"sha256:{new string('a', 64)}",
-            CreatedDate = now, CreatedBy = actorId,
-        });
-
-        db.StorageCredential.Add(credential);
-        db.StorageProfile.Add(profile);
-        await db.SaveChangesAsync();
-        return profileId;
     }
 
     /// <summary>As above, but also tolerating the ownership loss a fence bump raises — the shape a user cancel takes, where the run is legitimately taken away from this pass rather than the pass being taken away from the host.</summary>
@@ -687,6 +605,19 @@ public partial class AgentRunExecutorTests
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Await work that SHOULD finish, with a deadline and a message naming what did not. An unbounded await on an
+    /// executor is how this suite killed a CI host: the blame collector reported a crash after five minutes of
+    /// silence, which says nothing about the wait that produced it (Rule 12.10).
+    /// </summary>
+    private static async Task AwaitWithinAsync(Task work, TimeSpan budget, string what)
+    {
+        if (await Task.WhenAny(work, Task.Delay(budget)).ConfigureAwait(false) != work)
+            throw new Xunit.Sdk.XunitException($"{what} (waited {budget.TotalSeconds}s)");
+
+        await work.ConfigureAwait(false);   // surface its own exception rather than the timeout's
+    }
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan budget, string failure)
     {
