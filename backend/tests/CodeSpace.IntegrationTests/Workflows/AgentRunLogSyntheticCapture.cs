@@ -50,14 +50,19 @@ internal static class SyntheticPayload
 }
 
 /// <summary>
-/// A durable log source of arbitrary declared size that never holds its own payload: one reused segment buffer,
-/// bytes minted per read, and an incremental SHA-256 over everything it has served. That digest is the only claim
+/// A durable log source of arbitrary declared size that never holds its own payload: a fresh segment buffer
+/// minted per read, and an incremental SHA-256 over everything it has served. That digest is the only claim
 /// about the source's content anywhere in this test — nothing compares against a materialized copy, because at
 /// 4 GiB there is deliberately no copy to compare against.
+///
+/// <para>The buffer is allocated fresh each call — never reused — because <see cref="SandboxDurableLogReadResult.Available"/>
+/// transfers ownership to the caller: the capture bridge may retain a served chunk in its backlog, unmodified,
+/// until it durably lands, which can span later reads while a destination stalls. A shared, overwritten buffer
+/// would silently corrupt an earlier, still-queued chunk with later content — exactly what a real durable source
+/// (a fresh read buffer per call) never does.</para>
 /// </summary>
 internal sealed class SyntheticLogSource(long totalBytes) : ISandboxDurableLogSource
 {
-    private readonly byte[] _buffer = new byte[AgentRunLogCaptureBridge.MaximumSegmentBytes];
     private readonly IncrementalHash _digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private long _served;
 
@@ -80,11 +85,12 @@ internal sealed class SyntheticLogSource(long totalBytes) : ISandboxDurableLogSo
         if (available == 0 && request.FinalDrain) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource(false));
         if (available == 0 || (!request.FinalDrain && available < request.MinimumBytes)) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.NoData());
 
-        var length = (int)Math.Min(available, Math.Min(request.MaximumBytes, _buffer.Length));
-        SyntheticPayload.Generate(_buffer.AsSpan(0, length), _served);
-        _digest.AppendData(_buffer, 0, length);
+        var length = (int)Math.Min(available, Math.Min(request.MaximumBytes, AgentRunLogCaptureBridge.MaximumSegmentBytes));
+        var buffer = new byte[length];
+        SyntheticPayload.Generate(buffer, _served);
+        _digest.AppendData(buffer, 0, length);
         _served += length;
-        return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Available(_buffer.AsMemory(0, length)));
+        return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Available(buffer));
     }
 }
 
