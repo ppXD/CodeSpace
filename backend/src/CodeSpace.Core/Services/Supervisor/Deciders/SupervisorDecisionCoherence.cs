@@ -10,9 +10,10 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// and still emits payload-less and top-level-flattened spawns. A <c>oneOf</c> discriminated by <c>kind</c> IS enforced,
 /// by the validator the provider clients run over every reply — and that is the worse option, because its root-path
 /// violation is FATAL after one transport re-ask and lands BEFORE <see cref="SupervisorDecisionPayloadLift"/> can
-/// repair the same shape for free (probed 2026-09-15 against the live fixture from run 33755336097, a CORRECT
-/// payload-less <c>stop</c> on a cap-spent conflicted tape: the branch turns it into a billed re-ask and then a
-/// <c>no-decision</c> terminal that discards the model's own outcome and words). So the check lives HERE, downstream
+/// repair the same shape for free — live-probed 2026-09-15 (run 34964436636): a root <c>oneOf</c> over <c>stop</c>
+/// and <c>amend_acceptance</c> alone took the golden decision eval from 28/29 to 20/29 on EVERY wire, all nine new
+/// failures being the lift's own shapes ("no conformant decision (fail-closed 'no-decision' stop)" and "retry
+/// authored NO target"), with no gateway objection anywhere. So the check lives HERE, downstream
 /// of the lift and fail-OPEN. Checked on the RAW bound decision BEFORE projection, because
 /// <see cref="SupervisorDecisionProjector"/> substitutes an empty payload for a missing sub-object — past that
 /// point the executor rejects a payload the model never wrote, the rendered correction quotes that substitute,
