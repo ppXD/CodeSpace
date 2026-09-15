@@ -126,6 +126,16 @@ public sealed record AgentRunResult
     public bool CostIndeterminate { get; init; }
 
     /// <summary>
+    /// WHICH rates produced <see cref="CostUsd"/> — the price version the agent-run plane previously had none of.
+    /// A CLI's cost is DERIVED (tokens × an operator-editable rate), and the rate table carries no effective-from
+    /// column, so without this stamp a later price edit silently re-values every historical run and
+    /// <see cref="CostUsd"/> can never be audited. Null when nothing priced this result: an uncapped run (no pricing
+    /// ran at all) or a model no table prices.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ModelPriceSnapshot? PriceSnapshot { get; init; }
+
+    /// <summary>
     /// P3.1a: the harness-native session/thread id of the agent's CLI conversation (Claude's <c>session_id</c>,
     /// Codex's <c>thread_id</c>), captured off the run's event stream. The handle a later rerun threads back as
     /// <c>--resume &lt;id&gt;</c> / <c>exec resume &lt;id&gt;</c> to CONTINUE the prior conversation instead of cold-starting.

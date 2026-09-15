@@ -1812,12 +1812,12 @@ public partial class AgentRunExecutorTests
         return instrumented;
     }
 
-    private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800, decimal? maxCostUsd = null, decimal? budgetSpentUsd = null, string model = "test-model")
+    private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800, decimal? maxCostUsd = null, decimal? budgetSpentUsd = null, string model = "test-model", Guid? workflowRunId = null)
     {
         using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = model, TimeoutSeconds = timeoutSeconds, MaxCostUsd = maxCostUsd, BudgetSpentUsd = budgetSpentUsd },
-            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 

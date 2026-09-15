@@ -89,6 +89,28 @@ public sealed class PairedQualificationStatisticsTests
     }
 
     [Fact]
+    public void A_solve_whose_known_cost_is_flagged_indeterminate_is_still_not_budget_admissible()
+    {
+        // MUTATION THIS CATCHES: dropping `CostIndeterminate: false` from the admissibility clause in
+        // PairedTaskLaunchQualification.Observation. The suite's existing indeterminate fixture sets CostUsd to null
+        // AS WELL as the flag, so the `CostUsd: { } cost` half alone keeps it out of the numerator and the mutation
+        // stays green. This cell carries a cheap, KNOWN 0.5 under a 5.0 cap and is flagged anyway — with the clause
+        // gone it enters the numerator, and a capability claim gets to count a solve whose spend nothing vouches for.
+        var fixture = Scenario(40, new ScenarioOptions { CandidateSolved = true });
+        var first = fixture.Sessions[0];
+        fixture.Sessions[0] = first with
+        {
+            Candidate = Run(fixture.Tasks, true, "candidate-observed", new RunOptions { Cost = 0.5m, PricedIndeterminateTask = "task-1" }),
+        };
+
+        var outcome = Analyze(fixture, Spec(minimumClusters: 40));
+
+        outcome.Candidate.Solved.ShouldBe(40, "the cell still SOLVED — the flag is about the spend, not the work");
+        outcome.Candidate.BudgetAdmissibleSolved.ShouldBe(39, "a solve whose cost is flagged indeterminate cannot enter the budget-admissible numerator, even though its number is present and under the cap");
+        outcome.Candidate.CostKnownCells.ShouldBe(39, "the same cell is excluded from the cost-known tally by the same flag");
+    }
+
+    [Fact]
     public void Two_configured_rows_that_resolve_to_one_backing_model_are_not_an_independent_comparison()
     {
         var fixture = Scenario(40, new ScenarioOptions { CandidateSolved = true, CandidateObserved = "CONTROL-OBSERVED" });
@@ -202,8 +224,12 @@ public sealed class PairedQualificationStatisticsTests
         {
             TaskId = task.Id, Mode = BenchmarkMode.TaskLaunchQuick, RunStatus = AgentRunStatus.Succeeded,
             Grade = new BenchmarkGrade { Passed = solved, Detail = solved ? "passed" : "failed" }, McpFullCatalog = false,
-            ObservedModel = task.Id == options.WithoutObservedTask ? null : observed, CostUsd = task.Id == options.IndeterminateTask ? null : options.Cost,
-            CostIndeterminate = task.Id == options.IndeterminateTask,
+            ObservedModel = task.Id == options.WithoutObservedTask ? null : observed,
+            // A PRICED-indeterminate cell carries a number AND the flag: the cost was computed, but the fold could
+            // not vouch for it (incomplete usage, an unrepresentable total). It is the only shape that separates the
+            // `CostIndeterminate: false` clause from the `CostUsd: { }` one.
+            CostUsd = task.Id == options.IndeterminateTask ? null : options.Cost,
+            CostIndeterminate = task.Id == options.IndeterminateTask || task.Id == options.PricedIndeterminateTask,
         }).ToList();
         return new CorpusBenchmarkRun
         {
@@ -265,6 +291,8 @@ public sealed class PairedQualificationStatisticsTests
         public decimal Cost { get; init; } = 1m;
         public string? InfraTask { get; init; }
         public string? IndeterminateTask { get; init; }
+        /// <summary>A cell whose cost is KNOWN as a number yet flagged indeterminate — the shape that isolates the admissibility clause's <c>CostIndeterminate: false</c> half.</summary>
+        public string? PricedIndeterminateTask { get; init; }
         public string? WithoutObservedTask { get; init; }
     }
     private sealed class NoopStager : IBenchmarkFixtureStager { public void Stage(string fixtureRef, string directory) { } }
