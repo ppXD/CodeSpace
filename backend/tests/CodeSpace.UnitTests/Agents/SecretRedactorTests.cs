@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents;
+using System.Runtime.InteropServices;
 using System.Text;
 using Shouldly;
 
@@ -124,5 +125,20 @@ public class SecretRedactorTests
 
         transformed.SourceBytesConsumed.ShouldBe(source.Length);
         transformed.Bytes.ToArray().ShouldBe(new byte[] { 0xff, 0xfe, (byte)'*', (byte)'*', (byte)'*', 0x80 });
+    }
+
+    [Fact]
+    public void A_chunk_with_no_patterns_is_returned_without_copying()
+    {
+        // A run with no brokered/injected secret is the common case, and its log volume is the hot path the 4 GiB
+        // capture proof stresses — this pins that path to zero allocation, not just correct content.
+        var stream = SecretRedactor.None.CreateUtf8Stream();
+        var source = Encoding.UTF8.GetBytes("nothing in this chunk needs to be redacted");
+
+        var transformed = stream.Transform(source, final: false);
+
+        transformed.SourceBytesConsumed.ShouldBe(source.Length);
+        MemoryMarshal.TryGetArray(transformed.Bytes, out var segment).ShouldBeTrue();
+        ReferenceEquals(segment.Array, source).ShouldBeTrue("a zero-pattern redactor must hand back the caller's own buffer, never a copy of it");
     }
 }
