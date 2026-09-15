@@ -54,6 +54,34 @@ public class TransactionalBehaviorPostCommitTests
     }
 
     [Fact]
+    public async Task A_non_transactional_command_that_leaves_unsaved_changes_fails_loudly()
+    {
+        // The silent-write-loss regression this arm could otherwise hide: a marked command's handler stages tracked
+        // entities and relies on the framework SaveChanges it no longer gets, so the tick reports success and
+        // persists nothing — every tick, with no error anywhere. Surface it as a failure instead.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var postCommit = new PostCommitActions(db, NullLogger<PostCommitActions>.Instance);
+        var behavior = new TransactionalBehavior<SweepProbeCommand, Unit>(db, postCommit, NullLogger<TransactionalBehavior<SweepProbeCommand, Unit>>.Instance);
+
+        var markerId = Guid.NewGuid();
+
+        Task<Unit> Next(CancellationToken ct)
+        {
+            db.User.Add(new User { Id = markerId, Email = $"nt-{markerId:N}@x", Name = "probe" });
+            return Task.FromResult(Unit.Value);
+        }
+
+        var thrown = await Should.ThrowAsync<InvalidOperationException>(() => behavior.Handle(new SweepProbeCommand(), Next, CancellationToken.None)).ConfigureAwait(false);
+
+        thrown.Message.ShouldContain(nameof(SweepProbeCommand), customMessage: "the failure must name the command whose writes would have been lost");
+
+        using var freshScope = _fixture.BeginScope();
+        (await freshScope.Resolve<CodeSpaceDbContext>().User.AsNoTracking().AnyAsync(u => u.Id == markerId).ConfigureAwait(false))
+            .ShouldBeFalse("nothing was saved — which is exactly what the failure is reporting");
+    }
+
+    [Fact]
     public async Task A_non_transactional_command_still_drains_an_action_deferred_behind_a_service_transaction()
     {
         // With no transaction open, RunAfterCommitAsync runs inline — but a sweep step that calls a service which

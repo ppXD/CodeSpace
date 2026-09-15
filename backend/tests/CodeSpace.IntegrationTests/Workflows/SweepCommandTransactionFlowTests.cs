@@ -2,6 +2,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Budget;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Agents;
@@ -87,6 +89,25 @@ public class SweepCommandTransactionFlowTests
                            "for this run means that step never ran at all");
     }
 
+    [Fact]
+    public async Task Budget_settlement_releases_the_terminal_map_branch_reservation_it_owns()
+    {
+        var teamId = await SeedTeamAsync();
+        var parentRunId = await SeedWorkflowRunAsync(teamId, WorkflowRunStatus.Success);
+        var reservationId = await SeedMapBranchReservationAsync(teamId, parentRunId);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IMediator>().Send(new SweepBudgetSettlementCommand());
+
+        using var verify = _fixture.BeginScope();
+        var reservation = await verify.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().SingleAsync(r => r.Id == reservationId);
+
+        reservation.State.ShouldBe(BudgetReservationStates.Released,
+            customMessage: "a terminal run's branch reservation holds team headroom for work that already finished, so the sweep " +
+                           "must release it — still Reserved here means IBudgetLedger.ReleaseAsync could not open its own " +
+                           "transaction and took the whole tick down with it");
+    }
+
     /// <summary>
     /// Every sweep marked <see cref="INonTransactionalCommand"/>, dispatched through the real pipeline. The cases
     /// differ only by which command is sent, so they are one Theory rather than nineteen copies of one fact.
@@ -139,7 +160,11 @@ public class SweepCommandTransactionFlowTests
     private async Task<Guid> SeedStaleRunningRunAsync(Guid teamId)
     {
         var runId = Guid.NewGuid();
-        var stamp = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20);
+        // Far older than any sibling test's stale run, not just past the window. The sweep takes the 50
+        // longest-lapsed leases (AgentRunReconcilerService.cs:329), and this suite shares one database with
+        // several classes that seed ~20-minute-old ones — a row merely eligible could be crowded out of the batch
+        // and the assertion below would fail for a reason that has nothing to do with what it measures.
+        var stamp = DateTimeOffset.UtcNow - TimeSpan.FromDays(365);
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -175,6 +200,25 @@ public class SweepCommandTransactionFlowTests
 
         await db.SaveChangesAsync();
         return runId;
+    }
+
+    /// <summary>Seed one still-held map-branch admission estimate on a run that has since gone terminal — the state the release pass exists to return. No expiry, so the sweep's overdue pass cannot claim it first.</summary>
+    private async Task<Guid> SeedMapBranchReservationAsync(Guid teamId, Guid workflowRunId)
+    {
+        var reservationId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.BudgetReservation.Add(new BudgetReservation
+        {
+            Id = reservationId, TeamId = teamId, WorkflowRunId = workflowRunId,
+            Kind = WorkflowEngine.MapBranchReservationKind, ScopeKey = $"sweep-{reservationId:N}",
+            State = BudgetReservationStates.Reserved, ReservedUsd = 1m, PriceVersion = "realized-v1",
+        });
+
+        await db.SaveChangesAsync();
+        return reservationId;
     }
 
     /// <summary>Seed a parent workflow run (request + run) in the given status — WorkflowId null (no Workflow row needed; the FK is optional).</summary>
