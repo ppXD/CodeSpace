@@ -281,7 +281,8 @@ public partial class AgentRunExecutorTests
         // Two agents this worker brokered, both still working when the pod takes its SIGTERM. Their leases live in
         // THIS process's memory behind THIS process's listener, so neither survives the restart — and each child
         // sleeps far past its own deadline, so anything that left them Running would be a run degrading in silence.
-        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token)).ToArray();
+        var lifetime = new FakeHostLifetime();
+        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime)).ToArray();
 
         await WaitUntilAsync(() => runIds.All(broker.HasLease), TimeSpan.FromSeconds(30), "the runs never opened their credential leases");
         await WaitUntilAsync(() => runIds.All(id => HandleOf(id) is not null), TimeSpan.FromSeconds(30), "the runs never persisted a durable handle, so there was no launched agent for a shutdown to account for");
@@ -289,6 +290,9 @@ public partial class AgentRunExecutorTests
         var pids = runIds.Select(id => HandleOf(id)!.ProcessId).ToArray();
         pids.ShouldAllBe(pid => ProcessIsAlive(pid), "precondition: both agents are alive at the moment the worker is told to go");
 
+        // The host announces it is stopping BEFORE the job tokens are cancelled, exactly as the generic host does.
+        // That announcement — not the cancelled token — is what the tear-down arm is allowed to act on.
+        lifetime.Stop();
         shutdown.Cancel();
         await Task.WhenAll(executions);
 
@@ -299,14 +303,63 @@ public partial class AgentRunExecutorTests
 
             run.Status.ShouldBe(AgentRunStatus.Failed,
                 $"run {runId} was left Running by a worker that was taking its model access with it — the outcome has to land here, inside the drain, not at the agent's spec timeout");
-            JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost);
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options).ShouldNotBeNull();
+
+            result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost);
             run.Error!.ShouldNotContain("provider", Shouldly.Case.Insensitive, "a restart of ours must never be dressed as a provider outage");
+
+            // The drain FOLDS. A bare landing would carry no changed files, which the supervisor's post-hoc grade
+            // reads as no-branch-or-repo with no work present — a real verdict failure rather than infra — so a
+            // rolling restart would burn a turn's no-progress budget in seconds. And without the session id every
+            // retry is cold, re-paying for work already bought.
+            result.SessionId.ShouldBe(ShutdownFactSessionId,
+                $"run {runId} landed without the session id its agent announced — the retry this failure tells an operator to run would start cold");
+            result.TokenUsage.ShouldNotBeNull($"run {runId} landed reporting no spend, though its agent burned the tenant's tokens before the drain stopped it");
+            (result.TokenUsage!.InputTokens + result.TokenUsage.OutputTokens).ShouldBeGreaterThan(0);
+
+            var confinement = JsonSerializer.Deserialize<SandboxConfinement>(run.SandboxConfinementJson!, AgentJson.Options).ShouldNotBeNull();
+            confinement.ModelCredentialLeaseLost.ShouldBeTrue("the posture is stamped under the fence BEFORE the kill, so a landing that fails still leaves the next sweep the cause");
 
             broker.HasLease(runId).ShouldBeFalse("the credential is withdrawn before the kill, so the agent cannot spend on the seconds it has left");
         }
 
         foreach (var pid in pids)
             await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {pid} -o pid,stat,etime,command`");
+    }
+
+    [Fact]
+    public async Task A_parent_cancelling_a_brokered_run_on_a_LIVE_host_never_lands_the_lost_lease_verdict()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-parent-cancel-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var broker = new LoopbackModelCredentialBroker();
+        using var parent = new CancellationTokenSource();
+
+        // The shape three production callers actually have: AgentReviewRunner and the two benchmark cell runners hand
+        // ExecuteAsync a PARENT's token, so a parent that cancels cancels this run's token while the host is
+        // perfectly alive. Gating on that token would kill a healthy agent and tell its owner a worker restarted.
+        var lifetime = new FakeHostLifetime();
+        var execution = ExecuteUntilStoppedAsync(runId, broker, parent.Token, lifetime);
+
+        await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened a credential lease");
+        await WaitUntilAsync(() => HandleOf(runId) is not null, TimeSpan.FromSeconds(30), "the run never launched an agent");
+
+        var pid = HandleOf(runId)!.ProcessId;
+        parent.Cancel();
+        await execution;
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Running, "a cancelled PARENT is not a restarting host; the durable run survives its observer exactly as it always did");
+        (run.Error ?? "").ShouldNotContain("worker", Shouldly.Case.Insensitive, "no worker restarted — saying one did sends an operator hunting a deploy that never happened");
+        ProcessIsAlive(pid).ShouldBeTrue("the agent must still be running: a parent's cancel stops OBSERVING, it does not kill");
+
+        try { using var p = System.Diagnostics.Process.GetProcessById(pid); p.Kill(entireProcessTree: true); } catch { /* cleanup */ }
     }
 
     [Fact]
@@ -327,7 +380,10 @@ public partial class AgentRunExecutorTests
         // would have KILLED a healthy agent on those grounds.
         // Tolerates the ownership loss too: a cancel bumps the run's fence, so this pass legitimately discovers it no
         // longer owns the run. That IS the expected shape of a cancel — what the test asserts is what got written.
-        var execution = ExecuteUntilStoppedAsync(runId, broker, CancellationToken.None);
+        // A LIVE host — the predicate the arm gates on is false, which is the whole point: this run is being stopped
+        // by a person, not by a deploy. Passing a lifetime that is not stopping is what makes the guard falsifiable;
+        // with a null one the branch is unreachable for a reason unrelated to what this test is about.
+        var execution = ExecuteUntilStoppedAsync(runId, broker, CancellationToken.None, new FakeHostLifetime());
 
         await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened a credential lease");
         await WaitUntilAsync(() => HandleOf(runId) is not null, TimeSpan.FromSeconds(30), "the run never launched an agent to cancel");
@@ -350,18 +406,18 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>One brokered run driven to the tear-down arm. The cancel is the point of the test, so the <see cref="OperationCanceledException"/> it re-raises (the contract that leaves a non-brokered run recoverable) is expected, not a failure.</summary>
-    private async Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown)
+    private async Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
-        var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo working; sleep 120");
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; sleep 120");
 
-        try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown); }
+        try { await ExecuteAsync(runId, harness, credentialBroker: broker, cancellationToken: shutdown, lifetime: lifetime); }
         catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
     }
 
     /// <summary>As above, but also tolerating the ownership loss a fence bump raises — the shape a user cancel takes, where the run is legitimately taken away from this pass rather than the pass being taken away from the host.</summary>
-    private async Task ExecuteUntilStoppedAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown)
+    private async Task ExecuteUntilStoppedAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
-        try { await ExecuteUntilShutdownAsync(runId, broker, shutdown); }
+        try { await ExecuteUntilShutdownAsync(runId, broker, shutdown, lifetime); }
         catch (CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException) { /* the cancel bumped the fence; the row it wrote is what this test asserts */ }
     }
 
@@ -371,6 +427,30 @@ public partial class AgentRunExecutorTests
         var json = scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.RunnerHandleJson).Single();
 
         return string.IsNullOrWhiteSpace(json) ? null : JsonSerializer.Deserialize<SandboxHandle>(json, AgentJson.Options);
+    }
+
+    /// <summary>The harness session id the shutdown fixture's agent announces before it hangs — the input a WARM retry needs, and the thing a bare landing used to throw away.</summary>
+    private const string ShutdownFactSessionId = "sess-drained-but-resumable-4c88";
+
+    /// <summary>The line the shutdown fixture's agent prints, in the shape <c>AgentRunFactKeys.Fallback</c> reads.</summary>
+    private const string ShutdownFactLine = "{\"session_id\":\"" + ShutdownFactSessionId + "\",\"usage\":{\"input_tokens\":900,\"output_tokens\":150}}";
+
+    /// <summary>
+    /// The host's own lifetime, driven by the test. The executor's tear-down arm may act ONLY on this — a cancelled
+    /// job token means nothing (a parent run cancelling, a Hangfire job abort), and a fake that can be asked both ways
+    /// is what makes that guard falsifiable rather than merely unreached.
+    /// </summary>
+    private sealed class FakeHostLifetime : Microsoft.Extensions.Hosting.IHostApplicationLifetime
+    {
+        private readonly CancellationTokenSource _stopping = new();
+        private readonly CancellationTokenSource _stopped = new();
+
+        public CancellationToken ApplicationStarted => CancellationToken.None;
+        public CancellationToken ApplicationStopping => _stopping.Token;
+        public CancellationToken ApplicationStopped => _stopped.Token;
+
+        public void Stop() => _stopping.Cancel();
+        public void StopApplication() => _stopping.Cancel();
     }
 
     /// <summary>The agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
@@ -539,13 +619,26 @@ public partial class AgentRunExecutorTests
             return new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
         }
 
-        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
-            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
+        // KEEPS the line's structured root, as every real harness's parse does — AgentRunFacts reads only
+        // AgentEvent.Data, so a double that dropped it would let a test pass while the executor recorded no session
+        // id and no spend.
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) return Array.Empty<AgentEvent>();
 
+            JsonElement? data = null;
+            try { using var doc = JsonDocument.Parse(line); data = doc.RootElement.Clone(); }
+            catch (JsonException) { /* a plain line carries no facts, exactly as a real harness's would not */ }
+
+            return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = data } };
+        }
+
+        // Carries the executor's accumulated facts onto the result, as ClaudeCodeResultFolder and CodexResultFolder do.
         public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
             exitCode == 0
-                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
-                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText, SessionId = fold.SessionId, TokenUsage = fold.TokenUsage }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}", SessionId = fold.SessionId, TokenUsage = fold.TokenUsage });
 
         public IReadOnlyList<string> SupportedProviders { get; } = new[] { provider };
 

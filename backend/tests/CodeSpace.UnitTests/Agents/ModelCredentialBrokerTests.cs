@@ -375,7 +375,7 @@ public class ModelCredentialBrokerTests
     [Fact]
     public void A_lost_lease_lands_a_declared_code_whose_words_never_blame_the_provider()
     {
-        var result = AgentRunExecutor.ModelCredentialLeaseLostResult();
+        var result = AgentRunExecutor.AsLostModelAccess(new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit" });
 
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost);
@@ -391,6 +391,34 @@ public class ModelCredentialBrokerTests
         error.ShouldContain("Retry", Case.Insensitive, "an operator-facing terminal that does not say what to do next is a dead end");
         error.ShouldNotContain("provider", Case.Insensitive, "the provider is fine; sending a reader to check one costs them the hour this sentence exists to save");
         error.ShouldNotContain("gateway", Case.Insensitive, "same reason — a gateway-shaped word here is exactly the misdiagnosis this outcome removes");
+    }
+
+    [Fact]
+    public void The_lost_lease_verdict_never_overwrites_a_run_that_actually_succeeded()
+    {
+        // A kill races the agent's own exit. One that finished between the probe and the signal has a REAL success on
+        // the spool, and stamping this verdict over it would destroy completed work and make an operator retry
+        // something already done.
+        var succeeded = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did the thing", SessionId = "sess-1" };
+
+        AgentRunExecutor.AsLostModelAccess(succeeded).ShouldBeSameAs(succeeded, "a finished attempt is not an attempt that could not finish");
+    }
+
+    [Fact]
+    public void The_lost_lease_verdict_keeps_everything_the_attempt_produced()
+    {
+        var folded = new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = "got partway",
+            SessionId = "sess-resumable", TokenUsage = new AgentTokenUsage { InputTokens = 1200, OutputTokens = 340 },
+        };
+
+        var landed = AgentRunExecutor.AsLostModelAccess(folded);
+
+        landed.SessionId.ShouldBe("sess-resumable", "the session id is what makes the retry WARM rather than a cold re-run of work already paid for");
+        landed.TokenUsage!.InputTokens.ShouldBe(1200);
+        landed.Summary.ShouldBe("got partway");
+        landed.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost, "only the three fields that say WHAT HAPPENED are replaced");
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────

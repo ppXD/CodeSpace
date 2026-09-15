@@ -1682,7 +1682,7 @@ public partial class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
         using var scope = _fixture.BeginScope();
 
@@ -1717,7 +1717,9 @@ public partial class AgentRunExecutorTests
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance,
             logCapture,
-            credentialBroker: credentialBroker);
+            credentialBroker: credentialBroker,
+            logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
+            lifetime: lifetime);
 
         return executor;
     }

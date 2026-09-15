@@ -174,9 +174,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // capture streams have lost their owner (the re-attach path — see RecordLogOwnerLossQuietlyAsync). Optional for
     // the same reason _logCapture is, and a null one simply leaves those streams for a later sweep.
     private readonly AgentRunLogging.IAgentRunLogService? _logs;
+    // The HOST's own lifetime — the only thing that can answer "is this process going away?". A cancelled job token
+    // cannot: three production callers hand ExecuteAsync a PARENT's token (a review run under its reviewer, a
+    // benchmark cell under its suite), and Hangfire's own shutdown token fires on a server-side job abort too. Every
+    // one of those is a live host, so a tear-down arm reading them would fail and kill a healthy agent. Optional like
+    // the rest — a null one simply never takes the shutdown branch, which is the safe direction.
+    private readonly Microsoft.Extensions.Hosting.IHostApplicationLifetime? _lifetime;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -200,6 +206,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _completeness = completeness;
         _credentialBroker = credentialBroker;
         _logs = logs;
+        _lifetime = lifetime;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -223,13 +230,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         var claimedEpoch = owner.Epoch;
-
-        // The HOST's token, kept before the line below replaces `cancellationToken` with the observer's. Only this one
-        // answers "is this process going away?". The observer token is cancelled for reasons that are nothing of the
-        // sort — an ownership loss cancels it, and any inner HTTP/DB client that times out raises its own
-        // TaskCanceledException — so a tear-down arm that read the observer token would fire on a healthy run whose
-        // lease is live, and (at the same epoch, where the fence CAS SUCCEEDS) fail and kill it.
-        var hostShutdown = cancellationToken;
 
         using var observerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cancellationToken = observerCts.Token;
@@ -640,14 +640,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // leaving the run Running would only defer the same verdict to a reconciler sweep, with the run degrading
             // in silence until then. Land it here instead, inside the drain, while this pass still holds the fence.
             //
-            // Both halves of the guard are load-bearing. `hostShutdown` is the host token, NOT the observer token this
-            // arm is otherwise reached through: an ownership loss and any inner client timeout also arrive here as an
-            // OperationCanceledException, and on those the run is healthy, its lease live, and its fence still ours —
-            // so the CAS would succeed and this would fail and kill a working agent.
+            // The predicate is the HOST'S OWN LIFETIME, and nothing weaker will do. Every token in reach here is
+            // cancelled by things that are not a shutdown: the observer's, by an ownership loss; this method's
+            // parameter, by a PARENT run cancelling (a review run under its reviewer, a benchmark cell under its
+            // suite); Hangfire's, by a server-side job abort. On all of those the process is alive, the lease is live,
+            // and the fence is still ours — so the CAS would succeed and this would fail and kill a working agent and
+            // tell its owner a worker restarted. ApplicationStopping is true only when one actually is.
             //
             // Best-effort by construction: a drain budget is finite, and a run this misses is caught by the re-attach
             // half, which reaches the identical outcome one sweep later rather than at the spec timeout.
-            if (brokeredHere && hostShutdown.IsCancellationRequested && await EndBrokeredAttemptOnShutdownAsync(owner, run.TeamId).ConfigureAwait(false))
+            if (brokeredHere && _lifetime?.ApplicationStopping.IsCancellationRequested == true && await EndBrokeredAttemptOnShutdownAsync(owner, run.TeamId, agentRunId).ConfigureAwait(false))
                 leaveWorkspaceForReattach = false;   // the agent's death is CONFIRMED (see the landing), so nothing is standing in the clone
 
             throw;
@@ -740,27 +742,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return;
 
-        // Before anything that can throw or return: a brokered run re-attached HERE has already lost its model
-        // access, and the record has to say so while this pass is still the one holding the fence.
-        await RecordLostBrokeredCredentialAsync(owner, run, handle, cancellationToken).ConfigureAwait(false);
-
-        // ...and then STOP it, rather than re-tail an agent that cannot reach a model. The lease lived in the minting
-        // worker's memory, this pass re-opens none, and no future pass can: the child holds a base URL naming a port
-        // that died. A still-running one therefore cannot complete its attempt — it burns its wall clock failing to
-        // connect while the run reads Running, which is the silent degrade this branch exists to remove.
-        //
-        // Asked only when this worker's OWN broker has no live lease for the run. "A re-attach means the lease is
-        // gone" is true today only because of an emergent TTL ordering nobody wrote down (a reattach reservation needs
-        // an expired observation lease, ~3 heartbeats; a credential lease lapses after 2) — and the cost of that
-        // ordering being violated used to be a stale posture stamp, whereas now it would be killing a live agent. So
-        // the question is asked directly instead of inferred. RenewAsync would NOT do: this pass carries the
-        // reclaim-bumped epoch, so a renewal fails even against a lease that is very much alive.
-        var leaseLost = handle.ModelBrokerRunToken is not null && _credentialBroker?.HasLease(agentRunId) is not true
-            ? await StopAgentWithoutModelAccessAsync(agentRunId, durable, handle, cancellationToken).ConfigureAwait(false)
-            : LostModelAccess.None;
+        // A brokered run re-attached HERE has lost its model access: record it, and stop an agent that is still
+        // burning its wall clock without one. Its own method (Rule 3) — this is one decision with one outcome, and
+        // ReattachAsync's body is a pipeline, not a place to reason in.
+        var leaseLost = await ResolveLostModelAccessAsync(owner, run, durable, handle, cancellationToken).ConfigureAwait(false);
 
         // Its agent outlived the kill, so nothing may be landed over it (see the enum). Leave the run Running exactly
-        // as an unobservable re-attach does, and let the next sweep ask again.
+        // as an unobservable re-attach does, and let the next sweep ask again — including the log-stream owner-loss
+        // write skipped with it, which the stale sweep's own AbandonAsync performs
+        // (AgentRunReconcilerService.RecordLogOwnerLossQuietlyAsync) once this run goes stale.
         if (leaseLost == LostModelAccess.AgentUnstoppable) return;
 
         // Heartbeat spans the whole re-tail (its own DI scope, like ExecuteAsync) so the lease stays fresh and the
@@ -4016,13 +4006,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal static AgentRunResult AsLostModelAccess(AgentRunResult folded)
     {
+        // A kill races the agent's own exit: an agent that finished between the probe and the signal has a REAL
+        // success on the spool, and overwriting it with this verdict would destroy a completed piece of work and make
+        // the operator retry something that was already done. The verdict describes an attempt that could not finish;
+        // an attempt that did is not one.
+        if (folded.Status == AgentRunStatus.Succeeded) return folded;
+
         var failure = new Credentials.ModelCredentialLeaseLostException();
 
         return folded with { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(failure), Error = failure.Message };
     }
-
-    /// <summary>The same verdict with nothing folded into it — the tear-down path's landing, where this process is being taken away and there is no budget to re-tail the spool. See the PR-documented asymmetry: the re-attach half folds, this half trades that for immediacy.</summary>
-    internal static AgentRunResult ModelCredentialLeaseLostResult() => AsLostModelAccess(new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = GenericExecutorExitReason });
 
     /// <summary>What asking "can this run still reach a model?" found, and therefore what its caller may do about it.</summary>
     private enum LostModelAccess
@@ -4043,6 +4036,43 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Cadence of the confirmation poll. Matches the runner's own tail cadence — there is nothing to gain by asking faster than the spool is read.</summary>
     private static readonly TimeSpan AgentStopPollInterval = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>How long the one question "did the terminal actually land?" gets, on a token of its own. Short: it is a single indexed read, and it is asked only on a path where a longer budget has already run out.</summary>
+    private static readonly TimeSpan TerminalConfirmationBudget = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// What a re-attach must do about a BROKERED run's model access: record that it is gone, and decide whether this
+    /// pass owes the attempt a verdict.
+    ///
+    /// <para>The lease lived in the minting worker's memory, this pass re-opens none, and no future pass can: the
+    /// agent holds a base URL naming a port that died. A still-running one therefore cannot complete its attempt — it
+    /// burns its wall clock failing to connect while the run reads Running, which is the silent degrade this exists
+    /// to remove — so it is stopped.</para>
+    ///
+    /// <para>Asked only when this worker's OWN broker has no live lease. "A re-attach means the lease is gone" is true
+    /// today only through an emergent ordering nobody wrote down (a reattach reservation needs an expired observation
+    /// lease, ~3 heartbeats; a credential lease lapses after 2). That inference was free when its cost was a stale
+    /// posture stamp; it is not free when its cost is killing a live agent. <c>RenewAsync</c> would NOT do — this pass
+    /// carries the reclaim-bumped epoch, so a renewal fails against a perfectly live lease.</para>
+    ///
+    /// <para>An agent that is ALREADY gone still owes the verdict when the posture recorded before this pass says a
+    /// lost lease is why: that is a worker which revoked, stamped and killed on its way out and then could not land
+    /// the terminal. Without this arm its cause dies with it and the run reports whatever the signal happened to
+    /// produce. The posture is read from the row as it was BEFORE this pass stamps it, which is what keeps the two
+    /// cases apart.</para>
+    /// </summary>
+    private async Task<LostModelAccess> ResolveLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        var deployAlreadyStamped = DeserializeConfinement(run.SandboxConfinementJson)?.ModelCredentialLeaseLost == true;
+
+        await RecordLostBrokeredCredentialAsync(owner, run, handle, cancellationToken).ConfigureAwait(false);
+
+        if (handle.ModelBrokerRunToken is null || _credentialBroker?.HasLease(owner.RunId) is true) return LostModelAccess.None;
+
+        var stopped = await StopAgentWithoutModelAccessAsync(owner.RunId, durable, handle, cancellationToken).ConfigureAwait(false);
+
+        return stopped == LostModelAccess.None && deployAlreadyStamped ? LostModelAccess.AgentStopped : stopped;
+    }
+
     /// <summary>
     /// STOP an agent whose brokered model access is provably gone, and say whether it actually stopped.
     ///
@@ -4053,9 +4083,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <see cref="LostModelAccess.AgentUnstoppable"/> instead, the caller lands nothing, and the next sweep — which will
     /// find the same run, and by then very likely a dead agent — decides again.</para>
     ///
-    /// <para>Killing before the fenced CAS is safe because this pass already OWNS the run: on the re-attach path by the
-    /// reservation it activated (heartbeat live), on the tear-down path by the claim it has held since launch. That is
-    /// the same ownership the reconciler's abandon kill relies on.</para>
+    /// <para>Killing before the fenced CAS is safe because this pass PROVED it owns the run one statement earlier, and
+    /// not because a heartbeat is running — on the re-attach path the heartbeat starts after this. The proof is the
+    /// posture write: <c>ActivateReattachAsync</c> stamped <c>lease_expires_at = now + LeaseDuration</c>
+    /// (<c>AgentRunService.Ownership.cs</c>), and <c>SetSandboxConfinementAsync</c> in the same file asserts owner AND
+    /// epoch AND <c>lease_expires_at &gt; clock_timestamp()</c>, throwing <see cref="AgentRunOwnershipLostException"/>
+    /// when any of the three fails. It runs immediately before this, so a lapsed or superseded ownership never reaches
+    /// the kill. That is the same ownership the reconciler's abandon kill relies on.</para>
     /// </summary>
     private async Task<LostModelAccess> StopAgentWithoutModelAccessAsync(Guid runId, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
     {
@@ -4096,21 +4130,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// sweep rediscover it. Runs on its OWN token — the caller's is already cancelled, and a tear-down that skipped
     /// its own cleanup because it was being torn down would do nothing at all.
     ///
-    /// <para>Revoke FIRST, before anything that can kill: a signal races the agent's next model call and a withdrawn
-    /// lease does not — the same ordering the cancel path promises. Then the confirmed kill, then the terminal.</para>
+    /// <para>The order is the argument. REVOKE first, because a signal races the agent's next model call and a
+    /// withdrawn lease does not. STAMP the posture next, under the fence, because it is what tells a later re-attach
+    /// that this run's death was a deploy — without it a landing that fails below leaves a dead agent the next sweep
+    /// reads as an ordinary non-zero exit, and the cause is lost. Then the confirmed KILL. Then the FOLD, and only
+    /// then the terminal.</para>
     ///
-    /// <para>Unlike the re-attach half this lands NO folded work: re-tailing the spool needs the harness folder, the
-    /// redactor, the native plane and the transcript spool, and a finite drain cannot afford to rebuild them. The
-    /// trade is deliberate and stated in the PR — immediacy here, fidelity there.</para>
+    /// <para>It folds for the same reason the re-attach half does, and the cost of not folding is not merely lost
+    /// fidelity: a bare result carries no changed files, so the supervisor's post-hoc grade reads it as
+    /// <c>no-branch-or-repo</c> with no work present — a real verdict failure rather than infra — and a rolling
+    /// restart would burn a turn's no-progress budget in seconds. The fold also carries the session id that makes the
+    /// retry WARM.</para>
     ///
-    /// <para>Swallows everything, including the ownership loss a reclaimed run's fenced write raises: this runs inside
-    /// a <c>catch</c> whose own exception must reach the caller, and an outcome nobody can land here is exactly what
-    /// the re-attach half is for.</para>
+    /// <para>If the drain cannot afford all of that, NOTHING is landed: the run stays Running with its lease revoked,
+    /// its posture stamped and its agent dead, and the re-attach half lands it from that posture. A bare terminal
+    /// would be worse than no terminal.</para>
     /// </summary>
-    /// <returns>True only when the run was LANDED terminal over a confirmed-dead agent — the one case whose clone is nobody's any more.</returns>
-    private async Task<bool> EndBrokeredAttemptOnShutdownAsync(AgentRunOwnerToken owner, Guid teamId)
+    /// <returns>True when the run reached a TERMINAL state here — the one case whose clone is nobody's any more. Post-terminal bookkeeping being cut off by the drain does not make it false; the database is asked.</returns>
+    private async Task<bool> EndBrokeredAttemptOnShutdownAsync(AgentRunOwnerToken owner, Guid teamId, Guid runId)
     {
-        var runId = owner.RunId;
         await RevokeBrokeredCredentialQuietlyAsync(runId, "worker-shutdown").ConfigureAwait(false);
 
         using var budget = new CancellationTokenSource(ShutdownLeaseLandingBudget);
@@ -4121,15 +4159,107 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (DeserializeHandle(run.RunnerHandleJson) is not { } handle) return false;
             if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return false;
+
+            await RecordLostBrokeredCredentialAsync(owner, run, handle, budget.Token).ConfigureAwait(false);
+
             if (await StopAgentWithoutModelAccessAsync(runId, durable, handle, budget.Token).ConfigureAwait(false) != LostModelAccess.AgentStopped) return false;
 
-            await CompleteAndNotifyAsync(owner, teamId, ModelCredentialLeaseLostResult(), budget.Token).ConfigureAwait(false);
-
-            return true;
+            return await FoldAndLandLostModelAccessAsync(owner, run, durable, handle, budget.Token).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Agent run {RunId}: this worker could not land its lost-lease outcome before shutting down; the re-attach sweep reaches the same verdict instead", runId);
+            _logger.LogWarning(exception, "Agent run {RunId}: this worker could not land its lost-lease outcome before shutting down; its lease is revoked and its posture stamped, so the re-attach sweep lands the same verdict from those", runId);
+            return await TerminalAlreadyLandedAsync(runId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Fold the dead agent's spool through the SAME path the re-attach half folds through, then land the typed verdict
+    /// on top of what it produced. Shared so the two halves cannot drift into reporting different things about the
+    /// same event — the reason the shutdown half used to land a bare result, and the reason that was wrong.
+    /// </summary>
+    private async Task<bool> FoldAndLandLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options) ?? throw new InvalidOperationException($"AgentRun {owner.RunId} has an empty task envelope.");
+        var harness = _harnesses.Resolve((await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false)).HarnessKind);
+
+        var folded = await ReattachAndFoldAsync(new ReattachFoldContext { Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy, Durable = durable, Handle = handle, Task = task, Harness = harness }, cancellationToken).ConfigureAwait(false);
+
+        if (folded is null) return false;   // could not safely observe — leave it Running for the re-attach half, which lands it from the stamped posture
+
+        folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await CompleteAndNotifyAsync(owner, run.TeamId, AsLostModelAccess(folded), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (exception is not AgentRunOwnershipLostException)
+        {
+            // The fenced write may well have LANDED and only the bookkeeping after it been cut off by the drain — the
+            // shadow-log terminalization runs on a budget linked to this token, so a short window cancels it there
+            // rather than at the write. Whether the run is terminal is a question for the database, not for which
+            // exception escaped: answering it wrong leaves a terminal run's clone to the janitor. The stream that
+            // terminalization did not close is closed by the recovery sweep's own FailOpenStreamAsync, which is
+            // reached because this landing does NOT bump the fence the stream was opened at.
+            _logger.LogWarning(exception, "Agent run {RunId}: its lost-lease terminal was written but the bookkeeping after it was cut off by the drain", owner.RunId);
+            return await TerminalAlreadyLandedAsync(owner.RunId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Fill in the run facts a RESUMED fold could not see.
+    ///
+    /// <para>A tail that resumes from a checkpoint reads only the bytes after it, and the rewind that exists for the
+    /// native plane deliberately does NOT feed re-read text back into the folder or the facts (it would duplicate the
+    /// normalized log). So an attempt whose session id and token usage were announced BEFORE this pass began — which
+    /// on the tear-down path is every attempt, since this process's own live tail already consumed them — folds to
+    /// nulls. Those two nulls are exactly the difference between a warm retry and a cold one, and between a recorded
+    /// spend and a written-off one.</para>
+    ///
+    /// <para>The events are already durable, so they are read back through the harness's OWN declared spellings via
+    /// <see cref="AgentRunFacts.From(IEnumerable{AgentEvent}, IAgentHarness)"/> — the documented replay seam — and only
+    /// the gaps are filled. A fold that already established a fact keeps it: the live stream is the better witness.</para>
+    /// </summary>
+    private async Task<AgentRunResult> WithFactsFromDurableEventsAsync(AgentRunResult folded, Guid runId, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    {
+        if (folded is { SessionId.Length: > 0, TokenUsage: not null }) return folded;
+
+        try
+        {
+            var stored = await _runs.GetEventsAsync(runId, teamId, 0, cancellationToken).ConfigureAwait(false);
+            var facts = AgentRunFacts.From(stored.Select(ReplayedEvent), harness);
+
+            return folded with { SessionId = folded.SessionId ?? facts.SessionId, TokenUsage = folded.TokenUsage ?? facts.TokenUsage, Model = folded.Model ?? facts.Model };
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: its durable events could not be replayed for run facts; the result keeps whatever the fold established", runId);
+            return folded;
+        }
+    }
+
+    /// <summary>One persisted event read back as the normalized event it was written from. Only the two fields the fact readers consult survive the round trip — an offloaded payload (DataJson null, artifact id set) simply carries no facts, which is the same answer the original parse would have given for a line with no structured root.</summary>
+    private static AgentEvent ReplayedEvent(Persistence.Entities.AgentRunEvent stored)
+    {
+        if (stored.DataJson is not { Length: > 0 } json) return new AgentEvent { Kind = stored.Kind, Text = stored.Text };
+
+        try { using var doc = JsonDocument.Parse(json); return new AgentEvent { Kind = stored.Kind, Text = stored.Text, Data = doc.RootElement.Clone() }; }
+        catch (JsonException) { return new AgentEvent { Kind = stored.Kind, Text = stored.Text }; }
+    }
+
+    /// <summary>Ask the row, on a token of its own, whether the run actually reached a terminal state — the only honest answer to "did the landing take?" once an exception has been raised somewhere after the fenced write.</summary>
+    private async Task<bool> TerminalAlreadyLandedAsync(Guid runId)
+    {
+        using var probe = new CancellationTokenSource(TerminalConfirmationBudget);
+
+        try
+        {
+            return await _db.AgentRun.AsNoTracking().AnyAsync(r => r.Id == runId && r.Status != AgentRunStatus.Running && r.Status != AgentRunStatus.Queued, probe.Token).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: could not confirm whether its terminal landed; treating it as still Running, so its clone is left for the janitor rather than removed from under a live agent", runId);
             return false;
         }
     }
