@@ -287,18 +287,29 @@ public partial class AgentRunExecutorTests
         // THIS process's memory behind THIS process's listener, so neither survives the restart — and each child
         // sleeps far past its own deadline, so anything that left them Running would be a run degrading in silence.
         var lifetime = new FakeHostLifetime();
-        // PRODUCTION SHAPE: a real INativeRecordPlane, because the drain's fold re-opens a resumed capture at the
-        // SAME worker fence epoch as this pass's still-open one, and with a null plane that second open is a no-op.
+        // PRODUCTION SHAPE, and every part of it is load-bearing. A real INativeRecordPlane, because the drain's
+        // fold re-opens a resumed capture at the SAME worker fence epoch as this pass's still-open one. And a real
+        // capture bridge RESOLVED FROM THE CONTAINER — IAgentRunLogCaptureBridge is marked IScopedDependency on the
+        // INTERFACE, so the convention scan registers it and a deployed executor gets it; resolving rather than
+        // hand-building is what makes its storage resolver, recovery service and stall writer the deployed ones too.
         //
-        // NO log-capture bridge, and that is ALSO the production shape: AgentRunLogCaptureBridge carries no
-        // IDependency marker and is registered nowhere in backend/src, so a deployed executor's _logCapture is null
-        // and it always takes its PassthroughLogCaptureSession branch. An earlier revision hand-built the bridge to
-        // assert something about capture streams; that asserted a property of a component no deployment runs, and
-        // building it also exposed a pre-existing hang that killed a CI host. Both are in the PR body.
-        var executions = runIds.Select(runId => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true)).ToArray();
+        // That matters more than fidelity for its own sake: with the bridge attached, a cancel used to hang here
+        // forever, which is the production shape of a worker shutdown and the exact silent degrade this PR exists to
+        // end. A test without the bridge cannot see it.
+        var captureScopes = runIds.Select(_ => _fixture.BeginScope()).ToArray();
+
+        try
+        {
+        var executions = runIds.Select((runId, i) => ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true, logCapture: captureScopes[i].Resolve<IAgentRunLogCaptureBridge>())).ToArray();
 
         await WaitUntilAsync(() => runIds.All(broker.HasLease), TimeSpan.FromSeconds(30), "the runs never opened their credential leases");
         await WaitUntilAsync(() => runIds.All(id => HandleOf(id) is not null), TimeSpan.FromSeconds(30), "the runs never persisted a durable handle, so there was no launched agent for a shutdown to account for");
+
+        // The bridge really opened, BEFORE anything depends on it: a capture that cannot reach its destination
+        // degrades to a passthrough session silently, and every later claim about streams would then be about the
+        // empty set. A fixture problem has to fail HERE, named as one.
+        await WaitUntilAsync(() => runIds.All(HasLogStream), TimeSpan.FromSeconds(60),
+            "no agent_run_log_stream row appeared, so the capture bridge never opened one — check that its storage destination resolves and is writable on this machine");
 
         var pids = runIds.Select(id => HandleOf(id)!.ProcessId).ToArray();
         pids.ShouldAllBe(pid => ProcessIsAlive(pid), "precondition: both agents are alive at the moment the worker is told to go");
@@ -339,10 +350,28 @@ public partial class AgentRunExecutorTests
 
             broker.HasLease(runId).ShouldBeFalse("the credential is withdrawn before the kill, so the agent cannot spend on the seconds it has left");
 
+            // The capture bridge's streams reach a TERMINAL state during the drain rather than being stranded Open.
+            // An Open row is what the Room folds to "Finalizing" forever, and on this path nothing would ever close
+            // one: the landing does not bump the fence, so a later owner-loss write (which requires the stream's
+            // generation to be strictly older than the run's) could never match it either. CaptureFailed is the
+            // honest terminal here — the observer was cancelled before any terminal result proved the source
+            // complete, so what was committed is all there will be, and the row says exactly that.
+            var streams = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
+                .Where(x => x.AgentRunId == runId).Select(x => new { x.State, x.WorkerFenceEpoch }).ToListAsync();
+
+            streams.ShouldNotBeEmpty($"run {runId} opened no log stream, so every claim below is about the empty set — check that the capture bridge reached the executor rather than its passthrough branch");
+            streams.ShouldAllBe(x => x.State != AgentRunLogStreamState.Open,
+                $"run {runId} left a capture stream Open after the drain landed it terminal; nothing writes one of those afterwards (the landing leaves the fence unchanged, so even the owner-loss statement cannot match it) and the Room reports it as still finalizing forever");
+
         }
 
         foreach (var pid in pids)
             await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {pid} -o pid,stat,etime,command`");
+        }
+        finally
+        {
+            foreach (var captureScope in captureScopes) captureScope.Dispose();
+        }
     }
 
     [Fact]
@@ -605,6 +634,14 @@ public partial class AgentRunExecutorTests
     }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Whether the capture bridge has opened this run's stream yet — the row nothing else writes, and therefore the proof that the bridge reached the executor instead of its passthrough branch.</summary>
+    private bool HasLogStream(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking().Any(s => s.AgentRunId == runId);
+    }
 
     /// <summary>
     /// Await work that SHOULD finish, with a deadline and a message naming what did not. An unbounded await on an
