@@ -172,8 +172,8 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         return Task.CompletedTask;
     }
 
-    /// <summary>Test seam: whether this run currently holds a live lease here. Not on the interface — nothing in production asks, and a caller that did would be reasoning about another worker's memory.</summary>
-    internal bool HasLease(Guid runId) => _byRun.TryGetValue(runId, out var lease) && lease.ExpiresAt > _time.GetUtcNow();
+    /// <summary>Whether this run currently holds a live lease HERE — see <see cref="IModelCredentialBroker.HasLease"/> for why a caller is allowed to ask. An entry past its expiry answers false without waiting for the sweep that removes it: a lapsed lease is already refused at the relay, and the two must not disagree.</summary>
+    public bool HasLease(Guid runId) => _byRun.TryGetValue(runId, out var lease) && lease.ExpiresAt > _time.GetUtcNow();
 
     // ── Listener ──────────────────────────────────────────────────────────────────────────────────────────────────
 

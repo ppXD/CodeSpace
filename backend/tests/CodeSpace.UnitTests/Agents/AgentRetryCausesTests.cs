@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
@@ -7,6 +8,7 @@ using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Failures;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -143,6 +145,22 @@ public class AgentRetryCausesTests
             task.ResumeFromSessionId.ShouldBeNull($"the {lane} lane must start FRESH — a replay re-triggers the fault deterministically");
             task.RestoredTranscript.ShouldBeNull($"the {lane} lane must not carry the poisoned transcript forward");
         }
+    }
+
+    [Fact]
+    public void A_lost_model_credential_lease_classifies_as_infra_and_buys_no_mitigation()
+    {
+        AgentRetryCauses.Classify(FailureCodes.ModelCredentialLeaseLost, ModelCredentialLeaseLostException.Explanation)
+            .ShouldBe(AgentRetryCauses.ModelAccessLost, "a worker restart is OUR infra; an attempt it killed is evidence about the rollout, never about the model");
+
+        AgentRetryCauses.Classify(FailureCodes.ModelCredentialLeaseLost, ModelCredentialLeaseLostException.Explanation)
+            .ShouldNotBe(AgentRetryCauses.GatewayFormatFault,
+                "it must NOT borrow the format fault's repair — that one drops the conversation and disables extended thinking, which would cold-start a retry that only ever needed a live worker");
+
+        // The TYPED code decides it. The same sentence with no declared exit reason classifies as nothing, which is
+        // what stops this from becoming one more substring heuristic over prose.
+        AgentRetryCauses.Classify(null, ModelCredentialLeaseLostException.Explanation).ShouldBeNull();
+        AgentRetryCauses.Classify("non-zero-exit", "claude exited with code 1").ShouldBeNull("an ordinary failure still carries no retry-relevant cause");
     }
 
     private static NodeRunContext NodeContext(JsonElement priorAttemptPayload) => new()

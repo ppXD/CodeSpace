@@ -826,10 +826,26 @@ public static class RoomNarrative
         return reason.EndsWith('.') ? reason : reason + ".";
     }
 
-    /// <summary>A rejected model credential — the one error class with a typed remediation (Fix credentials) rather than just a rerun.</summary>
+    /// <summary>
+    /// A rejected model credential — the one error class with a typed remediation (Fix credentials) rather than just a
+    /// rerun.
+    ///
+    /// <para>A failure THIS codebase declared outranks the substring scan, and the first arm is why the rule exists:
+    /// <see cref="Agents.Credentials.ModelCredentialLeaseLostException"/> says a worker restarted and the attempt was
+    /// stopped, and it necessarily contains the word "credential" — so the scan below would rewrite it into
+    /// "Authentication failed … Fix credentials" and send an operator to rotate a key that is perfectly good. That is
+    /// the exact misdirection that failure exists to prevent, reintroduced one layer up. The match is on a constant
+    /// this codebase writes, never on a provider's words.</para>
+    ///
+    /// <para>Narrow on purpose: the general form is to carry the failing run's typed <c>ExitReason</c> into
+    /// <see cref="RoomTurnFacts"/> so EVERY declared code outranks the heuristic, which needs the node-failure record
+    /// to persist it first. Until then the heuristic keeps its job — reading errors nobody here authored.</para>
+    /// </summary>
     private static bool IsAuthError(string? error)
     {
         if (string.IsNullOrWhiteSpace(error)) return false;
+
+        if (error.Contains(Agents.Credentials.ModelCredentialLeaseLostException.Explanation, StringComparison.Ordinal)) return false;
 
         return new[] { "401", "unauthorized", "authentication", "api key", "api-key", "credential", "invalid_api_key" }
             .Any(m => error.Contains(m, StringComparison.OrdinalIgnoreCase));

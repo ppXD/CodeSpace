@@ -502,7 +502,12 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         // later pass can do restores it. The deadline is SHORTER than the child's own sleep, so the mutation (revert
         // to log-only) is bounded: the re-attach would tail this live process to its timeout and land TimedOut, which
         // is the silent degrade-until-the-spec-timeout this test exists to forbid.
-        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "echo working; sleep 120" }, TimeoutSeconds = 30 };
+        //
+        // It emits real facts BEFORE it hangs — a session id and a token spend — because the verdict must be stamped
+        // onto the attempt's FOLDED work, not instead of it. An attempt this deployment killed still cost the tenant
+        // money and still left a resumable conversation; a terminal that dropped them would make "retry" a cold start
+        // that re-pays for work nobody can see.
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", $"echo '{FactLine}'; sleep 120" }, TimeoutSeconds = 30 };
 
         SandboxHandle handle;
         using (var scope = _fixture.BeginScope())
@@ -521,21 +526,38 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
         ProcessIsAlive(handle.ProcessId).ShouldBeTrue("precondition: the detached agent outlived its worker and is what a re-attach would find");
 
+        // The log stream the VANISHED worker opened, still Open at the fence it was minted under. Its own recovery
+        // sweep refuses it once the reservation bumps the run's fence (a superseded claim), and the only writer that
+        // could close it runs solely from the reconciler's abandon — which never visits a terminal run. Left alone it
+        // stays Open forever and the Room reports the capture as "Finalizing" for the life of the row.
+        var streamId = await SeedOpenLogStreamAsync(teamId, runId, workerFenceEpoch: 1);
+
         using (var scope = _fixture.BeginScope())
         {
             await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
             _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
         }
 
-        await ReattachAsync(runId, new ScriptedHarness());
+        await ReattachAsync(runId, new FactCarryingHarness());
 
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
 
         run.Status.ShouldBe(AgentRunStatus.Failed,
             "an agent with no model access cannot finish its attempt; leaving it Running only hides that until the spec timeout");
-        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost,
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options).ShouldNotBeNull();
+
+        result.ExitReason.ShouldBe(FailureCodes.ModelCredentialLeaseLost,
             "the outcome has to be attributable — an operator must be able to tell a worker restart from a model that refused the work");
+
+        // The verdict is stamped ONTO the fold, never instead of it (the kill lands before the tail, so the spool is
+        // finished and reads normally). Drop either field and the sentence the run writes — "retry starts a fresh
+        // attempt" — becomes a cold restart whose predecessor's spend went unrecorded.
+        result.SessionId.ShouldBe(FactSessionId,
+            "the killed conversation is resumable, and its id is the single input a WARM retry needs — a terminal that drops it makes every retry cold");
+        result.TokenUsage.ShouldNotBeNull("the attempt burned the tenant's tokens before we stopped it; a terminal that reports none writes that spend off");
+        (result.TokenUsage!.InputTokens + result.TokenUsage.OutputTokens).ShouldBeGreaterThan(0);
 
         run.Error.ShouldNotBeNull();
         run.Error!.ShouldNotContain("provider", Case.Insensitive, "the provider is up; a word here that sends an operator to check one is the misdiagnosis this change removes");
@@ -545,7 +567,65 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         confinement.ModelCredentialLeaseLost.ShouldBeTrue("the posture stamp survives the typed landing — the two say different things and a reader needs both");
         confinement.Outcome.ShouldBe(SandboxConfinementOutcome.Confined, "the launch's own posture is merged onto, never replaced");
 
+        var stream = await verify.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking().SingleAsync(s => s.Id == streamId);
+        stream.State.ShouldBe(AgentRunLogStreamState.CaptureFailed,
+            "the vanished worker's capture can never be finished by anyone — its own sweep refuses it as superseded and nothing else writes it, so an Open row here is the Room saying 'Finalizing' forever about a capture whose owner is gone");
+
         await WaitUntilProcessGoneAsync(handle.ProcessId);
+    }
+
+    /// <summary>A log stream in the state a worker that DIED mid-capture leaves behind: Open, stamped with the fence it was minted under, which the re-attach reservation is about to move past.</summary>
+    private async Task<Guid> SeedOpenLogStreamAsync(Guid teamId, Guid runId, long workerFenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var stream = new AgentRunLogStream
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId,
+            WorkerFenceEpoch = workerFenceEpoch, CaptureSessionId = Guid.NewGuid(),
+            // Versioned identities, because ck_agent_run_log_stream_identity requires them — a fixture the schema
+            // would have refused proves nothing about the rows production actually writes.
+            StreamKind = "agent-run-native-log/v1", CaptureSource = "local-process-spool/v1", State = AgentRunLogStreamState.Open,
+        };
+
+        db.AgentRunLogStream.Add(stream);
+        await db.SaveChangesAsync();
+        return stream.Id;
+    }
+
+    /// <summary>The harness session id the fixture agent announces before it hangs — the one input a warm retry needs.</summary>
+    private const string FactSessionId = "sess-killed-but-resumable-7f21";
+
+    /// <summary>The line the fixture agent prints, in the shape <see cref="AgentRunFactKeys.Fallback"/> reads: a session id and a token spend, so the folded result carries real facts rather than fixture-shaped ones.</summary>
+    private const string FactLine = "{\"session_id\":\"" + FactSessionId + "\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":340}}";
+
+    /// <summary>A scripted harness whose ParseEvents keeps the line's structured root, so <c>AgentRunFacts</c> can read the session id and usage out of it — the fidelity an assertion about "the attempt's work was preserved" actually requires.</summary>
+    private sealed class FactCarryingHarness : IAgentHarness
+    {
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = ["-c", "true"], TimeoutSeconds = task.TimeoutSeconds };
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) return Array.Empty<AgentEvent>();
+
+            JsonElement? data = null;
+            try { using var doc = JsonDocument.Parse(line); data = doc.RootElement.Clone(); }
+            catch (JsonException) { /* a plain line carries no facts, exactly as a real harness's would not */ }
+
+            return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = data } };
+        }
+
+        // Carries the executor's accumulated facts onto the result, exactly as ClaudeCodeResultFolder and
+        // CodexResultFolder do. A double that dropped them would let this test pass while production lost the spend
+        // and the resumable conversation — the fixture would be measuring itself.
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = exitCode == 0 ? "completed" : "non-zero-exit", Summary = fold.LastText, SessionId = fold.SessionId, TokenUsage = fold.TokenUsage });
     }
 
     /// <summary>The detached agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
@@ -891,7 +971,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance,
-            logCapture);
+            logCapture,
+            logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>());
     }
 
     private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge
