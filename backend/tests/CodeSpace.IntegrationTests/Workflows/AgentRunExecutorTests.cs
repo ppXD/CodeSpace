@@ -1682,11 +1682,11 @@ public partial class AgentRunExecutorTests
         }
     }
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null)
     {
         using var scope = _fixture.BeginScope();
 
-        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker).ExecuteAsync(runId, CancellationToken.None);
+        await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic).ExecuteAsync(runId, CancellationToken.None);
     }
 
     /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch.</summary>
@@ -1697,7 +1697,7 @@ public partial class AgentRunExecutorTests
         await NewExecutor(scope, harness).ReattachAsync(reservation, CancellationToken.None);
     }
 
-    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
+    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null)
     {
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
@@ -1710,7 +1710,7 @@ public partial class AgentRunExecutorTests
             notifier ?? scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
-            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            critic ?? scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
