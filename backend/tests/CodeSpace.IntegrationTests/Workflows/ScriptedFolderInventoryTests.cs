@@ -8,12 +8,12 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <see cref="ScriptedFolders"/>.
 ///
 /// <para><c>AgentFolderDoubleFidelityTests</c> proves the SHARED construction reports everything production reports.
-/// It can say nothing about a double that builds its result inline — and most of this suite still does, which means
+/// It can say nothing about a double that builds its result inline — and fifteen files in this suite still do, which means
 /// most of this suite is still blind in exactly the way that cost three review rounds: a fixture reporting LESS than
 /// production breaks nothing except a test's ability to notice a regression.</para>
 ///
 /// <para>So this does not forbid the inline shape; it refuses to let the set of them grow by accident. Every site that
-/// exists today is listed below with the file it lives in. A new one reddens this test, and the author then chooses:
+/// exists today is listed below. A new one reddens this test, and the author then chooses:
 /// route it through <see cref="ScriptedFolders"/> (almost always right), or add the file here deliberately.</para>
 ///
 /// <para>Deliberately a SOURCE scan rather than reflection: the thing being counted is a syntactic construction, and a
@@ -25,8 +25,9 @@ public sealed class ScriptedFolderInventoryTests
     /// <summary>
     /// Test files that still build folder results inline, each a known blind spot rather than a decision. They are not
     /// converted here because this PR's subject is the lost-lease landing, and rewriting nine unrelated suites' doubles
-    /// inside it would bury the change under a refactor — the PR body lists them as follow-up. The two files this PR
-    /// DID touch are deliberately absent: they are routed through <see cref="ScriptedFolders"/>.
+    /// inside it would bury the change under a refactor — the PR body lists them as follow-up. The two files whose doubles this PR CONVERTED are
+    /// deliberately absent — <c>AgentRunReattachFlowTests</c> and <c>AgentRunExecutorCredentialBrokerTests</c>; note that
+    /// <c>AgentRunExecutorTests</c> is edited by this PR but still builds inline doubles, so it stays listed.
     /// </summary>
     private static readonly IReadOnlySet<string> InlineFolderSites = new HashSet<string>(StringComparer.Ordinal)
     {
