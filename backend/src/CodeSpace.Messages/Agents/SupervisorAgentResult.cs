@@ -145,6 +145,20 @@ public sealed record SupervisorAgentResult
     public string? AcceptanceDetail { get; init; }
 
     /// <summary>
+    /// The one <see cref="AcceptanceDetail"/> prefix NO grader mints: it marks a detail composed from
+    /// <see cref="InfraExitReason"/> BEFORE any check ran (<c>infra:model_credential_broker_unavailable</c>), where
+    /// every other convention — <c>grade-error:</c>, <c>clone-failed:</c>, <c>setup-failed:</c>,
+    /// <c>tests-failed-exit-N</c>, <c>no-rubric</c>, <c>no-schema</c> — names something a grading arm observed.
+    ///
+    /// <para>Declared HERE, in Messages, because it is a durable tape value: it round-trips through the persisted
+    /// <c>acceptanceDetail</c> bytes and is read back by consumers that never see the producer. Its literal and its
+    /// non-collision with every other detail composer are pinned by test (Rule 8) — a rename silently re-classifies
+    /// every tape already carrying it. Deliberately NOT on <c>FailureCodes</c>: that class's reflection over its own
+    /// literals defines the wire-code set, and this is not a code.</para>
+    /// </summary>
+    public const string InfraExitDetailPrefix = "infra:";
+
+    /// <summary>
     /// Whether this unit's self-report (<see cref="Status"/>) CONTRADICTS its objective grade (<see cref="AcceptancePassed"/>)
     /// — a <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value (P4-1): <c>over_claim</c> when
     /// <see cref="Status"/> is "Succeeded" but the check FAILED (the agent believes it's done; the check disagrees);

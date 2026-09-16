@@ -184,6 +184,59 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void An_attempt_this_deployment_ended_is_never_recited_as_done_with_a_broken_check()
+    {
+        // F1. The infra arms open with "done but its check COULD NOT RUN … re-plan the check, do not retry the
+        // agent". For a worker that went away every clause of that is false: the agent never finished, so nothing
+        // is done; the check was never picked up, so nothing about it is broken; and re-planning it is work spent
+        // rewriting an oracle that has nothing wrong with it. The plainest false recitation the tape can carry.
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, EndedByThisDeployment()),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("attempt ENDED BY THIS DEPLOYMENT", customMessage: "the recital names what actually stopped the attempt");
+        recitation.ShouldContain("RETRY this subtask on a live worker", customMessage: "…and the one verb that repairs it — the same one the quality block recites for BoundedRepair");
+
+        recitation.ShouldNotContain("done", Case.Insensitive, customMessage: "the agent never finished; 'done but its check could not run' is simply untrue of this row");
+        recitation.ShouldNotContain("re-plan the check", customMessage: "nothing is wrong with the check");
+        recitation.ShouldContain("Unfinished: s1", customMessage: "an attempt that never ran leaves the unit unfinished");
+    }
+
+    [Fact]
+    public void A_grader_side_infra_rejection_keeps_its_own_recital_unchanged()
+    {
+        // The falsifiable negative for the arm above: a check that really did fail to RUN still recites the
+        // re-plan steer, because another agent pass there reproduces the same grader fault forever.
+        var priors = new[]
+        {
+            JudgeWithoutARubric(1),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "no-rubric")),
+        };
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("done but its check COULD NOT RUN");
+        recitation.ShouldNotContain("ENDED BY THIS DEPLOYMENT");
+    }
+
+    /// <summary>
+    /// A unit whose attempt this deployment ended, minted through the SAME production pair the rehydrate folds with
+    /// (<c>ProjectCompact</c> then <c>InfraExitVerdict</c>) — a hand-written fixture could pair an exit reason with a
+    /// verdict production never writes together, and the arm keys on exactly that pair (Rule 12.5).
+    /// </summary>
+    private static object EndedByThisDeployment()
+    {
+        var attempt = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(attempt, AgentJson.Options));
+
+        return SupervisorTurnService.InfraExitVerdict(compact)!;
+    }
+
+    [Fact]
     public void A_waived_unit_recites_as_waived_never_as_done()
     {
         // B2 (FATAL-1): "done" alone would feed the decider a waived unit as ordinary evidence.

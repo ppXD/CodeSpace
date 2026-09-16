@@ -226,7 +226,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
     // ── F1: an attempt THIS DEPLOYMENT ended never reaches the oracle at all ─────────────────────────
 
     [Fact]
-    public async Task A_unit_this_deployment_ended_folds_InfraUnknown_without_ever_running_its_oracle()
+    public async Task A_unit_this_deployment_ended_folds_InfraUnknown_instead_of_the_fail_closed_absence()
     {
         // The shape a worker that could not broker the run's model credential leaves on the tape: nothing pushed,
         // nothing changed, and an exit reason naming OUR wall. Before this, the fold ran the oracle against an

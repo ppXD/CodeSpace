@@ -132,6 +132,37 @@ public class SupervisorUnitAcceptanceTests
         SupervisorTurnService.InfraExitVerdict(abandoned).ShouldBeNull();
     }
 
+    [Fact]
+    public void The_infra_exit_detail_prefix_is_pinned_and_reserved()
+    {
+        // Rule 8. The prefix is a DURABLE TAPE VALUE: it is written into acceptanceDetail and read back by
+        // consumers that never see the producer, so renaming it silently re-classifies every tape already carrying
+        // it — and reserving it is what lets IsInfraFailure key on a prefix at all.
+        SupervisorAgentResult.InfraExitDetailPrefix.ShouldBe("infra:");
+
+        // The INVENTORY of every other acceptance-detail this codebase composes, by producer. None may start with
+        // the reserved prefix, or that composer's verdict would silently acquire this class's typed-only steers
+        // (retry on a live worker) for a fault a retry reproduces forever.
+        //   SupervisorAcceptanceGrader / the per-repo + captured arms: tests-passed, tests-failed-exit-N,
+        //     tests-timed-out, setup-failed:, setup-timed-out, clone-failed:, grade-error:, oracle-restore-failed:,
+        //     artifacts-present, schema-valid:, citations-resolve:, rubric …, accepted, not-applicable:, repo '…':
+        //   SupervisorTurnService.Rehydrate: no-branch-or-repo, grade-skipped-budget-exhausted,
+        //     "verification waived by a human co-sign"
+        //   AgentAcceptanceContract: no-rubric, no-schema
+        string[] everyOtherComposer =
+        {
+            "tests-passed", "tests-failed-exit-1", "tests-failed-exit-127", "tests-timed-out",
+            "setup-failed: npm ci", "setup-timed-out", "clone-failed: auth", "grade-error: npm not found",
+            "oracle-restore-failed: dirty tree", "no-rubric", "no-schema", "no-branch-or-repo",
+            "grade-skipped-budget-exhausted", "artifacts-present", "schema-valid: 2 artifact(s)",
+            "citations-resolve: 3 citation(s)", "rubric 0.90 ≥ 0.70", "accepted", "not-applicable: no changes were expected",
+            "repo 'web': grade-error: boom", "verification waived by a human co-sign",
+        };
+
+        everyOtherComposer.Where(d => d.StartsWith(SupervisorAgentResult.InfraExitDetailPrefix, StringComparison.Ordinal))
+            .ShouldBeEmpty("the prefix is reserved for details minted BEFORE any grader ran — a composer that collides with it inherits a steer written for a different failure");
+    }
+
     [Theory]
     [InlineData(true)]    // the attempt had pushed work before the wall — already infra today, via no-branch-or-repo
     [InlineData(false)]   // it had not — the gap: today this reads as failed work

@@ -85,6 +85,33 @@ public class SupervisorAmendPreconditionTests
     }
 
     [Fact]
+    public void An_attempt_this_deployment_ended_is_not_amendable()
+    {
+        // F1. It is a STRICT SUBSET of the infra class the arm above admits, and admitting it would let the brain
+        // weaken an oracle on the evidence of a worker restart — a check that never ran rendered no opinion to be
+        // evidence of anything. The card would also post "Latest server verdict: infra:…" to a human co-signer as
+        // though the check had spoken. MUTATION: drop the typed guard and this reads null (admissible).
+        var rejection = SupervisorAmendPrecondition.Reject(Context(EndedByThisDeployment()), Amend());
+
+        rejection.ShouldNotBeNull();
+        rejection.ShouldContain("ended by THIS DEPLOYMENT");
+        rejection.ShouldContain("RETRY the subtask on a live worker", customMessage: "the rejection names the verb that actually repairs it");
+    }
+
+    /// <summary>
+    /// A unit whose attempt this deployment ended, minted through the SAME production pair the rehydrate folds with
+    /// (<c>ProjectCompact</c> then <c>InfraExitVerdict</c>), so the exit reason and the verdict can only be paired
+    /// the way production pairs them (Rule 12.5).
+    /// </summary>
+    private static SupervisorAgentResult EndedByThisDeployment()
+    {
+        var attempt = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(attempt, AgentJson.Options));
+
+        return SupervisorTurnService.InfraExitVerdict(compact)!;
+    }
+
+    [Fact]
     public void A_second_amend_while_one_awaits_its_retry_rejects()
     {
         // B6 (the re-enactment arm's live finding): the target's latest verdict is still the dead oracle's failure

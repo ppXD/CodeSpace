@@ -160,6 +160,14 @@ public static class SupervisorRecitation
 
         if (result is null) return "running";   // staged, outcome not folded yet
 
+        // F1, read BEFORE every arm below: those all answer "the CHECK could not run", and their verbs (re-plan,
+        // amend, ask) are about repairing an oracle. This unit's oracle is fine — its WORKER went away. Neither an
+        // outstanding co-sign nor a spent re-plan changes that answer, so this arm takes no standing and no exit
+        // ramp; a retry on a live worker is the whole repair, and it is the same verb the quality recitation's
+        // BoundedRepair line recites one screen away.
+        if (SupervisorOutcome.EndedByDeployment(result))
+            return $"attempt ENDED BY THIS DEPLOYMENT ({Truncate(result.AcceptanceDetail)}) — the agent never finished and its check never ran; RETRY this subtask on a live worker (do not re-plan it, do not amend its check)";
+
         // B6's other half, one re-plan later: the co-sign that repaired this unit's check is GONE (a plan discards
         // every approved amendment), so its unrunnable verdict is live again — and Describe's infra arm would recite
         // "re-plan the check", which is the very move that destroyed the repair. Recite the verb that re-anchors it,
@@ -251,6 +259,12 @@ public static class SupervisorRecitation
     {
         // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
         _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
+        // F1: read ahead of every arm below, INCLUDING the Succeeded ones, because none of them is true of this row.
+        // The infra arms open with "done" — which for a worker that went away is simply false: the agent never
+        // finished, so there is no work to call done and no check to call broken. Saying "done but its check COULD
+        // NOT RUN — re-plan the check" about an attempt that never started is the plainest kind of false recitation,
+        // and it points the brain at rewriting an oracle nothing ran.
+        _ when SupervisorOutcome.EndedByDeployment(result) => $"attempt ENDED BY THIS DEPLOYMENT ({Truncate(result.AcceptanceDetail)}) — the agent never finished and its check never ran; retry it on a live worker",
         "Succeeded" when result.AcceptancePassed == true => $"done (accepted){SubjectClause(result)}",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).

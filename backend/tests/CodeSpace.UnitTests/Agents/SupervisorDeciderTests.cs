@@ -488,6 +488,58 @@ public class SupervisorDeciderTests
         prompt.ShouldNotContain("RETRY this exact subtask", Case.Sensitive, "the retry bait line must not render for an infra-classed failure");
     }
 
+    // ── F1: the deployment ended the attempt — a STRICT SUBSET of infra whose steer is the opposite verb ──
+
+    [Fact]
+    public void An_attempt_this_deployment_ended_is_steered_at_a_retry_never_at_re_planning_its_check()
+    {
+        // The contradiction this arm removes: the shared infra steer says "Do NOT retry the agent … Re-plan this
+        // item with a check its agent can satisfy", while SupervisorQualityRecitation recites BoundedRepair as
+        // "retry (same model; the machinery failed, not the work)" for the SAME unit one screen away — two verbs for
+        // one row, the hazard SupervisorRecitation's own header names, and the fixed point InfraSteerFor's doc
+        // records burning a live run into plan×8. A worker that went away broke nothing about the check.
+        var prompt = PromptFor(EndedByThisDeploymentOutcome(Guid.NewGuid()));
+
+        prompt.ShouldContain("THIS DEPLOYMENT ended the attempt", Case.Sensitive, "the verdict names what actually happened");
+        prompt.ShouldContain(LlmSupervisorDecider.EndedByDeploymentSteer, Case.Sensitive, "and steers at the one repair that exists: the same subtask on a live worker");
+        prompt.ShouldContain("infra:model_credential_broker_unavailable", Case.Sensitive, "the wall is named verbatim");
+
+        prompt.ShouldNotContain("Do NOT retry the agent", Case.Sensitive,
+            "the shared infra prohibition is exactly wrong here — the retry IS the repair, and printing it beside the quality block's 'retry' is the contradiction");
+        prompt.ShouldNotContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
+            "there is nothing wrong with this unit's check to re-plan");
+
+        // Not a whole-prompt ShouldNotContain: `amend_acceptance` is a legitimate verb in the roster block. The
+        // claim is narrower and is the one that matters — this unit's own steer forbids it in the same breath as
+        // it names the verb, because the model picks its move off the directive it read last.
+        LlmSupervisorDecider.EndedByDeploymentSteer.ShouldContain("do NOT amend its check", Case.Sensitive);
+    }
+
+    [Fact]
+    public void A_grader_side_infra_failure_keeps_its_own_steer_unchanged()
+    {
+        // The falsifiable negative: widen EndedByDeployment past the typed pair and the grader-fault arm — whose
+        // retry really does reproduce forever — starts telling the brain to retry.
+        var prompt = PromptFor(InfraFailedUnit(Guid.NewGuid()));
+
+        prompt.ShouldContain("Do NOT retry the agent", Case.Sensitive);
+        prompt.ShouldContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive);
+        prompt.ShouldNotContain("THIS DEPLOYMENT ended the attempt", Case.Sensitive);
+    }
+
+    /// <summary>
+    /// One unit whose attempt this deployment ended — minted by the SAME production pair the rehydrate uses
+    /// (<see cref="SupervisorOutcome.ProjectCompact"/> then <c>SupervisorTurnService.InfraExitVerdict</c>), so the
+    /// fixture cannot carry a verdict/exit-reason combination the fold would never write (Rule 12.5).
+    /// </summary>
+    private static string EndedByThisDeploymentOutcome(Guid agentId)
+    {
+        var result = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
+        var compact = SupervisorOutcome.ProjectCompact(agentId, nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
+
+        return SupervisorOutcome.FoldAgentResults($$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""", new[] { SupervisorTurnService.InfraExitVerdict(compact)! });
+    }
+
     // ── The infra steer vs. a co-signed amendment: re-planning DISCARDS the co-sign, so it must not be the steer ──
 
     /// <summary>One graded unit whose CHECK could not run — the infra arm's fixture, folded exactly as the rehydrate fold folds it.</summary>

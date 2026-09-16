@@ -81,6 +81,13 @@ public static class SupervisorAmendPrecondition
         if (latest.AcceptancePassed is null)
             return $"subtask '{subtaskId}'s latest attempt was never graded — an oracle is only amendable against the evidence of a graded failure";
 
+        // F1: this deployment ended the attempt, so the oracle is the ONE thing here that is not in question — it was
+        // never picked up. Admitting it (it is a strict subset of the infra class the next arm keys on) would let the
+        // brain weaken a check on the evidence of a worker restart, and post "Latest server verdict: infra:…" to a
+        // human co-sign card as though the check had rendered an opinion. Checked TYPED, ahead of the string class.
+        if (SupervisorOutcome.EndedByDeployment(latest))
+            return $"subtask '{subtaskId}'s latest attempt was ended by THIS DEPLOYMENT ({latest.AcceptanceDetail}), not by its check — the check never ran, so there is no evidence against it to amend; RETRY the subtask on a live worker";
+
         if (!Agents.AgentAcceptanceContract.IsInfraFailure(latest.AcceptanceDetail, SupervisorOutcome.ResultShowsWork(latest)))
             return $"subtask '{subtaskId}'s check RAN and rejected the work ({latest.AcceptanceDetail}) — that is evidence against the WORK, not the check; fix the work or retry it. An oracle is only amendable when its failure is infra-classed (the check itself could not run)";
 
