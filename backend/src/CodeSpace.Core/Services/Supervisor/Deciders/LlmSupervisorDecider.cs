@@ -1639,7 +1639,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // breath as the prohibition on re-planning (the model reads a directive, never an inference).
         if (SupervisorOutcome.EndedByDeployment(result))
         {
-            builder.AppendLine($"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — THIS DEPLOYMENT ended the attempt (its worker or credential broker went away), so its check never ran and the agent never finished. NOT a verdict on the work and NOT a fault in the check. {EndedByDeploymentSteer}");
+            builder.AppendLine($"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — THIS DEPLOYMENT ended the attempt (its worker or credential broker went away), so its check never ran and the agent never finished. NOT a verdict on the work and NOT a fault in the check. {EndedByDeploymentSteer(result.InfraExitReason!)}");
 
             if (includeEvidenceTail)
                 AppendAcceptanceEvidenceTail(builder, result, retryDirected: true, replanExit, amendedOracle: false);
@@ -1721,15 +1721,35 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     };
 
     /// <summary>
-    /// F1's steer, and the one arm in this renderer that says RETRY under an UNVERIFIED verdict. It is sound here
-    /// for the reason none of the infra steers above is: the identical attempt on a live worker is the whole repair,
-    /// so it cannot reproduce the failure the way a grader fault or a half-authored spec would. It carries no
-    /// <see cref="SupervisorAmendStanding"/> arm and no <see cref="SupervisorReplanExit"/> ramp on purpose — neither
-    /// a co-sign nor a spent re-plan changes what a worker restart needs, and offering either would re-introduce the
-    /// contradiction this arm exists to remove. Pinned by test, including the ABSENCE of the shared class's
-    /// "Do NOT retry the agent".
+    /// F1's steer — the one place in this renderer that says RETRY under an UNVERIFIED verdict, and the one that
+    /// keys on the EXIT REASON rather than the class. Membership in
+    /// <see cref="Messages.Failures.FailureCodes.InfraExitReasons"/> settles that the attempt was not about the
+    /// work; it does NOT settle what to do, and the two members genuinely differ.
+    ///
+    /// <list type="bullet">
+    ///   <item><c>model_credential_lease_lost</c> — a worker went away mid-run. The identical attempt on a live
+    ///   worker succeeds, so the retry is the whole repair and there is nothing to escalate.</item>
+    ///   <item><c>model_credential_broker_unavailable</c> — this worker could not broker at all on a deployment that
+    ///   mandates confinement. A retry helps ONLY if it lands somewhere that can broker; a second identical end
+    ///   means the deployment itself is the fault, which no agent pass, plan or check can repair. So the steer buys
+    ///   one attempt and then names a human, rather than letting the run spend its no-progress cap discovering the
+    ///   same setting over and over.</item>
+    /// </list>
+    ///
+    /// <para>No <see cref="SupervisorAmendStanding"/> arm and no <see cref="SupervisorReplanExit"/> ramp on purpose:
+    /// neither a co-sign nor a spent re-plan changes what a dead worker needs, and offering either would
+    /// re-introduce the contradiction this arm exists to remove. A future member with no arm here renders a steer
+    /// that says so rather than borrowing a remedy written for a different fault. Pinned by test, including the
+    /// ABSENCE of the shared class's "Do NOT retry the agent".</para>
     /// </summary>
-    internal const string EndedByDeploymentSteer = "RETRY this exact subtask so it runs on a live worker; do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.";
+    internal static string EndedByDeploymentSteer(string exitReason) => exitReason switch
+    {
+        Messages.Failures.FailureCodes.ModelCredentialLeaseLost =>
+            "RETRY this exact subtask so it runs on a live worker; do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.",
+        Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable =>
+            "RETRY this exact subtask once, in case another worker can broker its model credential; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.",
+        _ => "This is an infrastructure fault with no recorded remedy: 'ask_human' to rule. Do NOT re-plan it and do NOT amend its check — neither is where the fault is.",
+    };
 
     /// <summary>The un-amended infra arm's own re-plan sentence — named so the exit ramp is a SUBSTITUTION into one interpolation rather than a second arm that could drift from it, and so a tape with no spent re-plan on it renders byte-identically to before the ramp existed.</summary>
     internal const string ReplanThisItemWithASatisfiableCheck = "Re-plan this item with a check its agent can satisfy, or ask a human to rule.";

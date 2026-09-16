@@ -90,19 +90,21 @@ public class SupervisorUnitAcceptanceTests
 
     // ── F1: an attempt THIS DEPLOYMENT ended never reaches a grade at all ──────────────
 
-    [Fact]
-    public void An_attempt_this_deployment_ended_is_graded_InfraUnknown_before_any_check_can_run()
+    [Theory]
+    [InlineData(FailureCodes.ModelCredentialLeaseLost)]           // a worker went away mid-run
+    [InlineData(FailureCodes.ModelCredentialBrokerUnavailable)]   // a worker could not broker at all
+    public void An_attempt_this_deployment_ended_is_graded_InfraUnknown_before_any_check_can_run(string exitReason)
     {
         // The shape a worker that could not broker the run's model credential leaves behind: nothing pushed, nothing
         // changed, no repo. Every grading arm past the short-circuit fails closed on that absence and hands back
         // "no-branch-or-repo", whose text rule reads GENUINE with no work present — so the unit's failure became
         // evidence that the MODEL could not do the work. Mutation: delete the short-circuit and this reads Failed.
-        var ended = Compact(AgentRunStatus.Failed, FailureCodes.ModelCredentialBrokerUnavailable);
+        var ended = Compact(AgentRunStatus.Failed, exitReason);
 
         var graded = SupervisorTurnService.InfraExitVerdict(ended).ShouldNotBeNull();
 
         graded.AcceptanceVerdict.ShouldBe(VerificationDisposition.InfraUnknown, "the typed verdict is what the quality reading classifies on");
-        graded.AcceptanceDetail.ShouldBe("infra:model_credential_broker_unavailable", "the detail names the wall the attempt hit, verbatim");
+        graded.AcceptanceDetail.ShouldBe($"infra:{exitReason}", "the detail names the wall the attempt hit, verbatim");
         graded.AcceptancePassed.ShouldBe(false, "unchanged from the arms this replaces: work nothing verified must stay withheld from the reviewable head");
     }
 
@@ -171,7 +173,7 @@ public class SupervisorUnitAcceptanceTests
         // The typed verdict is invisible to every reader that only ever sees the detail — the no-progress evidence
         // discount, the receipts, the decider's verdict line, the model-escalation trigger. Without this the fold
         // would REPLACE a detail those readers already classified as infra (work present) with one they do not.
-        AgentAcceptanceContract.IsInfraFailure("infra:model_credential_broker_unavailable", workPresent)
+        AgentAcceptanceContract.IsInfraFailure(SupervisorAgentResult.InfraExitDetailPrefix + FailureCodes.ModelCredentialLeaseLost, workPresent)
             .ShouldBeTrue("a worker that went away is not evidence about the work in either direction");
     }
 
