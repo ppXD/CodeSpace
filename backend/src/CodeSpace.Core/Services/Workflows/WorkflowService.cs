@@ -1358,7 +1358,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>
     /// The non-decision components of the broad NeedsAttention union — each a thing a HUMAN must act on:
     /// <list type="bullet">
-    /// <item>a human-actionable suspend: Suspended on a pending Approval / Action wait. EXCLUDES self-advancing waits
+    /// <item>a human-actionable suspend: Suspended on a pending Approval / Action / ActorIdentityLink wait. EXCLUDES self-advancing waits
     ///   (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer / Callback / Subworkflow / AgentRun) — a
     ///   supervisor run parked between turns is Suspended but needs no human. (Decision waits are the OTHER half of the
     ///   union, via <see cref="HasPendingDecisionPredicate"/>.)</item>
@@ -1378,10 +1378,15 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow)));
 
     /// <summary>
-    /// A HUMAN-actionable suspend: Suspended on a pending Approval / Action wait, OR stamped by the completion
-    /// authority. EXCLUDES self-advancing waits (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer /
-    /// Callback / Subworkflow / AgentRun) — a run parked on those auto-resumes (e.g. a fan-out waiting on its agent runs
-    /// is WORKING), so it needs no human and belongs in the Live set, not Needs-attention. A completion park is the
+    /// A HUMAN-actionable suspend: Suspended on a pending Approval / Action / ActorIdentityLink wait, OR stamped by the
+    /// completion authority. EXCLUDES self-advancing waits (SupervisorDecision / SupervisorAgentWaits) and machine waits
+    /// (Timer / Callback / Subworkflow / AgentRun) — a run parked on those auto-resumes (e.g. a fan-out waiting on its
+    /// agent runs is WORKING), so it needs no human and belongs in the Live set, not Needs-attention.
+    /// <see cref="WorkflowWaitKinds.ActorIdentityLink"/> looks like a machine wait and is NOT one: its deadline only
+    /// RE-CHECKS whether a specific person has connected their provider account, so the run can only ever finish if
+    /// that person acts. Counting it Live is exactly the "claimed progress that could not happen" this method warns
+    /// about below — and it would quietly re-create the failure this park exists to end, a run nobody is told about
+    /// that gives up when its window runs out. A completion park is the
     /// opposite: it holds NO wait at all and the stranded-run reconciler deliberately skips a stamped row, so nothing
     /// will ever resume it but a person — counting it Live claimed progress that could not happen. The single source
     /// for "a suspend a person must act on"; both disjuncts stay inside Suspended, which
@@ -1391,7 +1396,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         r.Status == WorkflowRunStatus.Suspended
         && (r.CompletionParkedAt != null
             || _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
-                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action)));
+                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action || w.WaitKind == WorkflowWaitKinds.ActorIdentityLink)));
 
     /// <summary>
     /// EXISTS a pending decision for the run, on EITHER park backend: a node-grain <c>workflow_run_wait</c> in

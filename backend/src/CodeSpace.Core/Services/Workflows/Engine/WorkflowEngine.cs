@@ -20,6 +20,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -2996,9 +2997,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision or WorkflowWaitKinds.SupervisorAgentWaits or WorkflowWaitKinds.SupervisorInfraPark or WorkflowWaitKinds.Decision) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision or WorkflowWaitKinds.SupervisorAgentWaits or WorkflowWaitKinds.SupervisorInfraPark or WorkflowWaitKinds.Decision or WorkflowWaitKinds.ActorIdentityLink) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, SupervisorDecision, SupervisorAgentWaits, SupervisorInfraPark, or Decision.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, SupervisorDecision, SupervisorAgentWaits, SupervisorInfraPark, Decision, or ActorIdentityLink.");
     }
 
     /// <summary>
@@ -3311,11 +3312,59 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         catch (OperationCanceledException) { throw; }
         catch (WorkflowSecretLeakException) { throw; }
         catch (WorkflowRedactedOutputsUnrecoverableException) { throw; }
+        catch (ActorIdentityRequiredException fault)
+        {
+            // "Park, don't die" for the act-as-user seam. This node can only authenticate as one specific person's
+            // own provider token and that person has not linked one — a fact no retry can change but a person can,
+            // in seconds. Killing the run here is what made a chat card's "Request changes" return 204 and then die
+            // in the background a minute later. Park instead: the deadline wake re-runs the node, which succeeds the
+            // moment the identity exists. Safe to re-run, because the identity is resolved BEFORE the provider write
+            // in every act-as-user path — the throw proves the side effect never fired. Handled HERE rather than in
+            // each node so every current and future ActsAsUser node inherits it with no per-node code.
+            //
+            // On a node that ALSO carries a retry policy the wake re-enters with a resume payload, so the loop
+            // continues its durable attempt budget instead of resetting it. That is the intended reading and it
+            // cannot run away: a park writes no attempt.failed record, so parking never spends the budget — each
+            // wake still gets its remaining attempt. (InfraPark warns against pairing a park with retries because
+            // it ships on nodes that have none; this one is engine-wide and cannot make that assumption.)
+            _logger.LogInformation("Node {NodeId} acts as user {ActorUserId}, who has no linked {Provider} identity — parking for the link instead of failing the run", exec.Node.Id, fault.ActorUserId, fault.ProviderKind);
+            return (ActorIdentityPark.Park(await ReadPriorParkStateAsync(exec, cancellationToken).ConfigureAwait(false), fault, DateTimeOffset.UtcNow), null);
+        }
         catch (Exception ex)
         {
             _logger.LogError("Node {NodeId} threw {ExceptionType}: {Message}", exec.Node.Id, ex.GetType().Name, RedactForPersistence(exec.Scope, ex.Message));
             return (null, ex);   // the EXCEPTION (not just its message) so the retry loop can classify a typed retryable-vs-terminal fault
         }
+    }
+
+    /// <summary>
+    /// The state a re-park must continue from: the node's OWN wait row, not the injected resume payload.
+    ///
+    /// <para>The resume payload is the wrong source, and a test proves it. <see cref="LoadResolvedWaitsAsync"/> injects
+    /// payloads from RESOLVED waits only, and the top-level walk re-runs a node whose own wait is still Pending
+    /// whenever anything else re-dispatches the run — the immediate single-wait resume path does this by design, and
+    /// its own docs say a still-suspended sibling "re-parks on the re-walk". So a person answering an unrelated
+    /// approval handed the parked node a NULL payload, which restarted the ladder at rung 1 with a fresh anchor: the
+    /// 24h window could be pushed out forever by activity that had nothing to do with the identity. The retry loop
+    /// clearing <see cref="NodeExecution.ResumePayload"/> between attempts is a second way to lose it.</para>
+    ///
+    /// <para>The wait row survives both, and the engine's own note in <see cref="LoadResolvedWaitsAsync"/> already
+    /// says payload-reading multi-park nodes should read it. <c>SuspendNodeAsync</c> keeps at most one row per
+    /// (run, node, iteration) and a resolve OVERWRITES its payload with the resume payload — which for this park is
+    /// the same marker — so the row holds the current ladder position whether the park is waiting or was just woken.
+    /// Falls back to the resume payload (then the retiring prior-attempt payload) for the FIRST park of an entry,
+    /// where no row exists yet but a from-node rerun's <c>approved: true</c> still has to ride forward.</para>
+    /// </summary>
+    private async Task<JsonElement?> ReadPriorParkStateAsync(NodeExecution exec, CancellationToken cancellationToken)
+    {
+        var payloadJson = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == exec.Run.Id && w.NodeId == exec.Node.Id && w.IterationKey == exec.IterationKey && w.WaitKind == WorkflowWaitKinds.ActorIdentityLink)
+            .Select(w => w.PayloadJson)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(payloadJson)) return exec.ResumePayload ?? exec.PriorAttemptPayload;
+
+        return JsonDocument.Parse(payloadJson).RootElement.Clone();
     }
 
     /// <summary>
