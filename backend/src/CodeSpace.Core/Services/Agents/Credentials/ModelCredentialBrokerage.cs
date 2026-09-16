@@ -63,9 +63,14 @@ public sealed class ModelCredentialBrokerUnavailableException : Exception, IFail
 }
 
 /// <summary>
-/// The worker holding a run's brokered lease went away, so the detached agent's model access ended with it. The lease
-/// is process-local — that is what makes revocation real — so nothing any later pass does can re-open it: the child
-/// still holds a base URL naming a port that died, and every model call it makes from here fails to connect.
+/// The worker holding a run's brokered lease went away AND no later worker could restore the address its agent holds,
+/// so the detached agent's model access ended with that process: the child still holds a base URL naming a port
+/// nothing answers on, and every model call it makes from here fails to connect.
+///
+/// <para>The second half of that sentence is the whole of what is left. A re-attaching worker DOES try to bind the
+/// run's recorded port and re-install its lease (<see cref="IModelCredentialBroker.RebindAsync"/>); this failure is
+/// what a refusal leaves behind — a handle stamped before the address was recorded, a run whose agent lives on another
+/// host, a credential that no longer resolves to the row the launch fronted, or a port something else now holds.</para>
 ///
 /// <para>Unavailable, like its sibling above, and for the same reason: nothing about the LAUNCH can be changed to make
 /// it work, and the identical launch succeeds untouched on a live worker. That is also why the remedy it states is a

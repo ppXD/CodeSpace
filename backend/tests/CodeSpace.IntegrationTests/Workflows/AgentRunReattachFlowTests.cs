@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
+using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -526,6 +527,13 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
         ProcessIsAlive(handle.ProcessId).ShouldBeTrue("precondition: the detached agent outlived its worker and is what a re-attach would find");
 
+        // The handle above is the PRE-UPGRADE shape: a bearer and nothing else — no port, no route, no credential
+        // row — which is what a worker on the previous build stamped. The re-attach below carries a live broker, so
+        // the re-bind arm is genuinely REACHED and genuinely declines; without one it would be unreachable for a
+        // reason that has nothing to do with the handle, and this test would pin nothing about the legacy path.
+        handle.ModelBrokerPort.ShouldBeNull("precondition: a legacy handle records no address, which is exactly why this run's access cannot come back");
+        using var broker = LoopbackModelCredentialBroker.ForTest(new NeverCalledUpstream());
+
         // The log stream the VANISHED worker opened, still Open at the fence it was minted under. Its own recovery
         // sweep refuses it once the reservation bumps the run's fence (a superseded claim), and the only writer that
         // could close it runs solely from the reconciler's abandon — which never visits a terminal run. Left alone it
@@ -538,7 +546,10 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
         }
 
-        await ReattachAsync(runId, new FactCarryingHarness());
+        await ReattachAsync(runId, new FactCarryingHarness(), credentialBroker: broker);
+
+        broker.HasLease(runId).ShouldBeFalse(
+            "nothing may be installed for a handle that records no address: a re-bind onto a port nobody wrote down would be a guess, and a lease behind a guess reports model access this run does not have");
 
         using var verify = _fixture.BeginScope();
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
@@ -601,6 +612,13 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     private const string FactLine = "{\"session_id\":\"" + FactSessionId + "\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":340}}";
 
     /// <summary>A scripted harness whose ParseEvents keeps the line's structured root, so <c>AgentRunFacts</c> can read the session id and usage out of it — the fidelity an assertion about "the attempt's work was preserved" actually requires.</summary>
+    /// <summary>The provider seam for a broker that must never relay anything — a call reaching it would mean a lease was installed for a run whose address nobody recorded.</summary>
+    private sealed class NeverCalledUpstream : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The broker relayed a call for a run it should never have held a lease for.");
+    }
+
     private sealed class FactCarryingHarness : IAgentHarness
     {
         public string Kind => "scripted";
@@ -943,13 +961,13 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = {DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE id = {runId}");
     }
 
-    private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null)
+    private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         using var scope = _fixture.BeginScope();
-        await BuildExecutor(scope, harness, logCapture).ReattachAsync(_reservations[runId], CancellationToken.None);
+        await BuildExecutor(scope, harness, logCapture, credentialBroker: credentialBroker).ReattachAsync(_reservations[runId], CancellationToken.None);
     }
 
-    private static AgentRunExecutor BuildExecutor(ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunService? runs = null)
+    private static AgentRunExecutor BuildExecutor(ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunService? runs = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         return new AgentRunExecutor(
             runs ?? scope.Resolve<IAgentRunService>(),
@@ -969,6 +987,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
             NullLogger<AgentRunExecutor>.Instance,
             logCapture,
+            credentialBroker: credentialBroker,
             logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>());
     }
 

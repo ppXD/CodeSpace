@@ -186,7 +186,7 @@ public partial class AgentRunExecutorTests
 
         (await kill.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15))).ShouldBeTrue("the cancel never reached TerminateAsync within 15s — check CancelRunningAsync's CAS; the run must be Running at epoch 1");
 
-        (await ProxiedCallAsync(brokered)).ShouldBe(HttpStatusCode.Unauthorized,
+        (await ProxiedCallRefusedAsync(brokered)).ShouldBeTrue(
             "the credential must already be refused while the kill is still in flight — a signal races the agent's next model call, a withdrawn lease does not");
 
         kill.Release.SetResult();
@@ -223,7 +223,7 @@ public partial class AgentRunExecutorTests
         (await kill.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30))).ShouldBeTrue(
             "the sweep never reached TerminateAsync for this run within 30s — check that the seeded row is still Running with an expired lease and no recent events, and that its handle kind matches the substituted runner");
 
-        (await ProxiedCallAsync(brokered)).ShouldBe(HttpStatusCode.Unauthorized,
+        (await ProxiedCallRefusedAsync(brokered)).ShouldBeTrue(
             "an abandoned orphan's credential must already be refused while its kill is still in flight — a signal races the agent's next model call, a withdrawn lease does not");
 
         kill.Release.SetResult();
@@ -272,7 +272,7 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
-    public async Task A_worker_shutting_down_ends_every_brokered_run_it_owns_typed_rather_than_leaving_them_running()
+    public async Task A_worker_shutting_down_ends_every_brokered_run_whose_address_it_cannot_hand_on_typed_rather_than_leaving_them_running()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -280,7 +280,11 @@ public partial class AgentRunExecutorTests
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-shutdown-drain-fixture");
         var runIds = new[] { await CreateRunWithCredentialAsync(teamId, credId), await CreateRunWithCredentialAsync(teamId, credId) };
 
-        using var broker = new LoopbackModelCredentialBroker();
+        // A broker that records NO re-bind address — the pre-upgrade generation, and the only generation this arm
+        // still owns. A run whose handle DOES carry one is left running for the next worker instead (see
+        // A_worker_shutting_down_leaves_a_rebindable_brokered_run_for_the_next_worker); what remains here is the run
+        // whose port really does die with this process, and which therefore still owes a verdict.
+        using var broker = new AddresslessBroker(new LoopbackModelCredentialBroker());
         using var shutdown = new CancellationTokenSource();
 
         // Two agents this worker brokered, both still working when the pod takes its SIGTERM. Their leases live in
@@ -375,6 +379,224 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_worker_shutting_down_leaves_a_rebindable_brokered_run_for_the_next_worker()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-rebindable-drain-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var broker = new LoopbackModelCredentialBroker();
+        using var shutdown = new CancellationTokenSource();
+        var lifetime = new FakeHostLifetime();
+
+        var execution = ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime);
+
+        await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened a credential lease");
+        await WaitUntilAsync(() => HandleOf(runId)?.ModelBrokerPort is > 0, TimeSpan.FromSeconds(30),
+            "the run never stamped a brokered port on its durable handle, so no later worker could re-bind it — check the ModelBroker* stamp in RunDurableAsync and that the broker hands back RebindPort");
+
+        var handle = HandleOf(runId)!;
+        var pid = handle.ProcessId;
+
+        // Every coordinate a later worker needs, on the ONE row that outlives this process. Missing any of them and
+        // the re-bind declines, which puts the run straight back on the typed landing this test exists to replace.
+        handle.ModelBrokerRoute.ShouldNotBeNullOrWhiteSpace("the route is half the address: without it a re-bind would have to mint one, and the agent's frozen base URL names the old one");
+        handle.ModelBrokerRunToken.ShouldNotBeNullOrWhiteSpace("the bearer the child already holds");
+        handle.ModelBrokerCredentialId.ShouldBe(credId, "the row whose key was fronted — a re-attach compares it before fronting whatever its own resolve returned");
+        handle.ModelBrokerProvider.ShouldBe(BrokeredProvider);
+
+        lifetime.Stop();
+        shutdown.Cancel();
+        await AwaitWithinAsync(execution, TimeSpan.FromSeconds(120), "the draining executor never returned — every path out of the drain is bounded, so this means one is not honouring its token");
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Running,
+            "a run whose address the NEXT worker can re-bind must survive a deploy: landing it terminal here spends a run on a restart that no longer has to cost one");
+        ProcessIsAlive(pid).ShouldBeTrue(
+            $"the agent must still be running — a drain that kills it has destroyed the very thing the re-bind exists to keep. Diagnose with `ps -p {pid} -o pid,stat,etime,command`");
+
+        var confinement = JsonSerializer.Deserialize<SandboxConfinement>(run.SandboxConfinementJson!, AgentJson.Options).ShouldNotBeNull();
+        confinement.ModelCredentialLeaseLost.ShouldBeFalse(
+            "nothing may stamp 'this run can make no further model call' about a run whose next model call a re-attach is going to answer — readers turn that stamp into an operator-facing caveat");
+
+        try { using var agent = System.Diagnostics.Process.GetProcessById(pid); agent.Kill(entireProcessTree: true); } catch { /* cleanup */ }
+    }
+
+    [Fact]
+    public async Task A_reattached_brokered_run_keeps_its_model_access()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-rebind-reattach-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var release = new TempDir();
+        var releaseFile = Path.Combine(release.Path, "release");
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"while [ ! -f '{releaseFile}' ]; do sleep 0.2; done; echo done");
+
+        var (handle, childBaseUrl) = await DrainLeavingTheAgentRunningAsync(runId, harness);
+        var runToken = handle.ModelBrokerRunToken.ShouldNotBeNull();
+
+        ProcessIsAlive(handle.ProcessId).ShouldBeTrue("precondition: the agent outlived its worker — that is the run a re-bind exists for");
+        (await ReachesUpstreamAsync(childBaseUrl, runToken)).ShouldBeFalse(
+            "precondition: with worker A gone the address the child holds answers nothing, which is the whole problem — if this is already true the test proves nothing below");
+
+        // Worker B. Its upstream is a stub, so a 200 through the child's own URL can only mean the relay is live here.
+        using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+        var reservation = await ReserveReattachAfterLapseAsync(runId);
+        var reattach = ReattachUntilStoppedAsync(reservation, harness, workerB);
+
+        await WaitUntilAsync(() => workerB.HasLease(runId), TimeSpan.FromSeconds(60),
+            "the re-attaching worker never re-bound the run's brokered address. Remove the RebindAsync call from the re-attach prelude and this is exactly what happens — the run then takes the typed lease-lost landing instead");
+
+        (await ReachesUpstreamAsync(childBaseUrl, runToken)).ShouldBeTrue(
+            "the ORIGINAL base URL and the ORIGINAL bearer must reach the provider again: the detached CLI's configuration froze both at launch, so anything less than a byte-identical restoration is a run that cannot talk");
+
+        using (var midflight = _fixture.BeginScope())
+        {
+            var running = await midflight.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+            running.Status.ShouldBe(AgentRunStatus.Running, "a run whose model access came back is not a run that lost it");
+            JsonSerializer.Deserialize<SandboxConfinement>(running.SandboxConfinementJson!, AgentJson.Options)!.ModelCredentialLeaseLost.ShouldBeFalse(
+                "and its posture must not say otherwise — a stamp left standing over a working run is a record that contradicts the process it describes");
+        }
+
+        await File.WriteAllTextAsync(releaseFile, "go");
+        await AwaitWithinAsync(reattach, TimeSpan.FromSeconds(120), "the re-attaching executor never returned after its agent was released");
+
+        using var verify = _fixture.BeginScope();
+        var landed = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentRunResult>(landed.ResultJson!, AgentJson.Options)!.ExitReason
+            .ShouldNotBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost,
+                "the attempt finished across a restart with its model access intact; a lease-lost verdict on it would tell an operator to retry work that was already done");
+    }
+
+    [Fact]
+    public async Task A_reattach_that_cannot_re_bind_the_address_still_lands_the_run_typed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-rebind-refused-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, "sleep 600");
+        var (handle, _) = await DrainLeavingTheAgentRunningAsync(runId, harness);
+
+        // Something else on this host takes the run's port during the gap — the one failure mode a re-bind has that
+        // nothing in this codebase controls. Held on every address the broker would try (see the unit suite's
+        // OccupiedPort for why one listener is not enough).
+        using var stolen = new StolenPort(handle.ModelBrokerPort!.Value);
+        using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+        var reservation = await ReserveReattachAfterLapseAsync(runId);
+
+        await ReattachUntilStoppedAsync(reservation, harness, workerB);
+
+        workerB.HasLease(runId).ShouldBeFalse("a refused re-bind must install nothing, or HasLease reports access the run does not have");
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed,
+            "a re-bind that could not take leaves the run exactly where it was before one existed: an agent that can make no model call, ended rather than left to burn its wall clock");
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason
+            .ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost,
+                "and under the same typed code — a run's outcome must not depend on WHY the address could not come back, only on whether it did");
+
+        JsonSerializer.Deserialize<SandboxConfinement>(run.SandboxConfinementJson!, AgentJson.Options)!.ModelCredentialLeaseLost.ShouldBeTrue(
+            "the posture is stamped for a run nobody could restore — which is the only kind of run it is now true about");
+
+        await WaitUntilAsync(() => !ProcessIsAlive(handle.ProcessId), TimeSpan.FromSeconds(15),
+            $"the agent (pid {handle.ProcessId}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {handle.ProcessId} -o pid,stat,etime,command`");
+    }
+
+    /// <summary>
+    /// Worker A's whole life, through production: launch the run, broker its credential, then take the host's SIGTERM
+    /// while the agent is still working — and dispose the broker, because a worker's listeners go with its process.
+    /// What comes back is what genuinely survives it: the durable handle, and the base URL the CHILD was handed (host
+    /// token resolved exactly as the runner resolves it at launch).
+    /// </summary>
+    private async Task<(SandboxHandle Handle, string ChildBaseUrl)> DrainLeavingTheAgentRunningAsync(Guid runId, BrokerableScriptedHarness harness)
+    {
+        var workerA = new LoopbackModelCredentialBroker();
+        try
+        {
+            using var shutdown = new CancellationTokenSource();
+            var lifetime = new FakeHostLifetime();
+            var execution = ExecuteUntilShutdownWithAsync(runId, harness, workerA, shutdown.Token, lifetime, productionCapturePlanes: false);
+
+            await WaitUntilAsync(() => HandleOf(runId)?.ModelBrokerPort is > 0, TimeSpan.FromSeconds(30),
+                "the run never stamped a brokered port on its durable handle, so there is nothing for a later worker to re-bind");
+
+            var handle = HandleOf(runId)!;
+            var childBaseUrl = harness.BuiltTask!.Environment[BrokerableScriptedHarness.BaseUrlEnvVar].Replace(SandboxSpec.ModelBrokerHostToken, "127.0.0.1", StringComparison.Ordinal);
+
+            lifetime.Stop();
+            shutdown.Cancel();
+            await AwaitWithinAsync(execution, TimeSpan.FromSeconds(120), "the draining executor never returned — every path out of the drain is bounded, so this means one is not honouring its token");
+
+            return (handle, childBaseUrl);
+        }
+        finally { workerA.Dispose(); }
+    }
+
+    /// <summary>Lapse the run's observation lease and reserve the re-attach — the reconciler's atomic step, performed here so the test owns when the next worker takes over.</summary>
+    private async Task<AgentRunReattachReservation> ReserveReattachAfterLapseAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+
+        return (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+    }
+
+    /// <summary>The re-attach, tolerating the ownership loss a concurrent fence bump raises — the run is the point, not which pass observed it.</summary>
+    private async Task ReattachUntilStoppedAsync(AgentRunReattachReservation reservation, IAgentHarness harness, IModelCredentialBroker broker)
+    {
+        try { await ReattachAsync(reservation, harness, broker); }
+        catch (OperationCanceledException) { /* the worker went away again — what it left behind is what the test asserts */ }
+        catch (CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException) { /* the fence moved on; the row it wrote is what the test asserts */ }
+    }
+
+    /// <summary>Whether a call on this address + bearer reaches the broker's upstream. False for an address nothing is bound to, which is what a run whose worker is gone has.</summary>
+    private static async Task<bool> ReachesUpstreamAsync(string childBaseUrl, string runToken)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, childBaseUrl + "/v1/messages") { Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {runToken}");
+
+        try { return (await client.SendAsync(request)).StatusCode == HttpStatusCode.OK; }
+        catch (HttpRequestException) { return false; }
+    }
+
+    /// <summary>A port taken out from under a re-bind, held on every address the broker would try — the wildcard AND loopback, because <c>SO_REUSEADDR</c> lets a specific bind succeed under a wildcard holder.</summary>
+    private sealed class StolenPort : IDisposable
+    {
+        private readonly System.Net.Sockets.TcpListener _wildcard;
+        private readonly System.Net.Sockets.TcpListener _loopback;
+
+        public StolenPort(int port)
+        {
+            _wildcard = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, port);
+            _wildcard.Start();
+            _loopback = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+            _loopback.Start();
+        }
+
+        public void Dispose()
+        {
+            try { _loopback.Stop(); } catch { /* best-effort */ }
+            try { _wildcard.Stop(); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
     public async Task A_drained_run_lands_with_the_files_its_agent_actually_changed()
     {
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
@@ -387,7 +609,9 @@ public partial class AgentRunExecutorTests
         var repoId = await SeedClonableRepositoryAsync(teamId, remote.RemoteUrl);
         var runId = await CreateRepoBackedRunAsync(teamId, credId, repoId);
 
-        using var broker = new LoopbackModelCredentialBroker();
+        // Addressless, like the drain test above and for the same reason: the diff capture under test belongs to the
+        // LANDING, and only a run whose address cannot be handed on is landed by a drain any more.
+        using var broker = new AddresslessBroker(new LoopbackModelCredentialBroker());
         using var shutdown = new CancellationTokenSource();
         var lifetime = new FakeHostLifetime();
 
@@ -507,17 +731,17 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>One brokered run driven to the tear-down arm. The cancel is the point of the test, so the <see cref="OperationCanceledException"/> it re-raises (the contract that leaves a non-brokered run recoverable) is expected, not a failure.</summary>
-    private Task ExecuteUntilShutdownAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false, IAgentRunLogCaptureBridge? logCapture = null) =>
+    private Task ExecuteUntilShutdownAsync(Guid runId, IModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false, IAgentRunLogCaptureBridge? logCapture = null) =>
         ExecuteUntilShutdownWithAsync(runId, new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; sleep 120"), broker, shutdown, lifetime, productionCapturePlanes, logCapture);
 
-    private async Task ExecuteUntilShutdownWithAsync(Guid runId, IAgentHarness harness, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime, bool productionCapturePlanes, IAgentRunLogCaptureBridge? logCapture = null)
+    private async Task ExecuteUntilShutdownWithAsync(Guid runId, IAgentHarness harness, IModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime, bool productionCapturePlanes, IAgentRunLogCaptureBridge? logCapture = null)
     {
         try { await ExecuteAsync(runId, harness, logCapture: logCapture, credentialBroker: broker, cancellationToken: shutdown, lifetime: lifetime, productionCapturePlanes: productionCapturePlanes); }
         catch (OperationCanceledException) { /* the worker went away — what it left behind is what this test asserts */ }
     }
 
     /// <summary>As above, but also tolerating the ownership loss a fence bump raises — the shape a user cancel takes, where the run is legitimately taken away from this pass rather than the pass being taken away from the host.</summary>
-    private async Task ExecuteUntilStoppedAsync(Guid runId, LoopbackModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
+    private async Task ExecuteUntilStoppedAsync(Guid runId, IModelCredentialBroker broker, CancellationToken shutdown, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
     {
         try { await ExecuteUntilShutdownAsync(runId, broker, shutdown, lifetime); }
         catch (CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException) { /* the cancel bumped the fence; the row it wrote is what this test asserts */ }
@@ -681,6 +905,18 @@ public partial class AgentRunExecutorTests
         return (await client.SendAsync(request)).StatusCode;
     }
 
+    /// <summary>
+    /// Whether the run's bearer is REFUSED at its own address. Now that each lease owns its port, a withdrawal shows up
+    /// two ways depending on timing — a 401 while something is still bound, and no answer at all once the listener is
+    /// closed — and both say the same thing: this bearer cannot spend. The ORDERING these callers assert is unaffected,
+    /// and pinning only the 401 would make the stronger withdrawal (the address ceasing to exist) read as a regression.
+    /// </summary>
+    private static async Task<bool> ProxiedCallRefusedAsync(BrokeredModelCredential brokered)
+    {
+        try { return await ProxiedCallAsync(brokered) == HttpStatusCode.Unauthorized; }
+        catch (HttpRequestException) { return true; }   // nothing is bound there any more
+    }
+
     /// <summary>A Running run at epoch 1 carrying a durable handle, so <c>CancelRunningAsync</c> resolves a runner to kill. No real process: the kill is what the test intercepts.</summary>
     private async Task<Guid> SeedBrokerCancelRunAsync(Guid teamId)
     {
@@ -786,6 +1022,27 @@ public partial class AgentRunExecutorTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true}") });
+    }
+
+    /// <summary>
+    /// A broker that fronts credentials exactly as the real one does but hands back NO re-bind coordinates — the shape
+    /// of a lease opened by a worker from before the address was recorded, and of any broker that cannot re-open an
+    /// address it once bound (<see cref="BrokeredModelCredential.RebindPort"/>'s null).
+    ///
+    /// <para>It WRAPS the production broker rather than faking one, so every other fact the tests using it assert — a
+    /// real listener, a real relay, a real revoke, a real handle written by the executor — stays production-true. The
+    /// only thing removed is the one those tests are about: whether the next worker has an address to come back to.</para>
+    /// </summary>
+    private sealed class AddresslessBroker(LoopbackModelCredentialBroker inner) : IModelCredentialBroker, IDisposable
+    {
+        public async Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken) =>
+            await inner.OpenAsync(request, cancellationToken).ConfigureAwait(false) is { } brokered ? brokered with { RebindPort = null, RebindRoute = null } : null;
+
+        public Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken) => inner.RebindAsync(request, cancellationToken);
+        public Task<bool> RenewAsync(Guid runId, long epoch, CancellationToken cancellationToken) => inner.RenewAsync(runId, epoch, cancellationToken);
+        public Task RevokeAsync(Guid runId, string reason, CancellationToken cancellationToken) => inner.RevokeAsync(runId, reason, cancellationToken);
+        public bool HasLease(Guid runId) => inner.HasLease(runId);
+        public void Dispose() => inner.Dispose();
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Agents.Credentials.Broker;
@@ -118,10 +119,8 @@ public class ModelCredentialBrokerTests
 
         await broker.RevokeAsync(runId, "run-cancelled", CancellationToken.None);
 
-        var refused = await CallAsync(brokered, "/v1/messages", brokered.RunToken);
-
-        refused.StatusCode.ShouldBe(HttpStatusCode.Unauthorized,
-            customMessage: "a revoked lease must refuse the NEXT call — revocation that only takes effect when the process dies is the defect this slice exists to remove");
+        (await RefusedAsync(brokered, brokered.RunToken)).ShouldBeTrue(
+            "a revoked lease must refuse the NEXT call — revocation that only takes effect when the process dies is the defect this slice exists to remove");
         upstream.Calls.ShouldBe(1, "a refused call must never reach the provider, or the tenant is billed for a run that was cancelled");
     }
 
@@ -168,8 +167,9 @@ public class ModelCredentialBrokerTests
         var second = await broker.OpenAsync(LeaseFor(runId, epoch: 8), CancellationToken.None);
 
         second!.RunToken.ShouldNotBe(first.RunToken);
-        (await CallAsync(first, "/v1/messages", first.RunToken)).StatusCode.ShouldBe(HttpStatusCode.Unauthorized,
-            customMessage: "the superseded attempt's bearer must stop working the moment the run is re-claimed");
+        second.RebindPort.ShouldNotBe(first.RebindPort, "a superseding attempt takes its OWN address; reusing the old one would race the close that withdraws it");
+        (await RefusedAsync(first, first.RunToken)).ShouldBeTrue(
+            "the superseded attempt's bearer must stop working the moment the run is re-claimed");
         (await CallAsync(second, "/v1/messages", second.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
@@ -245,6 +245,234 @@ public class ModelCredentialBrokerTests
         read.ShouldBeGreaterThan(0, "the relay delivered nothing within 10s — a buffered (non-streaming) copy would stall exactly here; check LoopbackModelCredentialBroker.CopyBodyAsync's per-chunk flush");
 
         return Encoding.UTF8.GetString(buffer, 0, read);
+    }
+
+    // ── The address, and re-opening it after the worker that minted it is gone ────────────────────────────────────
+
+    [Fact]
+    public async Task An_open_hands_back_the_port_and_route_its_own_base_url_names()
+    {
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+
+        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+        if (brokered is null) return;
+
+        var port = brokered.RebindPort.ShouldNotBeNull("without the port, nothing reaches the run's durable handle and every deploy ends every in-flight brokered run — there is no address left to re-open");
+        var route = brokered.RebindRoute.ShouldNotBeNull("without the route, a re-bind would have to mint one, and the agent's frozen base URL names the old one");
+
+        brokered.BaseUrl.ShouldBe($"http://{SandboxSpec.ModelBrokerHostToken}:{port}/{route}",
+            customMessage: "the coordinates handed back for the handle must be exactly the ones the CHILD was given — a port naming some other listener re-binds an address nobody calls, and the failure surfaces one deploy later as a run that will not talk");
+    }
+
+    [Fact]
+    public async Task Two_runs_are_brokered_on_two_ports_so_one_conflict_cannot_take_out_the_other()
+    {
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+
+        var first = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+        if (first is null) return;
+        var second = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+
+        second!.RebindPort.ShouldNotBe(first.RebindPort,
+            customMessage: "a port per run is the design, not an accident: on ONE worker port a single conflict — a port an unrelated process already holds, a second worker on the same host — takes out every in-flight brokered run at once, where a port per lease fails exactly one run");
+    }
+
+    [Fact]
+    public async Task Rebind_restores_the_recorded_port_route_and_token_so_the_original_base_url_still_works()
+    {
+        var runId = Guid.NewGuid();
+        BrokeredModelCredential brokered;
+
+        // Worker A mints the address and then GOES AWAY. What survives it is only what the run's durable handle
+        // carries — the port, the route, the bearer — which is exactly what worker B is given below.
+        using (var workerA = LoopbackModelCredentialBroker.ForTest(new StubUpstream()))
+        {
+            if (await workerA.OpenAsync(LeaseFor(runId, epoch: 7), CancellationToken.None) is not { } opened) return;
+
+            brokered = opened;
+            (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK, "precondition: the address answers while the worker that minted it holds it");
+        }
+
+        (await RefusedAsync(brokered, brokered.RunToken)).ShouldBeTrue("precondition: the address died with worker A — that IS the problem this re-bind exists for");
+
+        var upstream = new StubUpstream();
+        using var workerB = LoopbackModelCredentialBroker.ForTest(upstream);
+
+        (await workerB.RebindAsync(RebindOf(brokered, runId, epoch: 8), CancellationToken.None)).ShouldBeTrue(
+            "worker B must be able to re-open the address the detached agent is still calling; if it cannot, every deploy ends every brokered run in flight");
+
+        var response = await CallAsync(brokered, "/v1/messages", brokered.RunToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK,
+            customMessage: "the ORIGINAL base URL and the ORIGINAL bearer must BOTH still work. Mint a fresh port and this is a refused connection; mint a fresh route or a fresh token and it is a 401 — and either way the agent that is still running has no model");
+        upstream.LastRequest!.Headers.GetValues("x-api-key").Single().ShouldBe(UpstreamKey,
+            "a restored lease fronts the tenant's key server-side exactly as the original did — a re-bind that forwarded the run token instead would hand the provider a bearer it has no use for");
+        workerB.HasLease(runId).ShouldBeTrue("the run is held HERE now, which is the answer a re-attach acts on before deciding the run can no longer reach a model");
+        (await workerB.RenewAsync(runId, 8, CancellationToken.None)).ShouldBeTrue(
+            "the restored lease is keyed on the RE-ATTACH's epoch, not the launch's — keyed on the old one the new worker's heartbeat renews nothing and the lease lapses two beats later");
+    }
+
+    [Fact]
+    public async Task Rebind_reports_false_when_the_port_is_taken_rather_than_pretending_it_worked()
+    {
+        using var occupied = new OccupiedPort();
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        var request = RebindOn(occupied.Port, epoch: 8);
+
+        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeFalse(
+            customMessage: "a re-bind onto a port something else holds must SAY so. A silent success leaves the caller believing the run's model access is back, so it lands no verdict and clears the posture that says otherwise — a run Running forever with an agent that cannot talk, which is the exact degrade the typed landing exists to remove");
+
+        broker.HasLease(request.RunId).ShouldBeFalse(
+            "a failed re-bind must install NOTHING: a lease with no listener behind it would make HasLease lie to the one caller deciding whether the run can still reach a model");
+
+        logger.Warnings.ShouldContain(line => line.Contains(occupied.Port.ToString(), StringComparison.Ordinal) && line.Contains(request.RunId.ToString(), StringComparison.Ordinal),
+            "the refusal has to name the run and the port, or an operator cannot tell a transient conflict from a handle this worker was never going to restore");
+    }
+
+    /// <summary>
+    /// A port genuinely unavailable to the broker — held on EVERY address it would try (the wildcard first, then
+    /// loopback). One listener is not enough and finding that out is the point: with <c>SO_REUSEADDR</c>, which every
+    /// .NET listener sets on Unix, binding <c>127.0.0.1:P</c> SUCCEEDS while another socket holds <c>0.0.0.0:P</c> — so
+    /// a fixture that occupied only the wildcard would let the re-bind through and pass this test for the wrong
+    /// reason. Only an EXACT duplicate of a listening socket is refused.
+    /// </summary>
+    private sealed class OccupiedPort : IDisposable
+    {
+        private readonly System.Net.Sockets.TcpListener _wildcard;
+        private readonly System.Net.Sockets.TcpListener _loopback;
+
+        public OccupiedPort()
+        {
+            _wildcard = new System.Net.Sockets.TcpListener(IPAddress.Any, 0);
+            _wildcard.Start();
+            Port = ((IPEndPoint)_wildcard.LocalEndpoint).Port;
+
+            _loopback = new System.Net.Sockets.TcpListener(IPAddress.Loopback, Port);
+            _loopback.Start();
+        }
+
+        public int Port { get; }
+
+        public void Dispose()
+        {
+            try { _loopback.Stop(); } catch { /* best-effort */ }
+            try { _wildcard.Stop(); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Rebind_refuses_to_displace_a_lease_this_worker_holds_at_a_newer_epoch()
+    {
+        var runId = Guid.NewGuid();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+
+        // The run's first attempt, then a re-claim: the second open supersedes the first and CLOSES its listener, so
+        // the old port is free again. That freedom is what makes this test about the epoch and nothing else — a stale
+        // re-bind that was merely losing a port conflict would be refused for a reason this guard does not own.
+        var stale = await broker.OpenAsync(LeaseFor(runId, epoch: 7), CancellationToken.None);
+        if (stale is null) return;
+        var live = await broker.OpenAsync(LeaseFor(runId, epoch: 9), CancellationToken.None);
+
+        live!.RebindPort.ShouldNotBe(stale.RebindPort, "precondition: the live attempt is on its own port, so the stale one's is bindable");
+
+        // A pass from BEHIND the fence arrives holding the address the handle recorded at epoch 7. Honouring it would
+        // install that lease over the live one and close the live attempt's listener — handing the run back to the
+        // worker the fence already settled against, by a route the fence never sees.
+        (await broker.RebindAsync(RebindOf(stale, runId, epoch: 7), CancellationToken.None)).ShouldBeFalse(
+            customMessage: "a re-bind from behind the fence must be refused — the epoch is the only thing that separates restoring an address from taking one, and every other field a superseded worker presents is identical");
+
+        (await CallAsync(live, "/v1/messages", live.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK,
+            "the live attempt's own address must be untouched by the refusal; closing it would be the takeover, arrived at by a different route");
+        (await broker.RenewAsync(runId, 9, CancellationToken.None)).ShouldBeTrue("and the lease the broker keys on must still be epoch 9's");
+    }
+
+    /// <summary>The re-bind a later worker would build from what a run's durable handle carries — the point being that every value comes from <paramref name="brokered"/>, because a re-bind restores an address and never mints one.</summary>
+    private static ModelCredentialRebindRequest RebindOf(BrokeredModelCredential brokered, Guid runId, long epoch) => new()
+    {
+        RunId = runId, TeamId = Guid.NewGuid(), Epoch = epoch, Port = brokered.RebindPort!.Value, PathId = brokered.RebindRoute!,
+        RunToken = brokered.RunToken, Upstream = AnthropicCredential(), Ttl = TimeSpan.FromMinutes(3),
+    };
+
+    /// <summary>A re-bind naming a port no lease of ours ever bound — for the cases where what is under test is the bind itself.</summary>
+    private static ModelCredentialRebindRequest RebindOn(int port, long epoch) => new()
+    {
+        RunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), Epoch = epoch, Port = port, PathId = "a-recorded-route-id",
+        RunToken = "a-recorded-run-token-long-enough-to-be-one", Upstream = AnthropicCredential(), Ttl = TimeSpan.FromMinutes(3),
+    };
+
+    // ── What the re-attach checks BEFORE it asks the broker ───────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(true, true, true, true)]       // the handle names an address a worker can bind
+    [InlineData(false, true, true, false)]     // no port — a handle from before the address was recorded
+    [InlineData(true, false, true, false)]     // no route — half an address is no address
+    [InlineData(true, true, false, false)]     // no bearer — an unbrokered run has nothing to restore
+    public void Only_a_handle_that_records_the_whole_address_is_rebindable(bool port, bool route, bool token, bool rebindable) =>
+        AgentRunExecutor.IsRebindable(new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow,
+            ModelBrokerPort = port ? 44444 : null, ModelBrokerRoute = route ? "route-id" : null, ModelBrokerRunToken = token ? "run-token" : null,
+        }).ShouldBe(rebindable,
+            customMessage: "a partial address is not an address: binding a port with no route, or installing a route with no bearer, produces a lease the detached agent's own base URL cannot use — and the caller would then clear the posture that says the run has no model");
+
+    [Theory]
+    [InlineData("Anthropic", "Anthropic", true, true, true)]      // same row, same provider → the same credential
+    [InlineData("Anthropic", "anthropic", true, true, true)]      // hosts spell their own tags; the tag is not case
+    [InlineData("Anthropic", "OpenAI", true, true, false)]        // a different provider is a different API, not a different key
+    [InlineData("Anthropic", "Anthropic", true, false, false)]    // the resolve landed on another row — a rotation, or a changed team default
+    [InlineData(null, "Anthropic", false, false, false)]          // the launch recorded no provider at all (an unbrokered handle)
+    [InlineData("Anthropic", "Anthropic", false, false, true)]    // both row-less: the operator-global key, which has no row to name
+    public void A_rebind_only_fronts_the_credential_the_launch_itself_fronted(string? stampedProvider, string resolvedProvider, bool stampedRow, bool sameRow, bool fronts)
+    {
+        var stamped = Guid.NewGuid();
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow,
+            ModelBrokerProvider = stampedProvider, ModelBrokerCredentialId = stampedRow ? stamped : null,
+        };
+        var resolved = new ResolvedModelCredential { Provider = resolvedProvider, CredentialId = stampedRow && sameRow ? stamped : stampedRow ? Guid.NewGuid() : null };
+
+        AgentRunExecutor.FrontsTheSameCredential(handle, resolved).ShouldBe(fronts,
+            customMessage: "a re-attach re-resolves the credential from scratch and can legitimately land somewhere else. Re-binding that would spend a key the run's posture never recorded under a bearer minted for a different one — and a changed PROVIDER is worse still, because the relay's upstream root and path allowlist both come from it, so the child would be talking a wire its new upstream does not serve");
+    }
+
+    [Fact]
+    public void A_handle_written_before_the_broker_address_existed_deserializes_and_is_not_rebindable()
+    {
+        // Byte-for-byte the shape a worker on the previous build persisted: a bearer, and no address beside it. It has
+        // to READ — a re-attach that threw here could not recover the run at all — and it has to answer "not
+        // rebindable", which is what puts a mixed-version deploy's in-flight runs back on the typed landing instead of
+        // onto a port nobody wrote down.
+        const string legacy = """
+        {"kind":"local","processId":4242,"spoolDirectory":"/tmp/spool","deadline":"2026-01-01T00:00:00+00:00","modelBrokerRunToken":"a-bearer-from-the-previous-build"}
+        """;
+
+        var handle = JsonSerializer.Deserialize<SandboxHandle>(legacy, AgentJson.Options).ShouldNotBeNull();
+
+        handle.ModelBrokerRunToken.ShouldBe("a-bearer-from-the-previous-build", "the one broker field the old build did write must survive — the re-attach rebuilds its redactor from it");
+        handle.ModelBrokerPort.ShouldBeNull();
+        handle.ModelBrokerRoute.ShouldBeNull();
+        handle.ModelBrokerCredentialId.ShouldBeNull();
+        handle.ModelBrokerProvider.ShouldBeNull();
+
+        AgentRunExecutor.IsRebindable(handle).ShouldBeFalse(
+            "the mixed-version deploy story in one line: old handles keep the outcome they always had, and only handles that recorded an address survive a restart");
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<LoopbackModelCredentialBroker>
+    {
+        public List<string> Warnings { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= Microsoft.Extensions.Logging.LogLevel.Warning) Warnings.Add(formatter(state, exception));
+        }
+
+        private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
     }
 
     // ── The upstream address ──────────────────────────────────────────────────────────────────────────────────────
@@ -450,6 +678,19 @@ public class ModelCredentialBrokerTests
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 
         return await client.SendAsync(Authorized(brokered, path, token, carrier));
+    }
+
+    /// <summary>
+    /// Whether a call on this bearer is REFUSED. Now that every lease owns its own port, a withdrawal presents two ways
+    /// depending on timing: a 401 while something is still bound to the address, and no answer at all once the listener
+    /// is closed. Both say the identical thing — this bearer buys no model spend — and pinning only the 401 would make
+    /// the STRONGER withdrawal (the address ceasing to exist) read as a regression. What never varies, and what every
+    /// caller asserts beside this, is that the provider saw nothing.
+    /// </summary>
+    private static async Task<bool> RefusedAsync(BrokeredModelCredential brokered, string token)
+    {
+        try { return (await CallAsync(brokered, "/v1/messages", token)).StatusCode == HttpStatusCode.Unauthorized; }
+        catch (HttpRequestException) { return true; }   // nothing is bound there any more
     }
 
     /// <summary>

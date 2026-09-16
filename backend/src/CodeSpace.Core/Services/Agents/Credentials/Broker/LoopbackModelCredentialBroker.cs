@@ -12,10 +12,23 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace CodeSpace.Core.Services.Agents.Credentials.Broker;
 
 /// <summary>
-/// The in-process broker: ONE HTTP reverse proxy per worker, on an ephemeral port, with a per-run route and a per-run
-/// bearer. A brokered run's CLI talks to <c>http://&lt;worker&gt;:&lt;port&gt;/&lt;run path id&gt;/…</c> and the
-/// proxy replays the request upstream with the tenant's real key attached SERVER-SIDE. The key exists only in the
+/// The in-process broker: an HTTP reverse proxy PER RUN, each on its own ephemeral port, with a per-run route and a
+/// per-run bearer. A brokered run's CLI talks to <c>http://&lt;worker&gt;:&lt;port&gt;/&lt;run path id&gt;/…</c> and
+/// the proxy replays the request upstream with the tenant's real key attached SERVER-SIDE. The key exists only in the
 /// lease object; the sandbox holds a token that authenticates here and nowhere else.
+///
+/// <para><b>Why a listener per lease rather than one per worker.</b> The address a run is given is frozen into a
+/// detached CLI's configuration at launch, so it is the only address that run will ever call — which makes re-opening
+/// it after a worker restart the difference between a deploy interrupting a run and a deploy ENDING it
+/// (<see cref="RebindAsync"/>). A shared worker port could be re-bound too, but it would make every run's address one
+/// address: a single conflict would take out every in-flight run on the host, and two workers on one host could never
+/// both broker. A port per lease fails one run at a time, and the cost is one idle <see cref="HttpListener"/> per
+/// concurrent agent run.</para>
+///
+/// <para><b>Withdrawal closes the port.</b> A revoked or superseded lease has its listener closed, not merely
+/// un-routed: the capability's ADDRESS stops existing rather than answering 401 until the process ends. So a call on a
+/// withdrawn bearer presents either way depending on timing — refused while something is still bound, unanswered once
+/// it is not — and both say the same thing, which is that the bearer buys nothing. Nothing is relayed either way.</para>
 ///
 /// <para><b>Where it listens, and why it cannot simply be loopback.</b> A deny-by-default egress run executes inside
 /// a per-run network namespace, so <c>127.0.0.1</c> there is the NAMESPACE's loopback — a broker bound only to the
@@ -98,16 +111,10 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     };
 
     private readonly ConcurrentDictionary<Guid, Lease> _byRun = new();
-    private readonly ConcurrentDictionary<string, Lease> _byRoute = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _stopping = new();
     private readonly ILogger<LoopbackModelCredentialBroker> _logger;
     private readonly TimeProvider _time;
     private readonly HttpClient _upstream;
-    private readonly object _startLock = new();
-
-    private HttpListener? _listener;
-    private string? _baseUrlTemplate;
-    private bool _startFailed;
 
     public LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger = null, TimeProvider? timeProvider = null)
         : this(logger, timeProvider, null) { }
@@ -118,7 +125,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// constructor deliberately — a bare <see cref="HttpMessageHandler"/> registration appearing in the container
     /// later must not silently become the path every tenant's model traffic takes.
     /// </summary>
-    internal static LoopbackModelCredentialBroker ForTest(HttpMessageHandler upstream, TimeProvider? timeProvider = null) => new(null, timeProvider, upstream);
+    internal static LoopbackModelCredentialBroker ForTest(HttpMessageHandler upstream, TimeProvider? timeProvider = null, ILogger<LoopbackModelCredentialBroker>? logger = null) => new(logger, timeProvider, upstream);
 
     private LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger, TimeProvider? timeProvider, HttpMessageHandler? upstreamHandler)
     {
@@ -134,22 +141,78 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     public Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken)
     {
         if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return Task.FromResult<BrokeredModelCredential?>(null);
-        if (EnsureListening() is not { } template) return Task.FromResult<BrokeredModelCredential?>(null);
 
-        var lease = new Lease(request.RunId, request.TeamId, request.Epoch, McpRunToken.Mint(), McpRunToken.MintPathId(), request.Upstream, upstreamRoot);
-        lease.RenewUntil(_time.GetUtcNow() + request.Ttl);
+        if (BindFresh() is not { } bound)
+        {
+            _logger.LogWarning("Agent run {RunId}: the model-credential broker could not bind a listener on this worker, so the run falls back to whatever its deployment's confinement policy permits", request.RunId);
+            return Task.FromResult<BrokeredModelCredential?>(null);
+        }
 
-        // A second open for the same run REPLACES the previous lease and un-routes its token at once — that is the
-        // reclaimed-run case (a new attempt at a higher epoch), where the superseded worker's token must stop being
-        // honoured immediately rather than at the end of a TTL it could still be renewing.
-        if (_byRun.TryGetValue(request.RunId, out var superseded)) _byRoute.TryRemove(superseded.PathId, out _);
+        var lease = Install(new Lease
+        {
+            RunId = request.RunId, TeamId = request.TeamId, Epoch = request.Epoch, Token = McpRunToken.Mint(), PathId = McpRunToken.MintPathId(),
+            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port,
+        }, request.Ttl);
 
-        _byRun[request.RunId] = lease;
-        _byRoute[lease.PathId] = lease;
+        _logger.LogDebug("Model credential brokered for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
+        WarnIfUnreachableFromNetns(lease, bound.Host);
 
-        _logger.LogDebug("Model credential brokered for agent run {RunId} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}", lease.RunId, lease.TeamId, lease.Epoch, lease.ExpiresAt);
+        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId });
+    }
 
-        return Task.FromResult<BrokeredModelCredential?>(new(template.Replace(RoutePlaceholder, lease.PathId, StringComparison.Ordinal), lease.Token, lease.ExpiresAt));
+    /// <summary>
+    /// Re-open a run's recorded address — see <see cref="IModelCredentialBroker.RebindAsync"/> for why nothing here is
+    /// minted. Every refusal is a false plus one Warning naming the reason: the caller's alternative is ending a live
+    /// run typed, so "the port is taken" and "the credential named no endpoint" must not reach an operator as the same
+    /// silence.
+    /// </summary>
+    public Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken)
+    {
+        if (request.Port is <= 0 or > MaxPort) return RefuseRebind(request, "the recorded port is not a bindable TCP port");
+        if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return RefuseRebind(request, "the credential names no upstream endpoint to forward to");
+
+        // A lease held here at a NEWER epoch is a live claim by a later attempt. Replacing it would close a port that
+        // attempt's own agent is calling and hand the run back to a superseded worker — the exact reclaim this fence
+        // exists to settle, decided backwards.
+        if (_byRun.TryGetValue(request.RunId, out var held) && held.Epoch > request.Epoch) return RefuseRebind(request, $"a lease at a newer epoch ({held.Epoch}) is already held on this worker");
+        if (BindPort(request.Port) is not { } bound) return RefuseRebind(request, "the port is already in use on this worker");
+
+        var lease = Install(new Lease
+        {
+            RunId = request.RunId, TeamId = request.TeamId, Epoch = request.Epoch, Token = request.RunToken, PathId = request.PathId,
+            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port,
+        }, request.Ttl);
+
+        _logger.LogInformation("Model credential RE-BOUND for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}; its detached agent's next model call is answered here", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
+        WarnIfUnreachableFromNetns(lease, bound.Host);
+
+        return Task.FromResult(true);
+    }
+
+    /// <summary>Say WHY a re-bind could not take, and answer false. Warning rather than Debug because the consequence of the false is a live run ended typed, and this line is the only place that separates a transient port conflict from a handle this worker was never going to be able to restore.</summary>
+    private Task<bool> RefuseRebind(ModelCredentialRebindRequest request, string reason)
+    {
+        _logger.LogWarning("The model-credential broker could not re-bind agent run {RunId} on port {Port}: {Reason}", request.RunId, request.Port, reason);
+
+        return Task.FromResult(false);
+    }
+
+    /// <summary>
+    /// Make a lease live: set its window, REPLACE any lease the run already held — closing that listener, so a
+    /// superseded attempt's address stops existing at once rather than at the end of a TTL its own worker could still
+    /// be renewing — and start serving the new one.
+    /// </summary>
+    private Lease Install(Lease lease, TimeSpan ttl)
+    {
+        lease.RenewUntil(_time.GetUtcNow() + ttl);
+
+        if (_byRun.TryGetValue(lease.RunId, out var superseded)) CloseQuietly(superseded.Listener);
+
+        _byRun[lease.RunId] = lease;
+
+        _ = Task.Run(() => AcceptAsync(lease), CancellationToken.None);
+
+        return lease;
     }
 
     public Task<bool> RenewAsync(Guid runId, long epoch, CancellationToken cancellationToken)
@@ -165,7 +228,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         if (!_byRun.TryRemove(runId, out var lease)) return Task.CompletedTask;
 
-        _byRoute.TryRemove(lease.PathId, out _);
+        // The listener goes with the lease, not merely the routing entry: leaving it bound would hold one port per
+        // finished run for the life of the worker, and a worker serves thousands.
+        CloseQuietly(lease.Listener);
 
         _logger.LogInformation("Model credential lease revoked for agent run {RunId}: {Reason}", runId, reason);
 
@@ -177,51 +242,31 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
     // ── Listener ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>The route segment the base-URL template carries until a lease substitutes its own id in. Never reaches a child.</summary>
-    private const string RoutePlaceholder = "{route}";
+    /// <summary>The highest bindable TCP port — the bound a RESTORED port is checked against, since it arrives from a persisted row rather than from this process's own allocator.</summary>
+    private const int MaxPort = 65535;
+
+    /// <summary>The address a lease's child is handed: this run's own port and route, with the reachable host left as a token for the runner to substitute at launch (see <see cref="SandboxSpec.ModelBrokerHostToken"/>).</summary>
+    private static string BaseUrlFor(Lease lease) => $"http://{SandboxSpec.ModelBrokerHostToken}:{lease.Port}/{lease.PathId}";
 
     /// <summary>
-    /// The base-URL template for this worker's listener, starting it on first use. Null once a start attempt has
-    /// FAILED — recorded so every later run takes the caller's decision path immediately instead of re-probing ports
-    /// on a host that cannot listen at all.
+    /// A host that CAN build per-run network namespaces but refused the wide bind can serve only its shared-network
+    /// runs: a sealed run's child reaches this worker at its namespace gateway, and nothing is listening there. Said
+    /// out loud because the failure it produces is a model call that times out, which reads like a provider problem
+    /// rather than a bind that fell back.
     /// </summary>
-    private string? EnsureListening()
+    private void WarnIfUnreachableFromNetns(Lease lease, string host)
     {
-        lock (_startLock)
-        {
-            if (_listener is not null) return _baseUrlTemplate;
-            if (_startFailed) return null;
+        if (!FilteredEgressNetns.IsSupported || host == AnyHost) return;
 
-            if (Bind() is not { } bound)
-            {
-                _startFailed = true;
-                _logger.LogWarning("The model-credential broker could not bind a listener on this worker; runs will fall back to whatever their deployment's confinement policy permits");
-                return null;
-            }
-
-            _listener = bound.Listener;
-            _baseUrlTemplate = $"http://{SandboxSpec.ModelBrokerHostToken}:{bound.Port}/{RoutePlaceholder}";
-            _ = Task.Run(() => AcceptAsync(bound.Listener), CancellationToken.None);
-
-            _logger.LogInformation("Model-credential broker listening on port {Port} (bound to {Host})", bound.Port, bound.Host);
-
-            // A host that CAN build per-run network namespaces but refused the wide bind can broker only its
-            // shared-network runs: a sealed run's child reaches this worker at its namespace gateway, and nothing is
-            // listening there. Said out loud because the failure it produces is a model call that times out, which
-            // reads like a provider problem rather than a bind that fell back.
-            if (FilteredEgressNetns.IsSupported && bound.Host != AnyHost)
-                _logger.LogWarning("The model-credential broker fell back to a loopback-only bind on a host that builds filtered-egress namespaces; a deny-by-default egress run cannot reach it there");
-
-            return _baseUrlTemplate;
-        }
+        _logger.LogWarning("Agent run {RunId}: its model-credential broker fell back to a loopback-only bind on a host that builds filtered-egress namespaces; a deny-by-default egress run cannot reach it there", lease.RunId);
     }
 
     /// <summary>
-    /// Bind the listener: every address on a host that can build filtered-egress namespaces (their children reach the
-    /// worker on a per-run gateway IP, not on loopback), loopback otherwise. The wider bind is TRIED FIRST and falls
-    /// back, so a host that refuses it still brokers its shared-network runs.
+    /// Bind a FRESH ephemeral port for a new lease: every address on a host that can build filtered-egress namespaces
+    /// (their children reach the worker on a per-run gateway IP, not on loopback), loopback otherwise. The wider bind
+    /// is TRIED FIRST and falls back, so a host that refuses it still brokers its shared-network runs.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? Bind()
+    private static (HttpListener Listener, int Port, string Host)? BindFresh()
     {
         foreach (var host in CandidateHosts())
             for (var attempt = 0; attempt < BindAttempts; attempt++)
@@ -230,6 +275,20 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
                 if (TryBind(host, port) is { } listener) return (listener, port, host);
             }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Bind ONE GIVEN port — a re-bind's whole job. No fresh-port retry, deliberately: the address is not this
+    /// process's to choose, it is the one a detached agent already holds, so a substitute would answer nobody. The
+    /// same candidate hosts as <see cref="BindFresh"/>, because the run whose port this is was launched on a host of
+    /// the same shape and its child reaches the worker the same way.
+    /// </summary>
+    private static (HttpListener Listener, int Port, string Host)? BindPort(int port)
+    {
+        foreach (var host in CandidateHosts())
+            if (TryBind(host, port) is { } listener) return (listener, port, host);
 
         return null;
     }
@@ -271,25 +330,26 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         finally { probe.Stop(); }
     }
 
-    private async Task AcceptAsync(HttpListener listener)
+    /// <summary>Serve ONE lease's listener until it closes. Bound to the lease rather than to a shared table, so a request arriving on this run's port is answered against this run's lease and nothing else — a closed listener ends the loop, which is what makes revocation the end of an address rather than the end of a routing entry.</summary>
+    private async Task AcceptAsync(Lease lease)
     {
         while (!_stopping.IsCancellationRequested)
         {
             HttpListenerContext context;
-            try { context = await listener.GetContextAsync().ConfigureAwait(false); }
+            try { context = await lease.Listener.GetContextAsync().ConfigureAwait(false); }
             catch (Exception exception) when (exception is HttpListenerException or ObjectDisposedException or InvalidOperationException) { return; }
 
-            _ = Task.Run(() => ServeQuietlyAsync(context), CancellationToken.None);
+            _ = Task.Run(() => ServeQuietlyAsync(context, lease), CancellationToken.None);
         }
     }
 
     // ── One request ───────────────────────────────────────────────────────────────────────────────────────────────
 
-    private async Task ServeQuietlyAsync(HttpListenerContext context)
+    private async Task ServeQuietlyAsync(HttpListenerContext context, Lease lease)
     {
         try
         {
-            if (Authorize(context.Request) is not { } lease) { Refuse(context.Response, HttpStatusCode.Unauthorized); return; }
+            if (!Authorized(context.Request, lease)) { Refuse(context.Response, HttpStatusCode.Unauthorized); return; }
             if (UnrelayablePath(lease, context.Request.Url!) is { } refused) { RefusePath(context.Response, lease, refused); return; }
 
             await ForwardAsync(context, lease).ConfigureAwait(false);
@@ -304,19 +364,21 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     }
 
     /// <summary>
-    /// The run whose lease this request may spend, or null — which is a 401 and nothing more informative. Every
-    /// refusal reason (unknown route, wrong/absent token, expired lease, revoked lease, a source that cannot be one
-    /// of our sandboxes) collapses to the same answer on purpose: a caller probing the port learns only that it has
-    /// no capability here.
+    /// Whether this request may spend THIS port's lease — false is a 401 and nothing more informative. Every refusal
+    /// reason (another run's route, wrong/absent token, expired lease, a source that cannot be one of our sandboxes)
+    /// collapses to the same answer on purpose: a caller probing the port learns only that it has no capability here.
+    ///
+    /// <para>The route is checked against the lease this listener SERVES rather than looked up in a table: with a port
+    /// per run, a request carrying some other run's route is a request to the wrong address, and resolving it would
+    /// make two ports interchangeable that the design keeps apart.</para>
     /// </summary>
-    private Lease? Authorize(HttpListenerRequest request)
+    private bool Authorized(HttpListenerRequest request, Lease lease)
     {
-        if (RouteOf(request.Url) is not { } route || !_byRoute.TryGetValue(route, out var lease)) return null;
-        if (PresentedToken(request) is not { } presented || !McpRunToken.Matches(lease.Token, presented)) return null;
-        if (lease.ExpiresAt <= _time.GetUtcNow()) return null;
-        if (!IsPlausibleSandboxSource(request.RemoteEndPoint?.Address)) return null;
+        if (RouteOf(request.Url) is not { } route || !string.Equals(route, lease.PathId, StringComparison.Ordinal)) return false;
+        if (PresentedToken(request) is not { } presented || !McpRunToken.Matches(lease.Token, presented)) return false;
+        if (lease.ExpiresAt <= _time.GetUtcNow()) return false;
 
-        return lease;
+        return IsPlausibleSandboxSource(request.RemoteEndPoint?.Address);
     }
 
     /// <summary>
@@ -547,13 +609,18 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         try { _stopping.Cancel(); } catch (ObjectDisposedException) { /* already stopped */ }
 
-        _byRun.Clear();
-        _byRoute.Clear();
+        foreach (var lease in _byRun.Values) CloseQuietly(lease.Listener);
 
-        try { _listener?.Close(); } catch (Exception exception) when (exception is ObjectDisposedException or HttpListenerException) { /* best-effort */ }
+        _byRun.Clear();
 
         _upstream.Dispose();
         _stopping.Dispose();
+    }
+
+    /// <summary>Close one lease's listener, releasing its port. Best-effort: a listener already closed (a racing revoke, a disposed broker) is the outcome this wanted.</summary>
+    private static void CloseQuietly(HttpListener listener)
+    {
+        try { listener.Close(); } catch (Exception exception) when (exception is ObjectDisposedException or HttpListenerException) { /* already gone */ }
     }
 
     /// <summary>
@@ -561,18 +628,28 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// not in the child's environment — so the process holding it is the same one whose heartbeat keeps the lease
     /// alive. <see cref="ExpiresAt"/> is renewed from another thread than the one reading it, hence the interlocked
     /// tick field rather than a property a race could tear.
+    ///
+    /// <para>Init-only properties rather than a primary constructor: the nine values below include two bare numbers
+    /// (the epoch and the port) that a positional list would let a caller swap without failing to compile, and the
+    /// re-bind path is where such a swap would hand a live run the wrong address (Rule 1).</para>
     /// </summary>
-    private sealed class Lease(Guid runId, Guid teamId, long epoch, string token, string pathId, ResolvedModelCredential upstream, string upstreamRoot)
+    private sealed class Lease
     {
         private long _expiresAtUtcTicks;
 
-        public Guid RunId { get; } = runId;
-        public Guid TeamId { get; } = teamId;
-        public long Epoch { get; } = epoch;
-        public string Token { get; } = token;
-        public string PathId { get; } = pathId;
-        public ResolvedModelCredential Upstream { get; } = upstream;
-        public string UpstreamRoot { get; } = upstreamRoot;
+        public required Guid RunId { get; init; }
+        public required Guid TeamId { get; init; }
+        public required long Epoch { get; init; }
+        public required string Token { get; init; }
+        public required string PathId { get; init; }
+        public required ResolvedModelCredential Upstream { get; init; }
+        public required string UpstreamRoot { get; init; }
+
+        /// <summary>This lease's OWN listener — one per run, so the address can be withdrawn (and later restored) by itself.</summary>
+        public required HttpListener Listener { get; init; }
+
+        /// <summary>The port <see cref="Listener"/> is bound to. Handed back to the caller so it reaches the run's durable handle, which is the only place a later worker can learn the address from.</summary>
+        public required int Port { get; init; }
 
         public DateTimeOffset ExpiresAt => new(Interlocked.Read(ref _expiresAtUtcTicks), TimeSpan.Zero);
 

@@ -469,6 +469,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
                 Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
                 ModelBrokerRunToken = brokeredCredential?.RunToken, ModelCredentialBrokered = brokeredPosture,
+                ModelBrokerPort = brokeredCredential?.RebindPort, ModelBrokerRoute = brokeredCredential?.RebindRoute,
+                ModelBrokerCredentialId = brokeredCredential is null ? null : modelCredentialId, ModelBrokerProvider = brokeredCredential is null ? null : modelProvider,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
             };
@@ -754,10 +756,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return;
 
-        // A brokered run re-attached HERE has lost its model access: record it, and stop an agent that is still
-        // burning its wall clock without one. Its own method (Rule 3) — this is one decision with one outcome, and
-        // ReattachAsync's body is a pipeline, not a place to reason in.
-        var leaseLost = await ResolveLostModelAccessAsync(owner, run, durable, handle, cancellationToken).ConfigureAwait(false);
+        // The run's credential, re-resolved ONCE for this pass and shared by its two consumers below: the re-bind that
+        // fronts it again, and the redactor the re-opened endpoint masks tool-result text with. In its own try so a
+        // deleted / rotated credential degrades (no re-bind, no-op redactor) rather than blocking the re-attach.
+        // Independent of ReattachAndFoldAsync's own resolution, which still owns the fingerprint-gated re-tail.
+        var modelAccess = await ResolveModelCredentialQuietlyAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+
+        // A brokered run re-attached HERE either gets its address back or has lost its model access: re-bind what this
+        // worker can, record and stop what it cannot. Its own method (Rule 3) — this is one decision with one outcome,
+        // and ReattachAsync's body is a pipeline, not a place to reason in.
+        var leaseLost = await ResolveLostModelAccessAsync(new ModelAccessContext { Owner = owner, Run = run, Durable = durable, Handle = handle, Upstream = modelAccess?.Credential }, cancellationToken).ConfigureAwait(false);
 
         // Its agent outlived the kill, so nothing may be landed over it (see the enum). Leave the run Running exactly
         // as an unobservable re-attach does, and let the next sweep ask again — including the log-stream owner-loss
@@ -770,8 +778,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         using var heartbeatScope = _scopeFactory.CreateScope();
         var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // The SAME heartbeat the launch path runs, credential renewal included — a run whose lease this pass just
+        // re-bound would otherwise lapse two heartbeats later and 401 the agent it was restored for. A run with no
+        // lease here (unbrokered, or a re-bind that declined) gets a cheap false back and is unaffected.
         var heartbeat = HeartbeatLoop.RunAsync(
-            ct => RenewObservationAsync(heartbeatRuns, owner, observerCts, ct),
+            ct => RenewObservationAndCredentialAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
             ex => _logger.LogWarning(ex, "Heartbeat ping failed for re-attached agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
             heartbeatCts.Token);
@@ -785,12 +796,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // to an invocation that only the original worker's loop could have made, and the backstop closes those.
         var reattachSpendClaim = await RebuildRunSpendClaimAsync(run, task, RunSpendScopeKey(agentRunId, round: 0), cancellationToken).ConfigureAwait(false);
 
-        // Resolve a redactor for the re-opened endpoint's tool-result text — fresh from the run's credential, in its
-        // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
-        // Independent of ReattachAndFoldAsync's own resolution (which still owns the fingerprint-gated re-tail).
-        SecretRedactor reopenRedactor;
-        try { reopenRedactor = WithModelBrokerRunToken((await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, brokerage: null, cancellationToken).ConfigureAwait(false)).Redactor, handle.ModelBrokerRunToken); }
-        catch { reopenRedactor = SecretRedactor.None; }
+        // The redactor for the re-opened endpoint's tool-result text, from the one resolve above.
+        var reopenRedactor = WithModelBrokerRunToken(modelAccess?.Redactor ?? SecretRedactor.None, handle.ModelBrokerRunToken);
 
         // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
         // died with the original worker, but the detached agent keeps running with its declaration file pointing here).
@@ -3482,7 +3489,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // falls back to one of the credential's own models instead of the CLI default. All null when no credential
         // resolved. CredentialId names the ROW whose key this run authenticates with (null for the operator-global
         // key, which has no row) — D3 bounds an escalation's candidate models to exactly that row.
-        return new ModelCredentialProjection(env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId, brokered, Credentials.ModelCredentialBrokerage.BrokeredPosture(wouldInject, brokered is not null));
+        return new ModelCredentialProjection(env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel, credential?.CredentialId, brokered, Credentials.ModelCredentialBrokerage.BrokeredPosture(wouldInject, brokered is not null)) { Credential = credential };
     }
 
     /// <summary>
@@ -3541,7 +3548,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         string? DefaultModel,
         Guid? CredentialId,
         BrokeredModelCredential? Brokered,
-        bool? BrokeredPosture);
+        bool? BrokeredPosture)
+    {
+        /// <summary>
+        /// The resolved credential ITSELF — the decrypted key included — for the one caller that needs to front it
+        /// rather than project it: a re-attach re-binding a detached run's broker address has to hand the broker the
+        /// same upstream the launch did. Init-only rather than positional so the eight-way deconstruction above keeps
+        /// compiling and nobody can pass it by position into a string slot. Null when no credential resolved.
+        ///
+        /// <para>It never widens what is persisted: this record lives for the length of one call, and the key on it is
+        /// the same in-memory value <see cref="ResolveModelCredentialEnvAsync"/> already held.</para>
+        /// </summary>
+        public ResolvedModelCredential? Credential { get; init; }
+    }
 
     /// <summary>
     /// The shortest value usable as a redaction needle. Below this a value is a fragment, not an identifier —
@@ -4100,11 +4119,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// posture stamp; it is not free when its cost is killing a live agent. <c>RenewAsync</c> would NOT do — this pass
     /// carries the reclaim-bumped epoch, so a renewal fails against a perfectly live lease.</para>
     ///
-    /// <para><b>The invariant this arm rests on:</b> a lease-lost posture implies the agent is DEAD, because nothing
-    /// today can rebind a run to a new broker — the lease died with its worker and no code path re-opens one. The
-    /// stable per-run address (2b) breaks that: a run whose lease is re-bound would carry the stamp while being
-    /// perfectly alive, and this read would become a lie that kills it. 2b MUST clear the posture on a successful
-    /// rebind (or give this arm a freshness bound); this comment is the note that says so.</para>
+    /// <para><b>The invariant this arm rests on, and what now keeps it true:</b> a lease-lost posture implies the agent
+    /// is DEAD. It used to hold because nothing could rebind a run to a new broker. Now something can
+    /// (<see cref="RebindModelCredentialLeaseAsync"/>), so a re-bound run would carry the stamp while being perfectly
+    /// alive and this read would become a lie that kills it — which is why the re-bind runs FIRST, returns before any
+    /// of this on success, and CLEARS a stamp a previous worker left. The invariant is therefore: the posture is true
+    /// only for a run no worker could restore, and nothing below may run for a run one did.</para>
     ///
     /// <para>An agent that is ALREADY gone still owes the verdict when the posture recorded before this pass says a
     /// lost lease is why: that is a worker which revoked, stamped and killed on its way out and then could not land
@@ -4112,17 +4132,112 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// produce. The posture is read from the row as it was BEFORE this pass stamps it, which is what keeps the two
     /// cases apart.</para>
     /// </summary>
-    private async Task<LostModelAccess> ResolveLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    private async Task<LostModelAccess> ResolveLostModelAccessAsync(ModelAccessContext context, CancellationToken cancellationToken)
     {
-        var deployAlreadyStamped = DeserializeConfinement(run.SandboxConfinementJson)?.ModelCredentialLeaseLost == true;
+        if (await RebindModelCredentialLeaseAsync(context, cancellationToken).ConfigureAwait(false)) return LostModelAccess.None;
 
-        await RecordLostBrokeredCredentialAsync(owner, run, handle, cancellationToken).ConfigureAwait(false);
+        var deployAlreadyStamped = DeserializeConfinement(context.Run.SandboxConfinementJson)?.ModelCredentialLeaseLost == true;
 
-        if (handle.ModelBrokerRunToken is null || _credentialBroker?.HasLease(owner.RunId) is true) return LostModelAccess.None;
+        await RecordLostBrokeredCredentialAsync(context.Owner, context.Run, context.Handle, cancellationToken).ConfigureAwait(false);
 
-        var stopped = await StopAgentWithoutModelAccessAsync(owner.RunId, durable, handle, cancellationToken).ConfigureAwait(false);
+        if (context.Handle.ModelBrokerRunToken is null || _credentialBroker?.HasLease(context.Owner.RunId) is true) return LostModelAccess.None;
+
+        var stopped = await StopAgentWithoutModelAccessAsync(context.Owner.RunId, context.Durable, context.Handle, cancellationToken).ConfigureAwait(false);
 
         return stopped == LostModelAccess.None && deployAlreadyStamped ? LostModelAccess.AgentStopped : stopped;
+    }
+
+    /// <summary>What a re-attach needs to decide — and act on — one run's model access: who owns the run, what its row and handle say, the runner that can answer for its process, and the credential this pass re-resolved (null when none resolved, or the resolve threw). A record because the alternative is a six-parameter list whose two Guid-shaped members are silently swappable (Rule 1).</summary>
+    private sealed record ModelAccessContext
+    {
+        public required AgentRunOwnerToken Owner { get; init; }
+        public required AgentRun Run { get; init; }
+        public required ISandboxDurableRunner Durable { get; init; }
+        public required SandboxHandle Handle { get; init; }
+        public ResolvedModelCredential? Upstream { get; init; }
+    }
+
+    /// <summary>
+    /// RE-OPEN the brokered address this run's detached agent is still calling, on THIS worker, and say whether it
+    /// worked. True means the restart cost the run nothing but the gap: its next model call is answered here, the
+    /// heartbeat above renews the restored lease, and the caller must not treat the run as having lost anything.
+    ///
+    /// <para>False is every other case, and the caller's behaviour for it is exactly what it was before a re-bind
+    /// existed — no broker on this worker, a handle that recorded no address (an unbrokered run, or one launched by a
+    /// worker from before the address was stamped), an agent on another host, a credential that no longer resolves to
+    /// the row the launch fronted, or a port something else now holds. The broker names which in its own Warning; none
+    /// of them throws, because the alternative to a re-bind is a typed landing and not a failed re-attach.</para>
+    /// </summary>
+    private async Task<bool> RebindModelCredentialLeaseAsync(ModelAccessContext context, CancellationToken cancellationToken)
+    {
+        if (_credentialBroker is not { } broker || RebindRequestFor(context) is not { } request) return false;
+        if (!await broker.RebindAsync(request, cancellationToken).ConfigureAwait(false)) return false;
+
+        _logger.LogInformation("Agent run {RunId}: its brokered model address was re-bound on this worker at port {Port}, so its detached agent keeps its model access across the restart rather than ending as {Code}", context.Owner.RunId, request.Port, FailureCodes.ModelCredentialLeaseLost);
+
+        await ClearLostModelAccessPostureAsync(context.Owner, context.Run, cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// The re-bind this run's handle makes possible, or null when it makes none. Three gates, each of which would
+    /// otherwise produce a lease that answers the wrong thing:
+    ///
+    /// <para><b>The address.</b> Port + route + bearer must all be recorded. A handle stamped before they were is a
+    /// run whose port nobody wrote down, and that is the mixed-version deploy case: it keeps the typed landing.</para>
+    ///
+    /// <para><b>The host.</b> The agent calls a port on the machine it was launched on. Binding that number HERE, on a
+    /// worker that is not that machine, would answer nobody at all — while clearing the posture that says the run's
+    /// access is gone. Same predicate the runner uses before answering any other pid-derived question, and it admits
+    /// the same handles: this host's, and an older one that carries no host stamp (which carries no port either).</para>
+    ///
+    /// <para><b>The credential.</b> See <see cref="FrontsTheSameCredential"/> — a resolve that landed on a different
+    /// row is a rotation, not a restoration.</para>
+    /// </summary>
+    private static ModelCredentialRebindRequest? RebindRequestFor(ModelAccessContext context)
+    {
+        var handle = context.Handle;
+
+        if (handle.ModelBrokerRunToken is not { Length: > 0 } token || handle.ModelBrokerRoute is not { Length: > 0 } route || handle.ModelBrokerPort is not { } port) return null;
+        if (!LocalProcessRunner.PidAnswerableHere(handle)) return null;
+        if (context.Upstream is not { } upstream || !FrontsTheSameCredential(handle, upstream)) return null;
+
+        return new() { RunId = context.Owner.RunId, TeamId = context.Run.TeamId, Epoch = context.Owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = upstream, Ttl = Credentials.ModelCredentialLease.Ttl };
+    }
+
+    /// <summary>
+    /// Whether the credential this pass resolved is the SAME one the launch's lease fronted — the row id when the
+    /// launch named one (both null is the operator-global key, which has no row) and the provider tag either way.
+    ///
+    /// <para>A re-attach re-resolves from scratch, and that resolve can legitimately land somewhere else: the
+    /// credential was rotated, or the team default changed. Re-binding it anyway would spend a key the run's posture
+    /// never recorded, under a bearer minted for a different one — and a changed PROVIDER is worse than a changed key,
+    /// because the relay's upstream root and its path allowlist both come from it, so the child would be talking a wire
+    /// its new upstream does not serve. Declining leaves the typed landing, which is a verdict an operator can act on.</para>
+    /// </summary>
+    internal static bool FrontsTheSameCredential(SandboxHandle handle, ResolvedModelCredential resolved) =>
+        string.Equals(handle.ModelBrokerProvider, resolved.Provider, StringComparison.OrdinalIgnoreCase) && handle.ModelBrokerCredentialId == resolved.CredentialId;
+
+    /// <summary>
+    /// Withdraw a lease-lost stamp a PREVIOUS worker left, now that this one has re-bound the address the run's agent
+    /// calls. The stamp's meaning is "this run can make no further model call" — readers turn it into an
+    /// operator-facing caveat (<c>AgentAutonomyPolicy.LostBrokeredModelCredentialCaveat</c>) — so leaving it on a run
+    /// whose access is back would be a record that contradicts the process it describes. A no-op for the ordinary case
+    /// (nothing stamped) and for a run that recorded no posture at all.
+    /// </summary>
+    private async Task ClearLostModelAccessPostureAsync(AgentRunOwnerToken owner, AgentRun run, CancellationToken cancellationToken)
+    {
+        if (DeserializeConfinement(run.SandboxConfinementJson) is not { ModelCredentialLeaseLost: true } stamped) return;
+
+        await RecordConfinementAsync(owner, stamped with { ModelCredentialLeaseLost = false }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Re-resolve the run's credential for a pass that only READS it (a re-bind, a redactor) — null rather than a throw, because both consumers degrade honestly and neither is worth failing a re-attach over.</summary>
+    private async Task<ModelCredentialProjection?> ResolveModelCredentialQuietlyAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    {
+        try { return await ResolveModelCredentialEnvAsync(task, teamId, harness, brokerage: null, cancellationToken).ConfigureAwait(false); }
+        catch { return null; }
     }
 
     /// <summary>
@@ -4182,11 +4297,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// sweep rediscover it. Runs on its OWN token — the caller's is already cancelled, and a tear-down that skipped
     /// its own cleanup because it was being torn down would do nothing at all.
     ///
-    /// <para>The order is the argument. REVOKE first, because a signal races the agent's next model call and a
-    /// withdrawn lease does not. STAMP the posture next, under the fence, because it is what tells a later re-attach
-    /// that this run's death was a deploy — without it a landing that fails below leaves a dead agent the next sweep
-    /// reads as an ordinary non-zero exit, and the cause is lost. Then the confirmed KILL. Then the FOLD, and only
-    /// then the terminal.</para>
+    /// <para><b>It runs only for a run no later worker can restore.</b> A handle that recorded its broker address is
+    /// re-bound by the next worker to re-attach (<see cref="RebindModelCredentialLeaseAsync"/>), so killing its agent
+    /// here would destroy a run that a deploy no longer has to cost — and would do it on the ONE path where this
+    /// process still has the fence to make it stick. Those are left running, untouched and unstamped. What is left for
+    /// this method is the run whose address nobody wrote down: a handle from a worker on the previous build, which is
+    /// exactly the rolling-deploy generation, and for which the port really does die here.</para>
+    ///
+    /// <para>The order of what remains is the argument. REVOKE first, because a signal races the agent's next model
+    /// call and a withdrawn lease does not — after the leave decision, though, because a run handed to the next worker
+    /// keeps its access for the rest of this drain, and its lease dies with this process regardless (ExecuteAsync's own
+    /// finally revokes on every path out). STAMP the posture next, under the fence, because it is what tells a later
+    /// re-attach that this run's death was a deploy — without it a landing that fails below leaves a dead agent the
+    /// next sweep reads as an ordinary non-zero exit, and the cause is lost. Then the confirmed KILL. Then the FOLD,
+    /// and only then the terminal.</para>
     ///
     /// <para>It folds for the same reason the re-attach half does, and the cost of not folding is not merely lost
     /// fidelity: a bare result carries no changed files, so the supervisor's post-hoc grade reads it as
@@ -4201,8 +4325,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <returns>True when the run reached a TERMINAL state here — the one case whose clone is nobody's any more. Post-terminal bookkeeping being cut off by the drain does not make it false; the database is asked.</returns>
     private async Task<bool> EndBrokeredAttemptOnShutdownAsync(AgentRunOwnerToken owner, Guid teamId, Guid runId)
     {
-        await RevokeBrokeredCredentialQuietlyAsync(runId, "worker-shutdown").ConfigureAwait(false);
-
         // One deadline, so every step below can ask what is LEFT rather than assume it has its own full share.
         var deadline = DateTimeOffset.UtcNow + ShutdownLeaseLandingBudget;
         using var budget = new CancellationTokenSource(ShutdownLeaseLandingBudget);
@@ -4212,8 +4334,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var run = await _runs.GetAsync(runId, budget.Token).ConfigureAwait(false);
 
             if (DeserializeHandle(run.RunnerHandleJson) is not { } handle) return false;
+            if (LeftForRebind(runId, handle)) return false;
             if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return false;
 
+            await RevokeBrokeredCredentialQuietlyAsync(runId, "worker-shutdown").ConfigureAwait(false);
             await RecordLostBrokeredCredentialAsync(owner, run, handle, budget.Token).ConfigureAwait(false);
 
             if (await StopAgentWithoutModelAccessAsync(runId, durable, handle, budget.Token).ConfigureAwait(false) != LostModelAccess.AgentStopped) return false;
@@ -4222,10 +4346,34 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Agent run {RunId}: this worker could not land its lost-lease outcome before shutting down; its lease is revoked and its posture stamped, so the re-attach sweep lands the same verdict from those", runId);
+            _logger.LogWarning(exception, "Agent run {RunId}: this worker could not land its lost-lease outcome before shutting down; its lease dies with this process and its posture may already be stamped, so the re-attach sweep lands the same verdict from those", runId);
             return await TerminalAlreadyLandedAsync(runId).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Whether this drain LEAVES the run to the next worker instead of ending it. True when its handle records the
+    /// brokered address a re-attach can bind again: the agent is alive, its model access comes back the moment a worker
+    /// re-attaches, and stopping it here would spend a run on a restart that no longer has to cost one.
+    ///
+    /// <para>The residual it accepts, stated rather than hidden: if the agent does NOT survive this process — a
+    /// container whose whole tree goes with it — the run is left Running with a dead agent instead of landing typed
+    /// now, and the re-attach sweep folds it from its exit marker (or the reconciler abandons it) one pass later. A
+    /// drain cannot tell the two apart, and the asymmetry decides it: the wrong guess here costs a later, blander
+    /// terminal; the wrong guess the other way kills a run that was going to finish.</para>
+    /// </summary>
+    private bool LeftForRebind(Guid runId, SandboxHandle handle)
+    {
+        if (!IsRebindable(handle)) return false;
+
+        _logger.LogInformation("Agent run {RunId}: leaving it running for the next worker, which re-binds its brokered model address on port {Port}; nothing is stopped and no verdict is landed here", runId, handle.ModelBrokerPort);
+
+        return true;
+    }
+
+    /// <summary>Whether a later worker can re-open this run's brokered address at all: the handle has to name the port, the route and the bearer its detached agent already holds. False for an unbrokered run and for a handle stamped before those were recorded — the pre-upgrade generation, whose port dies with its worker for good.</summary>
+    internal static bool IsRebindable(SandboxHandle handle) =>
+        handle.ModelBrokerRunToken is { Length: > 0 } && handle.ModelBrokerRoute is { Length: > 0 } && handle.ModelBrokerPort is > 0;
 
     /// <summary>
     /// Fold the dead agent's spool through the SAME path the re-attach half folds through, then land the typed verdict
@@ -4530,6 +4678,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
         // the token lets it RE-OPEN the endpoint with the SAME socket+token the agent's declaration file already holds.
+        // The brokered address (port + route + credential row + provider) rides along for the same shape of reason: the
+        // child's model base URL froze this worker's port at launch, so a re-attach that can bind it again keeps the
+        // run's model access alive across a restart instead of ending the attempt.
         // The spool key is round-scoped (ReviseSpoolKey) — a revise round must never inherit a finished spool's exit marker.
         // The workspace directory + base SHA (primary repo only) let a re-attach capture the agent's diff via
         // IWorkspacePathCapture even though the live IWorkspaceHandle that prepared the clone died with this worker.
@@ -4548,6 +4699,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath, ModelBrokerRunToken = context.ModelBrokerRunToken,
+            ModelBrokerPort = context.ModelBrokerPort, ModelBrokerRoute = context.ModelBrokerRoute, ModelBrokerCredentialId = context.ModelBrokerCredentialId, ModelBrokerProvider = context.ModelBrokerProvider,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
             ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(context.RunId),
         };
@@ -4860,8 +5012,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         /// <summary>The address this run's endpoint bound, minted with an unguessable segment at launch. Carried here so the durable handle can be stamped with it — the only route a re-attach has back to it.</summary>
         public string? McpSocketPath { get; init; }
 
-        /// <summary>The brokered credential's per-run bearer (null when this run's credential was not brokered). Carried so the durable handle can be stamped with it — a re-attach needs it to rebuild the launch's redactor, and nothing else.</summary>
+        /// <summary>The brokered credential's per-run bearer (null when this run's credential was not brokered). Carried so the durable handle can be stamped with it — a re-attach needs it to rebuild the launch's redactor, and (with the three below) to re-open the address the child holds.</summary>
         public string? ModelBrokerRunToken { get; init; }
+
+        /// <summary>The port and route this run's lease bound, and the credential row + provider behind it — the four coordinates a re-attaching worker needs to bind the SAME address and front the SAME key (see <c>SandboxHandle.ModelBrokerPort</c>). All null when the credential was not brokered, or when the broker cannot re-open an address it minted.</summary>
+        public int? ModelBrokerPort { get; init; }
+        public string? ModelBrokerRoute { get; init; }
+        public Guid? ModelBrokerCredentialId { get; init; }
+        public string? ModelBrokerProvider { get; init; }
 
         /// <summary>Whether this launch's model credential was brokered — null when it injected none. Carried so the run's confinement RECORD can state it, which is what makes the posture sentence able to disclose a directly-injected key.</summary>
         public bool? ModelCredentialBrokered { get; init; }

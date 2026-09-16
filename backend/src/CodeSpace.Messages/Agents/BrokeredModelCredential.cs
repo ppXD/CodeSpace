@@ -17,4 +17,20 @@ namespace CodeSpace.Messages.Agents;
 /// <c>SandboxHandle.ModelBrokerRunToken</c> — for the same narrow reason the MCP run token is: a re-attaching worker
 /// must rebuild the same redactor.)</para>
 /// </summary>
-public sealed record BrokeredModelCredential(string BaseUrl, string RunToken, DateTimeOffset ExpiresAt);
+public sealed record BrokeredModelCredential(string BaseUrl, string RunToken, DateTimeOffset ExpiresAt)
+{
+    /// <summary>
+    /// The TCP port this run's lease listens on — not part of the capability above (the child already has it, inside
+    /// <see cref="BaseUrl"/>), but the half of the address a WORKER needs in a form it can act on. It is stamped on
+    /// the durable handle so a re-attaching worker can bind that exact port again and leave the detached agent's base
+    /// URL correct, instead of the run's model access ending with the process that minted it.
+    ///
+    /// <para>Null from a broker that cannot re-open an address it once bound. That is not a failure — it is the
+    /// statement that this run's handle must not promise a re-bind, so the re-attach takes the typed
+    /// lease-lost landing exactly as it did before any of this existed.</para>
+    /// </summary>
+    public int? RebindPort { get; init; }
+
+    /// <summary>The unguessable route segment of <see cref="BaseUrl"/>, for the same reason as <see cref="RebindPort"/>: a re-bind has to install the run's OWN route, never mint a fresh one, or the address the agent holds resolves to nothing. Null exactly when <see cref="RebindPort"/> is.</summary>
+    public string? RebindRoute { get; init; }
+}

@@ -1689,12 +1689,12 @@ public partial class AgentRunExecutorTests
         await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic, lifetime, productionCapturePlanes).ExecuteAsync(runId, cancellationToken);
     }
 
-    /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch.</summary>
-    private async Task ReattachAsync(AgentRunReattachReservation reservation, IAgentHarness harness)
+    /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch. The broker is the NEXT worker's, never the launching one's: a re-attach that shared a broker with the launch would never exercise the re-bind at all.</summary>
+    private async Task ReattachAsync(AgentRunReattachReservation reservation, IAgentHarness harness, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         using var scope = _fixture.BeginScope();
 
-        await NewExecutor(scope, harness).ReattachAsync(reservation, CancellationToken.None);
+        await NewExecutor(scope, harness, credentialBroker: credentialBroker).ReattachAsync(reservation, CancellationToken.None);
     }
 
     private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false)

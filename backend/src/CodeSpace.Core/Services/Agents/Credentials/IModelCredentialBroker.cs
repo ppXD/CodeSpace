@@ -36,6 +36,26 @@ public interface IModelCredentialBroker
     Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken);
 
     /// <summary>
+    /// RE-OPEN an address this worker never minted: bind the port the request names, install a lease under the route
+    /// and bearer it names, and front the credential it carries. False — never a throw — when the address cannot be
+    /// restored, which the caller must treat as "this run's model access really is gone" and end the attempt exactly
+    /// as it did before a re-bind existed.
+    ///
+    /// <para><b>Why this is not <see cref="OpenAsync"/> with extra fields.</b> An open may pick any free port; this one
+    /// must take the port it is given or fail, because a detached agent's base URL froze that port at launch and no
+    /// later pass can tell the agent about a different one. The same holds for the route and the bearer: every value
+    /// here is RESTORED, none is minted, and a broker that "helpfully" minted a fresh one would hand back a live lease
+    /// at an address nothing calls — which is worse than the honest false, since the caller would then leave a run
+    /// Running with no model access and no verdict.</para>
+    ///
+    /// <para>What it does NOT do is make the gap disappear. Between the minting worker's exit and this call the port is
+    /// unbound, so the agent's calls in that window fail to connect; this restores access from here on, for a CLI whose
+    /// own retry outlives the gap. The claim is "a deploy no longer ENDS an in-flight brokered run", not "a deploy is
+    /// invisible to one".</para>
+    /// </summary>
+    Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Extend the run's lease by its TTL. False when there is nothing to extend — no lease (already revoked, or held
     /// by another worker) or one opened under a DIFFERENT epoch, which is exactly the reclaimed-run case a superseded
     /// worker must not be able to keep alive. Never throws: a renewal is advisory, and the caller is a heartbeat.
