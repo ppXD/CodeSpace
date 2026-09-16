@@ -111,7 +111,7 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
     {
         ArgumentOutOfRangeException.ThrowIfNegative(estimateUsd);
         if (capUsd is < 0) throw new ArgumentOutOfRangeException(nameof(capUsd));
-        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
 
         await TakeAdmissionLocksAsync(workflowRunId, teamId, capUsd, cancellationToken).ConfigureAwait(false);
 
@@ -161,7 +161,7 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
     public async Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken)
     {
         if (actualUsd is < 0) throw new ArgumentOutOfRangeException(nameof(actualUsd));
-        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         await TakeRunLockAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
         var query = _db.BudgetReservation.Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.Kind == kind && r.ScopeKey == scopeKey);
 
@@ -183,7 +183,7 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
     public async Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken)
     {
-        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         await TakeRunLockAsync(workflowRunId, cancellationToken).ConfigureAwait(false);
         await _db.BudgetReservation.Where(r => r.WorkflowRunId == workflowRunId && r.TeamId == teamId && r.Kind == kind && r.ScopeKey == scopeKey && (r.State == BudgetReservationStates.Reserved || r.State == BudgetReservationStates.InFlight))
             .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.State, BudgetReservationStates.Released).SetProperty(r => r.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);

@@ -39,7 +39,11 @@ public class MediatorModule : Autofac.Module
         //   TeamPermission         — inside TeamMembership (whose marker it extends): the team is
         //                             already vetted, this adds the role check for write/action requests
         //   BotVisibility          — opts the request into seeing bot users (IBotInclusive); default excludes
-        //   Transactional          — innermost, wraps DB writes only after auth has passed
+        //   Transactional          — innermost of these, wraps DB writes only after auth has passed
+        //
+        // RegisterMediatR's own processor behaviours land INSIDE this list whatever order the two passes are written
+        // in, which is what puts the exception processors inside Transactional — the fact RequestFailureObserver's
+        // choice of seam depends on. Measured, not assumed: MediatorPipelineOrderTests resolves this very module.
         builder.RegisterGeneric(typeof(LoggingBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(AuthenticatedUserAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(PasswordRotationRequiredBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
