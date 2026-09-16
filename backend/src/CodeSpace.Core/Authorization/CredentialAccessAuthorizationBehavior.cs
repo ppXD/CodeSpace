@@ -26,7 +26,7 @@ public sealed class CredentialAccessAuthorizationBehavior<TRequest, TResponse> :
     {
         if (_currentUser.HasRole(Roles.Admin)) return await next().ConfigureAwait(false);
 
-        var headerTeamId = _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+        var headerTeamId = _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 
         var entityTeamId = await _db.Credential.AsNoTracking()
             .Where(c => c.Id == request.CredentialId && c.DeletedDate == null)

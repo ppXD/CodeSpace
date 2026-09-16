@@ -43,5 +43,12 @@ public sealed class RoleOutranksActorException : Exception, IFailure
 
     public string Code => FailureCodes.RoleOutranksActor;
 
-    public string? ClientMessage => $"You can't do that to someone who is {Subject}.";
+    /// <summary>
+    /// Both roles, because only the pair explains the refusal: an Admin told "you can't do that to an
+    /// Owner" cannot tell whether anyone could. Each is a fact the caller can already see — their own
+    /// role from /me, the subject's from the member list they are acting on.
+    /// </summary>
+    public string? ClientMessage => $"Your role on this team is {Actor}, and you can't do that to someone who is {Subject}.";
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["yourRole"] = Actor.ToString(), ["subjectRole"] = Subject.ToString() };
 }

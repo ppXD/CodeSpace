@@ -199,7 +199,7 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
         await _db.TeamMembership.SingleOrDefaultAsync(m => m.TeamId == teamId && m.UserId == userId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException("that person is not a member of this team");
 
-    private Guid RequireTeam() => _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+    private Guid RequireTeam() => _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 
     private Guid RequireUser() => _currentUser.Id ?? throw new UnauthorizedAccessException("authentication required");
 }

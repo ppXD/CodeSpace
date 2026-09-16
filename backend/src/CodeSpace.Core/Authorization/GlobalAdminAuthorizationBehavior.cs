@@ -13,7 +13,7 @@ public sealed class GlobalAdminAuthorizationBehavior<TRequest, TResponse> : IPip
 
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
     {
-        if (!_currentUser.HasRole(Roles.Admin)) throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"role '{Roles.Admin}' required");
+        if (!_currentUser.HasRole(Roles.Admin)) throw TenantAccessDeniedException.GlobalAdminRequired(_currentUser.Id, Roles.Admin);
 
         return await next().ConfigureAwait(false);
     }

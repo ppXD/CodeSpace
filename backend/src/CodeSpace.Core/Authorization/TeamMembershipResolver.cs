@@ -54,7 +54,7 @@ public sealed class TeamMembershipResolver : IScopedDependency
 
         var userId = _currentUser.Id;
 
-        if (userId == null) throw new TenantAccessDeniedException(null, teamId, "no authenticated user on request");
+        if (userId == null) throw TenantAccessDeniedException.NotAuthenticated(teamId);
 
         // Rooted on the team so a soft-deleted one denies everyone, membership rows or not — they are
         // a hard-delete junction table and outlive the team they point at.

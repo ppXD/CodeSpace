@@ -19,11 +19,11 @@ public sealed class TeamPermissionAuthorizationBehavior<TRequest, TResponse> : I
 
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
     {
-        var teamId = _currentTeam.Id ?? throw new TenantAccessDeniedException(_currentUser.Id, Guid.Empty, $"{HeaderCurrentTeam.HeaderName} header missing");
+        var teamId = _currentTeam.Id ?? throw TenantAccessDeniedException.NoTeamSelected(_currentUser.Id, HeaderCurrentTeam.HeaderName);
 
         var role = await _resolver.ResolveRoleAsync(teamId, cancellationToken).ConfigureAwait(false);
 
-        if (!TeamPermissionMatrix.IsGranted(role, request.RequiredPermission)) throw new TenantAccessDeniedException(_currentUser.Id, teamId, $"role '{role}' does not hold permission '{request.RequiredPermission}'");
+        if (!TeamPermissionMatrix.IsGranted(role, request.RequiredPermission)) throw TenantAccessDeniedException.MissingTeamPermission(_currentUser.Id, teamId, role, request.RequiredPermission);
 
         return await next().ConfigureAwait(false);
     }
