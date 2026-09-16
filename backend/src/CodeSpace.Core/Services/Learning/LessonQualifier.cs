@@ -35,7 +35,7 @@ public sealed class LessonQualifier : ILessonQualifier, IScopedDependency
 
     public async Task<int> QualifyAsync(CancellationToken cancellationToken)
     {
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(hashtext('codespace.lesson_qualification'))", cancellationToken).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
         var lessons = await _db.Lesson

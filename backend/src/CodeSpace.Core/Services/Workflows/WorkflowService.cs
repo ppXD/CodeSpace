@@ -1030,7 +1030,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // Status-guarded CAS from ANY non-terminal state → Cancelled (a pure UPDATE, not a tracked save on xmin, so
         // it never races the engine's own heartbeat-driven concurrency). 0 rows = the run reached a terminal state
         // between the read and the flip (the engine completed it, or a concurrent cancel won) → no-op, re-read.
-        await using var terminalTransaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var terminalTransaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == current.Value)
             .ExecuteUpdateAsync(s => s

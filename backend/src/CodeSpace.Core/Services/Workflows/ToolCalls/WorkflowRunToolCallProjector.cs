@@ -84,12 +84,11 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
     {
         if (batchSize <= 0 || batchSize > MaxBatchSize) throw new ArgumentOutOfRangeException(nameof(batchSize), $"Batch size must be between 1 and {MaxBatchSize}.");
 
-        var ownsTransaction = _db.Database.CurrentTransaction == null;
-        await using var transaction = ownsTransaction ? await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
+        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         var candidates = await ReadCandidatesAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var projected = await ProjectAsync(candidates, cancellationToken).ConfigureAwait(false);
         var diagnostics = await ReadDiagnosticsAsync(batchSize, cancellationToken).ConfigureAwait(false);
-        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return diagnostics with { CallsProjected = projected };
     }
 

@@ -7,7 +7,6 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -106,7 +105,7 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
     {
         // Recheck and lock before filesystem side effects. A candidate read is not authority to delete after a
         // handle replacement, retry-state advance, or lifecycle change. Concurrent reapers serialize on this row.
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
         var current = await _db.AgentRun.FromSqlInterpolated($"""
             SELECT agent_run.*, xmin FROM agent_run
             WHERE id = {candidate.Id} AND runner_handle = CAST({candidate.HandleJson} AS jsonb)
@@ -180,7 +179,7 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         return cleared == 1;
     }
 
-    private async Task<bool> ScheduleRetryAsync(CleanupCandidate candidate, DateTimeOffset now, string errorCode, IDbContextTransaction transaction, CancellationToken cancellationToken)
+    private async Task<bool> ScheduleRetryAsync(CleanupCandidate candidate, DateTimeOffset now, string errorCode, IOwnedTransaction transaction, CancellationToken cancellationToken)
     {
         var nextAttempts = candidate.Attempts == int.MaxValue ? int.MaxValue : candidate.Attempts + 1;
         var nextAttemptAt = now + RetryDelay(candidate.Id, nextAttempts);

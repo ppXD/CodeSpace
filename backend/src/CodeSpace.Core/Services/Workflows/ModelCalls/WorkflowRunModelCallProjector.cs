@@ -26,8 +26,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
     {
         if (batchSize <= 0 || batchSize > MaxBatchSize) throw new ArgumentOutOfRangeException(nameof(batchSize), $"Batch size must be between 1 and {MaxBatchSize}.");
 
-        var ownsTransaction = _db.Database.CurrentTransaction == null;
-        await using var transaction = ownsTransaction ? await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
+        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
 
         var started = await ProjectStartsOnlyAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var lateTerminals = await AttachLateTerminalsAsync(batchSize, cancellationToken).ConfigureAwait(false);
@@ -36,7 +35,7 @@ public sealed class WorkflowRunModelCallProjector : IWorkflowRunModelCallProject
         var orphanedStarts = await SettleOrphanedStartsAsync(batchSize, cancellationToken).ConfigureAwait(false);
         var bodyCaptures = await DeclareStartedBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false)
             + await DeclareBodyCapturesAsync(batchSize, cancellationToken).ConfigureAwait(false);
-        if (ownsTransaction) await transaction!.CommitAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new WorkflowRunModelCallProjectionResult(projected, lateStarts, bodyCaptures, started, lateTerminals, orphanedStarts);
     }
 
