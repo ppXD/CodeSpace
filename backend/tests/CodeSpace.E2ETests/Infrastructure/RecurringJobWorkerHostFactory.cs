@@ -23,17 +23,26 @@ namespace CodeSpace.E2ETests.Infrastructure;
 /// tick runs through <c>IJobSafeRunner</c> → the job's own DI scope → the mediator pipeline, exactly as on a
 /// worker pod.</para>
 ///
-/// <para>The host gets its OWN Serilog logger, wired to <paramref name="logSink"/>, instead of the process-wide
+/// <para>The host gets its OWN Serilog logger, wired to the supplied sink, instead of the process-wide
 /// <c>Serilog.Log.Logger</c> that <c>Program.CreateHostBuilder</c>'s bare <c>UseSerilog()</c> would bind. That is
 /// what lets a test read back what the pipeline logged — a sweep whose NESTED command rolled back still reports a
-/// Succeeded tick, and the rollback line is the only evidence — without mutating global state other test hosts in
-/// this process share.</para>
+/// Succeeded tick, and the rollback line is the only evidence. The LOGGER is the part that stays host-local; see
+/// below for what this fixture does change process-wide.</para>
+///
+/// <para><b>Substitutions, stated rather than implied.</b> (1) The host runs as <c>Development</c>, like every
+/// sibling fixture: that skips the HTTPS redirect, and it also relaxes two production boot guards —
+/// <c>DurableRootsGuard.ThrowIfProductionUnconfigured</c> does not fire, and <c>CodeSpaceModule</c>'s
+/// Variables master-key check falls back to a dev key with a warning instead of failing fast. Neither guard is on
+/// the job path under test, but neither is being exercised either. (2) <see cref="InitializeAsync"/> sets
+/// <c>CODESPACE_TEAM_SECRET_MASTER_KEY</c> in the PROCESS environment (the same deterministic value
+/// <see cref="TaskLaunchApiFactory"/> and <see cref="WebhookApiFactory"/> set), which outlives this fixture.</para>
 /// </summary>
 public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSpace.Api.Program>
 {
     private readonly ILogEventSink _logSink;
     private readonly string _adminConnectionString;
     private readonly string _testConnectionString;
+    private int _dropped;
 
     public RecurringJobWorkerHostFactory(ILogEventSink logSink)
     {
@@ -53,8 +62,11 @@ public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSp
         _testConnectionString = new NpgsqlConnectionStringBuilder(_adminConnectionString) { Database = DatabaseName }.ConnectionString;
     }
 
-    /// <summary>The per-run GUID database. Read back by the test to prove the storage it inspects is THIS host's.</summary>
+    /// <summary>The per-run GUID database.</summary>
     public string DatabaseName { get; }
+
+    /// <summary>The per-run database's connection string, so the test can open its OWN Hangfire storage handle onto the rows this host's job servers drain, rather than reading through the process-wide <c>JobStorage.Current</c>.</summary>
+    public string ConnectionString => _testConnectionString;
 
     public async Task InitializeAsync()
     {
@@ -72,21 +84,40 @@ public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSp
         Environment.SetEnvironmentVariable("CODESPACE_TEAM_SECRET_MASTER_KEY", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
     }
 
-    /// <summary>Overridden rather than hung off <c>IAsyncLifetime</c> so the GUID database is dropped by a plain <c>await using</c>, on the failure path too.</summary>
+    /// <summary>
+    /// Both disposal paths drop the database, because both are reachable: <c>await using</c> lands here, a plain
+    /// <c>using</c> or an xUnit <c>IDisposable</c> teardown lands on <see cref="Dispose(bool)"/>. Hanging the drop
+    /// off an explicitly-implemented <c>IAsyncLifetime.DisposeAsync</c> instead — what the sibling fixtures do —
+    /// means neither language construct reaches it, and the database is simply left behind.
+    /// </summary>
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
 
-        await using var conn = new NpgsqlConnection(_adminConnectionString);
-        await conn.OpenAsync();
+        DropTestDatabase();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (disposing) DropTestDatabase();
+    }
+
+    /// <summary>Once-only: the two disposal paths can both run, and a second DROP would race the first rather than no-op.</summary>
+    private void DropTestDatabase()
+    {
+        if (Interlocked.Exchange(ref _dropped, 1) == 1) return;
+
+        using var conn = new NpgsqlConnection(_adminConnectionString);
+        conn.Open();
 
         // The Hangfire servers hold pooled connections; a DROP fails while any session is still attached.
-        await using (var kill = new NpgsqlCommand(
-            $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{DatabaseName}' AND pid <> pg_backend_pid()", conn))
-            await kill.ExecuteNonQueryAsync();
+        using (var kill = new NpgsqlCommand($"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{DatabaseName}' AND pid <> pg_backend_pid()", conn))
+            kill.ExecuteNonQuery();
 
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{DatabaseName}\"", conn);
-        await drop.ExecuteNonQueryAsync();
+        using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{DatabaseName}\"", conn);
+        drop.ExecuteNonQuery();
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)

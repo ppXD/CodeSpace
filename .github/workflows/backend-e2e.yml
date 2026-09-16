@@ -20,15 +20,16 @@ name: Backend · E2E
 #      AppArmor restriction — and so reaches Postgres by the service ALIAS (postgres:5432), overridden
 #      via the TestPostgres__AdminConnectionString env var.
 #
-#   3. e2e-worker (Surface=Worker) — the PROCESSING role: a host booted with HangfireHosting=Worker, its two
-#      real Hangfire servers draining a real Postgres queue, every IRecurringJob registered by the real
-#      WorkerHangfireRegistrar and fired once. It needs no bubblewrap, so it could have shared the host
-#      runner with e2e-http; it gets its OWN job for two reasons. Hangfire's DI registration reads the
-#      process-wide JobStorage.Current, which every WebApplicationFactory boot in a process re-points, and
-#      the e2e-http job boots many of them in parallel. And a Worker host holds ControlWorkerCount +
-#      ProcessorCount * 2 worker connections (38 measured on a 12-core box — see FactoryHangfireRoleTests),
-#      which is precisely the footprint that exhausts postgres:18-alpine's default max_connections=100 when
-#      fixtures run concurrently. A dedicated process and a dedicated Postgres service avoid both.
+#   3. e2e-worker (Surface=Worker) — the PROCESSING role, which no other lane boots: a host with
+#      HangfireHosting=Worker, its two real Hangfire servers draining a real Postgres queue, every
+#      IRecurringJob registered by the real WorkerHangfireRegistrar and fired once. It needs no bubblewrap,
+#      so it could have run inside e2e-http; it gets its own job because it is the only lane that EXECUTES
+#      jobs. A Worker host holds ControlWorkerCount + ProcessorCount * 2 worker connections for its lifetime
+#      (38 measured on a 12-core box — see FactoryHangfireRoleTests) and its ticks run the real sweeps,
+#      filesystem reapers included. Its own Postgres service keeps that load and that blast radius off the
+#      HTTP lane's database server, and its own check line keeps "do the recurring jobs still fire" legible
+#      in the checks list rather than buried in a 159-test lane. In-process interference is handled
+#      separately, by the assembly-wide DisableTestParallelization in AssemblyParallelization.cs.
 
 on:
   push:

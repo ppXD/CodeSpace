@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
+using CodeSpace.Api.Extensions.Hangfire;
 using CodeSpace.Core.Constants;
 using CodeSpace.Core.Jobs;
 using CodeSpace.E2ETests.Infrastructure;
 using Hangfire;
+using Hangfire.PostgreSql;
+using Hangfire.PostgreSql.Factories;
 using Hangfire.States;
 using Hangfire.Storage;
+using Hangfire.Storage.Monitoring;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog.Core;
@@ -31,18 +35,33 @@ namespace CodeSpace.E2ETests.Jobs;
 /// sending each command through the real mediator; this closes the tier above it — registration, dispatch, fetch and
 /// execution as a worker pod actually performs them.</para>
 ///
-/// <para>Deliberately NOT covered: cron timing, job payloads, and what any individual sweep does to rows. Per-sweep
-/// behaviour belongs with each sweep's own tests, which can seed the candidate rows; this measures only that every
-/// registered job fires and survives one tick.</para>
+/// <para><b>What is substituted, honestly.</b> Nothing on the job path. The fixture does make two host-level
+/// substitutions, both named in <see cref="RecurringJobWorkerHostFactory"/>: it runs as <c>Development</c> (which
+/// relaxes the production boot guards), and it binds the host's own Serilog logger so the log assertion can read
+/// what the pipeline wrote. It also sets one process-wide environment variable at init, like its sibling fixtures.</para>
+///
+/// <para>Deliberately NOT covered: cron TIMING (whether a cadence is right), job payloads, and what any individual
+/// sweep does to rows. Cron-fired EXECUTIONS are covered — they land in the same database and are judged by
+/// <see cref="AssertNoJobInThisDatabaseFailed"/>. Per-sweep behaviour belongs with each sweep's own tests, which can
+/// seed the candidate rows; this measures only that every registered job fires and survives a tick.</para>
 /// </summary>
 [Trait("Category", "E2E")]
 [Trait("Surface", "Worker")]
 public sealed class RecurringJobWorkerSmokeE2ETests
 {
-    /// <summary>Bound on fetch + execution AFTER the host is up. Generous on purpose: every sweep shares one 4-worker control pool whose queue poll interval is 2s, and a cold CI runner is slow. A healthy run finishes in seconds; the budget is only ever spent when something is wrong.</summary>
+    /// <summary>
+    /// Bound on fetch + execution AFTER the host is up. Sized for the real contention: every triggered tick queues onto
+    /// ONE control pool of <c>ControlWorkerCount</c> = 4 workers at a 2s queue poll interval, and the recurring
+    /// scheduler adds its own ticks on top — seven jobs are minutely, so over this window they fire two or three extra
+    /// times each onto the same four workers. A healthy local run finishes in seconds; the budget exists for a cold CI
+    /// runner and is only ever spent when something is actually wrong.
+    /// </summary>
     private static readonly TimeSpan TickBudget = TimeSpan.FromMinutes(3);
 
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Cap on how many failures a red enumerates. A tick that breaks usually breaks every sweep, and thirty stack traces in one message help nobody.</summary>
+    private const int MaxFailuresReported = 50;
 
     /// <summary>The two <c>TransactionalBehavior</c> failure templates, by their rendered tail. A tick can report Succeeded while a command it dispatched rolled back; these lines are the only evidence.</summary>
     private const string RolledBackLine = "failed; transaction rolled back";
@@ -56,7 +75,7 @@ public sealed class RecurringJobWorkerSmokeE2ETests
         await using var factory = new RecurringJobWorkerHostFactory(sink);
         await factory.InitializeAsync();
 
-        var storage = StorageOfThisHost(factory);
+        var storage = OpenStorageOnTheFixtureDatabase(factory);
         ProveTheSinkSeesThePipelinesLogger(factory, sink);
 
         var registered = RegisteredJobIds(storage);
@@ -64,28 +83,33 @@ public sealed class RecurringJobWorkerSmokeE2ETests
 
         var outcomes = await AwaitEveryTickAsync(storage, TriggerOneTickEach(storage, registered));
 
-        // Job state first: it names the recurring JOB and quotes the exception. The log lines are the subtler
-        // signal — they are the only evidence left when a tick reports Succeeded and a command it dispatched
-        // rolled back inside it.
+        // Triggered ticks first: that assertion names the recurring JOB and quotes its exception. Then everything
+        // else in the database, which is how the ticks the CRON scheduler fired on its own get judged by state too.
+        // The log lines are last and subtlest — the only evidence left when a tick reports Succeeded and a command
+        // dispatched inside it rolled back.
         AssertEveryTickSucceeded(outcomes);
+        AssertNoJobInThisDatabaseFailed(storage);
         AssertNothingRolledBack(sink);
     }
 
     /// <summary>
-    /// Hangfire's DI registration reads the process-wide <c>JobStorage.Current</c>, which EVERY
-    /// <c>WebApplicationFactory</c> boot in this process re-points. Naming the database turns a lost race into a
-    /// legible red rather than a census silently taken against another fixture's storage.
+    /// A storage handle the test OWNS, built over the fixture's own connection string with the production options
+    /// (<see cref="HangfireRegistrarBase.BuildStorageOptions"/>). Identity is therefore by construction: every read,
+    /// trigger and state poll below is against the database this fixture created, with nothing to assert about it.
+    ///
+    /// <para>Deliberately NOT <c>factory.Services.GetRequiredService&lt;JobStorage&gt;()</c>. Measured on
+    /// Hangfire 1.8.25 / Hangfire.PostgreSql 1.20.13: two containers each keep the storage their own configuration
+    /// built, so the DI route would have been correct — but it also re-points the process-wide
+    /// <c>JobStorage.Current</c> that <c>CodeSpaceBackgroundJobClient.GetRecurringJobs/GetJobState</c> read
+    /// statically, so reading through DI would have coupled this test to a global every other test host in the
+    /// process mutates. A second handle onto the same Postgres is also the more independent observation: the host's
+    /// servers drain the rows, the test reads them back through its own connection.</para>
     /// </summary>
-    private static JobStorage StorageOfThisHost(RecurringJobWorkerHostFactory factory)
+    private static JobStorage OpenStorageOnTheFixtureDatabase(RecurringJobWorkerHostFactory factory)
     {
-        var storage = factory.Services.GetRequiredService<JobStorage>();
+        var options = HangfireRegistrarBase.BuildStorageOptions();
 
-        storage.ToString().ShouldContain(factory.DatabaseName,
-            customMessage: $"the resolved Hangfire storage is not this host's database ({factory.DatabaseName}) — another test "
-                + "host re-pointed the process-wide JobStorage.Current mid-boot. Run this class in its own process; the "
-                + "Surface=Worker CI job does exactly that.");
-
-        return storage;
+        return new PostgreSqlStorage(new NpgsqlConnectionFactory(factory.ConnectionString, options), options);
     }
 
     /// <summary>
@@ -200,6 +224,33 @@ public sealed class RecurringJobWorkerSmokeE2ETests
                 + "class alone with: dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj --filter \"Category=E2E&Surface=Worker\"");
     }
 
+    /// <summary>
+    /// No background job in this database failed — the triggered ticks AND everything the recurring scheduler fired
+    /// on its own meanwhile. The database is created per test and dropped with it, so every row in Hangfire's failed
+    /// set belongs to this run; no "since when" filter is needed or possible to get wrong.
+    ///
+    /// <para>Without this, a cron-fired tick was judged only by <see cref="AssertNothingRolledBack"/> — its Error
+    /// line landed in the sink while the state assertion, which only knows the ids the census triggered, could not
+    /// see it. Seven jobs are minutely, so over the tick budget that is a real population, not a corner case.</para>
+    /// </summary>
+    private static void AssertNoJobInThisDatabaseFailed(JobStorage storage)
+    {
+        var failures = storage.GetMonitoringApi().FailedJobs(0, MaxFailuresReported).Select(DescribeFailure).ToList();
+
+        failures.ShouldBeEmpty(
+            customMessage: "a background job in this test's own database ended Failed. If its id is not among the ticks this test "
+                + "triggered, the recurring SCHEDULER fired it on cron while the test ran — the same job, the same defect, just a "
+                + "tick nobody asked for. The exception is quoted above; retries are off (AutomaticRetry Attempts=0), so a Failed "
+                + "entry is the tick's own first and only outcome.");
+    }
+
+    private static string DescribeFailure(KeyValuePair<string, FailedJobDto> failure) =>
+        $"background job {failure.Key} ({RecurringJobIdOf(failure.Value)}) failed: {failure.Value.ExceptionType} — {failure.Value.ExceptionMessage}";
+
+    /// <summary>The registrar schedules <c>IJobSafeRunner.Run(jobId, jobType)</c>, so the first serialised argument names the recurring job.</summary>
+    private static string RecurringJobIdOf(FailedJobDto failure) =>
+        failure.Job?.Args is { Count: > 0 } args ? args[0]?.ToString() ?? "<null job id>" : "<job payload could not be loaded>";
+
     private static string Describe(TickOutcome outcome) =>
         $"{outcome.RecurringJobId} (background job {outcome.BackgroundJobId}) ended in state '{outcome.State?.Name ?? "<none — never fetched>"}'{Cause(outcome.State)}";
 
@@ -223,7 +274,9 @@ public sealed class RecurringJobWorkerSmokeE2ETests
             customMessage: "TransactionalBehavior logged a command failure while the sweeps ran. A tick reports Succeeded even when a "
                 + "command dispatched INSIDE it rolled back, so these lines are the only evidence — and they are exactly what nobody was "
                 + "reading while budget settlement, the stuck-run reconciler, the spool reaper and lesson distillation ticked and threw "
-                + "in production. The line names the command; its handler is where to look.");
+                + "in production. The line names the command; its handler is where to look. It may belong to a tick the recurring "
+                + "scheduler fired on cron rather than one this test triggered; the state assertion above covers those too, so a line "
+                + "here with no failed job means the failure was swallowed inside a tick that still reported Succeeded.");
     }
 
     /// <summary>One triggered execution: which schedule asked for it, which background job carried it, and the last state observed.</summary>
