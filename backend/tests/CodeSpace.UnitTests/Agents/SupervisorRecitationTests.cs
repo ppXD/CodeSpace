@@ -206,6 +206,51 @@ public sealed class SupervisorRecitationTests
         recitation.ShouldContain("Unfinished: s1", customMessage: "an attempt that never ran leaves the unit unfinished");
     }
 
+    [Theory]
+    [InlineData(false)]   // no plan authored over the verdict — the lint's fallback verb is "re-plan this item's check"
+    [InlineData(true)]    // a plan already spent — the lint would instead defer to "the exit its verdict names above"
+    public void An_invalid_spec_says_nothing_extra_on_a_row_this_deployment_ended(bool aReplanWasAlreadySpent)
+    {
+        // The contradiction the F1 steer introduced into the OTHER half of this line. The lint fires on a STATIC
+        // property of the authored bytes (ValidateAuthored), so it is reachable together with a deployment-ended
+        // attempt — two independent facts — and both of its branches then fight the state rendered beside them:
+        // the fallback demands the re-plan that state just forbade, and the deferral points at an exit the results
+        // block never wrote (the F1 arm returns before the ramp). The spec really is invalid; that keeps until an
+        // attempt RUNS the check and the verdict is evidence about it.
+        // MUTATION: drop either guard (VerdictNamesTheExit's exclusion, or the lint's own) and this reddens.
+        var priors = new List<SupervisorPriorDecision>
+        {
+            JudgeWithoutARubric(1),
+            Spawn(2, new[] { "s1" }, EndedByThisDeployment()),
+        };
+
+        if (aReplanWasAlreadySpent) priors.Add(JudgeWithoutARubric(3));
+
+        var recitation = SupervisorRecitation.Render(priors)!;
+
+        recitation.ShouldContain("RETRY this subtask on a live worker", customMessage: "the one verb this row has");
+
+        // Both lint branches open with this clause, so its absence rules out the whole suffix. Asserted as the
+        // clause rather than the bare word "re-plan", which the surrounding block legitimately uses elsewhere.
+        recitation.ShouldNotContain("INVALID as authored", customMessage: "a static property of the spec is not news, and saying it here competes with the retry");
+        recitation.ShouldNotContain("re-plan this item's check", customMessage: "the exact verb the state on this same line forbids");
+        recitation.ShouldNotContain("take the exit its verdict names above", customMessage: "the F1 arm renders no exit to defer to — the failure the shared predicate exists to prevent");
+    }
+
+    [Fact]
+    public void An_invalid_spec_still_lints_on_a_row_whose_check_actually_ran()
+    {
+        // The falsifiable negative: suppress the lint too widely and a half-authored oracle stops being named at
+        // all, which is the loop it was added to break.
+        var priors = new[]
+        {
+            JudgeWithoutARubric(1),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: false, acceptanceDetail: "no-rubric")),
+        };
+
+        SupervisorRecitation.Render(priors)!.ShouldContain("INVALID as authored");
+    }
+
     [Fact]
     public void A_grader_side_infra_rejection_keeps_its_own_recital_unchanged()
     {

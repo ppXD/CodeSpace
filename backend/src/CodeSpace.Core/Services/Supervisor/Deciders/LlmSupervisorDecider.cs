@@ -1614,52 +1614,84 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (passed)
         {
-            // P4-1: the agent itself reported failure, yet the objective check passed — previously silent (this line
-            // only ever read AcceptancePassed, never Status), so a passed-but-self-reported-failed unit rendered
-            // identically to a clean pass with no signal that the agent disagreed with its own verified result.
-            // Reads Status directly (not the newer Contradiction field) so this applies to every row, old or new.
-            builder.AppendLine(result.Status == "Failed"
-                ? "      acceptance PASSED — this unit's definition-of-done check ran green, even though the agent itself reported failure. The work is objectively fine; do NOT retry this subtask, merge it."
-                : "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
-
-            // The one thing a PASS can hide: the check EXECUTED a file this run does not own as a judge, so it
-            // graded the candidate's own bytes. The evidence says so, but a pass carries no evidence here (the
-            // fold drops the tail on green and this branch renders none) — so the clause the grade's detail
-            // carries is the only way the fact reaches the brain weighing a merge.
-            AppendSubjectClause(builder, result);
+            AppendPassedVerdict(builder, result);
             return;
         }
 
-        // F1: read BEFORE the shared infra class, which this is a strict subset of and whose steer says the
-        // OPPOSITE. A worker that went away did not break the check — it stopped the attempt — so "re-plan this
-        // item with a check its agent can satisfy" asks the brain to rewrite an oracle that has nothing wrong with
-        // it, and one screen away the quality recitation is simultaneously reciting "retry (same model; the
-        // machinery failed, not the work)" for the same unit. Two verbs for one row is the hazard the recitation's
-        // own header names; here the deployment is the fact, so the verb is retry, and it is stated in the same
-        // breath as the prohibition on re-planning (the model reads a directive, never an inference).
         if (SupervisorOutcome.EndedByDeployment(result))
         {
-            builder.AppendLine($"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — THIS DEPLOYMENT ended the attempt (its worker or credential broker went away), so its check never ran and the agent never finished. NOT a verdict on the work and NOT a fault in the check. {EndedByDeploymentSteer(result.InfraExitReason!)}");
-
-            if (includeEvidenceTail)
-                AppendAcceptanceEvidenceTail(builder, result, retryDirected: true, replanExit, amendedOracle: false);
-
+            AppendDeploymentEndedVerdict(builder, result, replanExit, includeEvidenceTail);
             return;
         }
 
-        var infra = SupervisorReplanStanding.InfraClassed(result);
+        AppendFailedVerdict(builder, result, amendStanding, replanExit, includeEvidenceTail);
+    }
 
-        // P5-2 (diagnosis-driven repair): the S3 baseline differential PICKS the failure directive instead of
-        // decorating it — a MEASURED red base makes "RETRY this exact subtask" futile advice (the check was failing
-        // before this attempt touched anything), so that case steers to re-plan/ask in the verdict line itself,
-        // never as a contradicting footnote. A green base strengthens the retry (the failure is attempt-introduced).
-        // An UNMEASURED baseline (never captured, or infra-classed per the pinned BaselineDetail convention) claims
-        // nothing — never read "unmeasurable" as "already broken". INFRA-classed candidate failures are untouched:
-        // the check never ran, so there is no candidate verdict to differentiate.
-        // Read from the same place as the arm above, because the two together ARE the ramp's render condition
-        // (SupervisorReplanStanding.VerdictNamesTheExit): the recitation's authoring lint defers its own re-plan
-        // verb to "the exit its verdict names above", and a second copy of this expression is how that lint starts
-        // deferring to a line no arm rendered.
+    /// <summary>
+    /// The PASSED arm. P4-1: the agent itself reported failure, yet the objective check passed — previously silent
+    /// (this line only ever read AcceptancePassed, never Status), so a passed-but-self-reported-failed unit rendered
+    /// identically to a clean pass with no signal that the agent disagreed with its own verified result. Reads Status
+    /// directly (not the newer Contradiction field) so this applies to every row, old or new.
+    ///
+    /// <para>The one thing a PASS can hide: the check EXECUTED a file this run does not own as a judge, so it graded
+    /// the candidate's own bytes. The evidence says so, but a pass carries no evidence here (the fold drops the tail
+    /// on green and this branch renders none) — so the clause the grade's detail carries is the only way the fact
+    /// reaches the brain weighing a merge.</para>
+    /// </summary>
+    private static void AppendPassedVerdict(StringBuilder builder, SupervisorAgentResult result)
+    {
+        builder.AppendLine(result.Status == "Failed"
+            ? "      acceptance PASSED — this unit's definition-of-done check ran green, even though the agent itself reported failure. The work is objectively fine; do NOT retry this subtask, merge it."
+            : "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
+
+        AppendSubjectClause(builder, result);
+    }
+
+    /// <summary>
+    /// F1's arm, read BEFORE the shared infra class, which this is a strict subset of and whose steer says the
+    /// OPPOSITE. A worker that went away did not break the check — it stopped the attempt — so "re-plan this item
+    /// with a check its agent can satisfy" asks the brain to rewrite an oracle that has nothing wrong with it, and
+    /// one screen away the quality recitation is simultaneously reciting "retry (same model; the machinery failed,
+    /// not the work)" for the same unit. Two verbs for one row is the hazard the recitation's own header names; here
+    /// the deployment is the fact, so the verb is retry, stated in the same breath as the prohibition on re-planning
+    /// (the model reads a directive, never an inference).
+    ///
+    /// <para>It renders NO exit ramp — the retry is not an exit off a spent re-plan — which is why
+    /// <see cref="SupervisorReplanStanding.VerdictNamesTheExit"/> excludes this class: the recitation's authoring
+    /// lint would otherwise defer its own verb to a sentence this arm never wrote.</para>
+    /// </summary>
+    private static void AppendDeploymentEndedVerdict(StringBuilder builder, SupervisorAgentResult result, SupervisorReplanExit replanExit, bool includeEvidenceTail)
+    {
+        builder.AppendLine($"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — THIS DEPLOYMENT ended the attempt (its worker or credential broker went away), so its check never ran and the agent never finished. NOT a verdict on the work and NOT a fault in the check. {EndedByDeploymentSteer(result.InfraExitReason!)}");
+
+        if (includeEvidenceTail)
+            AppendAcceptanceEvidenceTail(builder, result, retryDirected: true, replanExit, amendedOracle: false);
+    }
+
+    /// <summary>
+    /// The three remaining failure arms. P5-2 (diagnosis-driven repair): the S3 baseline differential PICKS the
+    /// failure directive instead of decorating it — a MEASURED red base makes "RETRY this exact subtask" futile
+    /// advice (the check was failing before this attempt touched anything), so that case steers to re-plan/ask in the
+    /// verdict line itself, never as a contradicting footnote. A green base strengthens the retry (the failure is
+    /// attempt-introduced). An UNMEASURED baseline (never captured, or infra-classed per the pinned BaselineDetail
+    /// convention) claims nothing — never read "unmeasurable" as "already broken". INFRA-classed candidate failures
+    /// are untouched: the check never ran, so there is no candidate verdict to differentiate.
+    ///
+    /// <para>Both reads come from <see cref="SupervisorReplanStanding"/> because together they ARE the ramp's render
+    /// condition (<see cref="SupervisorReplanStanding.VerdictNamesTheExit"/>): the recitation's authoring lint defers
+    /// its own re-plan verb to "the exit its verdict names above", and a second copy of that expression is how the
+    /// lint starts deferring to a line no arm rendered.</para>
+    ///
+    /// <para>The evidence tail follows the verdict's OWN directive — the live golden eval proved a model obediently
+    /// picks the verb off the copy (<see cref="AppendResolutionVerdict"/>'s M0 note), so a tail under a "do not
+    /// retry" verdict must never say "retry". An infra verdict carrying an unconsumed co-sign IS retry-directed: the
+    /// amended check is what the next attempt runs against, and the tail is what the retry's revisedInstruction
+    /// targets. On an amended unit whose repair is spent or discarded the authoring verb is 'amend_acceptance', so
+    /// the tail must not offer the re-plan the verdict one line above just forbade either.</para>
+    /// </summary>
+    private static void AppendFailedVerdict(StringBuilder builder, SupervisorAgentResult result, SupervisorAmendStanding amendStanding, SupervisorReplanExit replanExit, bool includeEvidenceTail)
+    {
+        var infra = SupervisorReplanStanding.InfraClassed(result);
         var baseAlsoFails = SupervisorReplanStanding.BaselineAlsoFails(result);
 
         builder.AppendLine(infra
@@ -1671,12 +1703,6 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (!infra && result.BaselinePassed == true)
             builder.AppendLine("      baseline: the unit's BASE tree passes this same check — the failure was INTRODUCED by this attempt's work; a focused retry can fix it.");
 
-        // The preamble follows the verdict's OWN directive — the live golden eval proved a model obediently picks
-        // the verb off the copy (AppendResolutionVerdict's M0 note), so a tail under a "do not retry" verdict must
-        // never say "retry". An infra verdict carrying an unconsumed co-sign IS retry-directed: the amended check
-        // is what the next attempt runs against, and the tail is what the retry's revisedInstruction targets. On an
-        // amended unit whose repair is spent or discarded the authoring verb is 'amend_acceptance', so the tail must
-        // not offer the re-plan the verdict one line above just forbade either.
         var retryDirected = infra ? amendStanding == SupervisorAmendStanding.AwaitingRetry : !baseAlsoFails;
 
         if (includeEvidenceTail)

@@ -284,6 +284,41 @@ public class SupervisorReplanStandingTests
     }
 
     /// <summary>One spawn that staged BOTH units and folded a result for each — s1's check COULD NOT RUN, s2 was ACCEPTED. What <see cref="Staged"/> cannot express, and the dependency case needs: s2's acceptance is the satisfaction a later generation no longer sees.</summary>
+    // ─── F1: the deployment-ended class names no exit, because its arm renders none ───
+
+    [Fact]
+    public void A_deployment_ended_verdict_names_no_exit_even_though_its_detail_classifies_infra()
+    {
+        // The predicate's whole contract is "true on exactly the arms that substitute the exit ramp". F1's arm in
+        // AppendUnitAcceptanceVerdict RETURNS before the ramp — its steer is a retry on a live worker, not an exit
+        // off a spent re-plan — so a predicate that still said yes here would send the recitation's authoring lint
+        // to defer its only verb to a sentence no block wrote. Read TYPED, because the detail wears the reserved
+        // infra: prefix and therefore satisfies InfraClassed. MUTATION: drop the exclusion and this reddens.
+        var ended = EndedByThisDeployment();
+
+        SupervisorReplanStanding.InfraClassed(ended).ShouldBeTrue("fixture check — the string class does match, which is exactly why the typed exclusion is needed");
+        SupervisorReplanStanding.VerdictNamesTheExit(ended).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_grader_side_infra_verdict_still_names_its_exit()
+    {
+        // The falsifiable negative: exclude too widely and the ramp's own render condition goes dark, so the lint
+        // stops deferring and starts demanding a second plan beside a verdict that just forbade one.
+        var graderFault = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = "codespace/agent/s1", AcceptancePassed = false, AcceptanceDetail = InfraDetail };
+
+        SupervisorReplanStanding.VerdictNamesTheExit(graderFault).ShouldBeTrue();
+    }
+
+    /// <summary>A unit this deployment ended, minted by the SAME production pair the rehydrate folds with, so the exit reason and the verdict can only be paired the way production pairs them (Rule 12.5).</summary>
+    private static SupervisorAgentResult EndedByThisDeployment()
+    {
+        var attempt = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost };
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(attempt, AgentJson.Options));
+
+        return SupervisorTurnService.InfraExitVerdict(compact)!;
+    }
+
     private static SupervisorPriorDecision StagedPair(long seq)
     {
         var unrunnable = Guid.NewGuid();

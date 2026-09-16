@@ -221,8 +221,14 @@ public static class SupervisorReplanStanding
     /// verdict names above" would defer to nothing there, which is the whole reason this predicate is not simply
     /// "the exit is not None".
     /// </summary>
+    /// <para>F1 EXCLUDES the deployment-ended class even though <see cref="InfraClassed"/> is true of it (its detail
+    /// wears the reserved <c>infra:</c> prefix). That arm of the results block returns BEFORE the ramp — its steer is
+    /// a retry on a live worker, and a re-plan exit is not one of the moves it offers — so the ramp really is
+    /// unrendered there, and a predicate that still said "the verdict names the exit" would send the authoring lint
+    /// to defer to a sentence no block wrote. Read TYPED, so it cannot drift back in with the string class.</para>
     public static bool VerdictNamesTheExit(SupervisorAgentResult result) =>
-        result.AcceptancePassed == false && !SupervisorOutcome.IsWaived(result) && (InfraClassed(result) || BaselineAlsoFails(result));
+        result.AcceptancePassed == false && !SupervisorOutcome.IsWaived(result) && !SupervisorOutcome.EndedByDeployment(result)
+        && (InfraClassed(result) || BaselineAlsoFails(result));
 
     /// <summary>The unit's CHECK could not run (grader fault, environment, half-authored spec) — the shared classification, over the same work-presence read every other door applies. The decider's verdict line reads its first arm from here so the ramp's render condition has one definition.</summary>
     public static bool InfraClassed(SupervisorAgentResult result) =>
