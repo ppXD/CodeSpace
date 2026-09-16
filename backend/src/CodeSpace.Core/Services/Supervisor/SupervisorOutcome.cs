@@ -892,6 +892,24 @@ public static class SupervisorOutcome
     public static bool IsWaived(SupervisorAgentResult result) => result.AcceptanceVerdict == Messages.Contracts.VerificationDisposition.Waived;
 
     /// <summary>
+    /// THIS DEPLOYMENT ended the attempt (F1) — a worker went away, a broker could not bind — so the unit's check
+    /// never ran AND the agent never got to finish. TYPED on both halves, deliberately: the exit reason is the
+    /// codebase's own diagnosis, and the disposition is the verdict the fold stamped from it, so no reader has to
+    /// parse a detail string to recognise this class.
+    ///
+    /// <para>It is a STRICT SUBSET of the grader-side infra class
+    /// (<see cref="Agents.AgentAcceptanceContract.IsInfraFailure"/>), and the two want OPPOSITE verbs. That class
+    /// means "the instrument is sick": another agent pass reproduces it, so its steers say do NOT retry — re-plan the
+    /// check, or amend it with a human. This one means "the instrument was never picked up": the work was never
+    /// judged, nothing about the check is wrong, and the repair is the SAME subtask on a live worker. Every prompt
+    /// renderer must therefore read this BEFORE the shared class, or a rolling restart is told to re-plan a check
+    /// that has nothing wrong with it — the fixed point <c>LlmSupervisorDecider.InfraSteerFor</c>'s own history
+    /// records burning a live run into its no-progress kill.</para>
+    /// </summary>
+    public static bool EndedByDeployment(SupervisorAgentResult result) =>
+        result.InfraExitReason is not null && result.AcceptanceVerdict == Messages.Contracts.VerificationDisposition.InfraUnknown;
+
+    /// <summary>
     /// EVERY agent-run id the active Plan generation's staging (spawn/retry/resolve) decisions folded a WITHHELD
     /// (<see cref="IsWithheldFromHead"/> — rejected or waived) result for. DC-3's ledger-direct branch resolver needs
     /// the generation-wide set (not one frontier's), since it can surface a contributor from any earlier round in

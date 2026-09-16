@@ -898,7 +898,7 @@ public sealed partial class SupervisorTurnService
     /// fail-closed arms already write, and it is deliberately UNCHANGED: it is the withheld-from-head read
     /// (<c>SupervisorOutcome.IsWithheldFromHead</c>), and work nothing verified must not become mergeable because
     /// the reason it went unverified was ours. The DETAIL names the wall verbatim under
-    /// <see cref="Agents.AgentAcceptanceContract.InfraExitDetailPrefix"/>, which is the same answer in the string
+    /// <see cref="SupervisorAgentResult.InfraExitDetailPrefix"/>, which is the same answer in the string
     /// vocabulary — so the readers that never see the typed field (the no-progress evidence discount, the receipts,
     /// the decider's verdict line) agree with it rather than reading a worker restart as failed work.</para>
     ///
@@ -913,7 +913,7 @@ public sealed partial class SupervisorTurnService
         {
             AcceptancePassed = false,
             AcceptanceVerdict = Messages.Contracts.VerificationDisposition.InfraUnknown,
-            AcceptanceDetail = Agents.AgentAcceptanceContract.InfraExitDetailPrefix + exitReason,
+            AcceptanceDetail = SupervisorAgentResult.InfraExitDetailPrefix + exitReason,
         };
     }
 

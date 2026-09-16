@@ -164,18 +164,10 @@ public static class AgentAcceptanceContract
                    // carries the TYPED disposition too; this arm is what lets the readers that only ever see the
                    // detail string (the no-progress evidence discount, the receipts, the decider's verdict line,
                    // the model-escalation trigger) reach the same answer it does.
-                   || effective.StartsWith(InfraExitDetailPrefix, StringComparison.Ordinal)
+                   || effective.StartsWith(Messages.Agents.SupervisorAgentResult.InfraExitDetailPrefix, StringComparison.Ordinal)
                    || (effective == "no-branch-or-repo" && workPresent));
     }
 
-    /// <summary>
-    /// The acceptance-detail an infra-classed verdict minted from an attempt's own DECLARED exit reason carries: this
-    /// prefix followed by that reason verbatim (<c>infra:model_credential_lease_lost</c>), so a reader sees WHICH
-    /// wall the attempt hit instead of the fail-closed <c>no-branch-or-repo</c> every absence collapses to. Minted by
-    /// <c>SupervisorTurnService.InfraExitVerdict</c> BEFORE any grader runs — unlike every prefix above, which names
-    /// a grader-side fault. Pinned by test (Rule 8): the producer and this consumer must never drift apart.
-    /// </summary>
-    public const string InfraExitDetailPrefix = "infra:";
 
     /// <summary>
     /// The multi-repo grade paths wrap a classifiable detail in a uniform machine-authored display tag

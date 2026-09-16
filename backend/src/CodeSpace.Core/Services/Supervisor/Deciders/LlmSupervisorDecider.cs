@@ -1630,6 +1630,23 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             return;
         }
 
+        // F1: read BEFORE the shared infra class, which this is a strict subset of and whose steer says the
+        // OPPOSITE. A worker that went away did not break the check — it stopped the attempt — so "re-plan this
+        // item with a check its agent can satisfy" asks the brain to rewrite an oracle that has nothing wrong with
+        // it, and one screen away the quality recitation is simultaneously reciting "retry (same model; the
+        // machinery failed, not the work)" for the same unit. Two verbs for one row is the hazard the recitation's
+        // own header names; here the deployment is the fact, so the verb is retry, and it is stated in the same
+        // breath as the prohibition on re-planning (the model reads a directive, never an inference).
+        if (SupervisorOutcome.EndedByDeployment(result))
+        {
+            builder.AppendLine($"      acceptance UNVERIFIED ({result.AcceptanceDetail}) — THIS DEPLOYMENT ended the attempt (its worker or credential broker went away), so its check never ran and the agent never finished. NOT a verdict on the work and NOT a fault in the check. {EndedByDeploymentSteer}");
+
+            if (includeEvidenceTail)
+                AppendAcceptanceEvidenceTail(builder, result, retryDirected: true, replanExit, amendedOracle: false);
+
+            return;
+        }
+
         var infra = SupervisorReplanStanding.InfraClassed(result);
 
         // P5-2 (diagnosis-driven repair): the S3 baseline differential PICKS the failure directive instead of
@@ -1702,6 +1719,17 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         SupervisorAmendStanding.Discarded => "Do NOT retry the agent — another pass cannot fix the check. Its check WAS amended by an approved human co-sign, and a later re-plan DISCARDED that amendment — so do NOT author another plan: propose 'amend_acceptance' again, re-anchoring the repaired check to THIS plan, or 'ask_human' to rule.",
         _ => $"Do NOT retry the agent — another pass cannot fix the check. {ReplanExitRampFor(replanExit) ?? ReplanThisItemWithASatisfiableCheck}",
     };
+
+    /// <summary>
+    /// F1's steer, and the one arm in this renderer that says RETRY under an UNVERIFIED verdict. It is sound here
+    /// for the reason none of the infra steers above is: the identical attempt on a live worker is the whole repair,
+    /// so it cannot reproduce the failure the way a grader fault or a half-authored spec would. It carries no
+    /// <see cref="SupervisorAmendStanding"/> arm and no <see cref="SupervisorReplanExit"/> ramp on purpose — neither
+    /// a co-sign nor a spent re-plan changes what a worker restart needs, and offering either would re-introduce the
+    /// contradiction this arm exists to remove. Pinned by test, including the ABSENCE of the shared class's
+    /// "Do NOT retry the agent".
+    /// </summary>
+    internal const string EndedByDeploymentSteer = "RETRY this exact subtask so it runs on a live worker; do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.";
 
     /// <summary>The un-amended infra arm's own re-plan sentence — named so the exit ramp is a SUBSTITUTION into one interpolation rather than a second arm that could drift from it, and so a tape with no spent re-plan on it renders byte-identically to before the ramp existed.</summary>
     internal const string ReplanThisItemWithASatisfiableCheck = "Re-plan this item with a check its agent can satisfy, or ask a human to rule.";
