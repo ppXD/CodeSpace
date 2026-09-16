@@ -67,7 +67,14 @@ public static class SupervisorRecitation
             // against a GREEN baseline is steered at the retry with no exit named anywhere — and this line would be
             // deferring the only verb it has to a sentence no block rendered. Read off the shared predicate rather
             // than a second copy of that condition, which is how the two would drift apart again.
+            // F1: and SILENT for a unit this deployment ended, whichever branch it would take. Both of its verbs
+            // contradict the state rendered on this very line: the deferral points at an exit that arm never wrote
+            // (it returns before the ramp), and the fallback demands the re-plan that state just forbade. The spec
+            // really is invalid, and that is not new information — it is a STATIC property of the authored bytes,
+            // so it keeps until an attempt actually RUNS the check and the verdict is evidence about it. Saying it
+            // now only competes with the one move that gets there: a retry on a live worker.
             if (!effective.WaivedSubtaskIds.Contains(subtask.Id)
+                && !TheDeploymentEndedIt(latestResults.GetValueOrDefault(subtask.Id))
                 && effective.BySubtask.GetValueOrDefault(subtask.Id) is { } spec && Agents.AgentAcceptanceContract.ValidateAuthored(spec) is { } specError)
                 builder.Append(DefersToItsExit(replanExit, latestResults.GetValueOrDefault(subtask.Id))
                     ? $" ⚠ its acceptance spec is INVALID as authored ({specError}) — it can never pass; take the exit its verdict names above, not another plan."
@@ -127,6 +134,10 @@ public static class SupervisorRecitation
     /// <summary>Whether the authoring lint may defer its verb to the exit the results block named: an exit fired AND the item's latest verdict is one of the shapes that block substitutes the ramp into (<see cref="SupervisorReplanStanding.VerdictNamesTheExit"/>). A unit with no folded verdict at all — pending, or staged and unfolded — has no verdict line above to defer to.</summary>
     private static bool DefersToItsExit(SupervisorReplanExit replanExit, SupervisorAgentResult? latest) =>
         replanExit != SupervisorReplanExit.None && latest is not null && SupervisorReplanStanding.VerdictNamesTheExit(latest);
+
+    /// <summary>F1: whether this unit's latest attempt was ended by the deployment — the one state whose line already carries a verb, so nothing may append a second one to it. Null (never attempted / unfolded) is not that state.</summary>
+    private static bool TheDeploymentEndedIt(SupervisorAgentResult? latest) =>
+        latest is not null && SupervisorOutcome.EndedByDeployment(latest);
 
     /// <summary>The newest plan decision's subtasks — a re-plan supersedes (the same newest-plan rule the acceptance fold uses).</summary>
     internal static IReadOnlyList<SupervisorPlannedSubtask> LatestPlanSubtasks(IReadOnlyList<SupervisorPriorDecision> priors)
@@ -259,12 +270,10 @@ public static class SupervisorRecitation
     {
         // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
         _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
-        // F1: read ahead of every arm below, INCLUDING the Succeeded ones, because none of them is true of this row.
-        // The infra arms open with "done" — which for a worker that went away is simply false: the agent never
-        // finished, so there is no work to call done and no check to call broken. Saying "done but its check COULD
-        // NOT RUN — re-plan the check" about an attempt that never started is the plainest kind of false recitation,
-        // and it points the brain at rewriting an oracle nothing ran.
-        _ when SupervisorOutcome.EndedByDeployment(result) => $"attempt ENDED BY THIS DEPLOYMENT ({Truncate(result.AcceptanceDetail)}) — the agent never finished and its check never ran; retry it on a live worker",
+        // F1 has NO arm here on purpose. The deployment-ended state is answered by StateFor, this method's ONLY
+        // caller, before it delegates — so a second arm would be unreachable, and an unreachable copy of a rendered
+        // sentence is exactly how two surfaces drift into saying different things about one row. The infra arms
+        // below stay as they are: they are about a check that RAN and could not finish.
         "Succeeded" when result.AcceptancePassed == true => $"done (accepted){SubjectClause(result)}",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).

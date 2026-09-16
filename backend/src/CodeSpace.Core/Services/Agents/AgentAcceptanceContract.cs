@@ -168,7 +168,6 @@ public static class AgentAcceptanceContract
                    || (effective == "no-branch-or-repo" && workPresent));
     }
 
-
     /// <summary>
     /// The multi-repo grade paths wrap a classifiable detail in a uniform machine-authored display tag
     /// (<c>repo 'alias': </c>) — classification must see through it, or a grader crash on one repo of a

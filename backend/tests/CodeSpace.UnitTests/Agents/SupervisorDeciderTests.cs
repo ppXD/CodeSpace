@@ -529,14 +529,19 @@ public class SupervisorDeciderTests
         var leaseLost = LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.ModelCredentialLeaseLost);
         var brokerDown = LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.ModelCredentialBrokerUnavailable);
 
-        leaseLost.ShouldNotBe(brokerDown, "one remedy text for two different faults is how a bounded repair becomes an unbounded loop");
-        leaseLost.ShouldNotContain("ask_human", Case.Sensitive, "a live worker is the whole repair — escalating a rolling restart to a human is noise");
-        brokerDown.ShouldContain("ask_human", Case.Sensitive, "only an operator can change a confinement setting");
-        brokerDown.ShouldContain("once", Case.Sensitive, "…and the retry it does buy is bounded, because a second identical end proves the deployment is the fault");
+        // BYTES, not shape (Rule 8): these sentences are the model's actual instruction, and the live golden eval
+        // proved it picks its verb off this copy. Asserting them against the constant they come from would pass for
+        // any edit; a literal makes every reword a deliberate, reviewable change.
+        leaseLost.ShouldBe("RETRY this exact subtask so it runs on a live worker; do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.");
+        brokerDown.ShouldBe("RETRY this exact subtask once, in case another worker can broker its model credential; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.");
 
         // A future member with no arm must not silently inherit either remedy.
         LlmSupervisorDecider.EndedByDeploymentSteer("some_future_infra_exit")
-            .ShouldContain("no recorded remedy", Case.Sensitive);
+            .ShouldBe("This is an infrastructure fault with no recorded remedy: 'ask_human' to rule. Do NOT re-plan it and do NOT amend its check — neither is where the fault is.");
+
+        leaseLost.ShouldNotBe(brokerDown, "one remedy text for two different faults is how a bounded repair becomes an unbounded loop");
+        leaseLost.ShouldNotContain("ask_human", Case.Sensitive, "a live worker is the whole repair — escalating a rolling restart to a human is noise");
+        brokerDown.ShouldContain("ask_human", Case.Sensitive, "only an operator can change a confinement setting");
     }
 
     [Fact]

@@ -103,6 +103,7 @@ public class FailureTaxonomyTests
         FailureCodes.Internal.ShouldBe("internal_error");
         FailureCodes.UnscopedModelCall.ShouldBe("unscoped_model_call");
         FailureCodes.ModelCredentialBrokerUnavailable.ShouldBe("model_credential_broker_unavailable");
+        FailureCodes.ModelCredentialLeaseLost.ShouldBe("model_credential_lease_lost");
     }
 
     [Fact]
