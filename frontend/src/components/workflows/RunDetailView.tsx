@@ -480,6 +480,22 @@ export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: s
     );
   }
 
+  if (wait.kind === "ActorIdentityLink") {
+    // The one suspend with NO button here: nobody on this screen can resolve it but the person the step acts as,
+    // by connecting their own account. So the panel's whole job is to say that plainly — without it the run reads
+    // as "Suspended" with no reason and quietly gives up when its window runs out.
+    const prompt = readPrompt(wait);
+
+    return (
+      <section className="wf-section wf-approval">
+        <h2 className="wf-section-h">Waiting for an account to be connected</h2>
+        <div className="wf-approval-prompt">
+          {prompt || "This step acts as one person's own account on the remote, and they haven't connected one yet. It resumes on its own once they do."}
+        </div>
+      </section>
+    );
+  }
+
   if (wait.kind === "Timer") {
     return (
       <section className="wf-section wf-approval">

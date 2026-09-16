@@ -66,6 +66,22 @@ describe("foldRecord", () => {
     expect(state.byNode.get("n")?.call).toEqual({ target: "", method: "", startedAtMs: Date.parse("2026-07-08T00:00:00Z") });
   });
 
+  it("reads the wait kind and deadline the ENGINE writes, not a camelCased lookalike", () => {
+    // RunRecordLogger.NodeSuspendedAsync writes `{ wait_kind, wake_at, outputs }` and the record's payload reaches
+    // the client verbatim — nothing camelCases it on the way out. Reading only `waitKind`/`wakeAt` meant every live
+    // wait signal in production carried an EMPTY kind and NO deadline, so no footer could ever tell one wait from
+    // another or show a countdown. This fixture is the engine's own payload, byte for byte.
+    const state = foldRecord(emptyRunLiveState(), rec(1, "node.suspended", {
+      nodeId: "review",
+      iterationKey: "",
+      payloadJson: JSON.stringify({ wait_kind: "ActorIdentityLink", wake_at: "2026-07-08T00:00:30.000Z", outputs: {} }),
+    }));
+
+    const wait = state.byNode.get("review")?.wait;
+    expect(wait?.kind).toBe("ActorIdentityLink");
+    expect(wait?.deadlineAtMs).toBe(Date.parse("2026-07-08T00:00:30.000Z"));
+  });
+
   it("clears a node's wait on a later record of a different type", () => {
     const suspended = foldRecord(emptyRunLiveState(), rec(1, "node.suspended", { nodeId: "n", iterationKey: "b0" }));
     expect(suspended.byNode.get("n")?.wait).toBeDefined();
