@@ -7,6 +7,7 @@ import { useAlert, useConfirm } from "@/components/dialog";
 import { IdentityLinkModal } from "@/components/identities/IdentityLinkModal";
 import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabilities, useCredentials, useDeleteProviderInstance, useProviderDefaults, useProviderInstances, useRevokeCredential, useUpdateProviderInstance } from "@/hooks/use-credentials";
 import { useMe } from "@/hooks/use-me";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
 import { providerSupportsTeamServiceCredential } from "@/lib/teamCredentials";
 
@@ -289,6 +290,11 @@ interface ProvidersStepProps {
 }
 
 function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, errors, onConnect, onConnectPat, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
+  // Absent rather than present-and-refusing. The form this opens asks for an OAuth client secret
+  // before it can be submitted, so a member who cannot add a provider would type one into a request
+  // that was never going to land. Asked as a permission — the server's matrix stays the only copy of
+  // which role holds it.
+  const mayAddProvider = useTeamPermissions().can(TeamPermissions.ReposManage);
   return (
     <>
       <div className="mdl-head">
@@ -312,8 +318,10 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
         {!loading && !error && providers.length === 0 && (
           <div className="cn-empty">
             <div className="cn-empty-h">No providers yet</div>
-            <div className="cn-empty-p">Add your first GitHub or GitLab integration. After that, anyone on the team signs in with their own account here — no shared tokens, no copy-paste of secrets.</div>
-            <button className="btn btn-primary" onClick={onAddProvider}><Ic.Plus size={13} /> Add provider</button>
+            <div className="cn-empty-p">{mayAddProvider
+              ? "Add your first GitHub or GitLab integration. After that, anyone on the team signs in with their own account here — no shared tokens, no copy-paste of secrets."
+              : "Nobody has added a GitHub or GitLab integration for this team yet, and adding one isn't something your role can do. Ask a team Admin or the Owner."}</div>
+            {mayAddProvider && <button className="btn btn-primary" onClick={onAddProvider}><Ic.Plus size={13} /> Add provider</button>}
           </div>
         )}
 
@@ -322,9 +330,11 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
             {/* Both tabs list the SAME providers — they differ only in the credential dimension
                 (your personal sign-in vs the team's shared tokens). "Add provider" is tab-neutral
                 (a new provider shows in both), so it sits on its own action row above the tabs. */}
-            <div className="mdl-action-row">
-              <button className="btn" onClick={onAddProvider}><Ic.Plus size={14} /> Add provider</button>
-            </div>
+            {mayAddProvider && (
+              <div className="mdl-action-row">
+                <button className="btn" onClick={onAddProvider}><Ic.Plus size={14} /> Add provider</button>
+              </div>
+            )}
             <div className="cn-tabs" role="tablist">
               <button className="cn-tab" role="tab" aria-selected={tab === "personal"} data-active={tab === "personal"} onClick={() => onTabChange("personal")}>Personal</button>
               <button className="cn-tab" role="tab" aria-selected={tab === "team"} data-active={tab === "team"} onClick={() => onTabChange("team")}>Team</button>
@@ -766,9 +776,15 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
     if (!baseUrlTouched) setBaseUrl(FALLBACK_DEFAULTS[next].baseUrl);
   };
 
+  // Asked as a PERMISSION, never as a role. useTeamPermissions reads the server's own expansion of
+  // its matrix; a local role→ability table here would be a second copy of the rules that drifts the
+  // first time a permission moves tier, and the symptom is this very button staying enabled and
+  // answering 403.
+  const mayAddProvider = useTeamPermissions().can(TeamPermissions.ReposManage);
+
   // OAuth mode needs both client fields; token-only needs neither. Base fields always required.
   const oauthIncomplete = authMethod === "oauth" && (!clientId.trim() || !clientSecret);
-  const submitDisabled = !displayName.trim() || !baseUrl.trim() || oauthIncomplete || add.isPending;
+  const submitDisabled = !mayAddProvider || !displayName.trim() || !baseUrl.trim() || oauthIncomplete || add.isPending;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -909,8 +925,10 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
       </form>
 
       <div className="mdl-foot">
-        {/* AddProviderInstanceCommand requires TeamPermissions.ReposManage, whose minimum role is Admin. The old line promised any Member could, and a Member who believed it got a bare 403. */}
-        <div className="mdl-foot-info">Adding a provider needs the Admin role</div>
+        {/* The old line promised any team member could, and a member who believed it filled the form and
+            got a bare 403. What replaces it names no role: the server's matrix is the only copy of that
+            rule, and the caller's own team permissions already say whether they hold it. */}
+        <div className="mdl-foot-info">{mayAddProvider ? "Shared with everyone in this team" : "You don't have permission to add a provider for this team"}</div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={onBack} disabled={add.isPending}>Cancel</button>
           <button className="btn btn-primary cn-submit" disabled={submitDisabled} onClick={submit}>

@@ -69,7 +69,14 @@ public sealed class InvitationRoleExceedsGranterException : Exception, IFailure
 
     public string Code => FailureCodes.InvitationRoleExceedsGranter;
 
-    public string? ClientMessage => $"You can't invite someone as {Requested}.";
+    /// <summary>
+    /// Names the ceiling AND where it comes from. "You can't invite someone as Owner." leaves an Admin
+    /// unable to tell their own rank from a team setting or a bug, so they retry at the same role; the
+    /// granter's role is already on this exception and is a fact about the caller.
+    /// </summary>
+    public string? ClientMessage => $"Your role on this team is {Granter}, so you can invite up to {Granter}.";
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["yourRole"] = Granter.ToString(), ["requestedRole"] = Requested.ToString(), ["maximumGrantableRole"] = Granter.ToString() };
 }
 
 /// <summary>

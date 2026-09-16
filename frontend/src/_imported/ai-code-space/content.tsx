@@ -466,8 +466,8 @@ function RepoCredentialIssueAction({
           ) : (
             <>
               <div className="relink-pop-empty">
-                No other active credentials for this provider. Connect a new one — any team member
-                can — then come back and pick it here.
+                No other active credentials for this provider. Connect one from Providers, then come
+                back and pick it here.
               </div>
               <button className="sb-pop-item" onClick={connectNew}>
                 <Ic.Plus size={12} /> Open Providers…

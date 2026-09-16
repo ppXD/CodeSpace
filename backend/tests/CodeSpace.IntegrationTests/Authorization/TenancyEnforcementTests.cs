@@ -244,7 +244,6 @@ public class TenancyEnforcementTests
         var denied = await act.ShouldThrowAsync<TenantAccessDeniedException>().ConfigureAwait(false);
         denied.ClientMessage.ShouldBe("You don't have access to this.");
         denied.Details.ShouldBeNull();
-        denied.ClientMessage.ShouldNotContain(teamB.ToString(), Case.Insensitive);
     }
 
     private async Task<(Guid UserId, Guid TeamId)> SeedMemberAsync()

@@ -70,7 +70,7 @@ public sealed class TenantAccessDeniedException : Exception, IFailure
 
         return new TenantAccessDeniedException(
             userId, teamId, $"role '{role}' does not hold permission '{permission}'",
-            $"Your role on this team is {role}, but this needs {required} or higher. Ask someone with that role to do it, or to change yours.",
+            $"Your role on this team is {role}, but this needs {required} or higher. A team Admin or the Owner can do it, or change your role.",
             new Dictionary<string, object?> { ["yourRole"] = role.ToString(), ["requiredRole"] = required.ToString(), ["requiredPermission"] = permission });
     }
 
@@ -83,5 +83,5 @@ public sealed class TenantAccessDeniedException : Exception, IFailure
     public static TenantAccessDeniedException GlobalAdminRequired(Guid? userId, string role) =>
         new(userId, Guid.Empty, $"role '{role}' required",
             "This is an instance-administrator action, and your account isn't an administrator.",
-            new Dictionary<string, object?> { ["requiredRole"] = role });
+            new Dictionary<string, object?> { ["requiredInstanceRole"] = role });
 }

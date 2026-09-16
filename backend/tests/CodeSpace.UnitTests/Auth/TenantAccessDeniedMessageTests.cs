@@ -1,4 +1,5 @@
 using CodeSpace.Core.Authorization;
+using CodeSpace.Messages.Exceptions;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
@@ -30,9 +31,9 @@ public class TenantAccessDeniedMessageTests
     {
         var denial = TenantAccessDeniedException.MissingTeamPermission(User, Team, TeamRole.Member, TeamPermissions.ReposManage);
 
-        denial.ClientMessage.ShouldNotBeNull();
-        denial.ClientMessage!.ShouldContain("Member", Case.Sensitive, "the caller's own role is a fact about the caller");
-        denial.ClientMessage.ShouldContain("Admin", Case.Sensitive, "and the role that would work is what makes it actionable");
+        // The whole sentence, not "contains Member and contains Admin" — that passes just as well with
+        // the two roles swapped, which is the one way this message can be actively misleading.
+        denial.ClientMessage.ShouldBe("Your role on this team is Member, but this needs Admin or higher. A team Admin or the Owner can do it, or change your role.");
         denial.Details.ShouldNotBeNull();
         denial.Details!["yourRole"].ShouldBe("Member");
         denial.Details["requiredRole"].ShouldBe("Admin");
@@ -71,7 +72,11 @@ public class TenantAccessDeniedMessageTests
     [Fact]
     public void An_instance_administrator_action_says_it_is_one()
     {
-        TenantAccessDeniedException.GlobalAdminRequired(User, Roles.Admin).ClientMessage.ShouldContain("administrator");
+        var denial = TenantAccessDeniedException.GlobalAdminRequired(User, Roles.Admin);
+
+        denial.ClientMessage.ShouldContain("administrator");
+        denial.Details!["requiredInstanceRole"].ShouldBe(Roles.Admin);
+        denial.Details.ShouldNotContainKey("requiredRole", "an instance role and a team role must not share one key under one failure code");
     }
 
     /// <summary>
@@ -110,6 +115,32 @@ public class TenantAccessDeniedMessageTests
             wire.ShouldNotContain(User.ToString(), Case.Insensitive);
             wire.ShouldNotContain(Team.ToString(), Case.Insensitive);
         }
+    }
+
+    /// <summary>
+    /// The two sibling role refusals, held to the same rule. Both already carried the caller's own role
+    /// and spent it only on the log: an Admin refused an Owner invitation read "You can't invite
+    /// someone as Owner." and could not tell their own rank from a team setting or a bug, so the
+    /// natural next move was to retry at the same role.
+    /// </summary>
+    [Fact]
+    public void An_invitation_above_the_granter_names_the_ceiling_and_where_it_comes_from()
+    {
+        var denial = new InvitationRoleExceedsGranterException(TeamRole.Owner, TeamRole.Admin);
+
+        denial.ClientMessage.ShouldBe("Your role on this team is Admin, so you can invite up to Admin.");
+        denial.Details!["yourRole"].ShouldBe("Admin");
+        denial.Details["requestedRole"].ShouldBe("Owner");
+    }
+
+    [Fact]
+    public void Acting_on_someone_who_outranks_you_names_both_roles()
+    {
+        var denial = new RoleOutranksActorException(TeamRole.Admin, TeamRole.Owner);
+
+        denial.ClientMessage.ShouldBe("Your role on this team is Admin, and you can't do that to someone who is Owner.");
+        denial.Details!["yourRole"].ShouldBe("Admin");
+        denial.Details["subjectRole"].ShouldBe("Owner");
     }
 
     /// <summary>The diagnostic message keeps both ids — masking the client must not have masked the log.</summary>
