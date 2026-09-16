@@ -1890,7 +1890,7 @@ const AGENT_PIN_LIMIT = 6;
 
 /** Agents — the design's compact "Work · N agents" panel: a counts header, then one row per agent (status dot · name ·
  *  time · state · quiet action). Failed / timed-out agents pin to the top; the rest collapse behind "Show N more". */
-function AgentSection({ group }: { group: AgentGroupBlock }) {
+export function AgentSection({ group }: { group: AgentGroupBlock }) {
   const [expanded, setExpanded] = useState(false);
 
   const agents = [...group.agents].sort((a, b) => agentSortRank(a.status) - agentSortRank(b.status));
@@ -1952,7 +1952,8 @@ function AgentRow({ a }: { a: RoomAgentCard }) {
         <span className={`room-arow-state room-arow-state-${cls}`}>{agentStatusWord(a.status)}</span>
         <span className="room-arow-act">{action} <Sym n="chevron-right" s={11} /></span>
       </button>
-      {cls === "err" && a.error && <div className="room-arow-err" title={a.error}><Sym n="alert" s={11} cls="room-arow-erric" /> {a.error}</div>}
+      {/* Tone-independent: the backend fills the reason for ANY non-succeeded agent, so a NeedsReview card (tone "ok") must not drop the cause it carries. */}
+      {a.error && <div className="room-arow-err" title={a.error}><Sym n="alert" s={11} cls="room-arow-erric" /> {a.error}</div>}
       {a.recovery && <div className="room-arow-orphan" title="Resources left on the host that ran this run; another worker abandoned it — that host's own sweep reclaims them."><Sym n="alert" s={11} cls="room-arow-orphanic" /> {a.recovery.detail}</div>}
     </div>
   );

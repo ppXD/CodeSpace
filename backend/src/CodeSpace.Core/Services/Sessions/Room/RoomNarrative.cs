@@ -666,6 +666,7 @@ public static class RoomNarrative
         Label = UnitLabel(a),
         Role = a.Role,
         Status = a.Status,
+        Error = a.Error,
         AssignedSubtask = a.AssignedSubtask,
         Model = a.Model,
         Tokens = a.InputTokens is null && a.OutputTokens is null ? null : (a.InputTokens ?? 0) + (a.OutputTokens ?? 0),

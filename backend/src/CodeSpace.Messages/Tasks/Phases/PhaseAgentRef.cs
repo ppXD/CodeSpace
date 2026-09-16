@@ -22,6 +22,9 @@ public sealed record PhaseAgentRef
     /// <summary>The agent run's GROUND-TRUTH status as the <c>AgentRunStatus</c> enum NAME (open string — Queued/Running/Succeeded/Failed/Cancelled/TimedOut). Both sources read it team-scoped from the real AgentRun row; the node source falls back to the owning node's status name only when the agent row is absent.</summary>
     public required string Status { get; init; }
 
+    /// <summary>The (already secret-redacted) failure reason for a NON-succeeded agent — the real cause (e.g. an LLM 4xx like "Unexpected message role") folded by the SHARED metrics reader, so the Room's own agent card names WHY it failed instead of showing a bare status word. Bounded to a short single-line snippet by that reader (never re-truncated here). Null on a succeeded agent, and for a supervisor-staged ref (whose card renders through the journal lane, which carries the error itself).</summary>
+    public string? Error { get; init; }
+
     /// <summary>An optional cheap display label (the harness kind today).</summary>
     public string? Label { get; init; }
 

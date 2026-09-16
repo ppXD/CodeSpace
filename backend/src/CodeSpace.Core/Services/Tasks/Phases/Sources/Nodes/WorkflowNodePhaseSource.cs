@@ -198,7 +198,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         CompletedAt = node.CompletedAt,
     };
 
-    /// <summary>The agent ref for a node row, carrying the GROUND-TRUTH AgentRunStatus name + the per-agent metrics (duration / tokens / tool count / model) read team-scoped — falling back to the owning node's status name, and leaving the metric fields null, only when the agent row is missing (team-foreign or not yet created).</summary>
+    /// <summary>The agent ref for a node row, carrying the GROUND-TRUTH AgentRunStatus name + the per-agent metrics (failure reason / duration / tokens / tool count / model) read team-scoped — falling back to the owning node's status name, and leaving the metric fields null, only when the agent row is missing (team-foreign or not yet created).</summary>
     private static PhaseAgentRef ToAgentRef(WorkflowRunNodeSummary node, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
         var agentRunId = Guid.Parse(node.AgentRunId!);
@@ -210,6 +210,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             NodeId = node.NodeId,
             IterationKey = string.IsNullOrEmpty(node.IterationKey) ? null : node.IterationKey,
             Status = agentStatusById.TryGetValue(agentRunId, out var status) ? status.ToString() : node.Status.ToString(),
+            Error = metrics?.Error,   // the shared reader's already-bounded failure reason, so the room card names WHY, not just that it failed
             Goal = metrics?.Goal,   // the agent's subtask as a display name, so the row reads as its goal not a map#N key
             Model = metrics?.Model,
             InputTokens = metrics?.InputTokens,

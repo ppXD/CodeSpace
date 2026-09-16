@@ -1230,6 +1230,45 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_plain_failed_runs_own_agent_card_names_the_cause_not_just_the_status()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Plain failure");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Rename the command", resultSummary: null, status: WorkflowRunStatus.Failure);
+
+        // A PLAIN single-agent run — no supervisor decision beat to hang a journal card off, so the Room's OWN
+        // agent_group block is the only place its failure reason can reach the reader.
+        var agentRunId = await SeedFailedAgentNodeAsync(teamId, run, "litellm.BadRequestError: Unexpected message role");
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var card = turn.Blocks.OfType<AgentGroupBlock>().ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
+
+        card.AgentRunId.ShouldBe(agentRunId);
+        card.Status.ShouldBe(nameof(AgentRunStatus.Failed));
+        card.Error.ShouldBe("litellm.BadRequestError: Unexpected message role", "the room's own card names WHY the run failed; a bare 'Failed' tells the reader nothing");
+
+        JsonSerializer.SerializeToElement(card, ApiJson).GetProperty("error").GetString()
+            .ShouldBe("litellm.BadRequestError: Unexpected message role", "the field reaches the frontend on the wire, not only in the CLR projection");
+    }
+
+    [Fact]
+    public async Task A_plain_succeeded_runs_own_agent_card_carries_no_error()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Plain success");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Rename the command", resultSummary: "Done.");
+
+        await SeedAgentNodeAsync(teamId, run, summary: "Renamed it.", changedFiles: new[] { "cli.cs" });
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var card = turn.Blocks.OfType<AgentGroupBlock>().ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
+
+        card.Error.ShouldBeNull("a green card never shows a stray error");
+        JsonSerializer.SerializeToElement(card, ApiJson).GetProperty("error").ValueKind
+            .ShouldBe(JsonValueKind.Null, "the wire carries an explicit null, so the frontend renders no error line rather than a stale one");
+    }
+
+    [Fact]
     public async Task A_multi_repo_turn_keeps_same_path_files_distinct_and_carries_exact_identity_to_every_click_surface()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -1932,6 +1971,39 @@ public class RoomProjectorFlowTests
             Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = "",
             Harness = "codex-cli", Status = AgentRunStatus.Succeeded,
             TaskJson = goal is null && model is null ? "{}" : JsonSerializer.Serialize(new AgentTask { Goal = goal ?? nodeId, Harness = "codex-cli", Model = model }, AgentJson.Options),
+            ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+
+        return agentId;
+    }
+
+    /// <summary>Seed a plain single-agent run that FAILED: the same node.started/completed + AgentRun-wait staging as <see cref="SeedAgentNodeAsync"/>, with the row and its persisted result both terminal-Failed and the harness's real cause on the result (the source the shared metrics reader prefers over the row's own error column).</summary>
+    private async Task<Guid> SeedFailedAgentNodeAsync(Guid teamId, Guid runId, string error, string nodeId = "agent")
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentId = Guid.NewGuid();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.started", NodeId = nodeId, IterationKey = "", OccurredAt = now.AddSeconds(-5), PayloadJson = "{}" });
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = "node.completed", NodeId = nodeId, IterationKey = "", OccurredAt = now, PayloadJson = "{}" });
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = nodeId, IterationKey = "",
+            WaitKind = WorkflowWaitKinds.AgentRun, Token = agentId.ToString(), WakeAt = now,
+            Status = WorkflowWaitStatuses.Resolved, PayloadJson = "{}", CreatedAt = now,
+        });
+
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "error", Error = error, ChangedFiles = Array.Empty<string>() };
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = "",
+            Harness = "codex-cli", Status = AgentRunStatus.Failed, Error = error,
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "Rename the command", Harness = "codex-cli" }, AgentJson.Options),
             ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
             CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         });
