@@ -212,7 +212,7 @@ export interface RoomAgentCard {
   /// The planned subtask this agent was assigned (the model's decomposition). Null for a non-supervisor / homogeneous spawn.
   assignedSubtask?: string | null;
   status: string;
-  /// The (already secret-redacted) failure cause for a NON-succeeded agent — the real reason (e.g. an LLM 4xx) so the card names WHY it failed. Null on success. On a journal card it's carried from the backend; on a room card it's a display-only field the journal→room adapter fills.
+  /// The (already secret-redacted) failure cause for a NON-succeeded agent — the real reason (e.g. an LLM 4xx) so the card names WHY it failed. Backend-authored on BOTH lanes (the journal card, and the room's own agent_group card) off the same metrics reader; the journal→room adapter only carries it across. Null on success.
   error?: string | null;
   model?: string | null;
   /// The harness the agent ran on (e.g. "codex-cli" / "claude-code") — the small harness glyph on the card. Null when unknown.

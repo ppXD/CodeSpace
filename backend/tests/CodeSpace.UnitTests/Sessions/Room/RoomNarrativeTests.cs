@@ -1,5 +1,7 @@
 using CodeSpace.Core.Services.Agents.Credentials;
+using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Sessions.Room;
+using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
@@ -9,6 +11,7 @@ using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
 using CodeSpace.Messages.Tasks.Phases;
+using CodeSpace.UnitTests.Tasks.Phases;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;
@@ -533,6 +536,65 @@ public class RoomNarrativeTests
         card.Summary.ShouldBe("Renamed the command and registered the alias.", "the agent's own result takeaway");
         group.Agents.Single(c => c.AgentRunId == a2).Summary.ShouldBeNull("no summary captured for this agent");
     }
+
+    [Fact]
+    public void A_plain_agents_room_card_names_why_it_failed_and_a_green_one_stays_silent()
+    {
+        var failed = Guid.NewGuid();
+        var succeeded = Guid.NewGuid();
+        var needsReview = Guid.NewGuid();
+
+        // The REAL plain-run path: a node-source phase built by the structural source from the shared metrics reader's
+        // projection — the lane a single-agent / flow.map run falls back to when no decision beat carries its agents.
+        var phases = WorkflowNodePhaseSource.ProjectNodes(
+            new[]
+            {
+                RunDetailFixtures.TopLevelNode("code", NodeStatus.Failure, agentRunId: failed.ToString()),
+                RunDetailFixtures.TopLevelNode("docs", NodeStatus.Success, agentRunId: succeeded.ToString()),
+                RunDetailFixtures.TopLevelNode("audit", NodeStatus.Success, agentRunId: needsReview.ToString()),
+            },
+            new Dictionary<Guid, AgentRunStatus> { [failed] = AgentRunStatus.Failed, [succeeded] = AgentRunStatus.Succeeded, [needsReview] = AgentRunStatus.NeedsReview },
+            new Dictionary<Guid, AgentRunMetrics>
+            {
+                [failed] = NodeMetrics(AgentRunStatus.Failed, "litellm.BadRequestError: Unexpected message role"),
+                [succeeded] = NodeMetrics(AgentRunStatus.Succeeded, null),
+                [needsReview] = NodeMetrics(AgentRunStatus.NeedsReview, "acceptance command exited 1"),
+            });
+
+        var cards = Build(phases, WorkflowRunStatus.Failure).Blocks.OfType<AgentGroupBlock>().SelectMany(g => g.Agents).ToList();
+
+        cards.Single(c => c.AgentRunId == failed).Error
+            .ShouldBe("litellm.BadRequestError: Unexpected message role", "the room's OWN card names the cause, not a bare status word");
+        cards.Single(c => c.AgentRunId == succeeded).Error
+            .ShouldBeNull("a green card never carries a stray error");
+        cards.Single(c => c.AgentRunId == needsReview).Error
+            .ShouldBe("acceptance command exited 1", "the reader gates on Succeeded, not on 'failed' — a NeedsReview card's reason must not be dropped");
+    }
+
+    [Fact]
+    public void The_room_card_and_the_journal_card_carry_byte_identical_error_text()
+    {
+        var id = Guid.NewGuid();
+        // A raw row error the reader must FOLD (newlines collapsed, trimmed, capped at 400 with an ellipsis) — if either
+        // lane re-truncated or re-shaped it, the two strings would differ here rather than only in production.
+        var raw = "  litellm.BadRequestError: Unexpected message role\n" + new string('x', 500) + "  ";
+        var metrics = AgentMetricsReader.Build(id, AgentRunStatus.Failed, startedAt: null, completedAt: null, resultJson: null, taskJson: null, rowError: raw, toolCount: 0, now: DateTimeOffset.UnixEpoch);
+
+        var phases = WorkflowNodePhaseSource.ProjectNodes(
+            new[] { RunDetailFixtures.TopLevelNode("code", NodeStatus.Failure, agentRunId: id.ToString()) },
+            new Dictionary<Guid, AgentRunStatus> { [id] = AgentRunStatus.Failed },
+            new Dictionary<Guid, AgentRunMetrics> { [id] = metrics });
+
+        var roomError = Build(phases, WorkflowRunStatus.Failure).Blocks.OfType<AgentGroupBlock>().Single().Agents.ShouldHaveSingleItem().Error;
+        var journalError = AgentCardFactsSource.ToCard(id, metrics, allocation: null, compact: null).Error;
+
+        roomError.ShouldNotBeNullOrWhiteSpace();
+        roomError!.Length.ShouldBeLessThanOrEqualTo(401, "the reader's single 400-char cap (+ ellipsis) is the ONLY truncation rule");
+        roomError.ShouldBe(journalError, "both lanes read the SAME AgentMetricsReader projection — a second rule in either one shows up here");
+    }
+
+    /// <summary>The metrics bundle a plain node agent projects with — only the leaves this file asserts on; the reader's own folding is pinned in its tests.</summary>
+    private static AgentRunMetrics NodeMetrics(AgentRunStatus status, string? error) => new() { Status = status, Error = error };
 
     [Fact]
     public void A_map_fanout_run_humanizes_node_labels_and_groups_its_agents()

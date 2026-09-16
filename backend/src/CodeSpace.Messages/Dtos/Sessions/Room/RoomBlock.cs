@@ -193,6 +193,9 @@ public sealed record RoomAgentCard
     /// <summary>The agent's lifecycle status as a stable string (the <c>AgentRunStatus</c> name).</summary>
     public required string Status { get; init; }
 
+    /// <summary>The (already secret-redacted) failure reason for a NON-succeeded agent — the real cause (e.g. an LLM 4xx like "Unexpected message role") so the card names WHY it failed rather than showing a bare status word. Carried verbatim off the shared metrics reader, so this card and the journal card for the same agent can't disagree. Null on a succeeded agent / when nothing was recorded.</summary>
+    public string? Error { get; init; }
+
     /// <summary>The TITLE of the planned subtask this agent was assigned (the model's decomposition) — display only. Null for a non-supervisor / homogeneous spawn.</summary>
     public string? AssignedSubtask { get; init; }
 
