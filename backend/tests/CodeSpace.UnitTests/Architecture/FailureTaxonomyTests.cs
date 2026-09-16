@@ -112,8 +112,8 @@ public class FailureTaxonomyTests
         // deployment ended it". Too wide and a genuine failure stops buying the retries that could fix it; too
         // narrow and a worker restart buys a stronger model. Either way the drift is silent, so the set is spelled
         // out here as literals rather than compared against the constants it is built from.
-        FailureCodes.InfraExitReasons.ShouldBe(new[] { "model_credential_broker_unavailable" }, ignoreOrder: true,
-            customMessage: "adding an exit reason here changes what a post-hoc grade can be — state the new member's producer in the PR, and add it to this list deliberately");
+        FailureCodes.InfraExitReasons.ShouldBe(new[] { "model_credential_lease_lost", "model_credential_broker_unavailable" }, ignoreOrder: true,
+            customMessage: "adding an exit reason here changes what a post-hoc grade can be — state the new member's producer in the PR, add it to this list deliberately, and give it its own remedy arm in LlmSupervisorDecider.EndedByDeploymentSteer (membership settles the classification, never the remedy)");
     }
 
     [Fact]

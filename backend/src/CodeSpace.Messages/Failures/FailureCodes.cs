@@ -129,17 +129,25 @@ public static class FailureCodes
     /// <para>Deliberately a SET of exit reasons, not of failure codes in general: <see cref="All"/> declares every
     /// code this API can emit, and most of them (an invalid request, a missing rubric, a spent budget) are genuine
     /// answers about the work. Membership here is the narrower claim that the run never got to be about the work at
-    /// all. Pinned member-by-member by a unit test — adding or removing one changes what buys a retry.</para>
+    /// all. Pinned member-by-member by a unit test — adding or removing one changes what a post-hoc grade can be.</para>
     ///
-    /// <para>TWO relatives are deliberately ABSENT, both for the same reason: nothing declares them as an exit
-    /// reason today. A worker that loses a run's brokered model-credential LEASE is the case this set was built for,
-    /// and it joins as one line here the moment its own code and producer exist. The gateway FORMAT fault
-    /// (<c>AgentRetryCauses.GatewayFormatFault</c>) is recognised by matching the harness's error TEXT, not by any
-    /// exit reason, and joins if it ever earns one — matching prose here would make this set's answer depend on
-    /// wording, which is the thing it exists to replace.</para>
+    /// <para><b>Membership settles the CLASSIFICATION, never the REMEDY</b>, and the two members already differ on
+    /// the second. <see cref="ModelCredentialLeaseLost"/> is a worker that went away mid-run: the identical attempt
+    /// on a live worker simply succeeds, so its repair is a retry and nothing else. <see cref="ModelCredentialBrokerUnavailable"/>
+    /// is a worker that could not broker at all on a deployment mandating confinement — a retry helps only if it
+    /// lands somewhere that CAN broker, and if the deployment itself is misconfigured no number of attempts will
+    /// (its own remedy line above says as much). Both are equally "not about the work", which is all this set
+    /// claims; what to DO about each is the prompt renderer's question, and
+    /// <c>LlmSupervisorDecider.EndedByDeploymentSteer</c> answers it per exit reason rather than per class.</para>
+    ///
+    /// <para>The gateway FORMAT fault (<c>AgentRetryCauses.GatewayFormatFault</c>) belongs to this family and is
+    /// deliberately ABSENT: it is recognised by matching the harness's error TEXT, not by any exit reason, and it
+    /// joins if it ever earns one — matching prose here would make this set's answer depend on wording, which is the
+    /// thing it exists to replace.</para>
     /// </summary>
     public static readonly IReadOnlySet<string> InfraExitReasons = new HashSet<string>(StringComparer.Ordinal)
     {
+        ModelCredentialLeaseLost,
         ModelCredentialBrokerUnavailable,
     };
 

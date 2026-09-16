@@ -8,6 +8,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -490,29 +491,52 @@ public class SupervisorDeciderTests
 
     // ── F1: the deployment ended the attempt — a STRICT SUBSET of infra whose steer is the opposite verb ──
 
-    [Fact]
-    public void An_attempt_this_deployment_ended_is_steered_at_a_retry_never_at_re_planning_its_check()
+    [Theory]
+    [InlineData(FailureCodes.ModelCredentialLeaseLost)]
+    [InlineData(FailureCodes.ModelCredentialBrokerUnavailable)]
+    public void An_attempt_this_deployment_ended_is_steered_at_a_retry_never_at_re_planning_its_check(string exitReason)
     {
         // The contradiction this arm removes: the shared infra steer says "Do NOT retry the agent … Re-plan this
         // item with a check its agent can satisfy", while SupervisorQualityRecitation recites BoundedRepair as
         // "retry (same model; the machinery failed, not the work)" for the SAME unit one screen away — two verbs for
         // one row, the hazard SupervisorRecitation's own header names, and the fixed point InfraSteerFor's doc
-        // records burning a live run into plan×8. A worker that went away broke nothing about the check.
-        var prompt = PromptFor(EndedByThisDeploymentOutcome(Guid.NewGuid()));
+        // records burning a live run into plan×8. Neither member broke anything about the check.
+        var prompt = PromptFor(EndedByThisDeploymentOutcome(Guid.NewGuid(), exitReason));
 
         prompt.ShouldContain("THIS DEPLOYMENT ended the attempt", Case.Sensitive, "the verdict names what actually happened");
-        prompt.ShouldContain(LlmSupervisorDecider.EndedByDeploymentSteer, Case.Sensitive, "and steers at the one repair that exists: the same subtask on a live worker");
-        prompt.ShouldContain("infra:model_credential_broker_unavailable", Case.Sensitive, "the wall is named verbatim");
+        prompt.ShouldContain(LlmSupervisorDecider.EndedByDeploymentSteer(exitReason), Case.Sensitive, "and steers with the remedy THIS exit reason actually has");
+        prompt.ShouldContain($"infra:{exitReason}", Case.Sensitive, "the wall is named verbatim");
 
         prompt.ShouldNotContain("Do NOT retry the agent", Case.Sensitive,
-            "the shared infra prohibition is exactly wrong here — the retry IS the repair, and printing it beside the quality block's 'retry' is the contradiction");
+            "the shared infra prohibition is exactly wrong here — a retry can reach a live worker, and printing it beside the quality block's 'retry' is the contradiction");
         prompt.ShouldNotContain(LlmSupervisorDecider.ReplanThisItemWithASatisfiableCheck, Case.Sensitive,
             "there is nothing wrong with this unit's check to re-plan");
 
         // Not a whole-prompt ShouldNotContain: `amend_acceptance` is a legitimate verb in the roster block. The
         // claim is narrower and is the one that matters — this unit's own steer forbids it in the same breath as
         // it names the verb, because the model picks its move off the directive it read last.
-        LlmSupervisorDecider.EndedByDeploymentSteer.ShouldContain("do NOT amend its check", Case.Sensitive);
+        LlmSupervisorDecider.EndedByDeploymentSteer(exitReason).ShouldContain("do NOT amend its check", Case.Sensitive);
+    }
+
+    [Fact]
+    public void The_two_deployment_exit_reasons_get_the_remedy_each_one_actually_has()
+    {
+        // Membership in InfraExitReasons settles the CLASSIFICATION, never the remedy — and the two members differ.
+        // A lost lease is repaired by any live worker, so its steer is a retry and stops there. A broker that could
+        // not bind is a DEPLOYMENT setting: a retry helps only if it lands somewhere that can broker, and a second
+        // identical end means no attempt ever will. Giving both the lease-lost copy would spend the run's whole
+        // no-progress cap rediscovering an operator's configuration.
+        var leaseLost = LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.ModelCredentialLeaseLost);
+        var brokerDown = LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.ModelCredentialBrokerUnavailable);
+
+        leaseLost.ShouldNotBe(brokerDown, "one remedy text for two different faults is how a bounded repair becomes an unbounded loop");
+        leaseLost.ShouldNotContain("ask_human", Case.Sensitive, "a live worker is the whole repair — escalating a rolling restart to a human is noise");
+        brokerDown.ShouldContain("ask_human", Case.Sensitive, "only an operator can change a confinement setting");
+        brokerDown.ShouldContain("once", Case.Sensitive, "…and the retry it does buy is bounded, because a second identical end proves the deployment is the fault");
+
+        // A future member with no arm must not silently inherit either remedy.
+        LlmSupervisorDecider.EndedByDeploymentSteer("some_future_infra_exit")
+            .ShouldContain("no recorded remedy", Case.Sensitive);
     }
 
     [Fact]
@@ -532,10 +556,10 @@ public class SupervisorDeciderTests
     /// (<see cref="SupervisorOutcome.ProjectCompact"/> then <c>SupervisorTurnService.InfraExitVerdict</c>), so the
     /// fixture cannot carry a verdict/exit-reason combination the fold would never write (Rule 12.5).
     /// </summary>
-    private static string EndedByThisDeploymentOutcome(Guid agentId)
+    private static string EndedByThisDeploymentOutcome(Guid agentId, string exitReason = FailureCodes.ModelCredentialLeaseLost)
     {
-        var result = new AgentRunResult { Status = CodeSpace.Messages.Enums.AgentRunStatus.Failed, ExitReason = CodeSpace.Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable };
-        var compact = SupervisorOutcome.ProjectCompact(agentId, nameof(CodeSpace.Messages.Enums.AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
+        var result = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = exitReason };
+        var compact = SupervisorOutcome.ProjectCompact(agentId, nameof(AgentRunStatus.Failed), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
 
         return SupervisorOutcome.FoldAgentResults($$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""", new[] { SupervisorTurnService.InfraExitVerdict(compact)! });
     }
