@@ -738,7 +738,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 await CompleteAndNotifyAsync(owner, run.TeamId, AuthorityRefusalResult(ex), cancellationToken).ConfigureAwait(false);
                 if (DeserializeHandle(run.RunnerHandleJson) is { } revokedHandle && _runners.All.FirstOrDefault(r => r.Kind == revokedHandle.Kind) is ISandboxDurableRunner revokedRunner)
                 {
-                    try { await revokedRunner.TerminateAsync(revokedHandle, cancellationToken).ConfigureAwait(false); }
+                    try { WarnIfKillWithheld(await revokedRunner.TerminateAsync(revokedHandle, cancellationToken).ConfigureAwait(false), revokedHandle, agentRunId, "its authority was revoked"); }
                     catch (Exception termination) when (termination is not OperationCanceledException) { _logger.LogError(termination, "Revoked agent run {RunId} could not terminate its detached process", agentRunId); }
                 }
                 return;
@@ -4673,11 +4673,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Kill the detached process tree behind a run this pass has already landed terminal, swallowing any failure: the terminal stands either way, and at worst the orphan lingers to its own wall-clock deadline. Mirrors the reconciler's abandon-side kill.</summary>
+    /// <summary>
+    /// Kill the detached process tree behind a run this pass has already landed terminal, swallowing any failure: the
+    /// terminal stands either way, and at worst the orphan lingers to its own wall-clock deadline. Takes the
+    /// reconciler's abandon-side SHAPE — a throw is logged, and so is a kill the runner withheld without throwing —
+    /// but writes no cleanup receipt: the ledger is the abandon sweep's, and this path has no fence epoch to stamp one
+    /// with.
+    /// </summary>
     private async Task TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
     {
-        try { await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
+        try { WarnIfKillWithheld(await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false), handle, runId, "the run was landed terminal"); }
         catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: its detached process could not be terminated after the run was landed terminal; it may keep running until its wall-clock deadline", runId); }
+    }
+
+    /// <summary>
+    /// Say so when a terminate decided NOT to kill. Every withholding path returns normally, so without this the
+    /// caller's catch-only logging reported nothing at all and an agent kept running with its run already terminal —
+    /// the same silence the reconciler's abandon path had.
+    /// </summary>
+    private void WarnIfKillWithheld(SandboxTerminateResult result, SandboxHandle handle, Guid runId, string because)
+    {
+        if (result.IsSettled) return;
+
+        _logger.LogWarning("Agent run {RunId}: the kill issued because {Because} was NOT carried out for pid {Pid} on host {OwnerHost} — outcome {Outcome}: {Detail}; the agent may keep running until its wall-clock deadline", runId, because, handle.ProcessId, handle.LaunchHost, result.Outcome, result.Detail);
     }
 
     /// <summary>The posture a run's launch recorded, or null when it recorded none / the row cannot be read — a record nobody can parse is treated exactly like a record that was never written.</summary>

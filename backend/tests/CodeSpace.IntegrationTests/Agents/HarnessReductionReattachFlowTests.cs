@@ -680,7 +680,7 @@ public sealed class HarnessReductionReattachFlowTests
         }
 
         public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) => _durable.ProbeAsync(handle, cancellationToken);
-        public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => _durable.TerminateAsync(handle, cancellationToken);
+        public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => _durable.TerminateAsync(handle, cancellationToken);
     }
 
     private async Task<WorkflowRunHarnessReductionCheckpoint?> ReadCheckpointAsync(Guid runId)

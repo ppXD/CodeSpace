@@ -89,6 +89,45 @@ public class RunCleanupReceiptsTests
             customMessage: "mirrors the same-host branch: a sweep that moved no intent has nothing outstanding to report, not an unknown that lingers forever");
     }
 
+    [Theory]
+    // One code per withheld outcome, because they are four DIFFERENT facts about an agent that may still be running:
+    // the wrong host owns it, the handle no longer binds, liveness is unreadable, the kill did not visibly land.
+    // Collapsing any two turns a receipt from a cause into a shrug — merge two rows here and this goes red.
+    [InlineData(SandboxTerminateOutcome.SkippedNotLocal, "terminate-skipped-not-local")]
+    [InlineData(SandboxTerminateOutcome.SkippedUnresolvableHandle, "terminate-skipped-unresolvable-handle")]
+    [InlineData(SandboxTerminateOutcome.SkippedIndeterminate, "terminate-skipped-indeterminate")]
+    [InlineData(SandboxTerminateOutcome.TimedOutWaitingReap, "terminate-timed-out-waiting-reap")]
+    // A throw is not a fifth skip: the runner reached no decision at all, so it must not wear a decision's code.
+    [InlineData(SandboxTerminateOutcome.ThrewDuringTerminate, "terminate-threw")]
+    public void Each_withheld_kill_carries_its_own_receipt_code(SandboxTerminateOutcome outcome, string expected)
+    {
+        RunCleanupReceipts.TerminateCodeFor(outcome).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Every_withheld_outcome_has_a_code_and_every_settled_one_refuses_to_invent_a_failure()
+    {
+        var withheld = Enum.GetValues<SandboxTerminateOutcome>().Where(outcome => !new SandboxTerminateResult(outcome, null).IsSettled).ToList();
+
+        withheld.Select(RunCleanupReceipts.TerminateCodeFor).Distinct().Count().ShouldBe(withheld.Count,
+            "a new outcome that reuses an existing code — or has none at all — makes the receipt lie about which skip fired");
+
+        Should.Throw<ArgumentOutOfRangeException>(() => RunCleanupReceipts.TerminateCodeFor(SandboxTerminateOutcome.Killed),
+            "a settled terminate is recorded Completed; minting an error code for it would put a fault on a clean row");
+    }
+
+    [Fact]
+    public void A_process_receipt_is_never_counted_as_outstanding_work_because_no_sweep_can_ever_clear_it()
+    {
+        var withheld = Stamp.Unknown(RunResourceKind.Process, "owner-host", "4242", RunCleanupReceipts.TerminateCodeFor(SandboxTerminateOutcome.SkippedNotLocal));
+
+        withheld.IsBeyondEverySweep.ShouldBeTrue(
+            "AgentRunOrphanReaper reads only Orphaned rows and declines this kind anyway, and the abandon that wrote it fires once — so a reader that counts it counts it forever");
+
+        Stamp.Unknown(RunResourceKind.Cgroup, "owner-host", "key", RunCleanupReceipts.UnsupportedCode).IsBeyondEverySweep.ShouldBeFalse(
+            "a cgroup leaf IS reachable by a later sweep on its own host, so it must stay counted until one clears it");
+    }
+
     [Fact]
     public void An_unstamped_legacy_handle_plans_nothing_because_it_names_no_owner()
     {

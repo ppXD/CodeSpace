@@ -836,10 +836,16 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         return _runners.All.FirstOrDefault(r => r.Kind == parsed.Kind) as ISandboxDurableRunner;
     }
 
-    /// <summary>Kill the cancelled run's process tree via its durable handle, swallowing any failure (the run still reached Cancelled; at worst the process lingers to its deadline) so a kill error never propagates out of the cancel.</summary>
+    /// <summary>Kill the cancelled run's process tree via its durable handle, swallowing any failure (the run still reached Cancelled; at worst the process lingers to its deadline) so a kill error never propagates out of the cancel. A kill the runner WITHHELD throws nothing at all, so it is logged on its own terms — an operator who pressed cancel is owed the difference between "stopped" and "declined to signal".</summary>
     private async Task TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
     {
-        try { await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            var result = await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false);
+
+            if (!result.IsSettled)
+                _logger.LogWarning("The cancel of run {RunId} did NOT stop pid {Pid} on host {OwnerHost} — outcome {Outcome}: {Detail}; it may keep running until its wall-clock deadline", runId, handle.ProcessId, handle.LaunchHost, result.Outcome, result.Detail);
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to terminate the process for cancelled run {RunId}; it may keep running until its wall-clock deadline", runId);

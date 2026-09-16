@@ -23,6 +23,14 @@ internal static class NativeProcess
         return new NativeProcessIdentity(pid, process.StartTime.ToUniversalTime().Ticks, BootId, "linux:" + fields[19]);
     }
 
+    /// <summary>
+    /// The <c>/proc/pid/stat</c> states that mean the process has ALREADY EXITED: <c>Z</c> (zombie — exited, awaiting
+    /// its parent's reap) and <c>X</c> (dead). The distinction matters because a pid in one of these still answers
+    /// <c>kill(pid, 0)</c>, which is what <see cref="System.Diagnostics.Process.HasExited"/> asks for a process it did
+    /// not start — so the managed answer calls a corpse "running" and this one does not.
+    /// </summary>
+    internal static readonly string[] DeadStates = ["Z", "X"];
+
     public static bool IsAlive(NativeProcessIdentity identity)
     {
         if (identity.BootId != BootId || identity.ProcessId <= 1) return false;
@@ -30,13 +38,37 @@ internal static class NativeProcess
         try
         {
             var fields = LinuxProcessFields(identity.ProcessId);
-            return fields[0] is not ("Z" or "X") && identity.StartKey == "linux:" + fields[19];
+            return !DeadStates.Contains(fields[0]) && identity.StartKey == "linux:" + fields[19];
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }
         catch (FileNotFoundException) { return false; }
         catch (DirectoryNotFoundException) { return false; }
         catch (Win32Exception) when (IsAbsent(identity.ProcessId)) { return false; }
+    }
+
+    /// <summary>
+    /// The STATE half of <see cref="IsAlive"/> without its birth-key half: is <paramref name="pid"/> a process that is
+    /// still running here, by the same reading of <c>Z</c>/<c>X</c> and of Darwin's <c>SZOMB</c>? For the legacy
+    /// (pre-native-handle) paths, which have no recorded birth key to compare and previously answered this question
+    /// with <see cref="System.Diagnostics.Process.HasExited"/> — reporting a killed-but-unreaped tree as alive, the
+    /// exact misread this method exists to stop. Callers that DO hold an identity must use <see cref="IsAlive"/>:
+    /// without the birth key this cannot tell our process from a recycled pid.
+    ///
+    /// <para>Throws the way <see cref="IsAlive"/> does when liveness cannot be read AT ALL (an unreadable
+    /// <c>/proc</c>, a <c>libproc</c> failure that is not "absent"), so a caller can tell "gone" from "unknowable"
+    /// instead of folding the second into the first.</para>
+    /// </summary>
+    public static bool IsRunning(int pid)
+    {
+        if (pid <= 1) return false;
+        if (OperatingSystem.IsMacOS()) return ReadDarwinProcess(pid) is not null;
+        try { return !DeadStates.Contains(LinuxProcessFields(pid)[0]); }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (Win32Exception) when (IsAbsent(pid)) { return false; }
     }
 
     public static void NewSession()

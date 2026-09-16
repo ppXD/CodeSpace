@@ -29,6 +29,9 @@ public enum RunResourceKind
 
     /// <summary>The model credential the launch injected into the sandbox env. Never reclaimable by a sweep — see <see cref="RunResourceOutcome.Unknown"/>.</summary>
     ProviderCredentialLease,
+
+    /// <summary>The supervised agent process tree itself. The one resource the abandon path always tries to free, and the only one whose teardown could previously be WITHHELD in silence: see <c>SandboxTerminateOutcome</c>, whose withheld outcomes become this kind's <see cref="RunCleanupReceipt.ErrorCode"/>.</summary>
+    Process,
 }
 
 /// <summary>
@@ -89,4 +92,18 @@ public sealed record RunCleanupReceipt
 
     /// <summary>True for the two outcomes nothing may overwrite: the resource is provably gone, so a later sweep's "still orphaned" read is stale by construction.</summary>
     public bool IsSettled => Outcome is RunResourceOutcome.Completed or RunResourceOutcome.Compensated;
+
+    /// <summary>
+    /// True for the kinds NO sweep anywhere can move off <see cref="RunResourceOutcome.Unknown"/>, so a reader that
+    /// counts them as outstanding work counts them FOREVER. Both qualify for the same structural reason: nothing
+    /// reaps them. <c>AgentRunOrphanReaper</c> selects only <see cref="RunResourceOutcome.Orphaned"/> rows and its
+    /// resolver declines both kinds anyway; the abandon that wrote the row fires once and never runs again.
+    ///
+    /// <para>And in both cases the underlying question really does close on its own, unobservably: an injected
+    /// credential may have been mid-call when the host died, and a process whose kill was withheld dies at the
+    /// wall-clock <c>SandboxHandle.Deadline</c> that made the abandon safe in the first place. The row stays as
+    /// DIAGNOSIS — the ledger an operator queries, and what a failing kill assertion reads back — not as a standing
+    /// claim the UI must keep showing.</para>
+    /// </summary>
+    public bool IsBeyondEverySweep => Kind is RunResourceKind.ProviderCredentialLease or RunResourceKind.Process;
 }

@@ -90,7 +90,7 @@ public sealed class AgentRunOrphanReaper : IAgentRunOrphanReaper, IScopedDepende
         RunResourceKind.EgressSubnet => await TearDownEgressNetnsAsync(orphan, cancellationToken).ConfigureAwait(false),
         RunResourceKind.Cgroup => await TearDownCgroupAsync(orphan, cancellationToken).ConfigureAwait(false),
         RunResourceKind.Spool or RunResourceKind.McpSocket or RunResourceKind.Workspace => ObservePath(orphan),
-        _ => null,   // LogSegments / ProviderCredentialLease are never minted as orphans — neither is a host-local resource
+        _ => null,   // LogSegments / ProviderCredentialLease are never minted as orphans, and Process never is either: this host holds no handle to re-kill by, so an orphan row for one would address a sweep that cannot act
     };
 
     /// <summary>Tear down the netns (and with it release the host-global subnet lease). An unsupported host must answer <see cref="RunResourceOutcome.Unknown"/>, never Compensated — a reclaim that could not be attempted is not a reclaim.</summary>

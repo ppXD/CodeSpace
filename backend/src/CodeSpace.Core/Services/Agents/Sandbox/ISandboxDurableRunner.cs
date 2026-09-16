@@ -91,6 +91,13 @@ public interface ISandboxDurableRunner
     /// runner means one another HOST minted: killing by a foreign pid would reach an unrelated local process, so no
     /// signal is issued and that host's process keeps running to its own deadline. Returns once the kill signal has
     /// been issued (or deliberately withheld).
+    ///
+    /// <para>The returned <see cref="SandboxTerminateResult"/> SAYS WHICH of those two it was. A withheld kill is not
+    /// an error — nothing is thrown — so before this return value a caller could not tell "the tree is dead" from
+    /// "this runner declined to signal and the agent is still running"; the abandon path logged only when the call
+    /// THREW, which none of the withholding paths do. An implementation MUST NOT report
+    /// <see cref="SandboxTerminateOutcome.Killed"/> or <see cref="SandboxTerminateOutcome.AlreadyGone"/> unless it
+    /// OBSERVED the tree gone: those two are the settled outcomes callers are entitled to trust.</para>
     /// </summary>
-    Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken);
+    Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken);
 }

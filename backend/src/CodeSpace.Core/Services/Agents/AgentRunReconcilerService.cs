@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using CodeSpace.Core.Constants;
 using CodeSpace.Core.DependencyInjection;
@@ -598,14 +599,18 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         // worker stopped being able to spend when its own worker's heartbeat stopped, one TTL earlier.
         await RevokeBrokeredCredentialQuietlyAsync(runId).ConfigureAwait(false);
 
-        if (durable is not null && handle is not null)
-            await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
+        var termination = durable is not null && handle is not null
+            ? await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false)
+            : null;
 
         // The CAS above bumped fence_epoch by exactly one, so this is the generation every receipt below is stamped
         // with. WHOSE resources these are decides what may be said about them: a handle minted on another host names
         // a spool, a netns, a cgroup leaf and a clone that exist in namespaces this worker cannot address, and the
         // teardowns below would run against keys that mean nothing here.
         var stamp = new RunCleanupStamp(runId, candidate.Epoch + 1, LocalProcessRunner.CurrentHost, DateTimeOffset.UtcNow);
+
+        if (handle is not null && termination is not null)
+            await RecordTerminationAsync(handle, termination, stamp, cancellationToken).ConfigureAwait(false);
 
         if (handle is not null && !LocalProcessRunner.PidAnswerableHere(handle))
             await RecordForeignOrphansAsync(handle, stamp, settledCaptures, cancellationToken).ConfigureAwait(false);
@@ -762,14 +767,51 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
     }
 
-    /// <summary>Kill the abandoned run's orphaned process tree via its durable handle, swallowing any failure (the run still reached Failed; at worst the process lingers to its deadline) so a kill error never aborts the sweep.</summary>
-    private async Task TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Kill the abandoned run's orphaned process tree via its durable handle, swallowing any failure (the run still
+    /// reached Failed; at worst the process lingers to its deadline) so a kill error never aborts the sweep.
+    ///
+    /// <para>A THROW was never the common way this failed. The local durable runner withholds the signal, silently and
+    /// without throwing, whenever it cannot bind the handle, the launch belongs to another host or boot, liveness
+    /// cannot be observed, or the tree is still alive when the bounded reap wait expires — so the pre-existing
+    /// catch-only log meant the usual outcome of a skipped kill was NO LINE AT ALL, and an orphan kept burning its
+    /// injected credential with the run already recorded Failed. Every non-settled outcome is now a warning naming the
+    /// run, the pid, the outcome and the runner's own detail, and is recorded as a receipt by the caller.</para>
+    /// </summary>
+    private async Task<SandboxTerminateResult> TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
     {
-        try { await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
+        SandboxTerminateResult result;
+
+        try { result = await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "AgentRunReconciler: failed to terminate the orphaned process for abandoned run {RunId}; it may keep running until its wall-clock deadline", runId);
+            return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.ThrewDuringTerminate, $"the terminate threw {ex.GetType().Name}: {ex.Message}");
         }
+
+        if (!result.IsSettled)
+            _logger.LogWarning("AgentRunReconciler: the kill for abandoned run {RunId} (pid {Pid} on host {OwnerHost}) was NOT carried out — outcome {Outcome}: {Detail}; the agent may keep running until its wall-clock deadline", runId, handle.ProcessId, handle.LaunchHost, result.Outcome, result.Detail);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Record what became of the run's supervised PROCESS, the one resource the abandon path always acts on and the
+    /// only one that had no row. <see cref="RunResourceOutcome.Completed"/> when the tree was observed gone (invisible
+    /// in the Room, like every other clean teardown); <see cref="RunResourceOutcome.Unknown"/> carrying the typed
+    /// outcome as its error code when the kill was withheld or its effect never observed — because that is precisely
+    /// what is then true: nobody can say whether the agent is still running.
+    /// </summary>
+    private async Task RecordTerminationAsync(SandboxHandle handle, SandboxTerminateResult termination, RunCleanupStamp stamp, CancellationToken cancellationToken)
+    {
+        var owner = handle.LaunchHost is { Length: > 0 } minted ? minted : stamp.RecordedByHost;
+        var pid = handle.ProcessId.ToString(CultureInfo.InvariantCulture);
+
+        var receipt = termination.IsSettled
+            ? stamp.Completed(RunResourceKind.Process, owner, pid)
+            : stamp.Unknown(RunResourceKind.Process, owner, pid, RunCleanupReceipts.TerminateCodeFor(termination.Outcome));
+
+        await UpsertQuietlyAsync(receipt, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
