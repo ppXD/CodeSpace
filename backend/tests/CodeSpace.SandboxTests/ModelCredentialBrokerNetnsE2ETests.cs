@@ -67,6 +67,61 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
     }
 
     [Fact]
+    public async Task A_sealed_run_reaches_its_broker_again_after_the_worker_that_minted_it_restarts()
+    {
+        if (!FilteredEgressNetns.IsSupported) return;   // no ip/nft (macOS dev / non-privileged) → the privileged CI job is authoritative
+
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var netnsKey = Guid.NewGuid().ToString("N");
+        var setup = await FilteredEgressNetns.SetupAsync(netnsKey, Array.Empty<string>(), timeoutSeconds: 20, CancellationToken.None);
+
+        try
+        {
+            setup.SetupOk.ShouldBeTrue($"the filtered netns must set up cleanly; setup error: {setup.SetupError}");
+            setup.HostIp.ShouldNotBeNullOrWhiteSpace("the setup must report its gateway address — it is the only address a process inside the namespace can reach this worker at");
+
+            BrokeredModelCredential brokered;
+            string url;
+
+            // Worker A mints the address, proves it works from inside the sealed namespace, and then GOES AWAY.
+            using (var workerA = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()))
+            {
+                brokered = (await workerA.OpenAsync(LeaseFor(runId, teamId), CancellationToken.None)).ShouldNotBeNull();
+                url = ReachableUrl(brokered, setup.HostIp!) + "/v1/messages";
+
+                (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered.RunToken)).ShouldBe("200", "precondition: the sealed run reaches its broker while the worker that minted it holds the address");
+            }
+
+            (await CurlAsync(setup.ExecPrefix, url, brokered.RunToken)).Exit.ShouldNotBe(0,
+                "precondition: with worker A gone the address answers nothing at all — that is the deploy this test is about");
+
+            using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+
+            (await workerB.RebindAsync(RebindOf(brokered, runId, teamId, epoch: 2), CancellationToken.None)).ShouldBeTrue(
+                "worker B must be able to re-open the address the sealed run is still calling");
+
+            // The claim this lane exists for, and one no unit test can make: a re-bind has to take the WIDE address,
+            // because a sealed child reaches this worker at its namespace GATEWAY and never on loopback. Fall back to
+            // a loopback-only bind here and curl cannot connect at all — the re-bind reports success onto an address
+            // nobody calls, which is strictly worse than the honest refusal it replaced.
+            (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered.RunToken)).ShouldBe("200",
+                customMessage: $"a sealed run must reach its RE-BOUND broker at {setup.HostIp}. If curl cannot connect, the re-bind took loopback instead of the wide bind; check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`");
+        }
+        finally { await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None); }
+    }
+
+    private static ModelCredentialLeaseRequest LeaseFor(Guid runId, Guid teamId) =>
+        new() { RunId = runId, TeamId = teamId, Epoch = 1, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-e2e-upstream-key" }, Ttl = TimeSpan.FromMinutes(5) };
+
+    /// <summary>The re-bind the next worker builds from what the run's durable handle carries — every value restored from <paramref name="brokered"/>, because the child's configuration froze all of them at launch.</summary>
+    private static ModelCredentialRebindRequest RebindOf(BrokeredModelCredential brokered, Guid runId, Guid teamId, long epoch) => new()
+    {
+        RunId = runId, TeamId = teamId, Epoch = epoch, Port = brokered.RebindPort!.Value, PathId = brokered.RebindRoute!,
+        RunToken = brokered.RunToken, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-e2e-upstream-key" }, Ttl = TimeSpan.FromMinutes(5),
+    };
+
+    [Fact]
     public async Task A_run_token_presented_to_the_provider_directly_is_refused()
     {
         if (!OperatingSystem.IsLinux()) return;

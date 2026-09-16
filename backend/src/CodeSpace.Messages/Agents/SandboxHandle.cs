@@ -145,11 +145,43 @@ public sealed record SandboxHandle
     /// spool with, and this token is one of the launch's needles — rebuilt from the credential alone it would be
     /// missing, and the fingerprint gate below would then refuse to re-tail every brokered run's native log.
     ///
-    /// <para>It does NOT re-open the lease. The lease lives in the launching worker's memory and dies with it, which
-    /// is the guarantee this whole path exists for — a token read off this row after that worker is gone is inert,
-    /// authenticates to nothing, and (unlike the model key, which is never persisted anywhere) grants no spend.</para>
+    /// <para>On its own it re-opens nothing. It is one of the FOUR coordinates a re-attach needs — with
+    /// <see cref="ModelBrokerPort"/>, <see cref="ModelBrokerRoute"/> and <see cref="ModelBrokerCredentialId"/> — and
+    /// the bearer is inert without them: a token read off this row while the port it named is gone authenticates to
+    /// nothing and (unlike the model key, which is never persisted anywhere) grants no spend.</para>
     /// </summary>
     public string? ModelBrokerRunToken { get; init; }
+
+    /// <summary>
+    /// The TCP port this run's brokered lease listened on. It is the ONE fact that turns a worker restart from the end
+    /// of a run into an interruption: the detached CLI's base URL names this port for good, so a re-attaching worker
+    /// that binds it again answers the agent's next model call, and one that cannot must say the access is gone.
+    ///
+    /// <para>PER-RUN, not one port for the worker, and that is the whole design. A single shared port could also be
+    /// re-bound, but it would make every run's address the same address: one lease's port conflict would take out every
+    /// in-flight run on the host, a port already held by an unrelated process would leave the worker unable to broker
+    /// anything at all, and two workers on one host could never both broker. A port per lease fails one run at a time.</para>
+    ///
+    /// <para>Null for an unbrokered run, and on a handle stamped before this field existed — a run whose address was
+    /// never recorded, which therefore takes the typed lease-lost landing rather than a re-bind onto a port nobody
+    /// wrote down. That is the mixed-version deploy story: old handles keep the old outcome, new ones survive.</para>
+    /// </summary>
+    public int? ModelBrokerPort { get; init; }
+
+    /// <summary>The unguessable route segment the launch minted for this run's lease (the first path segment of the agent's base URL). Persisted with <see cref="ModelBrokerPort"/> because a re-bind must install the run's OWN route: a fresh one answers 401 to every call the detached agent makes. Null exactly when <see cref="ModelBrokerPort"/> is.</summary>
+    public string? ModelBrokerRoute { get; init; }
+
+    /// <summary>
+    /// The <c>ModelCredential</c> ROW whose key the launch's lease fronted (null for the operator-global key, which has
+    /// no row). A re-attach re-resolves the run's credential from scratch, and that resolve can legitimately land on a
+    /// DIFFERENT row — the credential was rotated, or the team default changed — so this is what lets the re-bind tell
+    /// "front the same key again" from "front some other key under the same bearer". The second is a silent credential
+    /// swap mid-run, on a wire the child was never pointed at, and the re-bind declines it.
+    /// </summary>
+    public Guid? ModelBrokerCredentialId { get; init; }
+
+    /// <summary>The provider tag of that credential, checked with <see cref="ModelBrokerCredentialId"/> for the same reason and separately because it is what decides the relay's upstream root and its path allowlist — a provider that changed under a run is a different API, not a different key. Null exactly when the run was not brokered.</summary>
+    public string? ModelBrokerProvider { get; init; }
 
     /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
