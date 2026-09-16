@@ -327,7 +327,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         var teamId = await SeedTeamAsync();
         var (runId, pid) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts);
 
-        ProcessAlive(pid).ShouldBeTrue("precondition: the launched durable agent process is running before the sweep");
+        ProcessAlive(pid).ShouldBeTrue($"precondition: the launched durable agent process is running before the sweep — {ProcessLiveness.Describe(pid)}");
 
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None))
@@ -339,8 +339,49 @@ public class AgentRunRecoveryFlowTests : IDisposable
         run.Error!.ShouldContain("abandoned", customMessage: "a permanently-unattachable alive run is abandoned past the ceiling");
 
         // The orphan must be DEAD — not orphaned to its deadline. The kill is a signal + reap, so poll briefly.
-        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(
-            "the reconciler must KILL a still-alive run it abandons past the re-attach ceiling, not leave it running");
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(await WhyTheKillDidNotLandAsync(verify, runId, pid));
+
+        var process = await ProcessReceiptAsync(verify, runId);
+        process.Outcome.ShouldBe(RunResourceOutcome.Completed, $"the kill landed, so the process receipt must say so; it says {process.Outcome} ({process.ErrorCode})");
+        process.ResourceKey.ShouldBe(pid.ToString(), "the receipt names the pid, which is what an operator would go looking for");
+    }
+
+    /// <summary>
+    /// The process receipt the abandon writes for <paramref name="runId"/> — the durable record of what the kill
+    /// actually did, which is the ONLY thing that distinguishes "the agent was stopped" from "the runner declined to
+    /// signal and said nothing" once the sweep has returned.
+    /// </summary>
+    private static async Task<RunCleanupReceipt> ProcessReceiptAsync(ILifetimeScope scope, Guid runId)
+    {
+        var receipts = await scope.Resolve<IRunCleanupLedger>().ForRunsAsync(await TeamOfAsync(scope, runId), [runId], CancellationToken.None);
+
+        return receipts.SingleOrDefault(receipt => receipt.Kind == RunResourceKind.Process)
+            ?? throw new ShouldAssertException($"the abandon of run {runId} wrote no {RunResourceKind.Process} cleanup receipt, so nothing durable records whether its agent was actually stopped — check AgentRunReconcilerService.RecordTerminationAsync");
+    }
+
+    private static async Task<Guid> TeamOfAsync(ILifetimeScope scope, Guid runId) =>
+        (await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(run => run.Id == runId)).TeamId;
+
+    /// <summary>
+    /// The failure message for a kill that did not land. A bare "should be True but was False" here cost three red CI
+    /// runs and an investigation: the run WAS abandoned, and the question was only ever which of the runner's four
+    /// silent skips fired. The reconciler now records that as a receipt, so the red can just say it.
+    /// </summary>
+    private static async Task<string> WhyTheKillDidNotLandAsync(ILifetimeScope scope, Guid runId, int pid)
+    {
+        var cause = await ProcessTerminationCauseAsync(scope, runId);
+
+        return $"the reconciler must KILL a still-alive run it abandons past the re-attach ceiling, not leave it running — pid {pid} is still alive and the abandon recorded {cause}. Diagnose manually with `ps -p {pid} -o pid,stat,etime,command`; state Z means the product's own oracle already counts it dead and this test's does not.";
+    }
+
+    private static async Task<string> ProcessTerminationCauseAsync(ILifetimeScope scope, Guid runId)
+    {
+        try
+        {
+            var receipt = await ProcessReceiptAsync(scope, runId);
+            return $"outcome {receipt.Outcome} ({receipt.ErrorCode ?? "no error code"}) against host {receipt.OwnerHost}";
+        }
+        catch (Exception error) { return $"no readable process receipt ({error.Message})"; }
     }
 
     [Fact]
@@ -717,11 +758,8 @@ public class AgentRunRecoveryFlowTests : IDisposable
         return (runId, handle.ProcessId);
     }
 
-    private static bool ProcessAlive(int pid)
-    {
-        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
-        catch { return false; }
-    }
+    /// <summary>The supervised pid's liveness, read the way the PRODUCT reads it — a killed grandchild lingers as a zombie no test process reaps, and the managed answer calls that still running. See <see cref="ProcessLiveness"/>.</summary>
+    private static bool ProcessAlive(int pid) => ProcessLiveness.IsAliveLikeTheProduct(pid);
 
     private static async Task<bool> WaitForProcessGoneAsync(int pid)
     {

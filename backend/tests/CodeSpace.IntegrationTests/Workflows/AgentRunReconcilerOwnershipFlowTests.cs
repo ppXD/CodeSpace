@@ -84,7 +84,7 @@ public sealed class AgentRunReconcilerOwnershipFlowTests(PostgresFixture fixture
             await Resume.Task.WaitAsync(cancellationToken);
             return new SandboxProbe { State = state, ExitCode = state == SandboxRunState.Exited ? 0 : null };
         }
-        public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) { Terminations++; return Task.CompletedTask; }
+        public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) { Terminations++; return Task.FromResult(SandboxTerminateResult.Killed); }
         public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string runKey, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) => throw new NotSupportedException();
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) => throw new NotSupportedException();

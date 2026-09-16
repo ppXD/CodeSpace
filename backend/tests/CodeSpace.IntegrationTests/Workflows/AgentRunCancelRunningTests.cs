@@ -45,7 +45,7 @@ public class AgentRunCancelRunningTests : IDisposable
         var teamId = await SeedTeamAsync();
         var (runId, pid) = await SeedRunningDurableRunAsync(teamId);
 
-        ProcessAlive(pid).ShouldBeTrue("precondition: the durable agent process is running before the cancel");
+        ProcessAlive(pid).ShouldBeTrue($"precondition: the durable agent process is running before the cancel — {ProcessLiveness.Describe(pid)}");
 
         bool won;
         using (var scope = _fixture.BeginScope())
@@ -61,7 +61,7 @@ public class AgentRunCancelRunningTests : IDisposable
             run.CompletedAt.ShouldNotBeNull();
         }
 
-        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue("the won CAS must TerminateAsync the orphan process tree");
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue($"the won CAS must TerminateAsync the orphan process tree — {ProcessLiveness.Describe(pid)}");
     }
 
     [Theory]
@@ -245,11 +245,8 @@ public class AgentRunCancelRunningTests : IDisposable
         return teamId;
     }
 
-    private static bool ProcessAlive(int pid)
-    {
-        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
-        catch { return false; }
-    }
+    /// <summary>The supervised pid's liveness, read the way the PRODUCT reads it — a killed grandchild lingers as a zombie no test process reaps, and the managed answer calls that still running. See <see cref="ProcessLiveness"/>.</summary>
+    private static bool ProcessAlive(int pid) => ProcessLiveness.IsAliveLikeTheProduct(pid);
 
     private static async Task<bool> WaitForProcessGoneAsync(int pid)
     {

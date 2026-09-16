@@ -1759,7 +1759,7 @@ public partial class AgentRunExecutorTests
         public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) =>
             Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = 0 });
 
-        public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => Task.FromResult(SandboxTerminateResult.Killed);
     }
 
     private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge

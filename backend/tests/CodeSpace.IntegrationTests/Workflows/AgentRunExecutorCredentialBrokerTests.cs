@@ -13,6 +13,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -871,12 +872,7 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>The agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
-    private static bool ProcessIsAlive(int pid)
-    {
-        try { using var process = System.Diagnostics.Process.GetProcessById(pid); return !process.HasExited; }
-        catch (ArgumentException) { return false; }
-        catch (InvalidOperationException) { return false; }
-    }
+    private static bool ProcessIsAlive(int pid) => ProcessLiveness.IsAliveLikeTheProduct(pid);
 
     // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1018,12 +1014,14 @@ public partial class AgentRunExecutorTests
 
         public string Kind => SandboxKinds.Local;
 
-        public async Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
+        public async Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
         {
-            if (!IsMine(handle)) return;
+            if (!IsMine(handle)) return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.SkippedNotLocal, "the fake owns a different handle");
 
             Entered.TrySetResult(true);
             await Release.Task;
+
+            return SandboxTerminateResult.Killed;
         }
 
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) => throw new NotSupportedException();

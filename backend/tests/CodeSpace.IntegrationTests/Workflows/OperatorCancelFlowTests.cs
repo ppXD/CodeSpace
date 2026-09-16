@@ -145,7 +145,7 @@ public class OperatorCancelFlowTests : IDisposable
             // Drive the branch agent to RUNNING with a REAL detached durable process (a sleeper) + persist its handle —
             // the live-agent post-launch state. The kill-wave's CancelRunningAsync must reap THIS process.
             var pid = await MarkRunningWithRealDurableProcessAsync(agentId);
-            ProcessAlive(pid).ShouldBeTrue("precondition: the branch agent's durable process is running before the cancel");
+            ProcessAlive(pid).ShouldBeTrue($"precondition: the branch agent's durable process is running before the cancel — {ProcessLiveness.Describe(pid)}");
 
             CancelRunOutcome? outcome;
             using (var scope = _fixture.BeginScope())
@@ -192,7 +192,7 @@ public class OperatorCancelFlowTests : IDisposable
 
             // Claim the branch agent Running with a real detached sleeper + its handle — the live post-launch orphan.
             var pid = await MarkRunningWithRealDurableProcessAsync(agentId);
-            ProcessAlive(pid).ShouldBeTrue("precondition: the orphaned branch agent's durable process is running");
+            ProcessAlive(pid).ShouldBeTrue($"precondition: the orphaned branch agent's durable process is running — {ProcessLiveness.Describe(pid)}");
 
             // Reproduce the residue end-state: the parent run is terminal (Cancelled) and the orphan's AgentRun wait
             // is already Resolved (so it is invisible to the Pending-wait guard) — exactly what the kill-wave leaves
@@ -375,11 +375,8 @@ public class OperatorCancelFlowTests : IDisposable
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.CreatedDate, DateTimeOffset.UtcNow - ago));
     }
 
-    private static bool ProcessAlive(int pid)
-    {
-        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
-        catch { return false; }
-    }
+    /// <summary>The supervised pid's liveness, read the way the PRODUCT reads it — a killed grandchild lingers as a zombie no test process reaps, and the managed answer calls that still running. See <see cref="ProcessLiveness"/>.</summary>
+    private static bool ProcessAlive(int pid) => ProcessLiveness.IsAliveLikeTheProduct(pid);
 
     private static async Task<bool> WaitForProcessGoneAsync(int pid)
     {

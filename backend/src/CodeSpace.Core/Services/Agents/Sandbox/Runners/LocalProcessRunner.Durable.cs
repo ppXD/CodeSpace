@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -5,6 +6,7 @@ using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
+using CodeSpace.NativeLaunch;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 
@@ -438,19 +440,61 @@ public sealed partial class LocalProcessRunner
         }
     }
 
-    public async Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    public async Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
-        if (!TryResolveNativeHandle(handle, out var native)) return;
-        if (native is not null)
-        {
-            await TerminateNativeHandleAsync(handle, native, cancellationToken).ConfigureAwait(false);
-            return;
-        }
+        if (!TryResolveNativeHandle(handle, out var native, out var refusal))
+            return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.SkippedUnresolvableHandle, refusal);
+
+        if (native is not null) return await TerminateNativeHandleAsync(handle, native, cancellationToken).ConfigureAwait(false);
 
         // Historical handles without native metadata retain the legacy observer behavior.
+        var before = ObserveLegacyProcess(handle);
+
         await KillByIdAndWaitAsync(handle, cancellationToken).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
+
+        return ObserveLegacyTermination(handle, before);
+    }
+
+    /// <summary>
+    /// What the LEGACY (pre-native-handle) kill achieved. <see cref="KillByIdAndWaitAsync"/>'s own bool cannot answer
+    /// it: that value means "the log seal was written", which is false for a spool that never went quiescent even when
+    /// the tree died. So the process is observed once more instead, and <paramref name="before"/> — the observation
+    /// taken BEFORE the signal — is what separates a kill this call made from a tree that was already gone.
+    /// </summary>
+    private static SandboxTerminateResult ObserveLegacyTermination(SandboxHandle handle, SandboxRunState before) => LegacyTerminationOutcome(handle, before, ObserveLegacyProcess(handle));
+
+    /// <summary>
+    /// The legacy kill's VERDICT, separated from the two observations that feed it so every branch is decidable
+    /// without staging an OS state two of them cannot be staged in: a tree that survives SIGKILL, and a <c>/proc</c>
+    /// this process is refused. <paramref name="before"/> is the observation taken before the signal — the only thing
+    /// that separates a kill this call made from a tree that was already gone — and <paramref name="after"/> the one
+    /// taken once the bounded wait returned.
+    /// </summary>
+    internal static SandboxTerminateResult LegacyTerminationOutcome(SandboxHandle handle, SandboxRunState before, SandboxRunState after)
+    {
+        if (!PidAnswerableHere(handle)) return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.SkippedNotLocal, $"legacy handle minted on host '{handle.LaunchHost}'; this worker is '{CurrentHost}', where pid {handle.ProcessId} names nothing of ours");
+
+        if (after == SandboxRunState.Indeterminate) return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.SkippedIndeterminate, $"liveness of legacy pid {handle.ProcessId} could not be observed after the kill");
+
+        if (after == SandboxRunState.Running) return SandboxTerminateResult.Skipped(SandboxTerminateOutcome.TimedOutWaitingReap, $"legacy pid {handle.ProcessId} was still alive after the bounded producer-exit wait ({ProducerExitWait.TotalSeconds:0.###}s)");
+
+        return before == SandboxRunState.Running ? SandboxTerminateResult.Killed : SandboxTerminateResult.AlreadyGone;
+    }
+
+    /// <summary>
+    /// Tri-state liveness for a legacy handle, read with the PRODUCT's oracle (<see cref="NativeProcess.IsRunning"/>,
+    /// for which a killed-but-unreaped tree is GONE) plus the recorded-start-time PID-reuse guard. An observation that
+    /// cannot be made at all is reported as such rather than folded into "still running", which would have turned
+    /// every unreadable <c>/proc</c> into a false <see cref="SandboxTerminateOutcome.TimedOutWaitingReap"/>.
+    /// </summary>
+    private static SandboxRunState ObserveLegacyProcess(SandboxHandle handle)
+    {
+        if (!PidAnswerableHere(handle)) return SandboxRunState.Indeterminate;
+
+        try { return IsProcessRunning(handle.ProcessId, handle.ProcessStartTimeUtc) ? SandboxRunState.Running : SandboxRunState.Gone; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception) { return SandboxRunState.Indeterminate; }
     }
 
     /// <summary>
@@ -491,7 +535,7 @@ public sealed partial class LocalProcessRunner
 
     public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
-        if (!TryResolveNativeHandle(handle, out var native)) return Task.FromResult(new SandboxProbe { State = SandboxRunState.Indeterminate });
+        if (!TryResolveNativeHandle(handle, out var native, out _)) return Task.FromResult(new SandboxProbe { State = SandboxRunState.Indeterminate });
         if (native is not null) return Task.FromResult(ProbeNativeHandle(handle, native));
 
         // Legacy marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
@@ -1221,6 +1265,24 @@ public sealed partial class LocalProcessRunner
     /// </summary>
     private static bool IsProcessAlive(int pid, DateTimeOffset? expectedStartUtc)
     {
+        // An observation that cannot be made is NOT a death: every caller of this face reads false as "provably gone"
+        // and acts on it (stop tailing, seal the log, report vanished), so an unreadable /proc must answer "alive".
+        try { return IsProcessRunning(pid, expectedStartUtc); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception) { return true; }
+    }
+
+    /// <summary>
+    /// The throwing core of <see cref="IsProcessAlive"/>, so a caller that can represent "unknowable" (a terminate
+    /// deciding between <see cref="SandboxTerminateOutcome.TimedOutWaitingReap"/> and
+    /// <see cref="SandboxTerminateOutcome.SkippedIndeterminate"/>) is not handed the conservative guess the
+    /// observer-side callers need. Liveness comes from <see cref="NativeProcess.IsRunning"/> — the SAME reading the
+    /// native path uses — so a killed-but-unreaped tree is gone here too, rather than the zombie-as-running answer
+    /// <see cref="Process.HasExited"/> gives for a process this worker did not start.
+    /// </summary>
+    private static bool IsProcessRunning(int pid, DateTimeOffset? expectedStartUtc)
+    {
+        if (!NativeProcess.IsRunning(pid)) return false;
+
         try
         {
             using var p = Process.GetProcessById(pid);

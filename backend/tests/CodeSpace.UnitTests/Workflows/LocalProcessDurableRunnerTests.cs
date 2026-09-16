@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
+using CodeSpace.NativeLaunch;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -1035,6 +1036,48 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         KillTree(launched.ProcessId);
     }
 
+    [Theory]
+    // The LEGACY (pre-native-handle) terminate against real processes. The zombie case is the one that used to lie:
+    // this path read liveness with Process.HasExited, which for a tree this process did not start reports a killed-
+    // but-unreaped corpse as RUNNING — so a dead tree came back TimedOutWaitingReap, a false warning and a false
+    // receipt. Both rows must land on a settled outcome.
+    [InlineData(false, SandboxTerminateOutcome.Killed)]
+    [InlineData(true, SandboxTerminateOutcome.AlreadyGone)]
+    public async Task Legacy_terminate_settles_a_live_tree_and_a_tree_that_was_already_dead(bool killItFirst, SandboxTerminateOutcome expected)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = LegacyProbeProjection(await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 }));
+
+        if (killItFirst)
+        {
+            KillTree(handle.ProcessId);
+            for (var i = 0; i < 100 && ProcessIsAlive(handle.ProcessId); i++) await Task.Delay(50);
+        }
+
+        var result = await _runner.TerminateAsync(handle, default);
+
+        result.Outcome.ShouldBe(expected, $"detail was: {result.Detail}");
+        result.IsSettled.ShouldBeTrue("the tree is gone either way; only the question of who killed it differs");
+        ProcessIsAlive(handle.ProcessId).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Legacy_terminate_of_a_handle_another_host_minted_is_skipped_as_not_local()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = LegacyProbeProjection(await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 })) with { LaunchHost = "another-worker" };
+
+        var result = await _runner.TerminateAsync(handle, default);
+
+        result.Outcome.ShouldBe(SandboxTerminateOutcome.SkippedNotLocal);
+        result.Detail.ShouldNotBeNull().ShouldContain("another-worker");
+        ProcessIsAlive(handle.ProcessId).ShouldBeTrue("a kill aimed at another host's pid must not be issued here");
+
+        KillTree(handle.ProcessId);
+    }
+
     [Fact]
     public async Task Terminate_does_not_kill_a_local_process_for_a_handle_another_host_minted()
     {
@@ -1886,11 +1929,8 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         File.Exists(marker).ShouldBeTrue("the quick command should have finished + recorded its exit marker within ~5s");
     }
 
-    private static bool ProcessIsAlive(int pid)
-    {
-        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
-        catch { return false; }
-    }
+    /// <summary>The PRODUCT's liveness oracle, called directly (this project references it; the integration suite has to mirror it). Process.HasExited on a non-child reports a killed-but-unreaped tree as still running, which is not what the runner believes.</summary>
+    private static bool ProcessIsAlive(int pid) => NativeProcess.IsRunning(pid);
 
     private static void KillTree(int pid)
     {

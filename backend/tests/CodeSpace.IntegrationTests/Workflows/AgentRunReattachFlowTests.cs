@@ -644,12 +644,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     }
 
     /// <summary>The detached agent's supervisor pid, asked of the OS directly — the only witness that a terminal verdict actually stopped the process rather than just writing a row about it.</summary>
-    private static bool ProcessIsAlive(int pid)
-    {
-        try { using var process = Process.GetProcessById(pid); return !process.HasExited; }
-        catch (ArgumentException) { return false; }
-        catch (InvalidOperationException) { return false; }
-    }
+    private static bool ProcessIsAlive(int pid) => ProcessLiveness.IsAliveLikeTheProduct(pid);
 
     private static async Task WaitUntilProcessGoneAsync(int pid)
     {

@@ -1230,6 +1230,43 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_kill_the_runner_withheld_does_not_pin_a_recovery_card_no_sweep_can_ever_clear()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Abandoned with a withheld kill");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Edit the file", resultSummary: "Interrupted.");
+        var agentRunId = Guid.NewGuid();
+        await SeedSpawnDecisionAsync(teamId, run, (agentRunId, ["edited.cs"]));
+
+        // What a CROSS-HOST abandon writes on essentially every run it touches: it cannot read the foreign spool, so
+        // the kill is withheld and recorded. Nothing ever revisits this row — the orphan reaper reads only Orphaned
+        // rows and declines this kind anyway, and the abandon CAS fires once — so counting it would leave the turn
+        // wearing "1 resource in an unknown state" for the rest of the session's life, long after the agent itself
+        // ended at the wall-clock deadline that made the abandon safe.
+        var stamp = new RunCleanupStamp(agentRunId, 2, "host-b", DateTimeOffset.UtcNow);
+        using (var scope = _fixture.BeginScope())
+        {
+            var ledger = scope.Resolve<IRunCleanupLedger>();
+            await ledger.UpsertAsync(stamp.Unknown(RunResourceKind.Process, "host-a", "4242", RunCleanupReceipts.TerminateCodeFor(SandboxTerminateOutcome.SkippedUnresolvableHandle)), CancellationToken.None);
+            await ledger.UpsertAsync(stamp.Completed(RunResourceKind.EgressSubnet, "host-b", "netns-key"), CancellationToken.None);
+        }
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1);
+        var card = turn.Blocks.OfType<AgentGroupBlock>().Single().Agents.Single(agent => agent.AgentRunId == agentRunId);
+
+        card.Recovery.ShouldBeNull("nothing here is outstanding work: every reclaimable resource was reclaimed, and the one row left is a diagnosis no sweep can ever settle — a card for it would never come down");
+
+        // The row itself must still BE there: it is the ledger an operator queries and what a failing kill assertion
+        // reads back to name its own cause. Excluding it from the card is a UI decision, not a decision to forget.
+        using var verify = _fixture.BeginScope();
+        var receipts = await verify.Resolve<IRunCleanupLedger>().ForRunsAsync(teamId, [agentRunId], CancellationToken.None);
+        var process = receipts.Single(receipt => receipt.Kind == RunResourceKind.Process);
+
+        process.ErrorCode.ShouldBe("terminate-skipped-unresolvable-handle", "the receipt names which skip fired, which is the whole point of writing it");
+        process.ResourceKey.ShouldBe("4242");
+    }
+
+    [Fact]
     public async Task A_plain_failed_runs_own_agent_card_names_the_cause_not_just_the_status()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

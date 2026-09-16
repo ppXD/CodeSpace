@@ -51,6 +51,22 @@ public static class RunCleanupReceipts
 
     /// <summary>Recorded when the sweeping host cannot even attempt a teardown (no netns / cgroup-v2 support, or no delegated cgroup root) — never <see cref="RunResourceOutcome.Compensated"/>, which would claim a reclaim that never ran.</summary>
     public const string UnsupportedCode = "unsupported";
+
+    /// <summary>
+    /// The stable error code for a <see cref="RunResourceKind.Process"/> receipt whose kill was withheld or whose
+    /// effect was never observed. The typed outcome IS the code — a reader (and a failing test) gets the cause by
+    /// name instead of the "best-effort, may have worked" the silent skip used to leave behind. The runner's free-text
+    /// detail stays in the warning log, where prose belongs; a receipt carries a vocabulary.
+    /// </summary>
+    public static string TerminateCodeFor(SandboxTerminateOutcome outcome) => outcome switch
+    {
+        SandboxTerminateOutcome.SkippedNotLocal => "terminate-skipped-not-local",
+        SandboxTerminateOutcome.SkippedUnresolvableHandle => "terminate-skipped-unresolvable-handle",
+        SandboxTerminateOutcome.SkippedIndeterminate => "terminate-skipped-indeterminate",
+        SandboxTerminateOutcome.TimedOutWaitingReap => "terminate-timed-out-waiting-reap",
+        SandboxTerminateOutcome.ThrewDuringTerminate => "terminate-threw",
+        _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "A settled terminate outcome has no error code — it is recorded Completed."),
+    };
 }
 
 /// <summary>
