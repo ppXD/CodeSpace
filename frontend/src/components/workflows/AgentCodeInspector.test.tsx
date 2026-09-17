@@ -23,7 +23,24 @@ vi.mock("@/hooks/use-chat", () => ({
   useConversations: () => ({ isLoading: false, data: [{ id: "conv1", kind: "Channel", slug: "review", name: "Review" }] }),
 }));
 vi.mock("./selectors/RepositoryWorkspacePicker", () => ({
-  RepositoryWorkspacePicker: ({ repositoryId }: { repositoryId: string }) => <div data-testid="repo-selector">{repositoryId}</div>,
+  // Expose the WHOLE contract (not just repositoryId) plus an emit button: a mock that renders only the id it
+  // was handed cannot fail when the inspector stops passing a prop, which is exactly how the dropped
+  // workspaceRepoDrafts channel (blank "Add a repository" rows) stayed invisible to this suite.
+  RepositoryWorkspacePicker: ({ repositoryId, relatedRepositories, drafts, onChange }: {
+    repositoryId: string;
+    relatedRepositories: unknown;
+    drafts: unknown;
+    onChange: (next: { repositoryId: string | undefined; relatedRepositories: unknown; workspaceRepoDrafts: unknown }) => void;
+  }) => (
+    <div data-testid="repo-selector">
+      <span data-testid="repo-primary">{repositoryId}</span>
+      <span data-testid="repo-drafts">{JSON.stringify(drafts ?? null)}</span>
+      <span data-testid="repo-related">{JSON.stringify(relatedRepositories ?? null)}</span>
+      <button type="button" onClick={() => onChange({ repositoryId: undefined, relatedRepositories: undefined, workspaceRepoDrafts: [{ repositoryId: "", alias: "", access: "read" }] })}>
+        add-row
+      </button>
+    </div>
+  ),
 }));
 vi.mock("./VariablePickerInput", () => ({
   VariablePickerInput: ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) => (
@@ -125,5 +142,45 @@ describe("AgentCodeInspector", () => {
     fireEvent.mouseDown(screen.getByRole("option", { name: "#review" }));
 
     expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", approvalConversationId: "conv1" });
+  });
+
+  // The picker's blank-row channel: "Add a repository" creates a row with an empty id, which neither
+  // repositoryId nor relatedRepositories can carry. Both directions of the wiring must therefore survive —
+  // feed drafts DOWN, and hand the emitted drafts back UP on onChange. Dropping either end makes the click a
+  // no-op (the row is written, then discarded on the way out, and the re-read sees the old inputs).
+  describe("workspace draft rows round-trip", () => {
+    it("feeds persisted drafts down to the picker", () => {
+      const drafts = [{ repositoryId: "", alias: "api", access: "read" }];
+      render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} inputs={{ workspaceRepoDrafts: drafts }} />);
+
+      expect(screen.getByTestId("repo-drafts")).toHaveTextContent(JSON.stringify(drafts));
+    });
+
+    it("hands the emitted workspaceRepoDrafts back up (an added blank row is not discarded)", () => {
+      const onInputsChange = vi.fn();
+      // A pre-existing primary, so the assertion proves the picker's OWN emission wins the two persisted
+      // fields while the extra drafts channel rides along — the mock emits repositoryId: undefined, standing
+      // in for "the added row is blank, so neither persisted field can carry it".
+      render(<AgentCodeInspector {...baseProps} onInputsChange={onInputsChange} config={{ harness: "codex-cli" }} inputs={{ repositoryId: "p1", relatedRepositories: [] }} />);
+
+      fireEvent.click(screen.getByText("add-row"));
+
+      expect(onInputsChange).toHaveBeenCalledWith({
+        repositoryId: undefined,
+        relatedRepositories: undefined,
+        workspaceRepoDrafts: [{ repositoryId: "", alias: "", access: "read" }],
+      });
+    });
+
+    it("clears the drafts channel when no row is blank (a persisted picker emits no drafts)", () => {
+      const onInputsChange = vi.fn();
+      render(<AgentCodeInspector {...baseProps} onInputsChange={onInputsChange} config={{ harness: "codex-cli" }} inputs={{ workspaceRepoDrafts: [{ repositoryId: "", alias: "", access: "read" }] }} />);
+
+      // The picker resolved every row to a real repo, so its emit carries no drafts — the stale channel must
+      // not survive in inputs (readWorkspaceRepos trims to drafts.length, so a leftover would pin rows).
+      fireEvent.click(screen.getByText("add-row"));
+
+      expect(onInputsChange).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceRepoDrafts: [{ repositoryId: "", alias: "", access: "read" }] }));
+    });
   });
 });
