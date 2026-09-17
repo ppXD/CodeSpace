@@ -172,7 +172,17 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
           <RepositoryWorkspacePicker
             repositoryId={repositoryId}
             relatedRepositories={inputs.relatedRepositories}
-            onChange={(next) => onInputsChange({ ...inputs, repositoryId: next.repositoryId, relatedRepositories: next.relatedRepositories })}
+            drafts={inputs.workspaceRepoDrafts}
+            onChange={(next) => onInputsChange({
+              ...inputs,
+              repositoryId: next.repositoryId,
+              relatedRepositories: next.relatedRepositories,
+              // The in-progress-row channel must round-trip too: a blank row has no slot in the two fields
+              // above, so dropping it here loses the "Add a repository" click on re-read (the picker emits
+              // drafts, this side must hand them back). The backend fold reads only repositoryId/alias/access
+              // and skips idless entries, so the extra key never reaches the persisted workspace.
+              workspaceRepoDrafts: next.workspaceRepoDrafts,
+            })}
           />
           <span className="wf-form-help">The first repo is the primary — the writable workspace root the agent runs in. Add more to clone alongside it for a coordinated change (e.g. a frontend + its backend).</span>
         </div>

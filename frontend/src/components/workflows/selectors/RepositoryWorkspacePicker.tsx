@@ -29,11 +29,16 @@ interface RepositoryWorkspacePickerProps {
   repositoryId: string;
   /** Persisted `relatedRepositories` array (tolerated unknown — normalised on read). */
   relatedRepositories: unknown;
+  /** In-progress rows (blank ids) the persisted shape cannot hold — see {@link writeWorkspaceRepos}. */
+  drafts: unknown;
   onChange: (next: WorkspaceReposEmit) => void;
 }
 
-export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, onChange }: RepositoryWorkspacePickerProps) {
-  const rows = useMemo(() => readWorkspaceRepos(repositoryId, relatedRepositories), [repositoryId, relatedRepositories]);
+export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, drafts, onChange }: RepositoryWorkspacePickerProps) {
+  const rows = useMemo(
+    () => readWorkspaceRepos(repositoryId, relatedRepositories, drafts),
+    [repositoryId, relatedRepositories, drafts],
+  );
   const projects = useProjects();
   const repositories = useRepositories();
 
