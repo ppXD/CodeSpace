@@ -491,6 +491,13 @@ public partial class AgentRunExecutorTests
     {
         if (OperatingSystem.IsWindows()) return;
 
+        // BEFORE anything is launched. The fixture below holds LOOPBACK, the only candidate host a worker without
+        // filtered-egress namespaces tries; on a host that builds them the broker prefers the wide bind this fixture
+        // does not hold, so the refusal would not be falsifiable. Skipping here rather than after the drain, because
+        // the drain deliberately leaves a real `sleep 600` child ALIVE: a guard further down would return having
+        // leaked a ten-minute detached process and a run row stuck Running on every netns-capable dev box.
+        if (CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported) return;
+
         var teamId = await SeedTeamAsync();
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-rebind-refused-fixture");
         var runId = await CreateRunWithCredentialAsync(teamId, credId);
@@ -499,11 +506,7 @@ public partial class AgentRunExecutorTests
         var (handle, _) = await DrainLeavingTheAgentRunningAsync(runId, harness);
 
         // Something else on this host takes the run's port during the gap — the one failure mode a re-bind has that
-        // nothing in this codebase controls. The fixture holds LOOPBACK, the only candidate host a worker without
-        // filtered-egress namespaces tries; on a host that builds them the broker prefers the wide bind this fixture
-        // does not hold, so the refusal would not be falsifiable and the test says so instead of passing hollow.
-        if (CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported) return;
-
+        // nothing in this codebase controls.
         using var stolen = new StolenPort(handle.ModelBrokerPort!.Value);
         using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
         var reservation = await ReserveReattachAfterLapseAsync(runId);

@@ -274,9 +274,27 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
     public Task<bool> RenewAsync(Guid runId, long epoch, CancellationToken cancellationToken)
     {
+        var now = _time.GetUtcNow();
+
         if (!_byRun.TryGetValue(runId, out var lease) || lease.Epoch != epoch) return Task.FromResult(false);
 
-        lease.RenewUntil(_time.GetUtcNow() + ModelCredentialLease.Ttl);
+        // A lease that has ALREADY lapsed is not renewed, it is refused. Two reasons, and the second is a race.
+        //
+        // The honest one: an expired lease already reads false from HasLease and is already refused at the relay, so
+        // renewing it would resurrect a capability that was, for some interval, dead — while leaving the three
+        // answers disagreeing about the same instant. The window is not tight enough for that to be an accident: the
+        // TTL is TWO heartbeat intervals, so a single missed ping never reaches here and only a worker that has gone
+        // quiet for two consecutive beats does.
+        //
+        // The race: the sweep below reads an expiry, decides to reclaim, and then removes and closes. A renewal
+        // landing inside that window would otherwise extend a lease whose socket is about to be closed anyway —
+        // leaving the table claiming a live lease that nothing serves. Refusing here means ExpiresAt can never move
+        // forward once passed, so the sweep's decision cannot be invalidated after it is taken. Fixing it on this
+        // side rather than by re-inserting after the removal, because a re-insert races an OPEN for the same run and
+        // would then close the listener that open just installed.
+        if (lease.ExpiresAt <= now) return Task.FromResult(false);
+
+        lease.RenewUntil(now + ModelCredentialLease.Ttl);
 
         return Task.FromResult(true);
     }
@@ -332,11 +350,18 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         foreach (var (runId, lease) in _byRun)
         {
-            if (lease.ExpiresAt > now || !_byRun.TryRemove(new KeyValuePair<Guid, Lease>(runId, lease))) continue;
+            // Nothing may escape a timer callback: an unhandled exception on a TimeProvider timer takes the PROCESS
+            // down, which would turn a socket-reclaiming nicety into the worst outage this class could cause. The only
+            // throw left in the body is a misbehaving logger, and the catch costs nothing.
+            try
+            {
+                if (lease.ExpiresAt > now || !_byRun.TryRemove(new KeyValuePair<Guid, Lease>(runId, lease))) continue;
 
-            CloseQuietly(lease.Listener);
+                CloseQuietly(lease.Listener);
 
-            _logger.LogInformation("Model credential lease for agent run {RunId} lapsed without being withdrawn; its port {Port} is reclaimed", runId, lease.Port);
+                _logger.LogInformation("Model credential lease for agent run {RunId} lapsed without being withdrawn; its port {Port} is reclaimed", runId, lease.Port);
+            }
+            catch (Exception) { /* this lease keeps its socket until the next tick; the sweep is best-effort by design */ }
         }
     }
 
@@ -790,6 +815,14 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// <para>Init-only properties rather than a primary constructor: the nine values below include two bare numbers
     /// (the epoch and the port) that a positional list would let a caller swap without failing to compile, and the
     /// re-bind path is where such a swap would hand a live run the wrong address (Rule 1).</para>
+    ///
+    /// <para><b>A sealed CLASS, and it must stay one.</b> Three correctness sites remove a lease with
+    /// <c>TryRemove(KeyValuePair)</c> — <see cref="RevokeAsync"/>, <see cref="SweepLapsedLeases"/> and
+    /// <see cref="DropIfStillServing"/> — and every one of them depends on that comparison being REFERENCE equality,
+    /// so each removes only the instance it read and never a replacement installed in between. Turning this into a
+    /// <c>record</c> would silently switch it to value equality: two leases with identical fields would compare equal,
+    /// and a revoke or a sweep could then close the listener of a lease it never looked at. Nothing would fail to
+    /// compile.</para>
     /// </summary>
     private sealed class Lease
     {

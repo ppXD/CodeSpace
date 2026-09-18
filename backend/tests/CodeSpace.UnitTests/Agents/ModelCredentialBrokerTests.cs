@@ -128,6 +128,32 @@ public class ModelCredentialBrokerTests
     }
 
     [Fact]
+    public async Task A_lapsed_lease_is_refused_by_the_relay_before_any_sweep_reclaims_its_port()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream, time);
+
+        // A 30-second lease, advanced to t=31: past its expiry and still SHORT of the sweep's first minute tick, so
+        // the port is unambiguously still bound and the relay's own expiry check is the ONLY thing that can refuse
+        // the call. (Stopping short of the tick rather than landing between two of them, because FakeTimeProvider
+        // moves its clock to the end of an Advance before firing what came due — so a callback scheduled inside the
+        // span would see the FINAL time and sweep a lease that was live when its tick was actually due.)
+        //
+        // That window is the whole point. Its sibling test advances far enough that the sweep has already closed the
+        // socket, so the refusal there would look identical with the expiry check deleted — and in production that
+        // check is what stands between a lapsed lease and up to a full sweep interval of further spending.
+        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid(), ttl: TimeSpan.FromSeconds(30)), CancellationToken.None);
+        if (brokered is null) return;
+
+        time.Advance(TimeSpan.FromSeconds(31));
+
+        (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.Unauthorized,
+            customMessage: "an expired lease must be refused by the RELAY the moment it lapses. The sweep only reclaims the socket and it runs a minute apart, so without this check a worker that stopped heartbeating keeps its agent spending the tenant's key for up to a full sweep interval — on a port that is still perfectly open");
+        upstream.Calls.ShouldBe(0, "and nothing may reach the provider on a lease nobody is renewing");
+    }
+
+    [Fact]
     public async Task A_lease_left_unrenewed_past_its_ttl_is_refused_and_a_renewal_keeps_it_alive()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
