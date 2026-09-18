@@ -20,21 +20,36 @@ public interface IOwnedTransaction : IAsyncDisposable
 /// <para>Why: <c>TransactionalBehavior</c> opens one transaction per <c>ICommand</c> on that same scoped context, so
 /// any service reached through the mediator already runs inside one. Npgsql refuses a second — "The connection is
 /// already in a transaction and cannot participate in another transaction" — so a service that opened its own
-/// UNCONDITIONALLY threw on every such call. That is not hypothetical: it is what silently broke the budget
-/// settlement sweep, the lesson distiller and the agent-run spool reaper, each from the day its caller became
-/// transactional, and what broke an operator's run cancel outright. A service cannot know which door it was called
-/// through, so the decision belongs here rather than in each one.</para>
+/// UNCONDITIONALLY threw on every such call. That was not hypothetical: it is how the budget settlement sweep, the
+/// lesson distiller and the agent-run spool reaper were each found broken (fixed on 2026-09-15 by marking their
+/// commands <c>INonTransactionalCommand</c>), and how an operator's run cancel was found broken after them. A
+/// service cannot know which door it was called through, so the decision belongs here rather than in each one.</para>
+///
+/// <para><b>Which idiom, for what.</b> Two mechanisms answer "there is already a transaction", and they are not
+/// interchangeable:</para>
+/// <list type="bullet">
+/// <item>A system SWEEP command — a bounded batch of independent rows, each settled by its own fenced CAS, each
+/// failure caught and retried next tick — carries <c>INonTransactionalCommand</c>. Per-row independence IS its
+/// design; one transaction over the batch would make one unrecoverable row undo every other row's recovery, so
+/// joining a caller's transaction is exactly as wrong for it as opening its own.</item>
+/// <item>A request-scoped SERVICE reachable from a transactional command — one coherent unit of work that belongs in
+/// whatever transaction its caller already has — uses THIS helper.</item>
+/// <item>A site with an invariant that needs ownership — a write that must commit independently, a
+/// <c>RollbackAsync</c> it then carries on past, a global advisory lock it must not hold for a caller's whole
+/// command, or a ceremony that must run only after its own terminal is visible — keeps owning, with a comment
+/// naming the invariant.</item>
+/// </list>
 ///
 /// <para>Joined, <see cref="IOwnedTransaction.CommitAsync"/> is a no-op: the owner decides when — and whether — the
 /// work becomes durable. Disposal is a no-op too, so a caller that exits early does NOT roll the owner back. That
-/// cuts both ways, and is the rule for choosing this helper: a site that relies on disposing WITHOUT committing to
-/// DISCARD writes it already made, or that calls <c>RollbackAsync</c> and then carries on, must keep owning its own
+/// cuts both ways, and is why the third bullet exists: a site that relies on disposing WITHOUT committing to DISCARD
+/// writes it already made, or that calls <c>RollbackAsync</c> and then carries on, must keep owning its own
 /// transaction (a savepoint, not a join, is the tool there) — joined, its discard would silently become a keep.</para>
 ///
 /// <para>A <c>pg_advisory_xact_lock</c> taken inside a JOINED transaction is held until the OWNER commits, not until
-/// the service method returns. That is longer than the unjoined case and is the intended trade: the lock then covers
-/// the whole command, which is the window the caller's own write needs anyway. A site that needs the lock released
-/// EARLY cannot join, and must stay owning-only for that reason.</para>
+/// the service method returns. For a PER-ROW or per-run key that is the intended trade: the lock then covers the
+/// whole command, which is the window the caller's own write needs anyway. For a GLOBAL key it is not — one long
+/// command would serialize every other holder behind its tail — so a global lock stays owning-only.</para>
 /// </summary>
 public static class ScopedTransaction
 {

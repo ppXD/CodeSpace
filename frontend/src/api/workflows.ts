@@ -30,7 +30,7 @@ export class InvalidWorkflowRunPendingWaitObservationError extends Error {
   }
 }
 
-/** The result of a hard-stop. `cancelled` is true when this call won the flip; false (with the existing terminal `status`) when the run had already finished. `agentRunsCancelled` is how many in-flight agents the kill-wave stopped. */
+/** The result of a hard-stop. `cancelled` is true when this call won the flip; false (with the existing terminal `status`) when the run had already finished. `agentRunsCancelled` is how many in-flight agents the kill-wave was handed (counted at the flip; the wave itself runs just after). */
 export interface CancelRunOutcome {
   cancelled: boolean;
   status: WorkflowRunStatus;

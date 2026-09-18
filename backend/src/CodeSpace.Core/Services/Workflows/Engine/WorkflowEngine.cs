@@ -298,7 +298,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <summary>Commit the authoritative run row and its matching terminal ledger fact together, then run recoverable post-terminal ceremonies outside the transaction.</summary>
     private async Task CompleteAndRecordAsync(WorkflowRun run, TerminalCompletionRequest request, CancellationToken cancellationToken)
     {
-        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): the ceremonies below must run
+        // AFTER this terminal is visible, which only an owned commit here guarantees. Joined, "outside the
+        // transaction" would become "inside the caller's", and a caller's rollback would unpublish a terminal whose
+        // ceremonies had already fired. The engine walks on its own scope, so nothing is ambient here.
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var completion = await CompleteRunAsync(run, request, cancellationToken).ConfigureAwait(false);
         await RecordTerminalAsync(run.Id, completion, request.Duration, request.OutputsPresent, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -315,7 +319,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task EnsureRunCancelledAsync(Guid runId, DateTimeOffset engineStartedAt)
     {
-        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, CancellationToken.None).ConfigureAwait(false);
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): CancellationToken.None says this
+        // write must land whatever happened to the walk's token, and a joined write only lands if its caller commits.
+        await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
             .ExecuteUpdateAsync(s => s
@@ -365,7 +371,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _logger.LogError(failure, "Run {RunId} failed during bootstrap before walker started", runId);
 
         var now = DateTimeOffset.UtcNow;
-        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, CancellationToken.None).ConfigureAwait(false);
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync), for the same reason
+        // EnsureRunCancelledAsync does: a bootstrap terminal written under CancellationToken.None must land on its
+        // own, not at the discretion of a caller that may itself be failing.
+        await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
             .ExecuteUpdateAsync(s => s
@@ -3575,9 +3584,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         try
         {
-            // Owns its transaction deliberately, unlike this class's other three (ScopedTransaction.OwnOrJoinAsync):
-            // the catch below re-writes the record through a FRESH scope, which is only correct because disposing
-            // this one discards the first write. Joined, that discard would be a no-op and the node would settle twice.
+            // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): the catch below re-writes the
+            // record through a FRESH scope, which is only correct because disposing this one discards the first
+            // write. Joined, that discard would be a no-op and the node would settle twice.
             await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             var recordId = await WriteRedactedCompletionAsync(_recordLogger, redacted, cancellationToken).ConfigureAwait(false);
             await _sensitivePayloadStore.SaveNodeOutputsAsync(recordId, completion.RunId, completion.TeamId, completion.Outputs, cancellationToken).ConfigureAwait(false);

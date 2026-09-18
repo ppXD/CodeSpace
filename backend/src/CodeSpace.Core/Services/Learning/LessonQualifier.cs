@@ -35,7 +35,11 @@ public sealed class LessonQualifier : ILessonQualifier, IScopedDependency
 
     public async Task<int> QualifyAsync(CancellationToken cancellationToken)
     {
-        await using var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): the lock below is a GLOBAL key,
+        // and an advisory xact lock is held until its transaction ends. Joined, one long command would serialize
+        // every qualification sweep in the deployment behind its own tail. Its caller is an
+        // INonTransactionalCommand, so there is no ambient transaction to join here in the first place.
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(hashtext('codespace.lesson_qualification'))", cancellationToken).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
         var lessons = await _db.Lesson

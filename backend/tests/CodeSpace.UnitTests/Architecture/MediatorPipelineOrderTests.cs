@@ -97,8 +97,92 @@ public class MediatorPipelineOrderTests
             string.Join("\n  ", handlers));
     }
 
+    /// <summary>
+    /// Measures the one thing the list above only INTERPRETS: that the earlier element of the resolved enumerable is
+    /// the OUTER one. Everything the pinned order is read for — "the processors are inside the transaction" — depends
+    /// on that direction, and it comes from MediatR's fold, not from anything in this repository. Two recording
+    /// behaviours through the real module, and the nesting is observed rather than assumed.
+    /// </summary>
+    [Fact]
+    public async Task The_earlier_behaviour_in_the_resolved_list_is_the_outer_one()
+    {
+        var trace = new List<string>();
+        var container = ProbeContainer(trace);
+
+        var order = container.Resolve<IEnumerable<IPipelineBehavior<OrderProbe, string>>>().Select(b => b.GetType().Name.Split('`')[0]).ToList();
+
+        order.IndexOf(Name(typeof(FirstRecorder<,>))).ShouldBeLessThan(order.IndexOf(Name(typeof(SecondRecorder<,>))),
+            customMessage: "this test registers FirstRecorder before SecondRecorder so the resolved list has a known direction to measure");
+
+        await container.Resolve<IMediator>().Send(new OrderProbe());
+
+        trace.ShouldBe(["first in", "second in", "handler", "second out", "first out"], ignoreOrder: false,
+            customMessage: "the earlier behaviour in the resolved enumerable must ENTER first and EXIT last, i.e. it wraps the later " +
+                           $"one. If that flipped, every conclusion drawn from the pinned order is inverted.\n  trace: {string.Join(" > ", trace)}");
+    }
+
     /// <summary>A generic behaviour's name without its arity suffix, so the pinned list survives a rename but not a reorder.</summary>
     private static string Name(Type behavior) => behavior.Name.Split('`')[0];
+
+    /// <summary>The real module plus two recorders and a handler for a plain <c>IRequest</c> — no <c>ICommand</c>, so no transaction and no database is involved in measuring a fold direction.</summary>
+    private static IContainer ProbeContainer(List<string> trace)
+    {
+        var builder = new ContainerBuilder();
+
+        builder.RegisterModule(new MediatorModule(typeof(CodeSpaceModule).Assembly, typeof(MediatorPipelineOrderTests).Assembly));
+        RegisterBehaviorDependencies(builder);
+        builder.RegisterInstance(trace).AsSelf();
+        builder.RegisterGeneric(typeof(FirstRecorder<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(SecondRecorder<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+
+        return builder.Build();
+    }
+
+    public sealed record OrderProbe : IRequest<string>;
+
+    public sealed class OrderProbeHandler : IRequestHandler<OrderProbe, string>
+    {
+        private readonly List<string> _trace;
+
+        public OrderProbeHandler(List<string> trace) { _trace = trace; }
+
+        public Task<string> Handle(OrderProbe request, CancellationToken cancellationToken)
+        {
+            _trace.Add("handler");
+            return Task.FromResult("ok");
+        }
+    }
+
+    public abstract class Recorder<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse> where TRequest : notnull
+    {
+        private readonly List<string> _trace;
+
+        protected Recorder(List<string> trace) { _trace = trace; }
+
+        protected abstract string Label { get; }
+
+        public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
+        {
+            _trace.Add($"{Label} in");
+            var response = await next(cancellationToken).ConfigureAwait(false);
+            _trace.Add($"{Label} out");
+            return response;
+        }
+    }
+
+    public sealed class FirstRecorder<TRequest, TResponse> : Recorder<TRequest, TResponse> where TRequest : notnull
+    {
+        public FirstRecorder(List<string> trace) : base(trace) { }
+
+        protected override string Label => "first";
+    }
+
+    public sealed class SecondRecorder<TRequest, TResponse> : Recorder<TRequest, TResponse> where TRequest : notnull
+    {
+        public SecondRecorder(List<string> trace) : base(trace) { }
+
+        protected override string Label => "second";
+    }
 
     /// <summary>The behaviour names MediatR would fold, outermost first — resolved from the real module so a registration change is re-measured rather than re-assumed.</summary>
     private static List<string> ResolvedPipeline()
