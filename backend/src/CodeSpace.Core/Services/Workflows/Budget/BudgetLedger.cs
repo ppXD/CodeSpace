@@ -284,6 +284,14 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
     ///
     /// <para>The team lock is skipped for an <c>Unbudgeted</c> claim (null cap): it is admitted against nothing, so
     /// taking a team-wide lock for it would serialize every real admission in the team behind an observability row.</para>
+    ///
+    /// <para>The proof holds WITHIN ONE TRANSACTION, and since these methods join an ambient one
+    /// (<c>ScopedTransaction.OwnOrJoinAsync</c>) that transaction is the whole command's: an advisory xact lock is
+    /// released by the transaction, not by the method. So a single command that reserves for TWO runs of one team
+    /// re-derives the hazard — the first reserve still holds team-T when the second waits on run-B, while another
+    /// command holds run-B and waits on team-T. No caller does that today (a reserve is per-run, and the sweeps that
+    /// touch many runs settle and release, which take the run lock alone); a command that wants to must reserve each
+    /// run in its own transaction.</para>
     /// </summary>
     private async Task TakeAdmissionLocksAsync(Guid workflowRunId, Guid teamId, decimal? capUsd, CancellationToken cancellationToken)
     {

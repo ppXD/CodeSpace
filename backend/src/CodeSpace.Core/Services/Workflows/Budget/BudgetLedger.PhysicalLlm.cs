@@ -1,5 +1,4 @@
 using System.Text.Json;
-using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -23,9 +22,9 @@ public sealed partial class BudgetLedger
         if (input.InvocationId == Guid.Empty || input.LogicalCallId == Guid.Empty || input.CandidateId == Guid.Empty || input.CandidateOrdinal <= 0)
             throw new PhysicalLlmAccountingException("Physical admission requires complete server-owned causal identities.");
 
-        // Owns its transaction deliberately, unlike SettlePhysicalAsync (ScopedTransaction.OwnOrJoinAsync): the caller
-        // sends the physical POST as soon as this returns admitted, so the receipt authorizing it must already be
-        // COMMITTED. Joined, a caller's later rollback would erase the accounting for a request that was really sent.
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): the caller sends the physical
+        // POST as soon as this returns admitted, so the receipt authorizing it must already be COMMITTED. Joined, a
+        // caller's later rollback would erase the accounting for a request that was really sent.
         await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await TakeAdmissionLocksAsync(input.RunId, input.TeamId, input.CapUsd, cancellationToken).ConfigureAwait(false);
         if (!await _db.WorkflowRun.AsNoTracking().AnyAsync(r => r.Id == input.RunId && r.TeamId == input.TeamId, cancellationToken).ConfigureAwait(false))
@@ -94,7 +93,10 @@ public sealed partial class BudgetLedger
 
     public async Task SettlePhysicalAsync(PhysicalLlmSettlement input, CancellationToken cancellationToken)
     {
-        await using var tx = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
+        // Owns its transaction for the same reason AdmitPhysicalAsync does: this records the ACTUAL cost of a POST
+        // that already went out, and its only caller swallows failures in a finally. Joined, a caller's rollback
+        // would discard the one receipt proving what was spent, for a request nothing can un-send.
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await TakeRunLockAsync(input.RunId, cancellationToken).ConfigureAwait(false);
         var attempt = await _db.WorkflowRunModelCallAttempt.AsNoTracking().SingleOrDefaultAsync(a => a.Id == input.InvocationId && a.TeamId == input.TeamId && a.WorkflowRunId == input.RunId && a.CaptureSource == PhysicalLlmSource, cancellationToken).ConfigureAwait(false)
             ?? throw new PhysicalLlmAccountingException("The physical usage receipt is missing or outside its workflow scope.");

@@ -1048,20 +1048,53 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // The terminal row and matching ledger fact are one commit. Teardown is a recoverable ceremony and runs only
         // after this truth is visible, so a process-kill or child-cleanup failure cannot leave a terminal without tape.
         await _recordLogger.RunCancelledAsync(runId, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+        var branchAgentsTargeted = await CountLiveBranchAgentsAsync(runId, cancellationToken).ConfigureAwait(false);
         await terminalTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
-        // Trip the in-process walk's token so an actively-running engine walk on THIS host stops cooperatively
-        // at its next safe checkpoint instead of running every remaining node under CancellationToken.None. A
-        // no-op when no walk is running here (a parked run, or one walking on another replica — that one is
-        // caught by the engine's wave-boundary status re-read). Fired AFTER the flip so the walk observes Cancelled.
-        _cancellationRegistry.Cancel(runId);
+        await DeferTeardownAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        var agentRunsCancelled = await TearDownCancelledRunAsync(runId, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Workflow run cancelled by operator. RunId={RunId} TeamId={TeamId} From={From} BranchAgentsTargeted={BranchAgentsTargeted}", runId, teamId, current.Value, branchAgentsTargeted);
 
-        _logger.LogInformation("Workflow run cancelled by operator. RunId={RunId} TeamId={TeamId} From={From} AgentRunsCancelled={AgentRunsCancelled}", runId, teamId, current.Value, agentRunsCancelled);
-
-        return new CancelRunOutcome { Cancelled = true, Status = WorkflowRunStatus.Cancelled, AgentRunsCancelled = agentRunsCancelled };
+        return new CancelRunOutcome { Cancelled = true, Status = WorkflowRunStatus.Cancelled, AgentRunsCancelled = branchAgentsTargeted };
     }
+
+    /// <summary>
+    /// Hand the cancelled run's teardown to the post-commit drain, so both halves of it happen strictly AFTER the
+    /// terminal flip is durable — which is what the ceremony has always claimed and, since this method started
+    /// joining its caller's transaction, is no longer true of running it inline.
+    ///
+    /// <para>It is not only a comment: tripping the registry while the flip is uncommitted wakes an engine walk on
+    /// this host, whose <c>EnsureRunCancelledAsync</c> does a <c>WHERE Status = Running</c> UPDATE on the very row
+    /// this uncommitted transaction holds — so the walk blocks on a different connection while THIS transaction goes
+    /// on to write <c>agent_run</c> rows in the kill-wave. That is a cross-connection lock wait with a deadlock
+    /// shape, and the process kills the wave performs are in the middle of it.</para>
+    ///
+    /// <para>With no ambient transaction the drain runs the action immediately, so a direct caller sees the same
+    /// synchronous teardown it always did.</para>
+    /// </summary>
+    private async Task DeferTeardownAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _postCommit.RunAfterCommitAsync(async ct =>
+        {
+            // Trip the in-process walk's token so an actively-running engine walk on THIS host stops cooperatively
+            // at its next safe checkpoint instead of running every remaining node under CancellationToken.None. A
+            // no-op when no walk is running here (a parked run, or one walking on another replica — that one is
+            // caught by the engine's wave-boundary status re-read).
+            _cancellationRegistry.Cancel(runId);
+
+            var agentRunsCancelled = await TearDownCancelledRunAsync(runId, ct).ConfigureAwait(false);
+
+            _logger.LogInformation("Workflow run {RunId} teardown complete. AgentRunsCancelled={AgentRunsCancelled}", runId, agentRunsCancelled);
+        }, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The branch agent runs still Queued or Running when the cancel flipped — what the kill-wave is handed, read
+    /// inside the flip's own transaction. It is the count the caller is told, because the wave itself now runs after
+    /// the commit and cannot report back into this response; the wave logs what it actually flipped.
+    /// </summary>
+    private async Task<int> CountLiveBranchAgentsAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.AgentRun.AsNoTracking()
+            .CountAsync(r => r.WorkflowRunId == runId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running), cancellationToken)
+            .ConfigureAwait(false);
 
     /// <summary>The flip lost the CAS (the run went terminal between read and write). Re-read its now-terminal status as a clean no-op outcome.</summary>
     private async Task<CancelRunOutcome> ReReadTerminalOutcomeAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)

@@ -1,11 +1,11 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
-using CodeSpace.Core.Services.Completion;
-using CodeSpace.Core.Services.Learning;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Budget;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -32,6 +32,11 @@ namespace CodeSpace.IntegrationTests.Persistence;
 ///
 /// <para>Each case asserts a row THIS test seeded, read back in a fresh scope — never a sweep's global tally, which
 /// this shared database cannot make deterministic.</para>
+///
+/// <para>The ambient shape of the two theories is SYNTHETIC: no production caller opens a transaction around the
+/// budget ledger or the spool reaper today, because their commands carry <c>INonTransactionalCommand</c>. They pin
+/// the helper's contract for the next caller, not a live path. The cancel cases below are the live one — that
+/// command really is transactional, and really was broken.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -63,25 +68,6 @@ public class ScopedTransactionFlowTests
             customMessage: $"caller shape {caller} expected the release to end as {expectedState}. Released under a rolled-back " +
                            "caller means the ledger committed on its own instead of joining; Reserved under a committing one " +
                            "means its write never reached the caller's transaction.");
-    }
-
-    [Theory]
-    [InlineData(Caller.NoTransaction, true)]
-    [InlineData(Caller.CommitsItsTransaction, true)]
-    [InlineData(Caller.RollsBackItsTransaction, false)]
-    public async Task A_lesson_qualification_sweep_lands_exactly_when_its_caller_does(Caller caller, bool advanced)
-    {
-        var teamId = (await SeedTeamAsync()).TeamId;
-        var lessonId = await SeedLessonAsync(teamId);
-
-        await UnderCallerAsync(caller, scope => scope.Resolve<ILessonQualifier>().QualifyAsync(CancellationToken.None));
-
-        using var verify = _fixture.BeginScope();
-        var lesson = await verify.Resolve<CodeSpaceDbContext>().Lesson.AsNoTracking().SingleAsync(l => l.Id == lessonId);
-
-        (lesson.QualificationCheckedAt > SweepCursorFloor).ShouldBe(advanced,
-            customMessage: $"caller shape {caller} expected the fairness cursor to have {(advanced ? "advanced" : "stayed at its seeded floor")}; " +
-                           $"it reads {lesson.QualificationCheckedAt:O}. The sweep's own transaction must follow the caller's, not its own mind.");
     }
 
     [Theory]
@@ -132,6 +118,43 @@ public class ScopedTransactionFlowTests
                            "which this service now joins instead of trying to open a second one beside it");
     }
 
+    /// <summary>
+    /// The consequence of joining, on the one path that now does it under a real command: the cancel's teardown must
+    /// not run while the flip is still uncommitted. Tripping the run-cancellation registry there wakes an engine walk
+    /// on this host, whose <c>WHERE Status = Running</c> UPDATE then blocks on the row this very transaction holds,
+    /// while the kill-wave goes on writing <c>agent_run</c> from inside it — a cross-connection lock wait with a
+    /// deadlock shape, with process kills in the middle of it.
+    ///
+    /// <para>Measured without racing anything: inside the transaction, the branch agent must still read Queued — a
+    /// read that would see the wave's own uncommitted write if the teardown had run inline. It is only after the
+    /// commit and the drain <c>TransactionalBehavior</c> performs next that the agent is Cancelled.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_ambient_cancel_defers_its_teardown_until_the_command_commits()
+    {
+        var team = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(team.TeamId, WorkflowRunStatus.Running);
+        var agentRunId = await SeedQueuedBranchAgentAsync(team.TeamId, runId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await using var ambient = await db.Database.BeginTransactionAsync();
+
+        var outcome = await scope.Resolve<IWorkflowService>().CancelRunAsync(runId, team.TeamId, CancellationToken.None);
+
+        outcome!.AgentRunsCancelled.ShouldBe(1, "the one live branch agent is what the kill-wave is handed");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId)).Status.ShouldBe(AgentRunStatus.Queued,
+            customMessage: "this read is inside the cancel's own transaction, so it would see the kill-wave's write if the teardown " +
+                           "had run inline. Cancelled here means the wave ran while the run's terminal flip was still uncommitted.");
+
+        await ambient.CommitAsync();
+        await scope.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId)).Status
+            .ShouldBe(AgentRunStatus.Cancelled, "the deferred teardown runs on the drain, so the branch agent is aborted after the commit — not never");
+    }
+
     /// <summary>Runs <paramref name="work"/> in one scope, under the caller shape the case names, and resolves the outcome the way that caller would.</summary>
     private async Task UnderCallerAsync(Caller caller, Func<ILifetimeScope, Task> work)
     {
@@ -150,9 +173,6 @@ public class ScopedTransactionFlowTests
         else await ambient.RollbackAsync();
     }
 
-    /// <summary>The seeded fairness cursor: old enough to be swept first out of whatever else this shared database holds, and a value the sweep can only move forwards.</summary>
-    private static readonly DateTimeOffset SweepCursorFloor = DateTimeOffset.UnixEpoch;
-
     /// <summary>One unused map-branch reservation for this test's own (run, scope key) — the exact state <c>ReleaseAsync</c> returns to the cap.</summary>
     private async Task<Guid> SeedReservationAsync(Guid teamId, Guid workflowRunId, string scopeKey)
     {
@@ -170,27 +190,6 @@ public class ScopedTransactionFlowTests
 
         await db.SaveChangesAsync();
         return reservationId;
-    }
-
-    /// <summary>A live, unqualified lesson whose fairness cursor sits at the floor, so the bounded sweep reaches it however many other lessons this database holds.</summary>
-    private async Task<Guid> SeedLessonAsync(Guid teamId)
-    {
-        var lessonId = Guid.NewGuid();
-
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-
-        db.Lesson.Add(new Lesson
-        {
-            Id = lessonId, TeamId = teamId, Mode = RunModeKeys.PlanMap, FailureClass = "ambient-transaction",
-            WhatFailed = "a service opened its own transaction inside its caller's", Why = "npgsql refuses a nested transaction",
-            HowToApply = "join the ambient transaction", SourceRunIds = [Guid.NewGuid()], DistilledByModel = "test-model",
-            ValidFrom = DateTimeOffset.UtcNow.AddDays(-1), ExpiresAt = DateTimeOffset.UtcNow.AddDays(30),
-            QualificationCheckedAt = SweepCursorFloor,
-        });
-
-        await db.SaveChangesAsync();
-        return lessonId;
     }
 
     /// <summary>
@@ -217,6 +216,20 @@ public class ScopedTransactionFlowTests
         // own ordering, and this row must sort to the front of a batch this shared database also fills.
         await db.AgentRun.Where(r => r.Id == agentRunId)
             .ExecuteUpdateAsync(set => set.SetProperty(r => r.Status, AgentRunStatus.Succeeded).SetProperty(r => r.CompletedAt, DateTimeOffset.UtcNow.AddDays(-3650)));
+
+        return agentRunId;
+    }
+
+    /// <summary>One Queued branch agent under the run — what the cancel's kill-wave is handed.</summary>
+    private async Task<Guid> SeedQueuedBranchAgentAsync(Guid teamId, Guid workflowRunId)
+    {
+        var agentRunId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun { Id = agentRunId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Queued, WorkflowRunId = workflowRunId, NodeId = "agent", IterationKey = "" });
+        await db.SaveChangesAsync();
 
         return agentRunId;
     }

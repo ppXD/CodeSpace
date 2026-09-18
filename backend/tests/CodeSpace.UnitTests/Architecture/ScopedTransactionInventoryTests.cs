@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Messages.Mediation;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Architecture;
@@ -17,12 +18,34 @@ namespace CodeSpace.UnitTests.Architecture;
 /// <see cref="ScopedTransaction.OwnOrJoinAsync"/>, or be named in <see cref="OwnsByDesign"/> with the reason it must
 /// own its transaction. Each entry pins a COUNT as well as a reason: adding a raw call to an already-exempt file is
 /// exactly the way a new instance of this bug would arrive unnoticed.</para>
+///
+/// <para><b>Joining is not the only answer, and this list must not push anyone toward the wrong one.</b> The rule,
+/// stated in full on <see cref="ScopedTransaction"/>: a system SWEEP command carries
+/// <see cref="INonTransactionalCommand"/>, because per-row independence is its design and one transaction over the
+/// batch — the caller's or its own — destroys it (<see cref="RecurringJobTransactionInventoryTests"/> pins that
+/// half); a request-scoped SERVICE reachable from a transactional command joins through the helper; and a site with
+/// an invariant that needs ownership — an independent commit, a <c>RollbackAsync</c> it carries on past, a GLOBAL
+/// advisory lock, a ceremony that must follow its own terminal — keeps owning, and says which one here.</para>
+///
+/// <para>Scope: <c>Services/**</c> only. Two legitimate calls live outside it and are deliberately not scanned —
+/// <c>TransactionalBehavior</c>, which is the ambient transaction this helper exists to notice, and
+/// <see cref="ScopedTransaction"/> itself, which is the one place allowed to open one on its behalf.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class ScopedTransactionInventoryTests
 {
     private const string ScannedRoot = "backend/src/CodeSpace.Core/Services";
     private const string RawCall = "BeginTransactionAsync(";
+
+    /// <summary>The services whose transaction is their caller's when they have one — one coherent unit of work each, reachable from a transactional command.</summary>
+    private static readonly string[] JoinsItsCaller =
+    [
+        "Agents/AgentRunSpoolReaper.cs",
+        "Workflows/Budget/BudgetLedger.cs",
+        "Workflows/ModelCalls/WorkflowRunModelCallProjector.cs",
+        "Workflows/ToolCalls/WorkflowRunToolCallProjector.cs",
+        "Workflows/WorkflowService.cs",
+    ];
 
     /// <summary>
     /// Files whose transactions must stay owned, with how many such calls each has. Every entry names WHY joining
@@ -39,6 +62,7 @@ public class ScopedTransactionInventoryTests
         ["Agents/Mcp/IToolCallLedgerService.cs"] = (1, "rolls back and CONTINUES on a lost claim race, then re-reads the winner; a joined rollback would take the caller's transaction with it."),
         ["Agents/Publish/ArtifactManifestStore.cs"] = (1, "already joins, but through a SAVEPOINT: a failed pointer replacement must discard only its own writes, which a plain join cannot do."),
         ["Agents/Publish/IPublishManifestStore.cs"] = (1, "rolls back and CONTINUES into the fenced-update fallback when the first insert loses its race."),
+        ["Learning/LessonQualifier.cs"] = (1, "its advisory lock is a GLOBAL key; joined, one long command would serialize every qualification sweep in the deployment behind its tail."),
         ["Supervisor/Executors/RealSupervisorActionExecutor.Spawn.cs"] = (1, "the authorization wave must roll back to zero residue when the supervisor catches the fault and carries on; joined, that discard would be a no-op and replay would see a partial wave."),
         ["Supervisor/Observation/SupervisorDecisionObservationMetadataReader.cs"] = (1, "already joins; the RepeatableRead snapshot it opens is only meaningful for the transaction it owns."),
         ["Supervisor/Observation/SupervisorPlanObservationLeafReader.cs"] = (1, "already joins, same RepeatableRead snapshot."),
@@ -50,8 +74,8 @@ public class ScopedTransactionInventoryTests
         ["Workflows/Artifacts/Runtime/ArtifactLocationVerifier.cs"] = (1, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Workflows/Artifacts/Runtime/LegacyPlacementAdopter.cs"] = (8, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Workflows/Artifacts/StorageProfileHeadLock.cs"] = (1, "already joins, and hands the caller back the transaction it had to open so the advisory lock outlives the call."),
-        ["Workflows/Budget/BudgetLedger.PhysicalLlm.cs"] = (1, "AdmitPhysicalAsync: the receipt authorizing the physical POST must be COMMITTED before the caller sends it."),
-        ["Workflows/Engine/WorkflowEngine.cs"] = (1, "the redaction fallback re-writes the record through a fresh scope, which is only correct because disposing this transaction discards the first write."),
+        ["Workflows/Budget/BudgetLedger.PhysicalLlm.cs"] = (2, "both physical-POST sites: the receipt authorizing a POST, and the receipt recording what that POST actually cost, must be committed independently of a caller that may roll back."),
+        ["Workflows/Engine/WorkflowEngine.cs"] = (4, "three terminal writes that must land whatever their caller decides (two under CancellationToken.None), plus a redaction fallback whose fresh-scope retry depends on this transaction's discard."),
         ["Workflows/ModelCalls/WorkflowRunModelCallBodyMaterializer.cs"] = (2, "the same private CreateDb() context; nothing ambient can reach it."),
     };
 
@@ -87,16 +111,23 @@ public class ScopedTransactionInventoryTests
         }
     }
 
+    /// <summary>
+    /// The converted set, pinned exactly rather than as "more than none": which sites join is the decision this
+    /// whole class is about, so quietly gaining or losing one must be visible in a diff, not absorbed by a threshold.
+    /// </summary>
     [Fact]
-    public void The_helper_is_the_idiom_the_converted_services_use()
+    public void The_helper_is_the_idiom_of_exactly_the_converted_services()
     {
         var callers = SourceFiles()
             .Where(file => File.ReadAllText(file).Contains($"{nameof(ScopedTransaction)}.{nameof(ScopedTransaction.OwnOrJoinAsync)}(", StringComparison.Ordinal))
+            .Select(Relative)
+            .OrderBy(name => name, StringComparer.Ordinal)
             .ToList();
 
-        callers.Count.ShouldBeGreaterThan(1,
-            customMessage: $"{nameof(ScopedTransaction)} has no callers left under {ScannedRoot}. Either the conversions were " +
-                           "reverted — in which case the sweeps that need them are broken again — or the helper is dead code.");
+        callers.ShouldBe(JoinsItsCaller, ignoreOrder: false,
+            customMessage: $"the set of services joining their caller's transaction changed.\n  expected: {string.Join(", ", JoinsItsCaller)}\n  " +
+                           $"actual:   {string.Join(", ", callers)}\nA new joiner belongs here; a lost one means a service is opening its own " +
+                           "transaction again, or has moved to one of the other two idioms — in which case say which in the message.");
     }
 
     /// <summary>Every source line under the scanned root that calls <c>BeginTransactionAsync(</c> for real, grouped by repo-relative file. Comment lines are text about the call, not a call.</summary>
