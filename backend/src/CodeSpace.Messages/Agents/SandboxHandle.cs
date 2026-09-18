@@ -165,6 +165,21 @@ public sealed record SandboxHandle
     /// <para>Null for an unbrokered run, and on a handle stamped before this field existed — a run whose address was
     /// never recorded, which therefore takes the typed lease-lost landing rather than a re-bind onto a port nobody
     /// wrote down. That is the mixed-version deploy story: old handles keep the old outcome, new ones survive.</para>
+    ///
+    /// <para><b>The squatter residual, stated because it is real.</b> Between the minting worker's exit and the
+    /// re-attach, this port is unbound. A local process that grabs it and ACCEPTS — rather than merely holding it,
+    /// which only makes the re-bind refuse and the run land typed — receives the child's next request: its bearer, its
+    /// prompt, and whatever the child does with the reply it sends back. Nothing in the address stops that, because
+    /// the address is all the child has. What bounds it: the squatter must be ON THIS HOST (the child reaches loopback
+    /// or its own netns gateway), must win the race for one specific ephemeral port, and gains a per-run broker bearer
+    /// that authenticates to nothing else and expires — not the tenant's key, which never leaves the broker.</para>
+    ///
+    /// <para>Per-lease ports change the shape of that exposure rather than its nature: the number of squattable
+    /// addresses is now the number of concurrent brokered runs instead of one per worker, and on a host that builds
+    /// filtered-egress namespaces each is a WIDE (<c>+</c>) bind rather than loopback — the pre-existing design, since
+    /// a sealed run reaches the worker at its namespace gateway and not on loopback, so there are now N of those where
+    /// there was 1. Reaching them still buys nothing without a live run's bearer, and the broker refuses any source
+    /// outside loopback and the allocator's <c>10/8</c> space.</para>
     /// </summary>
     public int? ModelBrokerPort { get; init; }
 

@@ -67,8 +67,15 @@ public interface IModelCredentialBroker
     /// this worker never brokered (the lease is process-local, so a cancel issued by another worker relies instead on
     /// the owning worker's heartbeat stopping — the lease then lapses within its TTL). Never throws:
     /// callers are teardown paths whose outcome must not depend on it.
+    ///
+    /// <para><paramref name="fencedToEpoch"/> separates the two things a caller can mean, and it is REQUIRED rather
+    /// than defaulted because getting it wrong is silent. A pass tearing down its OWN attempt passes its epoch: if the
+    /// lease has since moved to a later one — a same-process re-attach adopted the address while this pass was on its
+    /// way out — then the attempt it is cleaning up after is no longer the one holding it, and withdrawing it would
+    /// take a live run's model access away. A statement about the RUN rather than about one attempt (a cancel, an
+    /// abandon) passes null and means it at every epoch.</para>
     /// </summary>
-    Task RevokeAsync(Guid runId, string reason, CancellationToken cancellationToken);
+    Task RevokeAsync(Guid runId, string reason, long? fencedToEpoch, CancellationToken cancellationToken);
 
     /// <summary>
     /// Whether THIS worker is currently holding a live lease for the run — a statement about this process's memory and

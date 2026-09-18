@@ -810,12 +810,12 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         }
     }
 
-    /// <summary>Withdraw a run's brokered model credential — best-effort and last-word-less: the cancel it belongs to already stands, and no failure here may change that. A no-op when no broker is registered.</summary>
+    /// <summary>Withdraw a run's brokered model credential — best-effort and last-word-less: the cancel it belongs to already stands, and no failure here may change that. A no-op when no broker is registered. UNFENCED: a person stopping a run means it at every epoch, so a lease a later attempt holds is withdrawn too — which is the point, since the run itself is over.</summary>
     private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId, string reason)
     {
         if (_credentialBroker is null) return;
 
-        try { await _credentialBroker.RevokeAsync(runId, reason, CancellationToken.None).ConfigureAwait(false); }
+        try { await _credentialBroker.RevokeAsync(runId, reason, fencedToEpoch: null, CancellationToken.None).ConfigureAwait(false); }
         catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked ({Reason}); it lapses on its own TTL instead", runId, reason); }
     }
 

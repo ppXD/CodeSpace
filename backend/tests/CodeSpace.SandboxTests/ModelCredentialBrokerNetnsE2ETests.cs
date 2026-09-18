@@ -61,7 +61,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
 
             var relayedBeforeRevoke = upstream.Calls;
 
-            await broker.RevokeAsync(runId, "e2e-revoke", CancellationToken.None);
+            await broker.RevokeAsync(runId, "e2e-revoke", fencedToEpoch: null, CancellationToken.None);
 
             // A revoke withdraws the ADDRESS, not just the routing entry: every lease owns its own listener, and
             // closing it is what stops one finished run from holding a port for the life of the worker. So what the

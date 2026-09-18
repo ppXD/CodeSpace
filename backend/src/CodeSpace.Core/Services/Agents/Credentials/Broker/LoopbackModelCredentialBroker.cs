@@ -116,6 +116,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     private readonly TimeProvider _time;
     private readonly HttpClient _upstream;
 
+    /// <summary>Reclaims the sockets of leases nobody withdrew — see <see cref="SweepLapsedLeases"/>. Disposed with the broker, so a torn-down worker leaves no callback behind.</summary>
+    private readonly ITimer _sweep;
+
     public LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger = null, TimeProvider? timeProvider = null)
         : this(logger, timeProvider, null) { }
 
@@ -127,11 +130,24 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// </summary>
     internal static LoopbackModelCredentialBroker ForTest(HttpMessageHandler upstream, TimeProvider? timeProvider = null, ILogger<LoopbackModelCredentialBroker>? logger = null) => new(logger, timeProvider, upstream);
 
+    /// <summary>
+    /// Test seam: kill the listener behind a LIVE lease without going through a revoke — the platform failure this
+    /// class cannot otherwise be made to have, and the one whose handling
+    /// (<see cref="DropIfStillServing"/>) is the difference between a lease that stops being claimed and a
+    /// <see cref="HasLease"/> that lies forever. A single narrow method rather than a wider surface: nothing in
+    /// production calls it, and the behaviour it triggers has no other trigger.
+    /// </summary>
+    internal void BreakListenerForTest(Guid runId)
+    {
+        if (_byRun.TryGetValue(runId, out var lease)) CloseQuietly(lease.Listener);
+    }
+
     private LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger, TimeProvider? timeProvider, HttpMessageHandler? upstreamHandler)
     {
         _logger = logger ?? NullLogger<LoopbackModelCredentialBroker>.Instance;
         _time = timeProvider ?? TimeProvider.System;
         _upstream = new HttpClient(upstreamHandler ?? DefaultUpstreamHandler(), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
+        _sweep = _time.CreateTimer(_ => SweepLapsedLeases(), null, SweepInterval, SweepInterval);
     }
 
     /// <summary>No automatic decompression and no redirect following: the proxy copies BYTES, so an upstream that gzips is passed through with its own <c>Content-Encoding</c> and the client decompresses, exactly as it would talking to the provider directly.</summary>
@@ -171,10 +187,22 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         if (request.Port is <= 0 or > MaxPort) return RefuseRebind(request, "the recorded port is not a bindable TCP port");
         if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return RefuseRebind(request, "the credential names no upstream endpoint to forward to");
 
-        // A lease held here at a NEWER epoch is a live claim by a later attempt. Replacing it would close a port that
-        // attempt's own agent is calling and hand the run back to a superseded worker — the exact reclaim this fence
-        // exists to settle, decided backwards.
-        if (_byRun.TryGetValue(request.RunId, out var held) && held.Epoch > request.Epoch) return RefuseRebind(request, $"a lease at a newer epoch ({held.Epoch}) is already held on this worker");
+        if (_byRun.TryGetValue(request.RunId, out var held))
+        {
+            // A lease held here at a NEWER epoch is a live claim by a later attempt. Replacing it would close a port
+            // that attempt's own agent is calling and hand the run back to a superseded worker — the exact reclaim
+            // this fence exists to settle, decided backwards.
+            if (held.Epoch > request.Epoch) return RefuseRebind(request, $"a lease at a newer epoch ({held.Epoch}) is already held on this worker");
+
+            // THE SAME ADDRESS, already up, on this very worker: a re-attach of a run this process never stopped
+            // serving (a reclaim after the observation lease lapsed while the old pass was between heartbeats). There
+            // is nothing to re-open, and trying is actively destructive — BindPort would walk the candidate hosts
+            // against a port THIS PROCESS holds, and on Linux the wide bind fails while the loopback one succeeds
+            // underneath it, so Install would close the live WIDE listener and leave a sealed netns run talking to an
+            // address it cannot reach, with true returned and the posture cleared. Adopt it instead.
+            if (IsSameAddress(held, request)) return AdoptHeldLease(held, request);
+        }
+
         if (BindPort(request.Port, out var bindFailure) is not { } bound) return RefuseRebind(request, "its port could not be bound here — something else is holding it, or this host refused the bind", bindFailure);
 
         var lease = Install(new Lease
@@ -185,6 +213,30 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         _logger.LogInformation("Model credential RE-BOUND for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}; its detached agent's next model call is answered here", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
         WarnIfUnreachableFromNetns(lease, bound.Host);
+
+        return Task.FromResult(true);
+    }
+
+    /// <summary>Whether a lease this worker already holds IS the address the request is asking for — same port, same route, same bearer. All three, because any one of them differing means the child would be talking to something other than what the handle recorded.</summary>
+    private static bool IsSameAddress(Lease held, ModelCredentialRebindRequest request) =>
+        held.Port == request.Port && string.Equals(held.PathId, request.PathId, StringComparison.Ordinal) && McpRunToken.Matches(held.Token, request.RunToken);
+
+    /// <summary>
+    /// Take over a lease this worker is ALREADY serving at the re-attach's epoch, without touching its listener. The
+    /// socket stays exactly as it was bound — which is the point, since re-binding it is what would move a wide bind
+    /// down to loopback — and only the two things a new claimant owns change: the fence the lease answers renewals on,
+    /// and its window.
+    ///
+    /// <para>The epoch move is what makes the adoption real rather than cosmetic: <see cref="RenewAsync"/> is fenced,
+    /// so a lease left at the previous attempt's epoch would refuse every heartbeat the re-attach sends and lapse two
+    /// beats later — the run would lose its model access anyway, just more slowly and for a reason nothing logs.</para>
+    /// </summary>
+    private Task<bool> AdoptHeldLease(Lease held, ModelCredentialRebindRequest request)
+    {
+        held.AdoptEpoch(request.Epoch);
+        held.RenewUntil(_time.GetUtcNow() + request.Ttl);
+
+        _logger.LogInformation("Model credential lease ADOPTED for agent run {RunId} on port {Port} (team {TeamId}) at epoch {Epoch}: this worker already serves the address the handle records, so nothing was re-bound", held.RunId, held.Port, held.TeamId, request.Epoch);
 
         return Task.FromResult(true);
     }
@@ -206,9 +258,14 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         lease.RenewUntil(_time.GetUtcNow() + ttl);
 
-        if (_byRun.TryGetValue(lease.RunId, out var superseded)) CloseQuietly(superseded.Listener);
+        // PUBLISH first, close second. The superseded lease's accept loop wakes the moment its listener closes and
+        // asks whether it is still the run's current lease; installing the replacement first means the answer is
+        // always no, so it exits quietly instead of racing to remove an entry this method is about to overwrite.
+        var superseded = _byRun.TryGetValue(lease.RunId, out var previous) ? previous : null;
 
         _byRun[lease.RunId] = lease;
+
+        if (superseded is not null) CloseQuietly(superseded.Listener);
 
         _ = Task.Run(() => AcceptAsync(lease), CancellationToken.None);
 
@@ -224,9 +281,22 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         return Task.FromResult(true);
     }
 
-    public Task RevokeAsync(Guid runId, string reason, CancellationToken cancellationToken)
+    public Task RevokeAsync(Guid runId, string reason, long? fencedToEpoch, CancellationToken cancellationToken)
     {
-        if (!_byRun.TryRemove(runId, out var lease)) return Task.CompletedTask;
+        if (!_byRun.TryGetValue(runId, out var lease)) return Task.CompletedTask;
+
+        // A FENCED revoke is one a pass issues about its OWN attempt on its way out. If the lease has moved on to a
+        // later epoch, that attempt is not the one holding the address any more — a same-process re-attach adopted it
+        // — and withdrawing it here would take a live run's model access away on the way out of a pass that no longer
+        // owns the run. An UNFENCED revoke (a cancel, an abandon) is a statement about the RUN rather than about one
+        // attempt, and means it at every epoch.
+        if (fencedToEpoch is { } epoch && lease.Epoch != epoch)
+        {
+            _logger.LogInformation("Model credential lease for agent run {RunId} left alone on {Reason}: it is held at epoch {HeldEpoch}, not the epoch {Epoch} this pass owned, so a later claimant is serving it", runId, reason, lease.Epoch, epoch);
+            return Task.CompletedTask;
+        }
+
+        if (!_byRun.TryRemove(new KeyValuePair<Guid, Lease>(runId, lease))) return Task.CompletedTask;   // it moved between the read and here; its new owner's revoke will close it
 
         // The listener goes with the lease, not merely the routing entry: leaving it bound would hold one port per
         // finished run for the life of the worker, and a worker serves thousands.
@@ -237,8 +307,38 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         return Task.CompletedTask;
     }
 
-    /// <summary>Whether this run currently holds a live lease HERE — see <see cref="IModelCredentialBroker.HasLease"/> for why a caller is allowed to ask. An entry past its expiry answers false without waiting for the sweep that removes it: a lapsed lease is already refused at the relay, and the two must not disagree.</summary>
+    /// <summary>Whether this run currently holds a live lease HERE — see <see cref="IModelCredentialBroker.HasLease"/> for why a caller is allowed to ask. An entry past its expiry answers false without waiting for the sweep that reclaims it: a lapsed lease is already refused at the relay, and the two must not disagree.</summary>
     public bool HasLease(Guid runId) => _byRun.TryGetValue(runId, out var lease) && lease.ExpiresAt > _time.GetUtcNow();
+
+    // ── Reclaiming what nobody withdrew ───────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// How often lapsed leases are reclaimed. NOT a correctness bound — an expired lease is already refused at the
+    /// relay and already reads false from <see cref="HasLease"/>, both the instant it lapses — so this only decides
+    /// how long a dead lease's SOCKET is held, which makes a round minute the right kind of arbitrary.
+    /// </summary>
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Close the listener of every lease whose window has passed. Defence in depth behind the callers that revoke:
+    /// each of them is a path that can be missed (a pass that crashes between its work and its finally, a future
+    /// entry point nobody wires a revoke into), and what a miss leaks is not a dictionary entry but a bound PORT and
+    /// a live accept task for the life of the worker. Runs on <see cref="TimeProvider"/>'s timer so a test can drive
+    /// it rather than sleep through it.
+    /// </summary>
+    private void SweepLapsedLeases()
+    {
+        var now = _time.GetUtcNow();
+
+        foreach (var (runId, lease) in _byRun)
+        {
+            if (lease.ExpiresAt > now || !_byRun.TryRemove(new KeyValuePair<Guid, Lease>(runId, lease))) continue;
+
+            CloseQuietly(lease.Listener);
+
+            _logger.LogInformation("Model credential lease for agent run {RunId} lapsed without being withdrawn; its port {Port} is reclaimed", runId, lease.Port);
+        }
+    }
 
     // ── Listener ──────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -302,7 +402,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
     private const string LoopbackHost = "127.0.0.1";
 
-    /// <summary>Bind addresses in order of preference — see <see cref="Bind"/>. Every address first only where a per-run network namespace can exist to need it.</summary>
+    /// <summary>Bind addresses in order of preference — see <see cref="BindFresh"/>. Every address first only where a per-run network namespace can exist to need it.</summary>
     private static IReadOnlyList<string> CandidateHosts() =>
         FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
 
@@ -324,11 +424,15 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// </summary>
     private static HttpListener? TryBind(string host, int port, out Exception? failure)
     {
-        var listener = new HttpListener();
+        HttpListener? listener = null;
         failure = null;
 
         try
         {
+            // The CONSTRUCTOR is inside the try too: it throws PlatformNotSupportedException where the HTTP stack is
+            // unavailable, and that is the same class of escape as the bind itself — a run's re-attach must not fail
+            // because this host has no listener to offer.
+            listener = new HttpListener();
             listener.Prefixes.Add($"http://{host}:{port}/");
             listener.Start();
             return listener;
@@ -336,7 +440,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         catch (Exception exception)
         {
             failure = exception;
-            CloseQuietly(listener);
+
+            if (listener is not null) CloseQuietly(listener);
+
             return null;
         }
     }
@@ -363,12 +469,34 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
             // exception a given platform raises for a closed listener is not something to enumerate from one OS. It
             // matters more here than it used to — a revoke now closes a listener per FINISHED RUN, where before a
             // listener only ever closed at process teardown — and the only correct response to any of them is to stop
-            // serving an address that no longer exists.
+            // serving an address that no longer exists, and to stop CLAIMING it.
             try { context = await lease.Listener.GetContextAsync().ConfigureAwait(false); }
-            catch (Exception) { return; }
+            catch (Exception exception) { DropIfStillServing(lease, exception); return; }
 
             _ = Task.Run(() => ServeQuietlyAsync(context, lease), CancellationToken.None);
         }
+    }
+
+    /// <summary>
+    /// A lease whose accept loop has stopped must stop being CLAIMED, not just stop being served. The table entry is
+    /// what <see cref="HasLease"/> answers from, and a true off a lease nothing accepts is the worst answer this class
+    /// can give: the child's connections sit unaccepted in a backlog rather than being refused, and a re-attach reading
+    /// true concludes the run still has model access — so it lands no verdict and leaves the run Running, with no
+    /// model and no explanation, for as long as the worker lives.
+    ///
+    /// <para>Removed only while it is STILL this lease. A revoke or a supersede reached the table first in every
+    /// ordinary case — that is WHY this loop woke — and dropping their replacement would withdraw a live run's
+    /// address by way of tidying up after its predecessor.</para>
+    /// </summary>
+    private void DropIfStillServing(Lease lease, Exception? reason)
+    {
+        if (!_byRun.TryRemove(new KeyValuePair<Guid, Lease>(lease.RunId, lease))) return;   // already revoked or superseded — that path owns the close
+
+        CloseQuietly(lease.Listener);
+
+        if (_stopping.IsCancellationRequested) return;   // the broker is going away and every lease ends with it; none of that is news
+
+        _logger.LogWarning(reason, "Agent run {RunId}: its brokered model listener on port {Port} stopped accepting, so the lease was dropped rather than left claiming an address nothing answers", lease.RunId, lease.Port);
     }
 
     // ── One request ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -637,6 +765,8 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         try { _stopping.Cancel(); } catch (ObjectDisposedException) { /* already stopped */ }
 
+        _sweep.Dispose();
+
         foreach (var lease in _byRun.Values) CloseQuietly(lease.Listener);
 
         _byRun.Clear();
@@ -667,7 +797,13 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         public required Guid RunId { get; init; }
         public required Guid TeamId { get; init; }
-        public required long Epoch { get; init; }
+        private long _epoch;
+
+        /// <summary>The fence this lease answers renewals on. Settable in place (<see cref="AdoptEpoch"/>) because the accept loop and the relay hold THIS object: swapping in a replacement would leave them serving a lease nobody renews.</summary>
+        public required long Epoch { get => Volatile.Read(ref _epoch); init => _epoch = value; }
+
+        /// <summary>Move this lease to a new claimant's fence — see <see cref="AdoptHeldLease"/>.</summary>
+        public void AdoptEpoch(long epoch) => Volatile.Write(ref _epoch, epoch);
         public required string Token { get; init; }
         public required string PathId { get; init; }
         public required ResolvedModelCredential Upstream { get; init; }
