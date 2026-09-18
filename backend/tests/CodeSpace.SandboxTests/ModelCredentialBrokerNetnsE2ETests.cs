@@ -33,7 +33,8 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
     {
         if (!FilteredEgressNetns.IsSupported) return;   // no ip/nft (macOS dev / non-privileged) → the privileged CI job is authoritative
 
-        using var broker = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+        var upstream = new AlwaysOkUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
         var runId = Guid.NewGuid();
 
         var brokered = await broker.OpenAsync(
@@ -58,13 +59,28 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
             (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered!.RunToken)).ShouldBe("200",
                 customMessage: $"a sealed run must reach its broker at {setup.HostIp} with an EMPTY egress allowlist — if this is not 200, check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`. A host-destined packet is INPUT, not FORWARD, so the allowlist must not be involved");
 
+            var relayedBeforeRevoke = upstream.Calls;
+
             await broker.RevokeAsync(runId, "e2e-revoke", CancellationToken.None);
 
-            (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered.RunToken)).ShouldBe("401",
-                customMessage: "after a revoke the sandbox's own bearer must be refused — a live process holding a withdrawn capability is exactly what this slice removes");
+            // A revoke withdraws the ADDRESS, not just the routing entry: every lease owns its own listener, and
+            // closing it is what stops one finished run from holding a port for the life of the worker. So what the
+            // sealed process observes is a refused CONNECTION, not an HTTP 401 — a strictly stronger withdrawal, and
+            // the shape this arm pins. (It used to read 401 back when one listener served every run and only the route
+            // was removed.)
+            var (exit, status) = await CurlAsync(setup.ExecPrefix, url, brokered.RunToken);
+
+            exit.ShouldBe(CurlCouldNotConnect,
+                customMessage: $"after a revoke nothing may answer at {url} from inside the namespace — curl must fail to connect (7), and got exit {exit} (status '{status}'). Exit 0 means something is STILL LISTENING on the revoked lease's port; exit 28 means the packet is being dropped rather than rejected, which is a netns/filter change, not a brokerage one. Check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`");
+
+            upstream.Calls.ShouldBe(relayedBeforeRevoke,
+                "and nothing may reach the provider after the withdrawal — that, not which error the sandbox sees, is what decides whether a cancelled run can still spend the tenant's key");
         }
         finally { await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None); }
     }
+
+    /// <summary>curl's "Failed to connect to host" — what a sealed process gets once a revoked lease's listener is closed and its port stops existing.</summary>
+    private const int CurlCouldNotConnect = 7;
 
     [Fact]
     public async Task A_sealed_run_reaches_its_broker_again_after_the_worker_that_minted_it_restarts()
@@ -183,7 +199,16 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
     /// <summary>The provider, answering 200 to anything the broker relays — this lane asserts REACHABILITY and REFUSAL, never what a model said.</summary>
     private sealed class AlwaysOkUpstream : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true}") });
+        private int _calls;
+
+        /// <summary>How many requests the broker has RELAYED. The count is what "withdrawn" actually means — the sandbox's own error is a symptom, this is the fact that decides whether a cancelled run can still spend the tenant's key. Interlocked because the relay serves each request on its own task.</summary>
+        public int Calls => Volatile.Read(ref _calls);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _calls);
+
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true}") });
+        }
     }
 }

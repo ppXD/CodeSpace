@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
@@ -320,7 +321,16 @@ public class ModelCredentialBrokerTests
         using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
         var request = RebindOn(occupied.Port, epoch: 8);
 
-        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeFalse(
+        // NEVER-THROWS is the load-bearing half, and it is the half that broke: the managed HttpListener reports a
+        // taken port as an HttpListenerException on Windows/macOS but as a bare SocketException from Socket.Bind on
+        // Linux, so an enumerated catch let Linux's escape — out of a re-attach prelude that runs BEFORE the
+        // executor's own try, failing the whole re-attach and leaving the run Running with nobody observing it. Which
+        // exception a given OS throws is exactly what a test cannot assume, so the contract pinned here is that none
+        // of them gets out.
+        bool? refused = null;
+        await Should.NotThrowAsync(async () => refused = await broker.RebindAsync(request, CancellationToken.None));
+
+        refused.ShouldBe(false,
             customMessage: "a re-bind onto a port something else holds must SAY so. A silent success leaves the caller believing the run's model access is back, so it lands no verdict and clears the posture that says otherwise — a run Running forever with an agent that cannot talk, which is the exact degrade the typed landing exists to remove");
 
         broker.HasLease(request.RunId).ShouldBeFalse(
@@ -331,33 +341,44 @@ public class ModelCredentialBrokerTests
     }
 
     /// <summary>
-    /// A port genuinely unavailable to the broker — held on EVERY address it would try (the wildcard first, then
-    /// loopback). One listener is not enough and finding that out is the point: with <c>SO_REUSEADDR</c>, which every
-    /// .NET listener sets on Unix, binding <c>127.0.0.1:P</c> SUCCEEDS while another socket holds <c>0.0.0.0:P</c> — so
-    /// a fixture that occupied only the wildcard would let the re-bind through and pass this test for the wrong
-    /// reason. Only an EXACT duplicate of a listening socket is refused.
+    /// A port genuinely unavailable to the broker — held by RAW sockets, bound and listening, on EVERY address it
+    /// would try (the wildcard first, then loopback).
+    ///
+    /// <para>Raw and listening is the shape that matters: it is a listening socket on the exact address that makes the
+    /// managed <c>HttpListener</c> fail its <c>Socket.Bind</c>, which is where Linux raises the bare
+    /// <c>SocketException</c> that an enumerated catch missed.</para>
+    ///
+    /// <para>And one socket is not enough — finding that out is the other half. With <c>SO_REUSEADDR</c>, which every
+    /// .NET socket sets on Unix, binding <c>127.0.0.1:P</c> SUCCEEDS while something else holds <c>0.0.0.0:P</c>, so a
+    /// fixture occupying only the wildcard would let the re-bind through and pass for the wrong reason. Only an EXACT
+    /// duplicate of a listening socket is refused.</para>
     /// </summary>
     private sealed class OccupiedPort : IDisposable
     {
-        private readonly System.Net.Sockets.TcpListener _wildcard;
-        private readonly System.Net.Sockets.TcpListener _loopback;
+        private readonly Socket _wildcard = Listening(new IPEndPoint(IPAddress.Any, 0));
+        private readonly Socket _loopback;
 
         public OccupiedPort()
         {
-            _wildcard = new System.Net.Sockets.TcpListener(IPAddress.Any, 0);
-            _wildcard.Start();
-            Port = ((IPEndPoint)_wildcard.LocalEndpoint).Port;
-
-            _loopback = new System.Net.Sockets.TcpListener(IPAddress.Loopback, Port);
-            _loopback.Start();
+            Port = ((IPEndPoint)_wildcard.LocalEndPoint!).Port;
+            _loopback = Listening(new IPEndPoint(IPAddress.Loopback, Port));
         }
 
         public int Port { get; }
 
+        private static Socket Listening(IPEndPoint endpoint)
+        {
+            var socket = new Socket(endpoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            socket.Bind(endpoint);
+            socket.Listen(1);
+
+            return socket;
+        }
+
         public void Dispose()
         {
-            try { _loopback.Stop(); } catch { /* best-effort */ }
-            try { _wildcard.Stop(); } catch { /* best-effort */ }
+            _loopback.Dispose();
+            _wildcard.Dispose();
         }
     }
 
