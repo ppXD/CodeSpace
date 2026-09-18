@@ -475,6 +475,14 @@ public partial class AgentRunExecutorTests
         JsonSerializer.Deserialize<AgentRunResult>(landed.ResultJson!, AgentJson.Options)!.ExitReason
             .ShouldNotBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost,
                 "the attempt finished across a restart with its model access intact; a lease-lost verdict on it would tell an operator to retry work that was already done");
+
+        // The other half of the launch path's contract, which a re-attach had no way to owe until it could HOLD a
+        // lease: the work being over means the credential stops being spendable NOW. Left in place, the finished run's
+        // bearer keeps relaying to the provider until its TTL runs out, and its listener + accept task + table entry
+        // are held for the life of the worker — one leaked socket per run that ever completed through a re-attach.
+        workerB.HasLease(runId).ShouldBeFalse(
+            "a finished re-attached run's credential must be withdrawn at once, exactly as the launch path withdraws its own — drop the revoke from ReattachAsync's finally and this is the assertion that goes red");
+        (await ReachesUpstreamAsync(childBaseUrl, runToken)).ShouldBeFalse("and its address stops answering with it");
     }
 
     [Fact]
@@ -490,8 +498,11 @@ public partial class AgentRunExecutorTests
         var (handle, _) = await DrainLeavingTheAgentRunningAsync(runId, harness);
 
         // Something else on this host takes the run's port during the gap — the one failure mode a re-bind has that
-        // nothing in this codebase controls. Held on every address the broker would try (see the unit suite's
-        // OccupiedPort for why one listener is not enough).
+        // nothing in this codebase controls. The fixture holds LOOPBACK, the only candidate host a worker without
+        // filtered-egress namespaces tries; on a host that builds them the broker prefers the wide bind this fixture
+        // does not hold, so the refusal would not be falsifiable and the test says so instead of passing hollow.
+        if (CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported) return;
+
         using var stolen = new StolenPort(handle.ModelBrokerPort!.Value);
         using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
         var reservation = await ReserveReattachAfterLapseAsync(runId);
@@ -576,36 +587,34 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>
-    /// A port taken out from under a re-bind by RAW listening sockets — the shape that makes the managed
-    /// <c>HttpListener</c> fail its own <c>Socket.Bind</c>, which on Linux raises a bare <c>SocketException</c> rather
-    /// than the <c>HttpListenerException</c> the other platforms raise. Held on every address the broker would try
-    /// (the wildcard AND loopback), because <c>SO_REUSEADDR</c> lets a specific bind succeed under a wildcard holder.
+    /// The run's own port, taken out from under its re-bind by ONE raw socket bound to loopback and left LISTENING —
+    /// the exact address the broker will try again, held by the one conflict shape no platform's <c>SO_REUSEADDR</c>
+    /// semantics can talk their way past.
+    ///
+    /// <para>The port is GIVEN (the drain released it when it revoked the lease), so there is no reserve-and-re-bind
+    /// dance here and none is wanted: an earlier version bound a second socket to cover the wildcard too, and that
+    /// second bind is the one Linux refuses for a raw socket, making the fixture itself throw. If the bind fails the
+    /// staging failed, and it says so rather than surfacing as an unattributable <c>SocketException</c>.</para>
     /// </summary>
     private sealed class StolenPort : IDisposable
     {
-        private readonly System.Net.Sockets.Socket _wildcard;
-        private readonly System.Net.Sockets.Socket _loopback;
+        private readonly System.Net.Sockets.Socket _holder = new(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
 
         public StolenPort(int port)
         {
-            _wildcard = Listening(new System.Net.IPEndPoint(System.Net.IPAddress.Any, port));
-            _loopback = Listening(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+            try
+            {
+                _holder.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+                _holder.Listen(1);
+            }
+            catch (System.Net.Sockets.SocketException exception)
+            {
+                _holder.Dispose();
+                throw new Xunit.Sdk.XunitException($"the fixture could not take port {port} to stage the conflict, so nothing below is about a refused re-bind: {exception.Message}");
+            }
         }
 
-        private static System.Net.Sockets.Socket Listening(System.Net.IPEndPoint endpoint)
-        {
-            var socket = new System.Net.Sockets.Socket(endpoint.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
-            socket.Bind(endpoint);
-            socket.Listen(1);
-
-            return socket;
-        }
-
-        public void Dispose()
-        {
-            _loopback.Dispose();
-            _wildcard.Dispose();
-        }
+        public void Dispose() => _holder.Dispose();
     }
 
     [Fact]
@@ -1052,7 +1061,7 @@ public partial class AgentRunExecutorTests
 
         public Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken) => inner.RebindAsync(request, cancellationToken);
         public Task<bool> RenewAsync(Guid runId, long epoch, CancellationToken cancellationToken) => inner.RenewAsync(runId, epoch, cancellationToken);
-        public Task RevokeAsync(Guid runId, string reason, CancellationToken cancellationToken) => inner.RevokeAsync(runId, reason, cancellationToken);
+        public Task RevokeAsync(Guid runId, string reason, long? fencedToEpoch, CancellationToken cancellationToken) => inner.RevokeAsync(runId, reason, fencedToEpoch, cancellationToken);
         public bool HasLease(Guid runId) => inner.HasLease(runId);
         public void Dispose() => inner.Dispose();
     }

@@ -687,12 +687,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
     }
 
-    /// <summary>Withdraw an abandoned run's brokered model credential — best-effort: the abandon already stands, and no failure here may change it.</summary>
+    /// <summary>Withdraw an abandoned run's brokered model credential — best-effort: the abandon already stands, and no failure here may change it. UNFENCED: an abandon is a statement about the run itself, so it withdraws whatever epoch happens to hold the lease rather than only the one this sweep read.</summary>
     private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId)
     {
         if (_credentialBroker is null) return;
 
-        try { await _credentialBroker.RevokeAsync(runId, "run-abandoned", CancellationToken.None).ConfigureAwait(false); }
+        try { await _credentialBroker.RevokeAsync(runId, "run-abandoned", fencedToEpoch: null, CancellationToken.None).ConfigureAwait(false); }
         catch (Exception exception) { _logger.LogWarning(exception, "AgentRunReconciler: the brokered model credential for abandoned run {RunId} could not be revoked; it lapses on its own TTL instead", runId); }
     }
 

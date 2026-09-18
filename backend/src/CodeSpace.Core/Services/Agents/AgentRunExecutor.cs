@@ -685,7 +685,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // The work is over (or this worker is): the credential stops being spendable now rather than at the end
             // of a TTL nobody is renewing. Before the workspace cleanup, because it must not be skipped by a cleanup
             // that decides to defer.
-            await RevokeBrokeredCredentialQuietlyAsync(agentRunId, "run-finished").ConfigureAwait(false);
+            await RevokeBrokeredCredentialQuietlyAsync(owner, "run-finished").ConfigureAwait(false);
 
             // Terminal exit (success / failure) owns the clone's cleanup; a worker tear-down leaves it for re-attach.
             // The one tear-down that DOES own it is the lost-lease landing above: it confirmed the agent is dead
@@ -880,6 +880,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             heartbeatCts.Cancel();
             await heartbeat.ConfigureAwait(false);
+
+            // The mirror of the launch path's own finally, and it exists for the same two reasons — except that until
+            // a re-attach could HOLD a lease there was nothing here to withdraw. Now there is: a re-bound (or adopted)
+            // lease is this pass's, so the work ending means the credential stops being spendable NOW rather than at
+            // the end of a TTL nobody is renewing, and the listener + accept task + table entry it owns are released
+            // instead of being held for the life of the worker. Fenced, so a pass that lost the run to a newer
+            // claimant on its way out withdraws nothing.
+            await RevokeBrokeredCredentialQuietlyAsync(owner, "reattach-finished").ConfigureAwait(false);
         }
     }
 
@@ -4138,9 +4146,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var deployAlreadyStamped = DeserializeConfinement(context.Run.SandboxConfinementJson)?.ModelCredentialLeaseLost == true;
 
-        await RecordLostBrokeredCredentialAsync(context.Owner, context.Run, context.Handle, cancellationToken).ConfigureAwait(false);
-
+        // The GATE comes before the stamp. A lease this worker still holds means the run's model access is intact, so
+        // recording that it is gone would be false — and nothing clears that stamp afterwards, because the clear only
+        // runs on a successful re-bind. The stamp used to precede the gate harmlessly, since "this worker holds the
+        // lease" was unreachable on a re-attach; the adopt path above makes it an ordinary case.
         if (context.Handle.ModelBrokerRunToken is null || _credentialBroker?.HasLease(context.Owner.RunId) is true) return LostModelAccess.None;
+
+        await RecordLostBrokeredCredentialAsync(context.Owner, context.Run, context.Handle, cancellationToken).ConfigureAwait(false);
 
         var stopped = await StopAgentWithoutModelAccessAsync(context.Owner.RunId, context.Durable, context.Handle, cancellationToken).ConfigureAwait(false);
 
@@ -4170,7 +4182,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private async Task<bool> RebindModelCredentialLeaseAsync(ModelAccessContext context, CancellationToken cancellationToken)
     {
-        if (_credentialBroker is not { } broker || RebindRequestFor(context) is not { } request) return false;
+        if (_credentialBroker is not { } broker || RebindRequestFor(context.Owner, context.Run.TeamId, context.Handle, context.Upstream) is not { } request) return false;
         if (!await broker.RebindAsync(request, cancellationToken).ConfigureAwait(false)) return false;
 
         _logger.LogInformation("Agent run {RunId}: its brokered model address was re-bound on this worker at port {Port}, so its detached agent keeps its model access across the restart rather than ending as {Code}", context.Owner.RunId, request.Port, FailureCodes.ModelCredentialLeaseLost);
@@ -4190,31 +4202,41 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <para><b>The host.</b> The agent calls a port on the machine it was launched on. Binding that number HERE, on a
     /// worker that is not that machine, would answer nobody at all — while clearing the posture that says the run's
     /// access is gone. Same predicate the runner uses before answering any other pid-derived question, and it admits
-    /// the same handles: this host's, and an older one that carries no host stamp (which carries no port either).</para>
+    /// the same handles: this host's, and one carrying no host stamp at all. That second admission is safe only
+    /// because the address gate ran first and a handle old enough to have no host stamp is older still than the
+    /// broker address — it cannot reach here. Ordered, not coincidental.</para>
     ///
     /// <para><b>The credential.</b> See <see cref="FrontsTheSameCredential"/> — a resolve that landed on a different
-    /// row is a rotation, not a restoration.</para>
+    /// ROW is not a restoration.</para>
+    ///
+    /// <para>Takes what it reads rather than the whole context, so the three gates are directly testable (Rule 1 —
+    /// four parameters, under the cap).</para>
     /// </summary>
-    private static ModelCredentialRebindRequest? RebindRequestFor(ModelAccessContext context)
+    internal static ModelCredentialRebindRequest? RebindRequestFor(AgentRunOwnerToken owner, Guid teamId, SandboxHandle handle, ResolvedModelCredential? upstream)
     {
-        var handle = context.Handle;
-
         if (handle.ModelBrokerRunToken is not { Length: > 0 } token || handle.ModelBrokerRoute is not { Length: > 0 } route || handle.ModelBrokerPort is not { } port) return null;
         if (!LocalProcessRunner.PidAnswerableHere(handle)) return null;
-        if (context.Upstream is not { } upstream || !FrontsTheSameCredential(handle, upstream)) return null;
+        if (upstream is not { } resolved || !FrontsTheSameCredential(handle, resolved)) return null;
 
-        return new() { RunId = context.Owner.RunId, TeamId = context.Run.TeamId, Epoch = context.Owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = upstream, Ttl = Credentials.ModelCredentialLease.Ttl };
+        return new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = resolved, Ttl = Credentials.ModelCredentialLease.Ttl };
     }
 
     /// <summary>
     /// Whether the credential this pass resolved is the SAME one the launch's lease fronted — the row id when the
     /// launch named one (both null is the operator-global key, which has no row) and the provider tag either way.
     ///
-    /// <para>A re-attach re-resolves from scratch, and that resolve can legitimately land somewhere else: the
-    /// credential was rotated, or the team default changed. Re-binding it anyway would spend a key the run's posture
-    /// never recorded, under a bearer minted for a different one — and a changed PROVIDER is worse than a changed key,
-    /// because the relay's upstream root and its path allowlist both come from it, so the child would be talking a wire
-    /// its new upstream does not serve. Declining leaves the typed landing, which is a verdict an operator can act on.</para>
+    /// <para>A re-attach re-resolves from scratch, and that resolve can legitimately land on a DIFFERENT ROW: the team
+    /// default changed, or the run's credential was deleted and another applies. Fronting that would spend a key the
+    /// run's posture never recorded, under a bearer minted for a different one — and a changed PROVIDER is worse than
+    /// a changed row, because the relay's upstream root and its path allowlist both come from it, so the child would
+    /// be talking a wire its new upstream does not serve. Declining leaves the typed landing, which is a verdict an
+    /// operator can act on.</para>
+    ///
+    /// <para><b>A rotated SECRET on the same row is fronted, deliberately.</b> Only the row id and the provider are
+    /// compared, so a key rotated in place is picked up and the run keeps working — which is what "the same
+    /// credential" means here: the run's credential is the ROW, and a row's current secret is what fronting it has
+    /// always meant, on this path exactly as on the launch path. The launch would have used the new secret too had it
+    /// started a minute later.</para>
     /// </summary>
     internal static bool FrontsTheSameCredential(SandboxHandle handle, ResolvedModelCredential resolved) =>
         string.Equals(handle.ModelBrokerProvider, resolved.Provider, StringComparison.OrdinalIgnoreCase) && handle.ModelBrokerCredentialId == resolved.CredentialId;
@@ -4337,7 +4359,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (LeftForRebind(runId, handle)) return false;
             if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return false;
 
-            await RevokeBrokeredCredentialQuietlyAsync(runId, "worker-shutdown").ConfigureAwait(false);
+            await RevokeBrokeredCredentialQuietlyAsync(owner, "worker-shutdown").ConfigureAwait(false);
             await RecordLostBrokeredCredentialAsync(owner, run, handle, budget.Token).ConfigureAwait(false);
 
             if (await StopAgentWithoutModelAccessAsync(runId, durable, handle, budget.Token).ConfigureAwait(false) != LostModelAccess.AgentStopped) return false;
@@ -4958,13 +4980,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (_credentialBroker is not null) await _credentialBroker.RenewAsync(owner.RunId, owner.Epoch, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Withdraw the run's brokered credential — best-effort, and never allowed to change the run's outcome. Called on EVERY exit from a launch, including a worker tear-down: the lease is this process's, so it is gone either way, and dropping it explicitly keeps the broker's table the size of the work actually in flight.</summary>
-    private async Task RevokeBrokeredCredentialQuietlyAsync(Guid runId, string reason)
+    /// <summary>
+    /// Withdraw the brokered credential of the attempt THIS PASS owns — best-effort, and never allowed to change the
+    /// run's outcome. Called on every exit from a launch and from a re-attach, including a worker tear-down: the lease
+    /// is this process's, so it is gone either way, and dropping it explicitly keeps the broker's table the size of
+    /// the work actually in flight.
+    ///
+    /// <para>FENCED to <paramref name="owner"/>'s epoch, and that is load-bearing rather than tidy. A same-process
+    /// re-attach can adopt this run's address while this pass is on its way out; an unfenced revoke here would then
+    /// close the listener a LIVE run is being served on, leaving its child refused, its posture cleared and its new
+    /// owner's heartbeat renewing a lease that no longer exists.</para>
+    /// </summary>
+    private async Task RevokeBrokeredCredentialQuietlyAsync(AgentRunOwnerToken owner, string reason)
     {
         if (_credentialBroker is null) return;
 
-        try { await _credentialBroker.RevokeAsync(runId, reason, CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked; it lapses on its own TTL instead", runId); }
+        try { await _credentialBroker.RevokeAsync(owner.RunId, reason, owner.Epoch, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked; it lapses on its own TTL instead", owner.RunId); }
     }
 
     private async Task<bool> CanCleanOwnedWorkspaceAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)

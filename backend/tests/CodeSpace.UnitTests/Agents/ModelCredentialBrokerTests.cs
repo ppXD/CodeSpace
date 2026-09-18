@@ -7,6 +7,8 @@ using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
@@ -118,7 +120,7 @@ public class ModelCredentialBrokerTests
 
         (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
 
-        await broker.RevokeAsync(runId, "run-cancelled", CancellationToken.None);
+        await broker.RevokeAsync(runId, "run-cancelled", fencedToEpoch: null, CancellationToken.None);
 
         (await RefusedAsync(brokered, brokered.RunToken)).ShouldBeTrue(
             "a revoked lease must refuse the NEXT call — revocation that only takes effect when the process dies is the defect this slice exists to remove");
@@ -147,8 +149,11 @@ public class ModelCredentialBrokerTests
         // Silence for a full TTL is a worker that stopped owning the run: the key stops being spendable on its own.
         time.Advance(ModelCredentialLease.Ttl + TimeSpan.FromSeconds(1));
 
-        (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.Unauthorized,
-            customMessage: "an unrenewed lease must lapse — a CLI outliving its worker is exactly the case where nobody is left to kill it");
+        // Refused however it presents: the relay stops honouring a lapsed lease the instant it expires, and the sweep
+        // then reclaims its port, so this reads as a 401 or as nothing answering depending on which got there first.
+        // Both say the same thing, and the sweep arriving FIRST is the stronger of the two.
+        (await RefusedAsync(brokered, brokered.RunToken)).ShouldBeTrue(
+            "an unrenewed lease must lapse — a CLI outliving its worker is exactly the case where nobody is left to kill it");
     }
 
     [Fact]
@@ -316,6 +321,14 @@ public class ModelCredentialBrokerTests
     [Fact]
     public async Task Rebind_reports_false_when_the_port_is_taken_rather_than_pretending_it_worked()
     {
+        // The fixture holds ONE address — loopback, which is the only candidate host a worker that cannot build
+        // filtered-egress namespaces ever tries. A host that CAN build them prefers the wide bind, which this fixture
+        // does not hold, so the refusal would not be falsifiable there. No unit lane is such a host (the privileged
+        // job runs SandboxTests, not this assembly); the guard is here so the test stays honest if that changes,
+        // rather than quietly passing because the broker bound a different address than the one under test.
+        if (FilteredEgressNetns.IsSupported) return;
+
+        // Held for the WHOLE test: released early, the broker could bind the very port this is meant to deny it.
         using var occupied = new OccupiedPort();
         var logger = new CapturingLogger();
         using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
@@ -341,45 +354,34 @@ public class ModelCredentialBrokerTests
     }
 
     /// <summary>
-    /// A port genuinely unavailable to the broker — held by RAW sockets, bound and listening, on EVERY address it
-    /// would try (the wildcard first, then loopback).
+    /// A port the broker genuinely cannot take: ONE raw socket, bound to loopback at port 0 and left LISTENING for the
+    /// whole test, whose own port is then handed to the re-bind. An exact duplicate of a listening socket is refused on
+    /// every platform, so this is the one conflict shape that does not depend on <c>SO_REUSEADDR</c> semantics — and a
+    /// listening socket failing the managed <c>HttpListener</c>'s own <c>Socket.Bind</c> is where Linux raises the bare
+    /// <c>SocketException</c> this test exists to prove is caught.
     ///
-    /// <para>Raw and listening is the shape that matters: it is a listening socket on the exact address that makes the
-    /// managed <c>HttpListener</c> fail its <c>Socket.Bind</c>, which is where Linux raises the bare
-    /// <c>SocketException</c> that an enumerated catch missed.</para>
-    ///
-    /// <para>And one socket is not enough — finding that out is the other half. With <c>SO_REUSEADDR</c>, which every
-    /// .NET socket sets on Unix, binding <c>127.0.0.1:P</c> SUCCEEDS while something else holds <c>0.0.0.0:P</c>, so a
-    /// fixture occupying only the wildcard would let the re-bind through and pass for the wrong reason. Only an EXACT
-    /// duplicate of a listening socket is refused.</para>
+    /// <para><b>Why the port is READ OFF the holder rather than reserved.</b> An earlier version bound the wildcard to
+    /// learn a port and then bound loopback to that same port, so as to cover both candidate hosts. That second bind is
+    /// the one Linux refuses — a raw <see cref="Socket"/> does NOT set <c>SO_REUSEADDR</c> (a <c>TcpListener</c> does,
+    /// which is what hid it on macOS) — so the FIXTURE threw <c>Address already in use</c> and the test failed for a
+    /// reason that had nothing to do with the broker. Bind once, keep it, read the port from the socket that holds it:
+    /// no reserve, no release, no window for anything to take it in between.</para>
     /// </summary>
     private sealed class OccupiedPort : IDisposable
     {
-        private readonly Socket _wildcard = Listening(new IPEndPoint(IPAddress.Any, 0));
-        private readonly Socket _loopback;
+        private readonly Socket _holder = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
         public OccupiedPort()
         {
-            Port = ((IPEndPoint)_wildcard.LocalEndPoint!).Port;
-            _loopback = Listening(new IPEndPoint(IPAddress.Loopback, Port));
+            _holder.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            _holder.Listen(1);
+
+            Port = ((IPEndPoint)_holder.LocalEndPoint!).Port;
         }
 
         public int Port { get; }
 
-        private static Socket Listening(IPEndPoint endpoint)
-        {
-            var socket = new Socket(endpoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-            socket.Bind(endpoint);
-            socket.Listen(1);
-
-            return socket;
-        }
-
-        public void Dispose()
-        {
-            _loopback.Dispose();
-            _wildcard.Dispose();
-        }
+        public void Dispose() => _holder.Dispose();
     }
 
     [Fact]
@@ -407,6 +409,147 @@ public class ModelCredentialBrokerTests
             "the live attempt's own address must be untouched by the refusal; closing it would be the takeover, arrived at by a different route");
         (await broker.RenewAsync(runId, 9, CancellationToken.None)).ShouldBeTrue("and the lease the broker keys on must still be epoch 9's");
     }
+
+    [Fact]
+    public async Task Rebind_of_an_address_this_worker_already_serves_adopts_it_instead_of_moving_it()
+    {
+        var runId = Guid.NewGuid();
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+
+        // The shape a same-process re-attach has: this worker never stopped serving the run (its observation lease
+        // lapsed while the old pass sat between heartbeats), so the address on the handle is the address already up.
+        var live = await broker.OpenAsync(LeaseFor(runId, epoch: 7), CancellationToken.None);
+        if (live is null) return;
+
+        (await broker.RebindAsync(RebindOf(live, runId, epoch: 9), CancellationToken.None)).ShouldBeTrue(
+            "an address that is already up IS restored — answering false here would make a re-attach end a run whose model access never went anywhere");
+
+        // Re-binding would have walked the candidate hosts against a port THIS PROCESS holds; on Linux the wide bind
+        // fails while loopback succeeds underneath it, so Install would close the live WIDE listener and a sealed
+        // netns run would lose its broker while this returned true. The address has to be untouched.
+        (await CallAsync(live, "/v1/messages", live.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK,
+            customMessage: "the address must still answer after the adoption — a re-bind that closed and re-opened it would drop a sealed run's wide bind down to loopback, which reads as success here and as a dead run in production");
+        upstream.Calls.ShouldBe(1);
+
+        (await broker.RenewAsync(runId, 9, CancellationToken.None)).ShouldBeTrue(
+            "the adopted lease answers the NEW claimant's fence — left at epoch 7 it would refuse every heartbeat the re-attach sends and lapse two beats later");
+        (await broker.RenewAsync(runId, 7, CancellationToken.None)).ShouldBeFalse("and the superseded pass's fence stops renewing it");
+    }
+
+    [Fact]
+    public async Task A_fenced_revoke_leaves_a_lease_a_later_claimant_has_adopted()
+    {
+        var runId = Guid.NewGuid();
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+
+        var live = await broker.OpenAsync(LeaseFor(runId, epoch: 7), CancellationToken.None);
+        if (live is null) return;
+
+        (await broker.RebindAsync(RebindOf(live, runId, epoch: 9), CancellationToken.None)).ShouldBeTrue("precondition: a re-attach adopted the address at epoch 9");
+
+        // The superseded pass now reaches its own finally and withdraws what it thinks is its lease. Unfenced, that
+        // closes the listener a LIVE run is being served on — the child refused, the posture cleared, and the new
+        // owner's heartbeat renewing a lease that no longer exists.
+        await broker.RevokeAsync(runId, "run-finished", fencedToEpoch: 7, CancellationToken.None);
+
+        broker.HasLease(runId).ShouldBeTrue(
+            "a pass that lost the run to a later claimant must withdraw nothing — its epoch is the whole of what it is entitled to speak for");
+        (await CallAsync(live, "/v1/messages", live.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK, "and the live run's address still answers");
+
+        // The claimant's own revoke DOES land, and an unfenced one (a cancel, an abandon) means it at every epoch.
+        await broker.RevokeAsync(runId, "run-finished", fencedToEpoch: 9, CancellationToken.None);
+
+        broker.HasLease(runId).ShouldBeFalse("the epoch that actually holds the lease withdraws it");
+    }
+
+    [Fact]
+    public async Task A_lapsed_lease_nobody_withdrew_has_its_port_reclaimed()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), time);
+        var runId = Guid.NewGuid();
+
+        var brokered = await broker.OpenAsync(LeaseFor(runId, ttl: TimeSpan.FromMinutes(2)), CancellationToken.None);
+        if (brokered is null) return;
+
+        // Nobody revokes: the pass that owned this run crashed between its work and its finally. Without a sweep the
+        // entry, its accept task and above all its BOUND PORT are held for the life of the worker.
+        time.Advance(TimeSpan.FromMinutes(5));
+
+        await WaitUntilAsync(() => !PortIsBound(brokered.RebindPort!.Value), TimeSpan.FromSeconds(10),
+            $"port {brokered.RebindPort} was never reclaimed after its lease lapsed — the sweep is the only thing that collects a lease whose owner never came back, and a worker that leaks one socket per such run runs out of them");
+    }
+
+    [Fact]
+    public async Task A_lease_whose_listener_died_stops_being_claimed()
+    {
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        var runId = Guid.NewGuid();
+
+        var brokered = await broker.OpenAsync(LeaseFor(runId), CancellationToken.None);
+        if (brokered is null) return;
+
+        broker.HasLease(runId).ShouldBeTrue("precondition: the lease is live and its listener is accepting");
+
+        // The platform failed the accept — a listener closed under us, an error nobody enumerated. The lease is still
+        // in the table and still inside its window, so nothing about TIME will correct it.
+        broker.BreakListenerForTest(runId);
+
+        await WaitUntilAsync(() => !broker.HasLease(runId), TimeSpan.FromSeconds(10),
+            "a lease whose accept loop has stopped went on reporting itself live. That is the worst answer this class can give: the child's connections sit unaccepted in a backlog instead of being refused, and a re-attach reading HasLease true concludes the run still has model access — so it lands no verdict and leaves the run Running, with no model and no explanation, for as long as the worker lives");
+
+        logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal),
+            "and it has to SAY so — a lease dropped silently is a run whose model access vanished with nothing in the log to attribute it to");
+    }
+
+    /// <summary>Whether anything still holds this port — asked by trying to take it, which is the only answer that matters to the next lease that wants it.</summary>
+    private static bool PortIsBound(int port)
+    {
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+        try { probe.Bind(new IPEndPoint(IPAddress.Loopback, port)); return false; }
+        catch (SocketException) { return true; }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan budget, string failure)
+    {
+        var deadline = DateTimeOffset.UtcNow + budget;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(50);
+        }
+
+        throw new Xunit.Sdk.XunitException($"{failure} (waited {budget.TotalSeconds}s)");
+    }
+
+    [Theory]
+    [InlineData(null, true)]                                    // no host stamp — but see the remarks: a handle that old carries no port either, so this arm is about the PREDICATE, not a reachable run
+    [InlineData(ThisHost, true)]
+    [InlineData("some-other-worker-in-this-deployment", false)]
+    public void A_rebind_is_only_built_for_a_handle_whose_agent_this_host_can_reach(string? launchHost, bool built)
+    {
+        var credentialId = Guid.NewGuid();
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow,
+            LaunchHost = launchHost == ThisHost ? LocalProcessRunner.CurrentHost : launchHost,
+            ModelBrokerPort = 44444, ModelBrokerRoute = "route-id", ModelBrokerRunToken = "a-recorded-run-token",
+            ModelBrokerProvider = "Anthropic", ModelBrokerCredentialId = credentialId,
+        };
+
+        var request = AgentRunExecutor.RebindRequestFor(new(Guid.NewGuid(), Guid.NewGuid(), 8), Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId });
+
+        (request is not null).ShouldBe(built,
+            customMessage: "the agent calls a port on the machine it was LAUNCHED on. Binding that number on a different worker answers nobody at all — and because the caller reads a built request as 'the address is back', it would also clear the posture that says this run has no model, leaving a dead run recorded as healthy and never landed");
+    }
+
+    /// <summary>Stands in for this worker's own host identity inside <c>[InlineData]</c>, which cannot carry a runtime value.</summary>
+    private const string ThisHost = " this-host";
 
     /// <summary>The re-bind a later worker would build from what a run's durable handle carries — the point being that every value comes from <paramref name="brokered"/>, because a re-bind restores an address and never mints one.</summary>
     private static ModelCredentialRebindRequest RebindOf(BrokeredModelCredential brokered, Guid runId, long epoch) => new()
