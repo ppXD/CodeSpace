@@ -10,7 +10,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Services.Workflows.Retention;
-using CodeSpace.Core.Services.Workflows.Retention.Logs;
+using CodeSpace.Core.Services.Workflows.Retention.Cursors;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Artifacts;
