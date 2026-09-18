@@ -142,9 +142,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return Task.FromResult<BrokeredModelCredential?>(null);
 
-        if (BindFresh() is not { } bound)
+        if (BindFresh(out var bindFailure) is not { } bound)
         {
-            _logger.LogWarning("Agent run {RunId}: the model-credential broker could not bind a listener on this worker, so the run falls back to whatever its deployment's confinement policy permits", request.RunId);
+            _logger.LogWarning(bindFailure, "Agent run {RunId}: the model-credential broker could not bind a listener on this worker after {Attempts} fresh ports, so the run falls back to whatever its deployment's confinement policy permits", request.RunId, BindAttempts);
             return Task.FromResult<BrokeredModelCredential?>(null);
         }
 
@@ -175,7 +175,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         // attempt's own agent is calling and hand the run back to a superseded worker — the exact reclaim this fence
         // exists to settle, decided backwards.
         if (_byRun.TryGetValue(request.RunId, out var held) && held.Epoch > request.Epoch) return RefuseRebind(request, $"a lease at a newer epoch ({held.Epoch}) is already held on this worker");
-        if (BindPort(request.Port) is not { } bound) return RefuseRebind(request, "the port is already in use on this worker");
+        if (BindPort(request.Port, out var bindFailure) is not { } bound) return RefuseRebind(request, "its port could not be bound here — something else is holding it, or this host refused the bind", bindFailure);
 
         var lease = Install(new Lease
         {
@@ -189,10 +189,10 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         return Task.FromResult(true);
     }
 
-    /// <summary>Say WHY a re-bind could not take, and answer false. Warning rather than Debug because the consequence of the false is a live run ended typed, and this line is the only place that separates a transient port conflict from a handle this worker was never going to be able to restore.</summary>
-    private Task<bool> RefuseRebind(ModelCredentialRebindRequest request, string reason)
+    /// <summary>Say WHY a re-bind could not take, and answer false. Warning rather than Debug because the consequence of the false is a live run ended typed, and this line is the only place that separates a transient port conflict from a handle this worker was never going to be able to restore. The bind's own exception rides along when there was one — its type is what tells a port conflict from a host that refuses the prefix, and the two want different operator responses.</summary>
+    private Task<bool> RefuseRebind(ModelCredentialRebindRequest request, string reason, Exception? failure = null)
     {
-        _logger.LogWarning("The model-credential broker could not re-bind agent run {RunId} on port {Port}: {Reason}", request.RunId, request.Port, reason);
+        _logger.LogWarning(failure, "The model-credential broker could not re-bind agent run {RunId} on port {Port}: {Reason}", request.RunId, request.Port, reason);
 
         return Task.FromResult(false);
     }
@@ -266,14 +266,16 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// (their children reach the worker on a per-run gateway IP, not on loopback), loopback otherwise. The wider bind
     /// is TRIED FIRST and falls back, so a host that refuses it still brokers its shared-network runs.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? BindFresh()
+    private static (HttpListener Listener, int Port, string Host)? BindFresh(out Exception? failure)
     {
+        failure = null;
+
         foreach (var host in CandidateHosts())
             for (var attempt = 0; attempt < BindAttempts; attempt++)
             {
                 var port = ReserveEphemeralPort();
 
-                if (TryBind(host, port) is { } listener) return (listener, port, host);
+                if (TryBind(host, port, out failure) is { } listener) return (listener, port, host);
             }
 
         return null;
@@ -285,10 +287,12 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// same candidate hosts as <see cref="BindFresh"/>, because the run whose port this is was launched on a host of
     /// the same shape and its child reaches the worker the same way.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? BindPort(int port)
+    private static (HttpListener Listener, int Port, string Host)? BindPort(int port, out Exception? failure)
     {
+        failure = null;
+
         foreach (var host in CandidateHosts())
-            if (TryBind(host, port) is { } listener) return (listener, port, host);
+            if (TryBind(host, port, out failure) is { } listener) return (listener, port, host);
 
         return null;
     }
@@ -302,18 +306,37 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     private static IReadOnlyList<string> CandidateHosts() =>
         FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
 
-    private static HttpListener? TryBind(string host, int port)
+    /// <summary>
+    /// Bind ONE prefix, or null plus the reason it could not. EVERY exception counts as "did not bind" — deliberately
+    /// wider than an enumerated list, and the width is the fix.
+    ///
+    /// <para><b>The platform split that made an enumeration wrong.</b> A taken port surfaces as an
+    /// <see cref="HttpListenerException"/> on the Windows/macOS paths and as a bare
+    /// <see cref="SocketException"/> (<c>Address already in use</c>, thrown from <c>Socket.Bind</c> inside the managed
+    /// listener's endpoint manager) on Linux. An enumeration that had not met Linux let that one escape — into a
+    /// re-attach prelude whose two callers both document that they never throw, where it failed the whole re-attach
+    /// and left the run Running with nobody observing it. The next platform to surface a new type is, by definition,
+    /// the one nobody ran this on; a bind that threw is a bind that did not happen, whatever it threw.</para>
+    ///
+    /// <para>The reason travels out rather than being dropped, so the caller's Warning can name it: the difference
+    /// between "something else holds this port" and "this host refuses the wide bind" is the difference between
+    /// waiting and reconfiguring.</para>
+    /// </summary>
+    private static HttpListener? TryBind(string host, int port, out Exception? failure)
     {
         var listener = new HttpListener();
+        failure = null;
+
         try
         {
             listener.Prefixes.Add($"http://{host}:{port}/");
             listener.Start();
             return listener;
         }
-        catch (Exception exception) when (exception is HttpListenerException or PlatformNotSupportedException or ObjectDisposedException or ArgumentException)
+        catch (Exception exception)
         {
-            listener.Close();
+            failure = exception;
+            CloseQuietly(listener);
             return null;
         }
     }
@@ -336,8 +359,13 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         while (!_stopping.IsCancellationRequested)
         {
             HttpListenerContext context;
+            // ANY failure to accept means this listener is done, for the same reason TryBind catches everything: the
+            // exception a given platform raises for a closed listener is not something to enumerate from one OS. It
+            // matters more here than it used to — a revoke now closes a listener per FINISHED RUN, where before a
+            // listener only ever closed at process teardown — and the only correct response to any of them is to stop
+            // serving an address that no longer exists.
             try { context = await lease.Listener.GetContextAsync().ConfigureAwait(false); }
-            catch (Exception exception) when (exception is HttpListenerException or ObjectDisposedException or InvalidOperationException) { return; }
+            catch (Exception) { return; }
 
             _ = Task.Run(() => ServeQuietlyAsync(context, lease), CancellationToken.None);
         }
@@ -617,10 +645,10 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         _stopping.Dispose();
     }
 
-    /// <summary>Close one lease's listener, releasing its port. Best-effort: a listener already closed (a racing revoke, a disposed broker) is the outcome this wanted.</summary>
+    /// <summary>Close one lease's listener, releasing its port. Best-effort against EVERY failure — the port being gone is the outcome this wanted, and it now runs on every revoke (once per finished run) and on every failed bind, so it is no place to discover which exception a platform raises for a listener that is already closed.</summary>
     private static void CloseQuietly(HttpListener listener)
     {
-        try { listener.Close(); } catch (Exception exception) when (exception is ObjectDisposedException or HttpListenerException) { /* already gone */ }
+        try { listener.Close(); } catch (Exception) { /* already gone, or this platform says so differently */ }
     }
 
     /// <summary>

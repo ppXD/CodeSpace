@@ -575,24 +575,36 @@ public partial class AgentRunExecutorTests
         catch (HttpRequestException) { return false; }
     }
 
-    /// <summary>A port taken out from under a re-bind, held on every address the broker would try — the wildcard AND loopback, because <c>SO_REUSEADDR</c> lets a specific bind succeed under a wildcard holder.</summary>
+    /// <summary>
+    /// A port taken out from under a re-bind by RAW listening sockets — the shape that makes the managed
+    /// <c>HttpListener</c> fail its own <c>Socket.Bind</c>, which on Linux raises a bare <c>SocketException</c> rather
+    /// than the <c>HttpListenerException</c> the other platforms raise. Held on every address the broker would try
+    /// (the wildcard AND loopback), because <c>SO_REUSEADDR</c> lets a specific bind succeed under a wildcard holder.
+    /// </summary>
     private sealed class StolenPort : IDisposable
     {
-        private readonly System.Net.Sockets.TcpListener _wildcard;
-        private readonly System.Net.Sockets.TcpListener _loopback;
+        private readonly System.Net.Sockets.Socket _wildcard;
+        private readonly System.Net.Sockets.Socket _loopback;
 
         public StolenPort(int port)
         {
-            _wildcard = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, port);
-            _wildcard.Start();
-            _loopback = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
-            _loopback.Start();
+            _wildcard = Listening(new System.Net.IPEndPoint(System.Net.IPAddress.Any, port));
+            _loopback = Listening(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+        }
+
+        private static System.Net.Sockets.Socket Listening(System.Net.IPEndPoint endpoint)
+        {
+            var socket = new System.Net.Sockets.Socket(endpoint.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            socket.Bind(endpoint);
+            socket.Listen(1);
+
+            return socket;
         }
 
         public void Dispose()
         {
-            try { _loopback.Stop(); } catch { /* best-effort */ }
-            try { _wildcard.Stop(); } catch { /* best-effort */ }
+            _loopback.Dispose();
+            _wildcard.Dispose();
         }
     }
 
