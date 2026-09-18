@@ -43,6 +43,20 @@ public sealed class AgentRunLogStream : IEntity<Guid>
     public DateTimeOffset? RemoteStallSince { get; set; }
     /// <summary>The typed refusal being waited out, in the capture bridge's error-code vocabulary. Never a second reason vocabulary, and never parsed.</summary>
     public string? RemoteStallCode { get; set; }
+    /// <summary>
+    /// The earliest instant this stream's bytes may be reclaimed, written by the retention reaper on the FIRST sweep
+    /// that found the stream terminal, past its rule and cited by nobody. Null means no sweep has ever proposed it —
+    /// which is what every stream a live worker is still capturing reads, and what the whole table read before the
+    /// plane existed.
+    /// </summary>
+    public DateTimeOffset? RetainUntil { get; set; }
+
+    /// <summary>
+    /// When this stream's segment bytes were reclaimed. The head row deliberately outlives its bytes: a reader that
+    /// finds nothing cannot tell "purged by policy" from "lost", so the tombstone is what lets the Room say purged.
+    /// </summary>
+    public DateTimeOffset? PurgedAt { get; set; }
+
     public ArtifactDigestAlgorithm? ContentDigestAlgorithm { get; set; }
     public byte[]? ContentDigest { get; set; }
     public byte[]? ManifestDigest { get; set; }

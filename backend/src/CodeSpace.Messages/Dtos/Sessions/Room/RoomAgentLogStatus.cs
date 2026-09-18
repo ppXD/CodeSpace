@@ -30,4 +30,12 @@ public enum RoomAgentLogStatus
     /// today, and a value shifted underneath a stored ordinal is unrecoverable.
     /// </summary>
     Stalled,
+
+    /// <summary>
+    /// Settled, and its bytes have since been reclaimed by the retention plane. Distinct from every other member
+    /// because nothing went wrong: the capture completed, the window elapsed, and the head row survives precisely so a
+    /// reader is told that rather than meeting a stream whose bytes will not load. Appended for the same reason
+    /// <see cref="Stalled"/> was — no existing member's ordinal may move.
+    /// </summary>
+    Purged,
 }

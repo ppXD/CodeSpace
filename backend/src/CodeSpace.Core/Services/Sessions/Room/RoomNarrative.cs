@@ -576,8 +576,9 @@ public static class RoomNarrative
         RoomAgentLogStatus.Incomplete => 0,
         RoomAgentLogStatus.Stalled => 1,
         RoomAgentLogStatus.Finalizing => 2,
-        RoomAgentLogStatus.Captured => 3,
-        _ => 4,
+        RoomAgentLogStatus.Purged => 3,
+        RoomAgentLogStatus.Captured => 4,
+        _ => 5,
     };
 
     private static string LogStatusWord(RoomAgentLogStatus status) => status switch
@@ -585,6 +586,7 @@ public static class RoomNarrative
         RoomAgentLogStatus.Incomplete => "incomplete",
         RoomAgentLogStatus.Stalled => "held; storage unavailable",
         RoomAgentLogStatus.Finalizing => "finalizing",
+        RoomAgentLogStatus.Purged => "purged; retention window elapsed",
         RoomAgentLogStatus.Captured => "captured; integrity proof unavailable",
         _ => "integrity verified",
     };
@@ -596,6 +598,9 @@ public static class RoomNarrative
         // vocabulary for it would change every renderer for a state that is not a failure.
         RoomAgentLogStatus.Stalled => NarrativeTone.Info,
         RoomAgentLogStatus.Finalizing => NarrativeTone.Info,
+        // Info, not Error: nothing failed. The capture settled and the bytes were reclaimed on schedule; the WORD is
+        // what tells the reader they are gone.
+        RoomAgentLogStatus.Purged => NarrativeTone.Info,
         RoomAgentLogStatus.Captured => NarrativeTone.Info,
         _ => NarrativeTone.Success,
     };
