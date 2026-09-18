@@ -123,6 +123,32 @@ public sealed class RoomLogSummaryTests
         summary.Detail.ShouldBe("2 streams · 1 capture failed · 1 held; storage unavailable");
     }
 
-    private static RoomProjector.AgentLogRow Row(AgentRunLogStreamState state, int schemaVersion = 3, bool hasManifestDigest = false, bool remoteStalled = false) =>
-        new(AgentId, state, schemaVersion, hasManifestDigest, remoteStalled);
+    /// <summary>A stream the retention plane reclaimed reads as purged, never as the integrity proof its manifest receipt still carries.</summary>
+    [Fact]
+    public void A_purged_stream_is_not_folded_as_integrity_verified()
+    {
+        var summary = RoomProjector.SummarizeLogs([Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true, purged: true)]);
+
+        summary.ShouldBe(new RoomAgentLogSummary(RoomAgentLogStatus.Purged, 1, "1 stream · 1 purged; retention window elapsed"));
+    }
+
+    [Fact]
+    public void A_readable_stream_outranks_a_purged_one_but_a_finalizing_one_outranks_both()
+    {
+        var purgedAndVerified = RoomProjector.SummarizeLogs([
+            Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true, purged: true),
+            Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true),
+        ]);
+
+        purgedAndVerified.Status.ShouldBe(RoomAgentLogStatus.Purged, "a reader has to be told some of this agent's log is gone, even when the rest verifies");
+        purgedAndVerified.Detail.ShouldBe("2 streams · 1 purged; retention window elapsed · 1 integrity verified");
+
+        RoomProjector.SummarizeLogs([
+            Row(AgentRunLogStreamState.Completed, schemaVersion: 3, hasManifestDigest: true, purged: true),
+            Row(AgentRunLogStreamState.Open),
+        ]).Status.ShouldBe(RoomAgentLogStatus.Finalizing, "a capture still in flight is the more urgent fact");
+    }
+
+    private static RoomProjector.AgentLogRow Row(AgentRunLogStreamState state, int schemaVersion = 3, bool hasManifestDigest = false, bool remoteStalled = false, bool purged = false) =>
+        new(AgentId, state, schemaVersion, hasManifestDigest, remoteStalled, purged);
 }

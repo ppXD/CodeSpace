@@ -218,7 +218,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         var logRows = await (from stream in _db.AgentRunLogStream.AsNoTracking()
             join agent in _db.AgentRun.AsNoTracking() on new { stream.TeamId, AgentRunId = stream.AgentRunId } equals new { agent.TeamId, AgentRunId = agent.Id }
             where stream.TeamId == teamId && agent.WorkflowRunId.HasValue && runIds.Contains(agent.WorkflowRunId.Value)
-            select new RunAgentLogRow(agent.WorkflowRunId.GetValueOrDefault(), stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null))
+            select new RunAgentLogRow(agent.WorkflowRunId.GetValueOrDefault(), stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null, stream.PurgedAt != null))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var reservations = await _db.BudgetReservation.AsNoTracking()
             .Where(row => row.TeamId == teamId && runIds.Contains(row.WorkflowRunId))
@@ -743,7 +743,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
 
         var rows = await _db.AgentRunLogStream.AsNoTracking()
             .Where(stream => stream.TeamId == teamId && agentIds.Contains(stream.AgentRunId))
-            .Select(stream => new AgentLogRow(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null))
+            .Select(stream => new AgentLogRow(stream.AgentRunId, stream.State, stream.SchemaVersion, stream.ManifestDigest != null, stream.RemoteStallSince != null, stream.PurgedAt != null))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return rows.GroupBy(row => row.AgentRunId).ToDictionary(group => group.Key, group => SummarizeLogs(group.ToList()));
@@ -757,12 +757,19 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         // bytes are queued in the sandbox spool. Saying "finalizing" through a storage incident is the reading an
         // operator acts on wrongly — it claims progress that is not happening and hides the one fact worth knowing.
         var stalled = rows.Count(row => row.State == AgentRunLogStreamState.Open && row.RemoteStalled);
-        var verified = rows.Count(row => row.State == AgentRunLogStreamState.Completed && row.SchemaVersion == 3 && row.HasManifestDigest);
-        var captured = rows.Count(row => row.State == AgentRunLogStreamState.Completed) - verified;
-        var status = incomplete.Count > 0 ? RoomAgentLogStatus.Incomplete : stalled > 0 ? RoomAgentLogStatus.Stalled : open > 0 ? RoomAgentLogStatus.Finalizing : captured > 0 ? RoomAgentLogStatus.Captured : RoomAgentLogStatus.Verified;
+        // A stream the retention plane reclaimed is counted apart from — never inside — captured or verified. Its
+        // manifest receipt is still on the row, so folding it as "integrity verified" would answer the operator's
+        // actual question ("can I read this?") with a proof about bytes that are gone.
+        var purged = rows.Count(row => row.State == AgentRunLogStreamState.Completed && row.Purged);
+        var settled = rows.Where(row => row.State == AgentRunLogStreamState.Completed && !row.Purged).ToList();
+        var verified = settled.Count(row => row.SchemaVersion == 3 && row.HasManifestDigest);
+        var captured = settled.Count - verified;
+        var status = incomplete.Count > 0 ? RoomAgentLogStatus.Incomplete : stalled > 0 ? RoomAgentLogStatus.Stalled : open > 0 ? RoomAgentLogStatus.Finalizing
+            : purged > 0 ? RoomAgentLogStatus.Purged : captured > 0 ? RoomAgentLogStatus.Captured : RoomAgentLogStatus.Verified;
         var details = incomplete.GroupBy(row => row.State).OrderBy(group => LogStateRank(group.Key)).Select(group => $"{group.Count()} {LogStateWord(group.Key)}").ToList();
         if (stalled > 0) details.Add($"{stalled} held; storage unavailable");
         if (open - stalled > 0) details.Add($"{open - stalled} finalizing");
+        if (purged > 0) details.Add($"{purged} purged; retention window elapsed");
         if (captured > 0) details.Add($"{captured} captured; integrity proof unavailable");
         if (verified > 0) details.Add($"{verified} integrity verified");
 
@@ -839,7 +846,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private static readonly IReadOnlyDictionary<Guid, TerminalEvidence> EmptyTerminalEvidence = new Dictionary<Guid, TerminalEvidence>();
     private static readonly IReadOnlyList<AgentProducerRow> EmptyAgentRows = Array.Empty<AgentProducerRow>();
 
-    internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled = false);
+    internal readonly record struct AgentLogRow(Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled = false, bool Purged = false);
 
     /// <summary>One agent run of the turn, in the three columns a produced artifact has to be able to speak for. Internal so the producer fold is unit-pinned directly, not only through a full projection.</summary>
     internal readonly record struct AgentProducerRow(Guid AgentRunId, Messages.Enums.AgentRunStatus Status, string? ConfinementJson);
@@ -847,9 +854,9 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <summary>The per-UNIT facts every delivered artifact attaches — each unit's graded result, its log fold, and its producer record. Gathered once and handed to BOTH the deliveries and the deliverables projection, so a repository and a file can never attribute the same agent differently.</summary>
     private sealed record UnitTruth(IReadOnlyList<SupervisorAgentResult> Results, IReadOnlyDictionary<Guid, RoomAgentLogSummary> Logs, IReadOnlyDictionary<Guid, RoomArtifactProducer> Producers);
 
-    private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled)
+    private readonly record struct RunAgentLogRow(Guid RunId, Guid AgentRunId, AgentRunLogStreamState State, int SchemaVersion, bool HasManifestDigest, bool RemoteStalled, bool Purged)
     {
-        public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest, RemoteStalled);
+        public AgentLogRow Log => new(AgentRunId, State, SchemaVersion, HasManifestDigest, RemoteStalled, Purged);
     }
 
     /// <summary>One agent row of a COLLAPSED turn, carrying its owning run so the batched read can be split per turn. Its <see cref="Agent"/> is the identical row a fresh projection folds.</summary>
@@ -1319,8 +1326,13 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         return RoomOracleProtection.None;
     }
 
-    /// <summary>A stream that settled (Captured or Verified) reads complete; still Finalizing or Incomplete does not.</summary>
-    private static bool LogsAreComplete(RoomAgentLogStatus status) => status is RoomAgentLogStatus.Verified or RoomAgentLogStatus.Captured;
+    /// <summary>
+    /// A stream that settled (Captured, Verified, or settled and since Purged) reads complete; still Finalizing or
+    /// Incomplete does not. Purged belongs here because this field answers whether the capture SETTLED, not whether
+    /// the bytes are still on a destination — reading a reclaimed archive as an incomplete capture would retro-brand
+    /// a clean run as a broken one every time a retention window elapsed. The status word carries the bytes.
+    /// </summary>
+    private static bool LogsAreComplete(RoomAgentLogStatus status) => status is RoomAgentLogStatus.Verified or RoomAgentLogStatus.Captured or RoomAgentLogStatus.Purged;
 
     private static string? ClipVerificationDetail(string? detail) =>
         string.IsNullOrEmpty(detail) ? null : detail.Length <= MaxVerificationDetailChars ? detail : detail[..MaxVerificationDetailChars].TrimEnd() + "…";

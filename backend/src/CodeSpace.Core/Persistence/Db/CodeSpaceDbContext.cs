@@ -117,6 +117,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<PairedQualificationCellAdmission> PairedQualificationCellAdmission => Set<PairedQualificationCellAdmission>();
     public DbSet<PairedQualificationCellCheckpoint> PairedQualificationCellCheckpoint => Set<PairedQualificationCellCheckpoint>();
     public DbSet<PairedQualificationResult> PairedQualificationResult => Set<PairedQualificationResult>();
+    public DbSet<PairedQualificationResultPin> PairedQualificationResultPin => Set<PairedQualificationResultPin>();
 
     public DbSet<Lesson> Lesson => Set<Lesson>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();

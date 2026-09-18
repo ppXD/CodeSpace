@@ -58,8 +58,38 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
             ExpectedObservationCount = ExpectedCount(protocol, request.Manifest), ObservationCount = observations.Count,
             QualifiedForCapabilityClaim = outcome.QualifiedForCapabilityClaim, OutcomeJson = outcomeJson,
         });
+        await PinCitedRecordsAsync(protocol.ObservationGroupId, observations, cancellationToken).ConfigureAwait(false);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return sealedOutcome with { ResultDigest = resultDigest };
+    }
+
+    /// <summary>
+    /// Records which durable records this result cites, staged into the SAME <c>SaveChanges</c> as the result row.
+    /// That is the whole guarantee: a seal that commits has its pins, and a seal that does not leaves none — there is
+    /// no window in which a sealed result exists whose evidence a reaper is free to reclaim.
+    ///
+    /// <para>The closure is column-derived, never inferred: the observations name their agent runs, and a run reaches
+    /// its log streams, its cleanup receipts and the offloaded payloads of its events. Migration 0235 backfills the
+    /// same four closures for results sealed before this existed.</para>
+    /// </summary>
+    private async Task PinCitedRecordsAsync(Guid resultId, IReadOnlyList<BenchmarkResultRecord> observations, CancellationToken cancellationToken)
+    {
+        var runIds = observations.Where(row => row.AgentRunId.HasValue).Select(row => row.AgentRunId!.Value).Distinct().ToList();
+
+        if (runIds.Count == 0) return;
+
+        var now = DateTimeOffset.UtcNow;
+        var streamIds = await _db.AgentRunLogStream.AsNoTracking().Where(stream => runIds.Contains(stream.AgentRunId)).Select(stream => stream.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var receiptIds = await _db.AgentRunCleanupReceipt.AsNoTracking().Where(receipt => runIds.Contains(receipt.AgentRunId)).Select(receipt => receipt.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var artifactIds = await _db.AgentRunEvent.AsNoTracking().Where(row => runIds.Contains(row.AgentRunId) && row.DataArtifactId != null).Select(row => row.DataArtifactId!.Value).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        Pin(DurablePinKind.AgentRun, runIds);
+        Pin(DurablePinKind.LogStream, streamIds);
+        Pin(DurablePinKind.CleanupReceipt, receiptIds);
+        Pin(DurablePinKind.Artifact, artifactIds);
+
+        void Pin(DurablePinKind kind, IEnumerable<Guid> targets) =>
+            _db.PairedQualificationResultPin.AddRange(targets.Select(target => PairedQualificationResultPin.For(resultId, kind, target, now)));
     }
 
     /// <summary>Verify the frozen runtime before the terminal row commits, so a seal minted on a substituted runtime leaves no result at all. Exempt for a replay — see <see cref="PairedQualificationSealSource"/>.</summary>
