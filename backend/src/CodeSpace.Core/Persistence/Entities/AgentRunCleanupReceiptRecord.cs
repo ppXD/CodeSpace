@@ -21,5 +21,8 @@ public sealed class AgentRunCleanupReceiptRecord : IEntity<Guid>
     public DateTimeOffset RecordedAt { get; set; }
     public string? ErrorCode { get; set; }
 
+    /// <summary>The earliest instant the retention plane may reclaim this receipt, written by the first sweep that found it settled and cited by nobody. Null until then, and on every row an older binary wrote.</summary>
+    public DateTimeOffset? RetainUntil { get; set; }
+
     public AgentRun AgentRun { get; set; } = default!;
 }
