@@ -90,16 +90,18 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
-    public async Task StripToken_never_throws_even_when_both_set_url_and_remove_fail()
+    public async Task StripToken_fails_closed_when_both_set_url_and_remove_fail()
     {
-        // The clone already succeeded by the time this runs — a credential-leak we FAILED to close must never
-        // fail the grade/workspace-prep outright (the janitor is the documented final backstop).
+        // This test used to assert the OPPOSITE ("never throws", janitor as the backstop). The janitor reclaims the
+        // directory after the run; the agent reads .git/config during it. Refusing is the only exit that keeps the
+        // token away from the reader. Mutation: restore the log-only branch (no throw) → this goes red.
         var runner = new ScriptedStripRunner(setUrlSucceeds: false, removeSucceeds: false);
 
-        await Should.NotThrowAsync(() =>
+        var failure = await Should.ThrowAsync<WorkspaceException>(() =>
             LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(runner, 60, NullLogger<LocalGitWorkspaceProvider>.Instance, "https://host/r.git", "/tmp/x", CancellationToken.None));
 
-        runner.Invocations.Count.ShouldBe(2);
+        failure.Message.ShouldContain(LocalGitWorkspaceProvider.TokenStripFailedDetail, Case.Sensitive, "the refusal names the credential that could not be stripped — the string an operator greps for");
+        runner.Invocations.Count.ShouldBe(2, "the fallback remove is still attempted before refusing — refusing instead of trying would fail runs the remove would have saved");
     }
 
     private sealed class ScriptedStripRunner : ISandboxRunner
@@ -142,6 +144,46 @@ public sealed class LocalGitWorkspaceProviderTests
             invocation.Spec.WorkingDirectory.ShouldBe(handle.Directory, string.Join(' ', invocation.Spec.Args));
             invocation.DirectoryExisted.ShouldBeTrue("the only writable clone mount must exist before bubblewrap starts");
             invocation.Spec.ReadOnlyPaths.ShouldBeEmpty("a network URL must not grant any host source path");
+        }
+    }
+
+    [Fact]
+    public async Task Preparation_withholds_and_deletes_a_clone_whose_token_could_not_be_stripped()
+    {
+        // The call site, not the helper: a clone whose .git/config may still hold the origin token must never become
+        // a workspace handle, and its bytes must not linger for the janitor either (PrepareAsync's catch deletes the
+        // root). Mutation: make the strip log-only again → PrepareAsync returns a handle and the directory survives,
+        // so BOTH assertions go red.
+        var runner = new StripFailingRunner();
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+        var failure = await Should.ThrowAsync<WorkspaceException>(() => provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = "https://example.test/repo.git", Token = "test-token",
+        }), CancellationToken.None));
+
+        failure.Message.ShouldContain(LocalGitWorkspaceProvider.TokenStripFailedDetail);
+
+        var clone = runner.Invocations.Single(invocation => invocation.Spec.Args.Contains("clone"));
+        clone.DirectoryExisted.ShouldBeTrue("the clone really was staged on disk — otherwise 'the directory is gone' below would pass vacuously");
+        Directory.Exists(clone.Spec.WorkingDirectory).ShouldBeFalse("a workspace that may carry a live origin token is deleted, not left for the janitor");
+    }
+
+    /// <summary>Every git command succeeds — except the two that strip the tokened origin, which is the state that must refuse the workspace.</summary>
+    private sealed class StripFailingRunner : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<(SandboxSpec Spec, bool DirectoryExisted)> Invocations { get; } = new();
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Invocations.Add((spec, Directory.Exists(spec.WorkingDirectory)));
+
+            var strips = spec.Args.Contains("set-url") || spec.Args.Contains("remove");
+
+            return Task.FromResult(strips
+                ? new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "git error" }
+                : new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
         }
     }
 
