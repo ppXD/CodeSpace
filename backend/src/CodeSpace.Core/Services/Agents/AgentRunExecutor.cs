@@ -3687,15 +3687,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>
     /// The most needles <see cref="BuildRunRedactor"/> will hand back. <see cref="AgentTask.Environment"/> is
-    /// author-supplied and uncapped, so without this a task naming a thousand secret-marked variables would make every
+    /// uncapped, so without this a task naming a thousand secret-marked variables would make every
     /// redaction pass a thousand-pattern scan over every event line and every spooled byte — and the byte-stream
     /// redactor holds a carry suffix as long as its longest pattern. A run legitimately injects a handful; 64 is far
     /// above any real launch and far below the point where the scan costs anything. The overflow is dropped SILENTLY:
-    /// naming the dropped variables would put author-chosen secret names into the log, which is the sort of thing this
+    /// naming the dropped variables would put the dropped secret names into the log, which is the sort of thing this
     /// file exists to prevent.
     ///
-    /// <para>It bounds what an AUTHOR can push in, which is why <see cref="WithMcpRunToken"/> adds the run's own minted
-    /// token beyond it: that one is this launch's, exactly one per run, and dropping it would leak a live capability.</para>
+    /// <para>Nothing an operator authors reaches that dictionary TODAY — every producer leaves it empty and no config
+    /// schema or launch DTO carries an env key (see <see cref="AgentTask.Environment"/>), so the cap currently binds
+    /// only the executor's own handful. It is kept because the day an authoring surface lands is not the day to
+    /// discover the scan is unbounded. <see cref="WithMcpRunToken"/> adds the run's own minted token BEYOND the cap
+    /// either way: that one is this launch's, exactly one per run, and dropping it would leak a live capability.</para>
     /// </summary>
     internal const int MaximumNeedles = 64;
 
@@ -3726,7 +3729,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The run's redactor, built from EVERY secret this launch injects into the child process — not the model key
     /// alone. Three carriers: the decrypted api key; the credential parts embedded in the base URL (a gateway that
     /// authenticates by <c>user:key@host</c> or <c>?api-key=</c>); and each injected env value whose name marks it
-    /// secret (an author-supplied git token, an MCP secret an agent definition carries). All three reach the same
+    /// secret (today only what the executor itself layers on — nothing an operator authors reaches
+    /// <see cref="AgentTask.Environment"/>; the third carrier is here for the surface that may one day fill it, and
+    /// costs nothing while the dictionary is empty). All three reach the same
     /// child and come back through the same failure modes — a 401 body, an init banner, a clone error — into text
     /// this run PERSISTS: <c>AgentRun.Error</c> (journal card, Room, supervisor prompt), the append-only event log,
     /// and the diagnostic records.
