@@ -9,6 +9,7 @@ import { formatElapsed, useNowTick } from "@/hooks/use-now-tick";
 import type { WorkflowNodeData } from "../WorkflowNode";
 import { ReceiptFooter } from "./ReceiptFooter";
 import type { NodeFooterProps } from "./index";
+import { WaitFooter } from "./WaitFooter";
 
 /**
  * The footer for the 10 single-call git nodes + `http.request` (every typeKey the registry resolves to the
@@ -25,6 +26,11 @@ export function ExternalCallFooter(props: NodeFooterProps) {
   const now = useNowTick();
 
   if (props.status === "Running") return <RunningBar data={props.data} title={props.title} live={live?.call ?? null} now={now} />;
+
+  // A Suspended external-call node is PARKED on something (these nodes have no wait of their own — the engine parks
+  // them, e.g. on an act-as-user identity link). The external-call language has nothing to say about that, and the
+  // plain receipt would render a bare "Suspended" with no reason, so hand it to the wait family's own bar.
+  if (props.status === "Suspended") return <WaitFooter {...props} />;
 
   const digest = digestExternalCall(props.data.typeKey, props.rows);
 

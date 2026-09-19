@@ -167,6 +167,17 @@ describe("ExternalCallFooter — component", () => {
     expect(ring?.style.getPropertyValue("--wf-ring-p")).toBe("50%");
   });
 
+  it("Suspended hands over to the wait bar so the park says WHY, not a bare status", () => {
+    // These nodes have no wait of their own — the engine parks them (an act-as-user identity link). The
+    // external-call language has nothing to say about that, and the plain receipt showed a bare "Suspended".
+    const store = fakeLiveStore("n1", { wait: { kind: "ActorIdentityLink", sinceMs: FIXED_NOW - 30_000, payload: {} }, lastEventSeq: 1 });
+    const { container } = renderFooter("Suspended", nodeData({ nodeId: "n1", typeKey: "git.pr_review" }), [], store);
+
+    expect(container.querySelector(".wf-wait")).not.toBeNull();
+    expect(container.textContent).toContain("Waiting on a connected account");
+    expect(container.querySelector(".wf-rf-status-spin")).toBeNull();
+  });
+
   it("terminal Success renders the per-type digest label in the reused receipt bar", () => {
     const rows = rowWith({ number: 42, url: "https://github.com/x/y/pull/42" });
     rows[0].status = "Success";

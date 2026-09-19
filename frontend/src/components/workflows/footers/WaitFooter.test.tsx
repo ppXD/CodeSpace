@@ -115,6 +115,32 @@ describe("WaitFooter — Suspended", () => {
     expect(container.querySelector(".wf-rf-status-spin")).toBeNull();
   });
 
+  it("names the provider to connect, keyed off the WAIT kind not the node type", () => {
+    // An act-as-user node (git.pr_review here) carries no wait typeKey at all, so the classifier must read the
+    // live wait kind. Without this the bar said a bare "Waiting" and never mentioned the account to connect.
+    live.value = signals({ kind: "ActorIdentityLink", sinceMs: SINCE, deadlineAtMs: DEADLINE, payload: {} });
+
+    const { container } = renderFooter({ status: "Suspended", data: nodeData({ typeKey: "git.pr_review", category: "Git" }) });
+
+    // The bar stays a short fixed label: the `node.suspended` record the live signal is folded from carries only
+    // {wait_kind, wake_at, outputs} — never the node's suspend payload — so there is no provider name here to read,
+    // and the bar is nowrap+ellipsis anyway. The park's full sentence belongs on the run detail, which has the room.
+    expect(screen.getByText("Waiting on a connected account")).toBeTruthy();
+    expect(container.querySelector(".wf-wait-detail")).toBeNull();
+    expect(container.querySelector(".wf-rf-status-spin")).toBeNull();
+  });
+
+  it("shows an identity park as PARKED, never as a countdown to an outcome", () => {
+    // The park's deadline is the next RE-CHECK of whether the person connected — nothing is promised to happen
+    // then. A ticking "0:30" would read as "done in 30 seconds".
+    live.value = signals({ kind: "ActorIdentityLink", sinceMs: SINCE, deadlineAtMs: DEADLINE, payload: {} });
+
+    const { container } = renderFooter({ status: "Suspended", data: nodeData({ typeKey: "git.pr_review", category: "Git" }) });
+
+    expect(container.querySelector(".wf-ring")).toBeNull();
+    expect(screen.getByText(/Parked/).textContent).toContain("0:30");
+  });
+
   it("renders from the node when there is no live signal, without throwing", () => {
     live.value = null;
 
