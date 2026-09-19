@@ -51,10 +51,36 @@ public sealed class SandboxExitCodeTests
     [Fact]
     public void The_vanished_sentinel_minus_one_reads_as_a_lost_process_not_a_bare_number()
     {
-        // -1 is the durable runner's "process gone, no exit marker" sentinel (a whole-tree SIGKILL / host teardown).
+        // -1 is the durable runner's "process gone, no exit marker" sentinel.
         var d = SandboxExitCode.Describe(-1);
 
         d.ShouldStartWith("-1");
         d.ShouldContain("vanished", Case.Insensitive);
+    }
+
+    [Fact]
+    public void The_vanished_sentinel_does_not_name_a_cause_it_did_not_establish()
+    {
+        // This text used to say "likely an external/OOM kill or host teardown", and it said so exactly backwards:
+        // ExitStatusFor consults the cgroup's own oom_kill counter FIRST and renders a resource-ceiling message when
+        // it fires, so reaching Describe(-1) at all means an OOM was NOT established. Naming one sent a real
+        // investigation after memory ceilings for a run whose process had never been created — the argv-too-long
+        // launch refusal, which allocated nothing and could not have been OOM-killed.
+        var d = SandboxExitCode.Describe(-1);
+
+        d.ShouldNotContain("OOM", Case.Insensitive);
+        d.ShouldNotContain("likely", Case.Insensitive);
+    }
+
+    [Fact]
+    public void The_vanished_sentinel_offers_both_readings_so_neither_is_assumed()
+    {
+        // The two are genuinely different repairs — one is "this host killed it", the other is "it never ran" — and
+        // the runner cannot tell them apart from the absence of a marker alone. Saying both is the honest answer;
+        // whatever the bootstrap or the workload actually said is folded on after this by AgentDiagnosticExcerpt.
+        var d = SandboxExitCode.Describe(-1);
+
+        d.ShouldContain("killed", Case.Insensitive);
+        d.ShouldContain("never started", Case.Insensitive);
     }
 }

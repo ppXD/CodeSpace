@@ -137,15 +137,21 @@ public class AgentDiagnosticFoldTests
         AgentDiagnosticExcerpt.MaxLines.ShouldBe(3);
     }
 
-    [Fact]
-    public void A_maximal_folded_error_still_fits_the_card_that_renders_it()
+    [Theory]
+    [InlineData(137)]   // 128+signal, named — the longest signal decode
+    [InlineData(168)]   // 128+signal, unnamed
+    [InlineData(-1)]    // the vanished sentinel — its own sentence, and the one that grew when it stopped asserting a cause
+    [InlineData(1)]     // a bare number, the floor
+    public void A_maximal_folded_error_still_fits_the_card_that_renders_it(int exitCode)
     {
-        // AgentMetricsReader caps the journal card's error at 400 chars and truncates from the FRONT, so a ceiling
-        // raised here would silently cut the folded reason off the one surface an operator reads it on. Pin the
-        // relationship, not just the number: whoever raises MaxChars has to see this.
-        var maximal = new ClaudeCodeHarness().BuildResult(Array.Empty<AgentEvent>(), exitCode: 137, diagnostics: new string('x', AgentDiagnosticExcerpt.MaxChars * 4));
+        // AgentMetricsReader caps the journal card's error at 400 chars with SQL left(), which keeps the head and
+        // drops the TAIL — so anything that lengthens the exit text eats the folded reason off the one surface an
+        // operator reads it on. Pin the relationship, not just the number, and pin it for EVERY text Describe can
+        // put in front: covering only the signal case let the vanished sentinel's rewording go 40 chars over
+        // unnoticed. Whoever raises MaxChars, or writes a longer exit sentence, has to see this.
+        var maximal = new ClaudeCodeHarness().BuildResult(Array.Empty<AgentEvent>(), exitCode, diagnostics: new string('x', AgentDiagnosticExcerpt.MaxChars * 4));
 
-        maximal.Error!.Length.ShouldBeLessThanOrEqualTo(400, "the whole folded error — exit text, separator and excerpt — has to clear AgentMetricsReader's card cap");
+        maximal.Error!.Length.ShouldBeLessThanOrEqualTo(400, $"the whole folded error for exit {exitCode} — exit text, separator and excerpt — has to clear AgentMetricsReader's card cap");
     }
 
     private static bool HasUnpairedSurrogate(string value)
