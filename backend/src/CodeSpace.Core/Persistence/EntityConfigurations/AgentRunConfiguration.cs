@@ -25,6 +25,13 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
         // is a column read. Nullable (a pre-session CLI / in-flight run has none).
         builder.Property(r => r.SessionId).HasColumnName("session_id");
 
+        // 3c (migration 0234) — the mid-run session-transcript checkpoint. Nullable with no default: the column is
+        // metadata-only on this hot table, and NULL is the escape an older binary and every pre-3c run reads as
+        // "no checkpoint, cold start".
+        builder.Property(r => r.SessionTranscriptCheckpointArtifactId).HasColumnName("session_transcript_checkpoint_artifact_id");
+        builder.Property(r => r.SessionTranscriptCheckpointAt).HasColumnName("session_transcript_checkpoint_at");
+        builder.Property(r => r.ResumedFromAgentRunId).HasColumnName("resumed_from_agent_run_id");
+
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");
         builder.Property(r => r.SpoolCleanupAttempts).HasColumnName("spool_cleanup_attempts");
         builder.Property(r => r.SpoolCleanupLastAttemptAt).HasColumnName("spool_cleanup_last_attempt_at");

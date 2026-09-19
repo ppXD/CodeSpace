@@ -230,6 +230,50 @@ public class RerunFromNodeAgentFlowTests
     }
 
     [Fact]
+    public async Task An_in_flight_sibling_at_one_hop_cannot_mask_the_resumable_attempt()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The lookup walks ancestors nearest-first and takes the first RESUMABLE candidate at each hop. It used to
+        // take the first candidate at each hop, full stop — and "resumable" needs BOTH a session id and a transcript
+        // (TryResumable, both-or-neither), so a row with an id and no transcript could win the hop and mask the
+        // attempt that actually had one. 3c makes that reachable rather than theoretical: a run now stamps its
+        // session id at its first MID-RUN checkpoint instead of only at completion, so an in-flight sibling at the
+        // same cell carries one with no result_jsonb at all.
+        // MUTATION: restore `candidates.FirstOrDefault(c => c.WorkflowRunId == runId)` → the masking row wins and
+        // this reds.
+        using var cli = new SubtaskAwareFakeCli();
+        var (teamId, _, originalRunId) = await RunOriginalChainAsync();
+        await SeedCapturedSessionAsync(originalRunId, "b", "sess-resumable", inlineTranscript: "B-transcript\n", transcriptArtifactId: null);
+        await SeedInFlightSiblingAsync(originalRunId, "b", teamId, "sess-in-flight");
+
+        using var scope = _fixture.BeginScope();
+
+        (await scope.Resolve<Core.Services.Agents.IAgentRunService>().FindResumableSessionAsync(teamId, originalRunId, "b", "", CancellationToken.None))
+            .ShouldNotBeNull("an in-flight sibling carrying only a session id must not mask the attempt that is genuinely resumable")
+            .SessionId.ShouldBe("sess-resumable");
+    }
+
+    /// <summary>A SECOND run at the same cell of the same workflow run, Running with a mid-run session id and no result — exactly what a checkpointed run looks like before it lands.</summary>
+    private async Task SeedInFlightSiblingAsync(Guid workflowRunId, string nodeId, Guid teamId, string sessionId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var sibling = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == workflowRunId && r.NodeId == nodeId);
+
+        db.AgentRun.Add(new Core.Persistence.Entities.AgentRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, WorkflowRunId = workflowRunId, NodeId = nodeId, IterationKey = sibling.IterationKey,
+            Harness = sibling.Harness, Status = Messages.Enums.AgentRunStatus.Running, SessionId = sessionId, TaskJson = sibling.TaskJson,
+            // NEWER than the resumable attempt, so the hop's newest-first order puts it FIRST — which is what makes
+            // this a real masking test rather than one that depends on whatever order the plan emitted.
+            CreatedDate = sibling.CreatedDate.AddMinutes(1),
+        });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
     public async Task Find_resumable_session_is_team_scoped_and_never_crosses_teams()
     {
         if (OperatingSystem.IsWindows()) return;

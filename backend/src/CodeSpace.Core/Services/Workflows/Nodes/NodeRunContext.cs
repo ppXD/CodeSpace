@@ -113,4 +113,17 @@ public sealed record NodeRunContext
     /// byte-identical no-op for every other node type.
     /// </summary>
     public JsonElement? PriorAttemptPayload { get; init; }
+
+    /// <summary>
+    /// Whether this node's OWN retry policy allows more than one attempt — <c>RetryPlan.RetriesOnFailure</c>, read
+    /// off the node definition the engine is executing. False (the default) for a node with no policy, and off the
+    /// engine path entirely.
+    ///
+    /// <para>It answers exactly one question and no more: "can a failure of this node buy another attempt at all?"
+    /// It deliberately does NOT say how many attempts are left, because the budget is a cross-cycle ledger the
+    /// engine counts from persisted attempt records and the node has no business re-deriving. <c>agent.run</c> reads
+    /// it to decide whether to pay for durable session checkpoints (3c): a node that can never be retried has nobody
+    /// to hand a restored conversation to, so checkpointing one is pure waste.</para>
+    /// </summary>
+    public bool RetriesOnFailure { get; init; }
 }

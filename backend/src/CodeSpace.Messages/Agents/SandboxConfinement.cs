@@ -69,4 +69,17 @@ public sealed record SandboxConfinement
     /// unbrokered run — those have nothing to lose here, and say so by saying nothing.</para>
     /// </summary>
     public bool ModelCredentialLeaseLost { get; init; }
+
+    /// <summary>
+    /// When this attempt was minted as the CONTINUATION of an earlier run whose host died, from that run's durable
+    /// session-transcript checkpoint — null (the default) for every ordinary launch.
+    ///
+    /// <para>Recorded here for the same reason the rest of this record is: it is a permanent fact about the run that
+    /// must outlive the runner handle the spool reaper nulls. And it must be said out loud, because a resumed attempt
+    /// is NARROWER than the one it continues: only the CONVERSATION was durable. The lost host's working tree is
+    /// gone, so every edit the earlier attempt had not published is gone with it, and the resumed agent is told so
+    /// (<c>AgentRetryContinuity.HonestNoContinuityHint</c>) rather than left to infer it from a transcript that
+    /// describes files its sandbox does not contain.</para>
+    /// </summary>
+    public DateTimeOffset? ResumedFromCheckpointAt { get; init; }
 }

@@ -29,6 +29,7 @@ public sealed class ArtifactReferenceOracleTests
             ("artifact_manifest", "content_artifact_id"),
             ("publish_manifest", "patch_artifact_id"),
             ("agent_run_event", "data_artifact_id"),
+            ("agent_run", "session_transcript_checkpoint_artifact_id"),
             ("workflow_run_model_call", "request_artifact_id"),
             ("workflow_run_model_call_attempt", "request_artifact_id"),
             ("workflow_run_model_call_attempt", "response_artifact_id"),
@@ -61,6 +62,18 @@ public sealed class ArtifactReferenceOracleTests
 
         mapped.Where(column => !probed.Contains(column)).ShouldBeEmpty(
             "a soft link to workflow_artifact that the oracle does not probe would let the reaper delete a referenced object — add it to ArtifactReferenceOracle.ReferenceSites and give it an index");
+    }
+
+    [Fact]
+    public void ReferenceSites_includes_the_checkpoint_column()
+    {
+        // 3c: agent_run.session_transcript_checkpoint_artifact_id is the ONLY column naming a live mid-run session
+        // checkpoint, and that checkpoint is DECLARED (AgentRunEventData) — so it is a reap candidate. An oracle that
+        // did not probe this column would answer "unreferenced" about the one artifact a run whose host died needs to
+        // be continuable, and the reaper would collect it. The literal list above already pins it; this states the
+        // reason separately so a future edit that deletes the entry cannot read as tidying.
+        ArtifactReferenceOracle.ReferenceSites.ShouldContain(("agent_run", "session_transcript_checkpoint_artifact_id"),
+            "the mid-run session-transcript checkpoint is a declared artifact whose only reference is this column — unprobed, the reaper deletes the conversation a cross-host resume restores");
     }
 
     [Fact]

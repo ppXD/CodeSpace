@@ -67,10 +67,39 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>
     /// P3.1a: the harness-native session/thread id captured off the run's CLI conversation (Claude's
     /// <c>session_id</c>, Codex's <c>thread_id</c>) — promoted from <c>result_jsonb</c> to a first-class column so a
-    /// rerun's CONTINUE lookup is a column read, not a JSON probe. NULL while in-flight, and for a run whose stream
-    /// carried no session id (a pre-session CLI). Set on completion from <c>AgentRunResult.SessionId</c>.
+    /// rerun's CONTINUE lookup is a column read, not a JSON probe. NULL for a run whose stream carried no session id
+    /// (a pre-session CLI). Set on completion from <c>AgentRunResult.SessionId</c>, and — since 3c — already at the
+    /// run's first session-transcript checkpoint, because a checkpoint nothing can ADDRESS is not resumable: the
+    /// continuation needs this id to hand the CLI its <c>--resume</c>. Every reader that treats a non-null id as
+    /// "resumable" also requires a transcript out of <see cref="ResultJson"/> (<c>TryResumable</c>, both-or-neither),
+    /// so an in-flight row carrying one is skipped exactly as a null one was.
     /// </summary>
     public string? SessionId { get; set; }
+
+    /// <summary>
+    /// 3c: the artifact holding this run's resumable session transcript as of its most recent MID-RUN checkpoint —
+    /// the only thing a run leaves behind that another host can continue from after the launching host dies. NULL
+    /// until the first checkpoint, and for every run whose harness has no addressable session transcript. A soft link
+    /// to <c>workflow_artifact.id</c>, and it is exactly that: the reference the artifact reaper's oracle probes
+    /// (<c>ArtifactReferenceOracle.ReferenceSites</c>) so a live checkpoint is never collected.
+    /// </summary>
+    public Guid? SessionTranscriptCheckpointArtifactId { get; set; }
+
+    /// <summary>When <see cref="SessionTranscriptCheckpointArtifactId"/> was taken. The cadence clock for the next checkpoint, and the age an operator (or a resumed attempt) reads to know how much of the conversation survived the lost host.</summary>
+    public DateTimeOffset? SessionTranscriptCheckpointAt { get; set; }
+
+    /// <summary>
+    /// 3c: the abandoned run this one was STAGED to continue from a session checkpoint — the structured link, so
+    /// "which attempt took over from which" is a column rather than a sentence buried in an event. Soft link (no
+    /// FK), like every other agent-run cross-reference. NULL for every ordinary run.
+    ///
+    /// <para>Staged, not necessarily restored: this is written when the row is created, and whether the checkpoint
+    /// could actually be READ is only knowable at launch (a reaped blob, an unreachable destination — then the
+    /// attempt runs cold and says so). The honest reading of a non-null value is therefore "this attempt succeeded
+    /// that one after it lost its host", which is true either way; what was recovered is the confinement record's
+    /// <c>ResumedFromCheckpointAt</c>, which the degrade clears.</para>
+    /// </summary>
+    public Guid? ResumedFromAgentRunId { get; set; }
 
     /// <summary>Worker liveness ping; a stuck-Running reconciler reads this to recover crashed runs.</summary>
     public DateTimeOffset? HeartbeatAt { get; set; }

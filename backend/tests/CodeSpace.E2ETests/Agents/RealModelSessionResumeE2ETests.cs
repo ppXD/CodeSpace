@@ -131,6 +131,177 @@ public sealed class RealModelSessionResumeE2ETests
             $"{Provider} '{model}': the resumed agent {(recalled ? "RECALLED" : "did NOT recall")} the codeword {codeword} from the restored conversation — the P3 continue chain {(recalled ? "held end-to-end against the live model" : "did not surface the prior context")}");
     }
 
+    /// <summary>
+    /// 3c — the CROSS-HOST arm: the conversation is taken from a MID-RUN checkpoint, the way a run whose host dies
+    /// leaves one behind, and a second agent continues from exactly those bytes.
+    ///
+    /// <para>What makes it a different experiment from the arm above, and why both are needed: that one reads the
+    /// session file AFTER the process exits, from the host that ran it — which is precisely what a dead host cannot
+    /// offer. This one takes the transcript while the agent is STILL RUNNING, through the same two production calls
+    /// the executor's observer tick makes (<c>IAgentSessionTranscript.SessionTranscriptRelativePath</c> to locate it
+    /// and <c>AgentRunExecutor.ResolveSessionTranscriptPath</c> to clamp it inside the config home), then KILLS the
+    /// agent before it can finish — the host loss — and asks a fresh agent, in a fresh config home, to recall the
+    /// codeword from those mid-run bytes alone.</para>
+    ///
+    /// <para>A mid-run snapshot that does not yet contain the codeword turn is INFRA, not a capability miss: the
+    /// experiment could not be staged, so there is nothing to measure. Same reporting contract as the arm above —
+    /// informational, gating only a <see cref="RealModelOutcome.CodeFault"/>.</para>
+    ///
+    /// <para><b>EXACTLY what this arm proves, and what it does not.</b> It proves ONE thing no other tier can: that a
+    /// transcript located mid-run through the production locate + clamp, cut at a line boundary, is bytes a real
+    /// <c>claude</c> actually resumes from — that the live model USES the pre-loss context. That is a statement about
+    /// the CLI and the model, not about this codebase's plumbing.</para>
+    ///
+    /// <para>It therefore CANNOT go red for anything else 3c wrote, and must not be read as coverage for it. It drives
+    /// <c>Process.Start</c> directly, so it never touches the executor's tick, the checkpointer, the artifact store,
+    /// the fenced row stamp, the reconciler's abandon or the agent node's respawn — all of which are pinned, with
+    /// their own mutations, in <c>AgentSessionTranscriptCheckpointerTests</c>,
+    /// <c>AgentRunSessionCheckpointFlowTests</c>, <c>AgentCodeNodeTests</c> and <c>AgentNodeFlowTests</c>. It also
+    /// cannot FAIL the lane on a recall miss (the verdict is informational by the same ruling as its sibling). What
+    /// it assumes: that the harness's locate and the executor's clamp are the ones this file calls — which they are,
+    /// at the call sites in <see cref="TryReadLiveTranscript"/>, and which is the only reason a layout change in
+    /// either would surface here at all.</para>
+    /// </summary>
+    [SkippableFact]
+    public async Task A_real_claude_agent_recalls_a_codeword_from_a_mid_run_checkpoint()
+    {
+        var baseUrl = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Environment.GetEnvironmentVariable(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => !string.IsNullOrWhiteSpace(v));
+        if (present == 0) throw RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)");
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await ClaudeReadyAsync()) throw RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the checkpoint-resume gate needs the harness binary (skip ≠ pass)");
+
+        try
+        {
+            await RealModelGate.AssessLiveAsync(Provider, () => RealModelFormatFaultRepair.WithColdRestageAsync(() => DriveCheckpointSourcedResumeAsync(baseUrl!, apiKey!, model!)));
+        }
+        finally
+        {
+            foreach (var dir in _tempDirs)
+                try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
+    /// <summary>
+    /// One COLD-staged measurement of the cross-host chain: checkpoint a LIVE agent's transcript, kill it, continue
+    /// from the checkpoint. Every resource is minted per call, so a re-stage measures the same configuration.
+    /// </summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> DriveCheckpointSourcedResumeAsync(string baseUrl, string apiKey, string model)
+    {
+        var codeword = "CODESPACE-" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+        var env = Harness.ProjectToEnv(new ResolvedModelCredential { Provider = Provider, ApiKey = apiKey, BaseUrl = baseUrl });
+        var cwd = await ResolveRealPathAsync(NewWorkspace());
+        var liveConfig = NewDir();
+
+        // A LONG second instruction so the agent is still working when the checkpoint is taken and the kill lands —
+        // the host loss must interrupt a live conversation, not race a process that already exited.
+        var goal = $"Remember this codeword, I will ask you to recall it: {codeword}. Reply 'ok', then count slowly from 1 to 40, one number per message.";
+        var live = await RunClaudeUntilCheckpointedAsync(Harness.BuildInvocation(Task(cwd, model, env, goal)), liveConfig, cwd, codeword);
+
+        if (live.Checkpoint is not { Length: > 0 } checkpoint)
+            throw new AgentExecutionInfraException($"no mid-run checkpoint containing the codeword could be taken before the live claude run ended (sessionId={live.SessionId ?? "null"}, snapshots={live.Snapshots}, error={live.Error ?? "none"}) — gateway/exec infra, not a recall verdict");
+
+        // ── CONTINUE on a FRESH config home: the dead host's spool is gone, so only the checkpoint's bytes travel. ──
+        var continueTask = Task(cwd, model, env, "What was the codeword I told you to remember? Reply with ONLY the codeword, nothing else.")
+            with { ResumeFromSessionId = live.SessionId, RestoredTranscript = checkpoint };
+        var resumed = await RunClaudeAsync(Harness.BuildInvocation(continueTask), NewDir());
+        var resumedResult = Harness.BuildResult(ParseAll(resumed.Stdout), resumed.ExitCode, "");
+
+        if (resumedResult.Status != AgentRunStatus.Succeeded)
+            throw new AgentExecutionInfraException($"the checkpoint-resumed claude run did not complete (status={resumedResult.Status}, error={resumedResult.Error ?? "none"}) — gateway/exec infra, not a recall verdict");
+
+        var modelReply = string.Join("\n", ParseAll(resumed.Stdout)
+            .Where(e => e.Kind is AgentEventKind.AssistantMessage or AgentEventKind.Completed or AgentEventKind.FinalSummary)
+            .Select(e => e.Text));
+        var recalled = modelReply.Contains(codeword, StringComparison.OrdinalIgnoreCase);
+
+        return (recalled ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss,
+            $"{Provider} '{model}': after a {checkpoint.Length}-byte MID-RUN checkpoint and a kill, the continued agent {(recalled ? "RECALLED" : "did NOT recall")} the codeword {codeword} — cross-host recovery {(recalled ? "held end-to-end against the live model" : "did not surface the pre-loss context")}");
+    }
+
+    /// <summary>
+    /// Run the live agent, checkpoint its session transcript WHILE it runs, and kill it — the host loss, staged.
+    ///
+    /// <para>The locate is the production pair and nothing else: the harness's own
+    /// <c>SessionTranscriptRelativePath</c> (the CLI's cwd-encoded layout, which this test must never restate) and
+    /// <c>AgentRunExecutor.ResolveSessionTranscriptPath</c> (the symlink/traversal clamp, which applies to a LIVE read
+    /// exactly as it does to a post-exit one). The session id comes off the live stream through the harness's own
+    /// parse, as the executor's fold gets it.</para>
+    ///
+    /// <para>Only a snapshot ending in a newline is kept: the CLI appends whole JSON lines, so a partial tail means
+    /// the file was caught mid-write and restoring it would hand the next CLI a corrupt session.</para>
+    /// </summary>
+    private static async Task<(string? SessionId, string? Checkpoint, int Snapshots, string? Error)> RunClaudeUntilCheckpointedAsync(SandboxSpec spec, string configDir, string cwd, string codeword)
+    {
+        LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configDir);
+
+        var psi = new ProcessStartInfo { FileName = spec.Command, WorkingDirectory = spec.WorkingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
+        foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
+        psi.Environment[ClaudeCodeHarness.ConfigDirEnvVar] = configDir;
+        foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
+
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Close();
+
+        string? sessionId = null;
+        string? checkpoint = null;
+        var snapshots = 0;
+        var deadline = DateTime.UtcNow.AddSeconds(180);
+
+        while (!proc.HasExited && DateTime.UtcNow < deadline)
+        {
+            if (await proc.StandardOutput.ReadLineAsync() is not { } line) break;
+
+            sessionId ??= AgentSessionIdReader.TryRead(Harness.ParseEvents(line).ToList());
+
+            if (sessionId is null) continue;
+
+            if (TryReadLiveTranscript(configDir, cwd, sessionId) is not { } snapshot) continue;
+
+            snapshots++;
+
+            // The experiment needs the codeword turn to be INSIDE the checkpoint — that is the fact the continued
+            // agent is asked to recall. Anything earlier is a snapshot of a conversation that never heard it.
+            if (!snapshot.Contains(codeword, StringComparison.Ordinal)) continue;
+
+            checkpoint = snapshot;
+            break;
+        }
+
+        // The host loss: the process is killed where it stands, so nothing it would have written after the checkpoint
+        // — including its post-exit session file — can reach the continuation.
+        try { proc.Kill(entireProcessTree: true); } catch { /* already gone */ }
+        try { await proc.WaitForExitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token); } catch { /* best-effort */ }
+
+        return (sessionId, checkpoint, snapshots, checkpoint is null ? await proc.StandardError.ReadToEndAsync() : null);
+    }
+
+    /// <summary>The live transcript through the PRODUCTION locate + clamp, or null when it is not addressable yet or was caught mid-write. Never a hand-built path: the cwd encoding is the harness's to own.</summary>
+    private static string? TryReadLiveTranscript(string configDir, string cwd, string sessionId)
+    {
+        if (((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath(configDir, cwd, sessionId) is not { } relative) return null;
+
+        if (AgentRunExecutor.ResolveSessionTranscriptPath(configDir, relative) is not { } path || !File.Exists(path)) return null;
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            var text = reader.ReadToEnd();
+
+            return text.EndsWith('\n') ? text : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
     private static AgentTask Task(string cwd, string model, IReadOnlyDictionary<string, string> env, string goal) => new()
     {
         Goal = goal,

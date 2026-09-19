@@ -580,6 +580,20 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private async Task<StaleOutcome> AbandonAsync(AgentRunReconciliationCandidate candidate, AgentRunAbandonCause cause, CancellationToken cancellationToken, ISandboxDurableRunner? durable = null, SandboxHandle? handle = null)
     {
         var runId = candidate.RunId;
+
+        // NOTE the asymmetry with the executor's own terminal write, which RELEASES the run's session-transcript
+        // checkpoint: this one must KEEP it. An abandon is exactly the case the checkpoint exists for — the agent
+        // node's respawn reads it off this row to continue the conversation the dead host was holding — so clearing
+        // it here would delete the only thing that makes the retry warm.
+        //
+        // The COST, stated because it is permanent and nothing else says it: this column keeps the artifact
+        // Referenced, and Referenced is TERMINAL in the retention ledger (the reaper's claim query takes only
+        // Declared and Quarantined rows), so one full transcript copy is kept FOR EVER per host loss — including
+        // when the retry ran and finished. The two-hour class does NOT collect it; that class only shortens the age
+        // floor for checkpoints nothing references. Clearing it once the successor is staged is not available
+        // either: the successor's ref lives in its own task_json, which the reference oracle does not probe, so the
+        // artifact would become collectable in the window before that successor launches. A jsonb reference site is
+        // the fix, and it belongs with the retention plane rather than here.
         var transitioned = await TerminalizeCandidateAsync(candidate, AgentRunStatus.Failed, AbandonedError, null, cancellationToken).ConfigureAwait(false);
 
         // P2 (capture-intent saga): an abandoned attempt died inside (or before) its capture window — every open
@@ -620,6 +634,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         await RecordLogOwnerLossQuietlyAsync(candidate.TeamId, stamp, cancellationToken).ConfigureAwait(false);
 
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
+
         return StaleOutcome.Abandoned;
     }
 

@@ -3499,6 +3499,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             PriorAttemptPayload = exec.PriorAttemptPayload,
             NodeId = exec.Node.Id,
             IncomingNodeIds = DirectPredecessorIds(exec),
+            // The node's own clamped retry policy, from the same RetryPlan the loop above runs on — so a node that
+            // decides anything by "will a failure of mine be retried" reads the engine's answer instead of guessing.
+            RetriesOnFailure = RetryPlan.From(exec.Node.Retry).RetriesOnFailure,
         };
     }
 

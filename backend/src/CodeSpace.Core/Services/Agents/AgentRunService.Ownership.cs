@@ -78,6 +78,22 @@ public sealed partial class AgentRunService
         if (changed != 1) throw new AgentRunOwnershipLostException(owner.RunId);
     }
 
+    public async Task<bool> StampSessionTranscriptCheckpointAsync(AgentRunOwnerToken owner, SessionTranscriptCheckpoint checkpoint, string? sessionId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+
+        // Fenced exactly like the handle and confinement writes beside it — a worker whose ownership was reclaimed
+        // must not be able to point a live run's recovery at ITS stale conversation. The session id rides the same
+        // statement because a checkpoint nothing can address is not resumable, and COALESCE keeps an id already on
+        // the row (a completion's, or an earlier checkpoint's when this tick saw none).
+        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET session_transcript_checkpoint_artifact_id = {checkpoint.ArtifactId}, session_transcript_checkpoint_at = {checkpoint.At}, session_id = COALESCE({sessionId}, target.session_id) FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+
+        // Deliberately NOT a throw, unlike its two neighbours. This write rides an observer tick whose real job is
+        // flushing the run's events and advancing its spool offset; a lost race here must cost a checkpoint, never
+        // the tick.
+        return changed == 1;
+    }
+
     private void EnsureIndependentOwnershipTransaction()
     {
         if (_db.Database.CurrentTransaction is not null || System.Transactions.Transaction.Current is not null) throw new InvalidOperationException("Execution ownership must commit independently before a worker can perform external actions.");

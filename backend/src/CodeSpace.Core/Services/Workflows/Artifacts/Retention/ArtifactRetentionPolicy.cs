@@ -38,6 +38,18 @@ public static class ArtifactRetentionPolicy
     public static readonly ArtifactRetentionRule AgentRunEventData =
         new(ArtifactRetentionClass.AgentRunEventData, TimeSpan.FromDays(7), TimeSpan.FromHours(24));
 
+    /// <summary>
+    /// A mid-run session-transcript checkpoint. TWO HOURS, not seven days, and the short floor is the whole reason
+    /// the class exists: a run writes one of these per minute, each supersedes the last, and the run's terminal write
+    /// clears the column that references the survivor — so on the seven-day floor a single long run would hold every
+    /// superseded copy of a growing transcript for over a week. Two hours still sits far outside the window in which
+    /// the reference lands (the stamp is the next statement after the write) and far outside the window in which a
+    /// continuation reads it (an abandon follows the host's death within one liveness window), so the floor costs
+    /// nothing it protects. The quarantine stays the standard 24 h: the second, independent wait is unchanged.
+    /// </summary>
+    public static readonly ArtifactRetentionRule SessionTranscriptCheckpoint =
+        new(ArtifactRetentionClass.SessionTranscriptCheckpoint, TimeSpan.FromHours(2), TimeSpan.FromHours(24));
+
     private static readonly IReadOnlyDictionary<ArtifactRetentionClass, ArtifactRetentionRule> Rules =
         new Dictionary<ArtifactRetentionClass, ArtifactRetentionRule>
         {
@@ -45,6 +57,7 @@ public static class ArtifactRetentionPolicy
             [SensitiveRecordPayload.Class] = SensitiveRecordPayload,
             [ModelCallBodyCapture.Class] = ModelCallBodyCapture,
             [AgentRunEventData.Class] = AgentRunEventData,
+            [SessionTranscriptCheckpoint.Class] = SessionTranscriptCheckpoint,
         };
 
     /// <summary>The rule for <paramref name="value"/>, or null when the running policy does not register it — which the reaper reads as "cannot tell" and keeps.</summary>
