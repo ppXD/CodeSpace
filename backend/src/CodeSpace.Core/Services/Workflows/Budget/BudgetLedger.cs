@@ -219,6 +219,8 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
         // Ordered by id so a run's claims always close in the same sequence: a failure part-way leaves a PARTIAL
         // close (the rest stay live for the expiry sweep, which is the same pessimism they would have had anyway),
         // and a deterministic order makes the survivors the same set on every retry instead of an arbitrary one.
+        // A released or expired row is not among them: it gave its headroom back, and settling it Indeterminate
+        // would take that money out of the cap again.
         var live = await OpenAgentRunClaimsAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         // An observed figure is ONE invocation's bill. When a run left several claims live, no row can be given it
@@ -231,18 +233,30 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
     public async Task<IReadOnlyList<AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken) =>
         (await OpenAgentRunClaimsAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false))
-            .Where(row => row.ScopeKey != exceptScopeKey && BudgetReservationStates.Live.Contains(row.State))
+            .Where(row => row.ScopeKey != exceptScopeKey)
             .Select(row => new AgentRunClaimHold(row.ScopeKey, row.ReservedUsd, row.ExpiresAt))
             .ToList();
 
-    /// <summary>Every not-yet-Settled monitored row of one agent run, across its attempts and rounds. <c>Settled</c> is the one state nothing here may touch or count — a confirmed receipt.</summary>
+    /// <summary>
+    /// Every monitored row of one agent run — across its attempts and its rounds — that still HOLDS its reserve
+    /// against the cap. ONE predicate, deliberately: what a terminal must close and what a refusal must name are the
+    /// same set, and the moment they differ the refusal starts omitting holds that are still charging the run.
+    ///
+    /// <para>It is the set <see cref="CommittedUsdAsync"/> counts at its RESERVE: everything except a confirmed
+    /// receipt (<see cref="BudgetReservationStates.Settled"/>, which counts its actual instead and may never be
+    /// reopened) and the two that gave their headroom back. Notably <see cref="BudgetReservationStates.Reconciled"/>
+    /// is IN — a sweep closing an orphan's bookkeeping does not release its money, so a dead attempt goes on holding
+    /// the cap after <c>SweepBudgetSettlement</c> touches it, and a caller that used
+    /// <see cref="BudgetReservationStates.Live"/> here would stop seeing it within a tick.</para>
+    /// </summary>
     private async Task<IReadOnlyList<OpenAgentRunClaim>> OpenAgentRunClaimsAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
     {
         var prefix = agentRunId.ToString("N");
         var unbudgeted = $"{BudgetKinds.UnbudgetedPrefix}{BudgetKinds.AgentRunMonitored}";
 
         return await _db.BudgetReservation.AsNoTracking()
-            .Where(r => r.TeamId == teamId && r.ScopeKey.StartsWith(prefix) && (r.Kind == BudgetKinds.AgentRunMonitored || r.Kind == unbudgeted) && r.State != BudgetReservationStates.Settled)
+            .Where(r => r.TeamId == teamId && r.ScopeKey.StartsWith(prefix) && (r.Kind == BudgetKinds.AgentRunMonitored || r.Kind == unbudgeted)
+                        && r.State != BudgetReservationStates.Settled && r.State != BudgetReservationStates.Released && r.State != BudgetReservationStates.Expired)
             .OrderBy(r => r.Id)
             .Select(r => new OpenAgentRunClaim(r.WorkflowRunId, r.Kind, r.ScopeKey, r.State, r.ReservedUsd, r.ExpiresAt))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
