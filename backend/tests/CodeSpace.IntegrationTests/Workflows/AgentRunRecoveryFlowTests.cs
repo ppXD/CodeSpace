@@ -187,7 +187,8 @@ public class AgentRunRecoveryFlowTests : IDisposable
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
-        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: null);   // no marker → killed before finishing
+        var pid = DeadPid();
+        var runId = await SeedDurableRunAsync(teamId, processId: pid, exitCode: null);   // no marker → killed before finishing
 
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
@@ -197,6 +198,15 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         run.Status.ShouldBe(AgentRunStatus.Failed);
         run.Error!.ShouldContain("abandoned", customMessage: "a gone-without-a-marker durable run is abandoned, like a non-durable one");
+
+        // And it SAYS what became of the process. This abandon attempts no kill — the probe already answered Gone —
+        // so it used to write a receipt for every other resource it touched and none for the process it had just
+        // formed a verdict about. An operator asking "was the agent stopped?" then got the same silence from a
+        // correct verdict and from a misread one, which is exactly how a probe that wrongly answered Gone hid.
+        var process = await ProcessReceiptAsync(verify, runId);
+        process.Outcome.ShouldBe(RunResourceOutcome.Unknown, $"no kill was attempted, so nothing here may claim a completed teardown; it says {process.Outcome} ({process.ErrorCode})");
+        process.ErrorCode.ShouldBe(RunCleanupReceipts.TerminateNotAttemptedCode);
+        process.ResourceKey.ShouldBe(pid.ToString(), "the receipt names the pid an operator would go looking for");
     }
 
     [Fact]
@@ -249,6 +259,14 @@ public class AgentRunRecoveryFlowTests : IDisposable
         receipts.ShouldContain(receipt => receipt.Kind == RunResourceKind.Spool && receipt.Outcome == RunResourceOutcome.Orphaned
             && receipt.OwnerHost == "a-host-that-never-came-back");
         receipts.ShouldAllBe(receipt => !receipt.IsSettled, "this worker freed nothing, so nothing here may read as freed");
+
+        // And the process row must say WHICH unknown this is. No kill was attempted here either, but for the opposite
+        // reason to a confirmed-dead abandon: nothing established death, the pid simply lives in a namespace this
+        // worker cannot address. A row that borrowed the confirmed-dead code would have the ledger assert the one
+        // thing this path exists to refuse.
+        var process = receipts.Single(receipt => receipt.Kind == RunResourceKind.Process);
+        process.ErrorCode.ShouldBe(RunCleanupReceipts.TerminateCodeFor(SandboxTerminateOutcome.SkippedNotLocal),
+            $"a deferred-then-abandoned foreign run never established that its process died; it says {process.ErrorCode}");
     }
 
     [Fact]
@@ -325,9 +343,10 @@ public class AgentRunRecoveryFlowTests : IDisposable
         // the re-attach budget. The reconciler must KILL it before abandoning — otherwise it runs on to its
         // wall-clock deadline holding the workspace and burning the injected model credential after the DB says Failed.
         var teamId = await SeedTeamAsync();
-        var (runId, pid) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts);
+        var (runId, handle) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts);
+        var pid = handle.ProcessId;
 
-        ProcessAlive(pid).ShouldBeTrue($"precondition: the launched durable agent process is running before the sweep — {ProcessLiveness.Describe(pid)}");
+        ProcessAlive(pid).ShouldBeTrue($"precondition: the launched durable agent process is running before the sweep — {ProcessLiveness.Describe(handle)}");
 
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None))
@@ -339,7 +358,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         run.Error!.ShouldContain("abandoned", customMessage: "a permanently-unattachable alive run is abandoned past the ceiling");
 
         // The orphan must be DEAD — not orphaned to its deadline. The kill is a signal + reap, so poll briefly.
-        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(await WhyTheKillDidNotLandAsync(verify, runId, pid));
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(await WhyTheKillDidNotLandAsync(verify, runId, handle));
 
         var process = await ProcessReceiptAsync(verify, runId);
         process.Outcome.ShouldBe(RunResourceOutcome.Completed, $"the kill landed, so the process receipt must say so; it says {process.Outcome} ({process.ErrorCode})");
@@ -367,11 +386,11 @@ public class AgentRunRecoveryFlowTests : IDisposable
     /// runs and an investigation: the run WAS abandoned, and the question was only ever which of the runner's four
     /// silent skips fired. The reconciler now records that as a receipt, so the red can just say it.
     /// </summary>
-    private static async Task<string> WhyTheKillDidNotLandAsync(ILifetimeScope scope, Guid runId, int pid)
+    private static async Task<string> WhyTheKillDidNotLandAsync(ILifetimeScope scope, Guid runId, SandboxHandle handle)
     {
         var cause = await ProcessTerminationCauseAsync(scope, runId);
 
-        return $"the reconciler must KILL a still-alive run it abandons past the re-attach ceiling, not leave it running — pid {pid} is still alive and the abandon recorded {cause}. Diagnose manually with `ps -p {pid} -o pid,stat,etime,command`; state Z means the product's own oracle already counts it dead and this test's does not.";
+        return $"the reconciler must KILL a still-alive run it abandons past the re-attach ceiling, not leave it running — pid {handle.ProcessId} is still alive and the abandon recorded {cause}. {ProcessLiveness.Describe(handle)}";
     }
 
     private static async Task<string> ProcessTerminationCauseAsync(ILifetimeScope scope, Guid runId)
@@ -498,7 +517,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
-        var (runId, pid) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts, fenceEpoch: 1);
+        var (runId, launched) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts, fenceEpoch: 1);
         var handle = await SeedOpenAttemptAsync(teamId, runId, fenceEpoch: 1);
 
         using (var scope = _fixture.BeginScope())
@@ -513,7 +532,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         attempt.ErrorCode.ShouldBe(NativeRecordPlane.ReconcilerAbandonedLeaseLapsedErrorCode);
 
         (await db.WorkflowRunHarnessExecution.AsNoTracking().SingleAsync(e => e.Id == handle.ExecutionId)).State.ShouldBe(HarnessExecutionState.Exited);
-        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue("the kill is unrelated to the native-record close, and must still happen");
+        (await WaitForProcessGoneAsync(launched.ProcessId)).ShouldBeTrue($"the kill is unrelated to the native-record close, and must still happen — {ProcessLiveness.Describe(launched)}");
     }
 
     [Fact]
@@ -723,7 +742,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
     /// state of an alive-but-unattachable run. Returns the run id + the supervisor pid so the test can assert the
     /// reconciler kills it. The process is tracked for best-effort teardown.
     /// </summary>
-    private async Task<(Guid RunId, int Pid)> SeedAliveDurableRunAsync(Guid teamId, int reattachAttempts, long fenceEpoch = 0)
+    private async Task<(Guid RunId, SandboxHandle Handle)> SeedAliveDurableRunAsync(Guid teamId, int reattachAttempts, long fenceEpoch = 0)
     {
         var workDir = Path.Combine(Path.GetTempPath(), "cs-kill-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workDir);
@@ -755,7 +774,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
             await db.SaveChangesAsync();
         }
 
-        return (runId, handle.ProcessId);
+        return (runId, handle);
     }
 
     /// <summary>The supervised pid's liveness, read the way the PRODUCT reads it — a killed grandchild lingers as a zombie no test process reaps, and the managed answer calls that still running. See <see cref="ProcessLiveness"/>.</summary>

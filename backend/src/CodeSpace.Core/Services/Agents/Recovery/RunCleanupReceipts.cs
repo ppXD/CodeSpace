@@ -53,6 +53,14 @@ public static class RunCleanupReceipts
     public const string UnsupportedCode = "unsupported";
 
     /// <summary>
+    /// Recorded for a <see cref="RunResourceKind.Process"/> the abandon never signalled because it had already been
+    /// observed gone. NOT <see cref="RunResourceOutcome.Completed"/>: nothing here cleaned anything up, and a reader
+    /// asking "was the agent stopped?" is owed the difference between a kill that landed and a process that was
+    /// already a corpse when the sweep arrived.
+    /// </summary>
+    public const string TerminateNotAttemptedCode = "terminate-not-attempted-process-confirmed-dead";
+
+    /// <summary>
     /// The stable error code for a <see cref="RunResourceKind.Process"/> receipt whose kill was withheld or whose
     /// effect was never observed. The typed outcome IS the code — a reader (and a failing test) gets the cause by
     /// name instead of the "best-effort, may have worked" the silent skip used to leave behind. The runner's free-text

@@ -625,8 +625,8 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         // teardowns below would run against keys that mean nothing here.
         var stamp = new RunCleanupStamp(runId, candidate.Epoch + 1, LocalProcessRunner.CurrentHost, DateTimeOffset.UtcNow);
 
-        if (handle is not null && termination is not null)
-            await RecordTerminationAsync(handle, termination, stamp, cancellationToken).ConfigureAwait(false);
+        if (handle is not null)
+            await RecordTerminationAsync(handle, termination, cause, stamp, cancellationToken).ConfigureAwait(false);
 
         if (handle is not null && !LocalProcessRunner.PidAnswerableHere(handle))
             await RecordForeignOrphansAsync(handle, stamp, settledCaptures, cancellationToken).ConfigureAwait(false);
@@ -819,17 +819,30 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// outcome as its error code when the kill was withheld or its effect never observed — because that is precisely
     /// what is then true: nobody can say whether the agent is still running.
     /// </summary>
-    private async Task RecordTerminationAsync(SandboxHandle handle, SandboxTerminateResult termination, RunCleanupStamp stamp, CancellationToken cancellationToken)
+    private async Task RecordTerminationAsync(SandboxHandle handle, SandboxTerminateResult? termination, AgentRunAbandonCause cause, RunCleanupStamp stamp, CancellationToken cancellationToken)
     {
         var owner = handle.LaunchHost is { Length: > 0 } minted ? minted : stamp.RecordedByHost;
         var pid = handle.ProcessId.ToString(CultureInfo.InvariantCulture);
 
-        var receipt = termination.IsSettled
-            ? stamp.Completed(RunResourceKind.Process, owner, pid)
-            : stamp.Unknown(RunResourceKind.Process, owner, pid, RunCleanupReceipts.TerminateCodeFor(termination.Outcome));
+        var receipt = termination switch
+        {
+            // No terminate was even ATTEMPTED — the abandon carried a handle without a runner — and the two ways that
+            // happens are opposites, so the code comes from the CAUSE, never from the nullness. A probe that answered
+            // Gone established death; an abandon deferred to a host that never answered established the reverse, and
+            // a ledger row claiming "confirmed dead" there would assert exactly what that path refuses to.
+            null => stamp.Unknown(RunResourceKind.Process, owner, pid, CodeForUnattemptedTerminate(cause)),
+            { IsSettled: true } => stamp.Completed(RunResourceKind.Process, owner, pid),
+            _ => stamp.Unknown(RunResourceKind.Process, owner, pid, RunCleanupReceipts.TerminateCodeFor(termination.Outcome)),
+        };
 
         await UpsertQuietlyAsync(receipt, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Why no kill was attempted: the process was already observed gone, or its pid lives in a namespace this worker cannot address — the same distinction <see cref="SandboxTerminateOutcome.SkippedNotLocal"/> draws for a terminate that did run.</summary>
+    private static string CodeForUnattemptedTerminate(AgentRunAbandonCause cause) =>
+        cause == AgentRunAbandonCause.ProcessConfirmedDead
+            ? RunCleanupReceipts.TerminateNotAttemptedCode
+            : RunCleanupReceipts.TerminateCodeFor(SandboxTerminateOutcome.SkippedNotLocal);
 
     /// <summary>
     /// Close the abandoned run's own live native-record execution + any attempt still Running inside it, stamped
