@@ -73,6 +73,9 @@ public enum AgentRunLogReadAvailability
     AccessDenied,
     ProviderTimeout,
     Unsupported,
+
+    /// <summary>The capture settled and the retention plane later reclaimed its bytes. Gone, and gone on purpose — which is exactly what <see cref="PhysicalObjectMissing"/> does not say.</summary>
+    Purged,
 }
 
 public sealed record AgentRunLogReadProblem

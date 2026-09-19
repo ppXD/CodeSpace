@@ -2005,6 +2005,7 @@ const PRODUCER_LOG_LABEL: Record<RoomAgentLogStatus, string> = {
   Finalizing: "logs finalizing",
   Incomplete: "logs incomplete",
   Stalled: "logs held; storage unavailable",
+  Purged: "logs purged; retention window elapsed",
 };
 
 /**

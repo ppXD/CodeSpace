@@ -58,7 +58,7 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
             ExpectedObservationCount = ExpectedCount(protocol, request.Manifest), ObservationCount = observations.Count,
             QualifiedForCapabilityClaim = outcome.QualifiedForCapabilityClaim, OutcomeJson = outcomeJson,
         });
-        await PinCitedRecordsAsync(protocol.ObservationGroupId, observations, cancellationToken).ConfigureAwait(false);
+        await PinCitedRecordsAsync(protocol, observations, cancellationToken).ConfigureAwait(false);
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return sealedOutcome with { ResultDigest = resultDigest };
     }
@@ -72,15 +72,20 @@ public sealed class PairedQualificationResultStore : IPairedQualificationResultS
     /// its log streams, its cleanup receipts and the offloaded payloads of its events. Migration 0235 backfills the
     /// same four closures for results sealed before this existed.</para>
     /// </summary>
-    private async Task PinCitedRecordsAsync(Guid resultId, IReadOnlyList<BenchmarkResultRecord> observations, CancellationToken cancellationToken)
+    private async Task PinCitedRecordsAsync(PairedQualificationProtocol protocol, IReadOnlyList<BenchmarkResultRecord> observations, CancellationToken cancellationToken)
     {
+        var resultId = protocol.ObservationGroupId;
         var runIds = observations.Where(row => row.AgentRunId.HasValue).Select(row => row.AgentRunId!.Value).Distinct().ToList();
 
         if (runIds.Count == 0) return;
 
+        // Team-scoped wherever the row carries a team: the run ids come from observations this protocol's own
+        // validation already bound to its team, and a lookup that ignored the tenant would pin another team's rows
+        // against this result — which would make THEIR records unreclaimable on the strength of a seal they never saw.
+        // agent_run_event carries no team column of its own (its parent run does), so it is scoped by run alone.
         var now = DateTimeOffset.UtcNow;
-        var streamIds = await _db.AgentRunLogStream.AsNoTracking().Where(stream => runIds.Contains(stream.AgentRunId)).Select(stream => stream.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
-        var receiptIds = await _db.AgentRunCleanupReceipt.AsNoTracking().Where(receipt => runIds.Contains(receipt.AgentRunId)).Select(receipt => receipt.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var streamIds = await _db.AgentRunLogStream.AsNoTracking().Where(stream => stream.TeamId == protocol.TeamId && runIds.Contains(stream.AgentRunId)).Select(stream => stream.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var receiptIds = await _db.AgentRunCleanupReceipt.AsNoTracking().Where(receipt => receipt.TeamId == protocol.TeamId && runIds.Contains(receipt.AgentRunId)).Select(receipt => receipt.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
         var artifactIds = await _db.AgentRunEvent.AsNoTracking().Where(row => runIds.Contains(row.AgentRunId) && row.DataArtifactId != null).Select(row => row.DataArtifactId!.Value).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
 
         Pin(DurablePinKind.AgentRun, runIds);

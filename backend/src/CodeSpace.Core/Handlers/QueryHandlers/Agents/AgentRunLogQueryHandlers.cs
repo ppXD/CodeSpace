@@ -208,6 +208,7 @@ internal static class AgentRunLogWire
     {
         AgentRunLogProblemCode.InvalidRequest => AgentRunLogReadAvailability.InvalidRange,
         AgentRunLogProblemCode.Missing or AgentRunLogProblemCode.ArtifactMissing => AgentRunLogReadAvailability.PhysicalObjectMissing,
+        AgentRunLogProblemCode.Purged => AgentRunLogReadAvailability.Purged,
         AgentRunLogProblemCode.ArtifactCorrupt => AgentRunLogReadAvailability.IntegrityFailure,
         AgentRunLogProblemCode.AccessDenied => AgentRunLogReadAvailability.AccessDenied,
         AgentRunLogProblemCode.ProviderTimeout => AgentRunLogReadAvailability.ProviderTimeout,

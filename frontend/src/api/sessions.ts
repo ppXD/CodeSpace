@@ -337,7 +337,7 @@ export interface RoomArtifactVerification {
 }
 
 /// One agent's durable log-stream health, as the Room's projector folds it.
-export type RoomAgentLogStatus = "Verified" | "Captured" | "Finalizing" | "Incomplete" | "Stalled";
+export type RoomAgentLogStatus = "Verified" | "Captured" | "Finalizing" | "Incomplete" | "Stalled" | "Purged";
 
 /// What the sandbox actually did to one producer. `Unknown` is a real absence (nothing recorded it), never a
 /// confinement to render as safety — the renderer must say "posture unknown" rather than show a confined glyph.

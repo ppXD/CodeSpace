@@ -18,26 +18,26 @@ public sealed class DurableRetentionPolicyTests
     private static readonly DateTimeOffset Now = new(2026, 9, 18, 12, 0, 0, TimeSpan.Zero);
     private static readonly DurableRetentionRule Rule = DurableRetentionPolicy.LogStream;
 
-    [Theory]
-    [InlineData(DurableRecordClass.LogStream, 30)]
-    [InlineData(DurableRecordClass.CleanupReceipt, 30)]
-    [InlineData(DurableRecordClass.CaptureGap, 30)]
-    [InlineData(DurableRecordClass.QualificationEvidence, 180)]
-    [InlineData(DurableRecordClass.BudgetReservation, 90)]
-    [InlineData(DurableRecordClass.TransferIntent, 7)]
-    public void The_committed_rule_table_is_pinned_to_its_literal_windows(DurableRecordClass value, int minimumAgeDays)
+    [Fact]
+    public void The_committed_rule_table_is_pinned_to_its_literal_windows()
     {
-        var rule = DurableRetentionPolicy.For(value).ShouldNotBeNull();
+        var rule = DurableRetentionPolicy.For(DurableRecordClass.LogStream).ShouldNotBeNull();
 
-        rule.MinimumAge.ShouldBe(TimeSpan.FromDays(minimumAgeDays));
-        rule.QuarantineWindow.ShouldBe(TimeSpan.FromHours(24), "every class waits a second, independent day after the first uncited observation");
+        rule.MinimumAge.ShouldBe(TimeSpan.FromDays(30), "a log stream is not a candidate until a month after its capture settled");
+        rule.QuarantineWindow.ShouldBe(TimeSpan.FromHours(24), "a second, independent day passes after the first uncited observation");
+        rule.RecheckInterval.ShouldBe(TimeSpan.FromHours(24), "a stream that was looked at and kept is left alone this long, so one unreclaimable row cannot own a batch slot");
     }
 
     [Fact]
     public void Every_declared_class_has_a_rule_and_the_table_declares_nothing_else()
     {
+        // The table advertises what is actually reclaimed. A class listed here without a cursor would read as a
+        // promise the system does not keep; a cursor whose class is missing claims nothing at all. Either way the
+        // right time to notice is here.
         DurableRetentionPolicy.Rules.Keys.Order().ShouldBe(Enum.GetValues<DurableRecordClass>().Order(),
             customMessage: "a class with no rule is never claimed, so adding one to the enum without a rule silently disables its plane");
+        Enum.GetValues<DurableRecordClass>().ShouldBe([DurableRecordClass.LogStream],
+            customMessage: "a class belongs here only together with the cursor that sweeps it — add both in one change, never the rule first");
     }
 
     [Fact]
@@ -47,6 +47,29 @@ public sealed class DurableRetentionPolicyTests
         // which is what makes REMOVING a class from the table a safe operation rather than a purge.
         DurableRetentionPolicy.For((DurableRecordClass)9999).ShouldBeNull();
         Decide(null, Now.AddDays(-400), null, DurableReferenceVerdict.Unreferenced).Action.ShouldBe(DurableRetentionAction.Indeterminate);
+    }
+
+    [Fact]
+    public void A_citation_clears_the_quarantine_it_contradicts()
+    {
+        // Mutation: carry the old retain_until through a Referenced settlement. A stream cited for a year would then
+        // be collectable the instant its pin went away, with a quarantine "window" that elapsed while something still
+        // pointed at it — a second wait that never actually waited for anything.
+        var decision = Decide(Rule, Now.AddDays(-400), Now.AddDays(-100), DurableReferenceVerdict.Referenced);
+
+        decision.RetainUntil.ShouldBeNull();
+    }
+
+    [Fact]
+    public void An_unanswered_question_keeps_the_quarantine_it_never_contradicted()
+    {
+        // The opposite of the test above, and the reason the two are separate: an unreadable citation site says
+        // nothing about the earlier uncited observation, so clearing the marker would restart a wait that was already
+        // most of the way through.
+        var quarantinedAt = Now.AddHours(-1);
+        var decision = Decide(Rule, Now.AddDays(-400), quarantinedAt, DurableReferenceVerdict.Indeterminate);
+
+        decision.RetainUntil.ShouldBe(quarantinedAt);
     }
 
     [Fact]
