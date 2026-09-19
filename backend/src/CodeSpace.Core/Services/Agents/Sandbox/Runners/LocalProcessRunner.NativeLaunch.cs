@@ -64,7 +64,7 @@ public sealed partial class LocalProcessRunner
         // image it would have written an exit marker from, so the run surfaces as a vanished process and is retried
         // forever. Refusing here turns that into one attributable sentence, for every harness at once.
         if (SandboxArgumentLimit.Exceeded(spec) is { } oversized)
-            throw new NativeLaunchException("argument-too-long", oversized);
+            throw new SandboxArgumentTooLongException(oversized);
 
         ValidateLaunchKey(request);
         var hash = NativeLaunchProtocol.SpecHash(spec);

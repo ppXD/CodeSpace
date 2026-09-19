@@ -24,9 +24,9 @@ public sealed partial class NativeLaunchRegistryTests
     {
         var key = "argv-limit-" + Guid.NewGuid().ToString("N");
 
-        var refusal = await Should.ThrowAsync<NativeLaunchException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest(key), CancellationToken.None));
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest(key), CancellationToken.None));
 
-        refusal.Reason.ShouldBe("argument-too-long");
+        ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong);
         Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse(
             customMessage: "the refusal must be preflight: a spool created and then abandoned is a slot whose single start commitment can never be re-made");
     }
@@ -36,7 +36,7 @@ public sealed partial class NativeLaunchRegistryTests
     {
         var oversized = SandboxArgumentLimit.MaxStringBytes + 1;
 
-        var refusal = await Should.ThrowAsync<NativeLaunchException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest("argv-limit-" + Guid.NewGuid().ToString("N")), CancellationToken.None));
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest("argv-limit-" + Guid.NewGuid().ToString("N")), CancellationToken.None));
 
         refusal.Message.ShouldContain(oversized.ToString());
         refusal.Message.ShouldContain(SandboxArgumentLimit.MaxStringBytes.ToString());
@@ -49,7 +49,7 @@ public sealed partial class NativeLaunchRegistryTests
     {
         // A launch refused for its argument size fails identically on every attempt. Classifying it retryable is how
         // the pre-guard failure burned a budget on a run that could not start.
-        var refusal = await Should.ThrowAsync<NativeLaunchException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest("argv-limit-" + Guid.NewGuid().ToString("N")), CancellationToken.None));
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest("argv-limit-" + Guid.NewGuid().ToString("N")), CancellationToken.None));
 
         ((IFailure)refusal).Kind.ShouldBe(FailureKind.Unprocessable);
     }
@@ -61,7 +61,7 @@ public sealed partial class NativeLaunchRegistryTests
         var secret = "sk-ant-" + new string('x', SandboxArgumentLimit.MaxStringBytes);
         var request = new SandboxLaunchRequest(new SandboxSpec { Command = "/bin/echo", Environment = new Dictionary<string, string> { ["ANTHROPIC_API_KEY"] = secret } }, key);
 
-        var refusal = await Should.ThrowAsync<NativeLaunchException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(request, CancellationToken.None));
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(request, CancellationToken.None));
 
         refusal.Message.ShouldContain("ANTHROPIC_API_KEY");
         refusal.Message.ShouldNotContain(secret);
