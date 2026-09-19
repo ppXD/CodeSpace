@@ -1,8 +1,10 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.NativeLaunch;
 using Shouldly;
@@ -85,6 +87,21 @@ public sealed partial class NativeLaunchRegistryTests
         fixture.StartCount.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task A_workload_its_own_controller_killed_reports_that_instead_of_an_empty_failure()
+    {
+        await using var fixture = new Fixture();
+        var handle = await fixture.LaunchAsync();
+        await fixture.WaitAsync(() => fixture.StartCount == 1);
+        using (var broker = Process.GetProcessById(fixture.ReadReceipt().Broker.ProcessId)) broker.Kill(entireProcessTree: false);
+        await fixture.WaitAsync(() => fixture.StopReason() == "broker-lost");
+
+        var result = await fixture.Runner.AttachAsync(handle, (_, _) => Task.CompletedTask, fixture.Token);
+
+        result.Status.ShouldBe(SandboxStatus.Failed);
+        result.Stderr.ShouldContain("broker-lost", customMessage: $"a run whose own controller killed it must SAY so — the workload wrote nothing to its stderr, so without the bootstrap's account this lands Failed with an empty reason. {fixture.DescribeRegistry()}");
+    }
+
     [Theory]
     [InlineData("boot")]
     [InlineData("birth")]
@@ -135,7 +152,9 @@ public sealed partial class NativeLaunchRegistryTests
         var result = await fixture.Runner.AttachAsync(handle, (_, _) => Task.CompletedTask, fixture.Token);
         result.Status.ShouldBe(SandboxStatus.Success);
         (await File.ReadAllTextAsync(Path.Combine(fixture.Spool, "out.log"))).ShouldBe("<>\n<a b>\n<雪🙂>\n");
-        foreach (var file in Directory.GetFiles(fixture.Directory, "*.json")) (await File.ReadAllTextAsync(file)).ShouldNotContain(secret);
+        // EVERY file the launch leaves behind, not just the receipts: the bootstrap's own diagnostics file lives here
+        // too, and a reason line that quoted its invocation would put the environment's secrets on disk beside them.
+        foreach (var file in Directory.GetFiles(fixture.Directory)) (await File.ReadAllTextAsync(file)).ShouldNotContain(secret, customMessage: $"{Path.GetFileName(file)} carries the run's private environment");
     }
 
     [Theory]
@@ -208,6 +227,51 @@ public sealed partial class NativeLaunchRegistryTests
         var error = await Should.ThrowAsync<NativeLaunchException>(() => fixture.LaunchAsync());
         error.Reason.ShouldBe("indeterminate");
         fixture.StartCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task The_workload_is_execed_by_the_launched_process_itself_not_by_one_of_its_threads()
+    {
+        // MEASURED, not theorised (Linux CI, 10 of 30 rounds red before this): the bootstrap used to reach execve on
+        // whatever thread-pool thread its admission handshake resumed on. execve from a non-leader thread makes the
+        // kernel zombie the real thread-group leader and WAIT for it, and for that whole window /proc reports the
+        // run's own pid as state Z with the bootstrap's comm — so a run in the act of becoming its workload was read
+        // as dead by every liveness check: probe Gone, observer Failed, reconciler abandoned-without-killing.
+        await using var fixture = new Fixture();
+        var handle = await fixture.LaunchAsync();
+        await fixture.WaitAsync(() => fixture.StartCount == 1);   // the workload ran, so the execve is behind us
+
+        var said = ProcessLiveness.DescribeBootstrap(fixture.Spool);
+
+        said.ShouldContain("leader: True", customMessage: $"the execve must happen on the process's own thread, or its pid spends the de_thread window looking like a corpse. {said}");
+        ProcessLiveness.IsAliveLikeTheProduct(handle.ProcessId).ShouldBeTrue($"and the consequence: the running workload reads as ALIVE. {ProcessLiveness.Describe(handle)}");
+    }
+
+    [Fact]
+    public async Task A_thread_that_is_not_the_process_thread_is_told_apart_from_one_that_is()
+    {
+        // The falsifier for the assertion above: a leader check that answered True everywhere would pin nothing.
+        // A test method never runs on the process's own thread, so this can only assert the negative — which is
+        // exactly the half that has to work.
+        (await Task.Run(NativeProcess.IsProcessLeaderThread)).ShouldBeFalse("a pool thread is not the thread the process was born on");
+    }
+
+    [Fact]
+    public async Task A_bootstrap_that_refuses_says_why_where_the_refusal_outlives_the_launch()
+    {
+        await using var fixture = new Fixture();
+        fixture.Bind();
+        using var broker = fixture.Broker();
+        (await broker.StandardOutput.ReadLineAsync(fixture.Token)).ShouldBe("owned");
+
+        broker.StandardInput.Close();            // EOF instead of an invocation frame: a refusal, not a launch
+        await broker.WaitForExitAsync(fixture.Token);
+
+        broker.ExitCode.ShouldBe(125);
+        var said = ProcessLiveness.DescribeBootstrap(fixture.Spool);
+        said.ShouldContain("broker pid", customMessage: $"the refusing bootstrap named neither itself nor its reason — {fixture.DescribeRegistry()}");
+        said.ShouldContain("rejected by", customMessage: "the refusal must name what threw; the app's stderr pipe is closed by then, so a reason written anywhere else is lost");
+        File.Exists(Path.Combine(fixture.Directory, NativeLaunchProtocol.DiagnosticsFile)).ShouldBeTrue("the reason lives beside the receipt, so a LATER reader of a dead pid can still find it");
     }
 
     [Fact]
@@ -294,6 +358,17 @@ public sealed partial class NativeLaunchRegistryTests
         public string Starts => Path.Combine(Root, "starts");
         public string Release => Path.Combine(Root, "release");
         public string Barrier => Path.Combine(Root, "observer-release");
+
+        /// <summary>
+        /// The launch request each real-OS observer reads, written ONCE before any of them exists.
+        ///
+        /// <para>Every observer used to rewrite it on its way out of the door, and an observer reads the file the
+        /// instant it starts — before the barrier it then waits on. So the second Observer() call truncated the file
+        /// under the first observer, which read zero bytes and died of an unhandled JsonException: exit 134, the
+        /// SIGABRT this suite kept going red with on Linux and which named nothing until the child's stderr was
+        /// quoted. Four observers, four rewrites, one file.</para>
+        /// </summary>
+        public string RequestFile { get; }
         public CancellationToken Token => _deadline.Token;
         public LocalProcessRunner Runner { get; } = new();
         public SandboxLaunchRequest Request { get; }
@@ -303,9 +378,25 @@ public sealed partial class NativeLaunchRegistryTests
         {
             System.IO.Directory.CreateDirectory(Root); System.IO.Directory.CreateDirectory(Directory);
             Request = new SandboxLaunchRequest(new SandboxSpec { Command = "/bin/sh", Args = ["-c", "printf '%s\\n' \"$$\" >>\"$1\"; while [ ! -f \"$2\" ]; do sleep 0.02; done", "native-launch", Starts, Release], WorkingDirectory = Root, TimeoutSeconds = timeout }, Key);
+            RequestFile = Path.Combine(Root, "request.json");
+            File.WriteAllText(RequestFile, JsonSerializer.Serialize(Request, NativeLaunchProtocol.Json));
         }
 
-        public Task<SandboxHandle> LaunchAsync() => Runner.LaunchOrDiscoverAsync(Request, Token);
+        /// <summary>
+        /// Launch, or say what the launch was still waiting for. The runner's own patience (35 s) is longer than this
+        /// fixture's whole budget, so a slow bootstrap surfaces as the token firing inside <c>DiscoverHandleAsync</c>
+        /// — a bare OperationCanceledException naming neither the launch nor its registry.
+        /// </summary>
+        public async Task<SandboxHandle> LaunchAsync()
+        {
+            var watch = Stopwatch.StartNew();
+
+            try { return await Runner.LaunchOrDiscoverAsync(Request, Token); }
+            catch (OperationCanceledException)
+            {
+                throw new TimeoutException($"the launch did not produce a handle within this fixture's {watch.Elapsed.TotalSeconds:0.#}s. {DescribeRegistry()}. {ProcessLiveness.DescribeBootstrap(Spool)}");
+            }
+        }
         public NativeLaunchReceipt ReadReceipt() => NativeLaunchFiles.Read<NativeLaunchReceipt>(Directory, NativeLaunchProtocol.ReceiptFile);
         public string? StopReason()
         {
@@ -335,25 +426,55 @@ public sealed partial class NativeLaunchRegistryTests
 
         public Process Observer(bool crash, bool missingHost = false)
         {
-            var requestFile = Path.Combine(Root, "request.json");
-            File.WriteAllText(requestFile, JsonSerializer.Serialize(Request, NativeLaunchProtocol.Json));
             var info = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
             if (missingHost) info.Environment[LocalProcessRunner.RunnerHostPathEnvVar] = Path.Combine(Root, "missing-runner-host");
-            foreach (var argument in new[] { "exec", "--runtimeconfig", Path.Combine(AppContext.BaseDirectory, "CodeSpace.UnitTests.runtimeconfig.json"), "--depsfile", Path.Combine(AppContext.BaseDirectory, "CodeSpace.UnitTests.deps.json"), typeof(RunnerTestWorker.RunnerTestWorker).Assembly.Location, requestFile, Barrier, crash ? "crash" : "return" }) info.ArgumentList.Add(argument);
+            foreach (var argument in new[] { "exec", "--runtimeconfig", Path.Combine(AppContext.BaseDirectory, "CodeSpace.UnitTests.runtimeconfig.json"), "--depsfile", Path.Combine(AppContext.BaseDirectory, "CodeSpace.UnitTests.deps.json"), typeof(RunnerTestWorker.RunnerTestWorker).Assembly.Location, RequestFile, Barrier, crash ? "crash" : "return" }) info.ArgumentList.Add(argument);
             var process = Process.Start(info)!; _workers.Add(process); return process;
         }
 
         public async Task<SandboxHandle> ReadObserverAsync(Process process, int expectedExit = 0)
         {
             var output = await process.StandardOutput.ReadLineAsync(Token);
+            // Drained BEFORE the wait: an observer that dies with a stack trace longer than the pipe buffer would
+            // otherwise block on its own stderr forever, and the reason for the death is exactly what is wanted here.
+            var error = (await process.StandardError.ReadToEndAsync(Token)).Trim();
             await process.WaitForExitAsync(Token);
-            process.ExitCode.ShouldBe(expectedExit, await process.StandardError.ReadToEndAsync(Token));
+            process.ExitCode.ShouldBe(expectedExit, WhyTheObserverDied(process.ExitCode, error));
             return JsonSerializer.Deserialize<SandboxHandle>(output!, NativeLaunchProtocol.Json)!;
         }
 
-        public async Task WaitAsync(Func<bool> condition)
+        /// <summary>A bare exit code says nothing about a launch: 134 is this runtime's unhandled exception, not a kill, and the reason is in one of these three places — the observer's own stderr, the bootstrap's, or the registry it left behind.</summary>
+        private string WhyTheObserverDied(int exitCode, string error) =>
+            $"the observer exited {ProcessLiveness.DescribeManagedExitCode(exitCode)}.\nIts stderr: {(error.Length == 0 ? "(empty)" : "\n" + error)}\n{ProcessLiveness.DescribeBootstrap(Spool)}\n{DescribeRegistry()}";
+
+        /// <summary>What the shared launch slot holds right now — the start commitment's state is the difference between "no observer ever owned this" and "one owned it and its bootstrap then refused".</summary>
+        public string DescribeRegistry()
         {
-            while (!condition()) await Task.Delay(20, Token);
+            if (!System.IO.Directory.Exists(Directory)) return $"the launch registry {Directory} does not exist";
+            var files = System.IO.Directory.GetFiles(Directory).Select(Path.GetFileName);
+
+            string receipt;
+            try { var value = ReadReceipt(); receipt = $"'{value.State}'{(value.Problem is { } problem ? " (" + problem + ")" : "")}"; }
+            catch (Exception error) { receipt = "unreadable: " + error.GetType().Name; }
+
+            return $"the launch registry holds [{string.Join(", ", files)}], its receipt state is {receipt}, and {StartCount} physical start(s) are recorded";
+        }
+
+        /// <summary>
+        /// Poll until <paramref name="condition"/> holds, or say what never came true. The bare
+        /// <c>TaskCanceledException</c> this used to throw at the fixture's own deadline named neither the signal
+        /// being waited on nor the state of the launch when the wait gave up — unfixable from a CI log, which is how
+        /// one of these sat unexplained through this whole investigation.
+        /// </summary>
+        public async Task WaitAsync(Func<bool> condition, [CallerArgumentExpression(nameof(condition))] string? signal = null)
+        {
+            var watch = Stopwatch.StartNew();
+
+            try { while (!condition()) await Task.Delay(20, Token); }
+            catch (OperationCanceledException)
+            {
+                throw new TimeoutException($"waited {watch.Elapsed.TotalSeconds:0.#}s for `{signal}` and it never came true. {DescribeRegistry()}. Diagnose by hand with `ps -ef | grep codespace-runner-host` and by reading {Path.Combine(Directory, NativeLaunchProtocol.DiagnosticsFile)}");
+            }
         }
 
         public async ValueTask DisposeAsync()
