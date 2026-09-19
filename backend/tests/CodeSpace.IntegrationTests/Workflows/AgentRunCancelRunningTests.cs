@@ -43,9 +43,10 @@ public class AgentRunCancelRunningTests : IDisposable
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
-        var (runId, pid) = await SeedRunningDurableRunAsync(teamId);
+        var (runId, handle) = await SeedRunningDurableRunAsync(teamId);
+        var pid = handle.ProcessId;
 
-        ProcessAlive(pid).ShouldBeTrue($"precondition: the durable agent process is running before the cancel — {ProcessLiveness.Describe(pid)}");
+        ProcessAlive(pid).ShouldBeTrue($"precondition: the durable agent process is running before the cancel — {ProcessLiveness.Describe(handle)}");
 
         bool won;
         using (var scope = _fixture.BeginScope())
@@ -61,7 +62,7 @@ public class AgentRunCancelRunningTests : IDisposable
             run.CompletedAt.ShouldNotBeNull();
         }
 
-        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue($"the won CAS must TerminateAsync the orphan process tree — {ProcessLiveness.Describe(pid)}");
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue($"the won CAS must TerminateAsync the orphan process tree — {ProcessLiveness.Describe(handle)}");
     }
 
     [Theory]
@@ -95,7 +96,8 @@ public class AgentRunCancelRunningTests : IDisposable
         // the status-guarded, epoch-fenced CAS (the run is no longer Running) → no flip, and crucially NO kill of a
         // process that belongs to a run that finished cleanly. A lost CAS = no kill is the safety invariant.
         var teamId = await SeedTeamAsync();
-        var (runId, pid) = await SeedRunningDurableRunAsync(teamId);
+        var (runId, handle) = await SeedRunningDurableRunAsync(teamId);
+        var pid = handle.ProcessId;
         _launchedPids.Add(pid);   // the cancel must NOT kill it; we reap it ourselves in Dispose
 
         using (var scope = _fixture.BeginScope())
@@ -170,7 +172,7 @@ public class AgentRunCancelRunningTests : IDisposable
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>Launch a REAL sleeper under the local durable runner, then seed a Running AgentRun carrying its handle — the live post-launch state CancelRunningAsync targets. Returns the run id + supervisor pid.</summary>
-    private async Task<(Guid RunId, int Pid)> SeedRunningDurableRunAsync(Guid teamId)
+    private async Task<(Guid RunId, SandboxHandle Handle)> SeedRunningDurableRunAsync(Guid teamId)
     {
         var workDir = Path.Combine(Path.GetTempPath(), "cs-cancelrunning-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workDir);
@@ -198,7 +200,7 @@ public class AgentRunCancelRunningTests : IDisposable
             await db.SaveChangesAsync();
         }
 
-        return (runId, handle.ProcessId);
+        return (runId, handle);
     }
 
     private async Task<Guid> SeedRunAsync(Guid teamId, AgentRunStatus status, long fenceEpoch = 0)

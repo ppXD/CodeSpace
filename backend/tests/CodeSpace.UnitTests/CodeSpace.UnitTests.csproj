@@ -34,6 +34,10 @@
          driven through the real CAS coordinator; linking it here keeps the driver-level contract tests on the exact
          same fake, so the two tiers can never disagree about what the provider does. -->
     <Compile Include="..\CodeSpace.IntegrationTests\Workflows\Artifacts\Providers\AliyunOss\FakeAliyunOssHandler.cs" Link="Workflows\Artifacts\Providers\AliyunOss\FakeAliyunOssHandler.cs" />
+    <!-- Same reasoning for the process-liveness oracle: the unit suite launches the SAME real durable runner and needs
+         the same answer about a pid, and the drift detector that keeps it honest against NativeProcess.IsAlive can
+         only guard one mirror. A second copy here would be a second thing to keep in step, silently. -->
+    <Compile Include="..\CodeSpace.IntegrationTests\Infrastructure\ProcessLiveness.cs" Link="Infrastructure\ProcessLiveness.cs" />
   </ItemGroup>
 
 </Project>
