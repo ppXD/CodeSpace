@@ -357,7 +357,7 @@ public partial class AgentRunExecutorTests
 
         // Exactly the row the launch mints (same kind, same scope key) — this worker never saw the reserve.
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<IBudgetLedger>().ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, runId.ToString("N"), 5m, 5m, "prices-v1", null, DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None))
+            (await scope.Resolve<IBudgetLedger>().ReserveAsync(workflowRunId, teamId, BudgetKinds.AgentRunMonitored, AgentRunExecutor.RunSpendScopeKey(runId, epoch: 1, round: 0), 5m, 5m, "prices-v1", null, DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None))
                 .Admitted.ShouldBeTrue();
 
         var reservation = await StrandRunningWithExitedProcessAsync(runId, teamId);
@@ -501,9 +501,9 @@ public partial class AgentRunExecutorTests
         (await PersistedResultAsync(runId)).ReviseRounds.ShouldBe(1, "the Improve critic flagged the output, so a second CLI invocation ran — without it this test proves nothing");
 
         var first = await ReservationOfAsync(workflowRunId, runId);
-        var second = await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1");
+        var second = await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, epoch: 1, round: 1));
 
-        first.ShouldNotBeNull("round 0 keeps the bare run-id key every existing row carries");
+        first.ShouldNotBeNull("round 0 owns the attempt's own key");
         first.State.ShouldBe(BudgetReservationStates.Settled);
         second.ShouldNotBeNull("round 1 is a separate invocation and mints a separate claim");
         second.State.ShouldBe(BudgetReservationStates.Settled, "each claim closes when ITS invocation exits");
@@ -525,6 +525,8 @@ public partial class AgentRunExecutorTests
         var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: 5m, model: "claude-opus-4-8", workflowRunId: workflowRunId);
 
         // Two rows the run's own invocations would have minted, left live exactly as a mid-flight throw leaves them.
+        // Deliberately in the PRE-ATTEMPT key shape ({runId:N}/r{n}, no epoch marker): the close is by run-id prefix,
+        // so rows written before the attempt grain existed are closed by it too.
         using (var scope = _fixture.BeginScope())
         {
             var ledger = scope.Resolve<IBudgetLedger>();
@@ -562,7 +564,7 @@ public partial class AgentRunExecutorTests
         result.CostUsd.ShouldBeNull("an uncapped task is still not priced by the fold — that is exactly why the ledger prices the usage itself");
         result.TokenUsage.ShouldNotBeNull().InputTokens.ShouldBe(200_000, "the durable record reports the RUN's summed usage — the figure the mutation would settle from");
 
-        (await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1")).ShouldNotBeNull()
+        (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, epoch: 1, round: 1))).ShouldNotBeNull()
             .SettledUsd.ShouldBe(PricedUsageCostUsd, "round 1 is charged for round 1 — not for rounds 0 AND 1");
 
         using var scope = _fixture.BeginScope();
@@ -598,7 +600,7 @@ public partial class AgentRunExecutorTests
         result.CostUsd.ShouldBe(PricedUsageCostUsd, "the work that DID happen is still priced and reported");
         run.CompletedAt.ShouldNotBeNull();
 
-        (await ReservationOfAsync(workflowRunId, runId, scopeKey: $"{runId:N}/r1")).ShouldBeNull("a refused round mints no row");
+        (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, epoch: 1, round: 1))).ShouldBeNull("a refused round mints no row");
 
         (await EventsOfAsync(runId, teamId)).Select(e => e.Text)
             .ShouldContain(text => text != null && text.StartsWith(AgentRunExecutor.ReviseBudgetStoppedPrefix, StringComparison.Ordinal),
@@ -656,11 +658,15 @@ public partial class AgentRunExecutorTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>The ONE row this test's own run owns — never a sweep tally, which a bounded global pass can fill with other tests' rows.</summary>
+    /// <summary>
+    /// The ONE row this test's own run owns — never a sweep tally, which a bounded global pass can fill with other
+    /// tests' rows. The default key is the production key for the FIRST attempt's first invocation: a run created
+    /// Queued and executed once is claimed at fence epoch 1, so that is the attempt every test here drives.
+    /// </summary>
     private async Task<BudgetReservation?> ReservationOfAsync(Guid workflowRunId, Guid agentRunId, string? kind = null, string? scopeKey = null)
     {
         using var scope = _fixture.BeginScope();
-        var key = scopeKey ?? agentRunId.ToString("N");
+        var key = scopeKey ?? AgentRunExecutor.RunSpendScopeKey(agentRunId, epoch: 1, round: 0);
 
         return await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking()
             .SingleOrDefaultAsync(r => r.WorkflowRunId == workflowRunId && r.Kind == (kind ?? BudgetKinds.AgentRunMonitored) && r.ScopeKey == key);

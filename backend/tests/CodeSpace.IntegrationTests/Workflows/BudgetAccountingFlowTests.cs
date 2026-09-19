@@ -172,6 +172,37 @@ public sealed class BudgetAccountingFlowTests(PostgresFixture fixture)
         (await RowAsync(scenario)).ReservedUsd.ShouldBe(5m);
     }
 
+    /// <summary>
+    /// A claim's identity is EXACT, whatever state its row is in — the invariant the agent-run plane leans on when
+    /// it keys each attempt's claim by fence epoch instead of relaxing this rule. A row that still HOLDS headroom
+    /// (Reserved, Indeterminate, Reconciled) gets no more latitude than one that has released it: admitting a
+    /// recomputed intent here would skip both <c>RefusalAsync</c> and <c>TeamRefusalAsync</c> for every kind on this
+    /// ledger, including the supervisor attempt and map-branch claims that have no other enforcement.
+    /// </summary>
+    [Theory]
+    [InlineData(BudgetReservationStates.Indeterminate)]
+    [InlineData(BudgetReservationStates.Reconciled)]
+    [InlineData(BudgetReservationStates.Expired)]
+    [InlineData(BudgetReservationStates.Released)]
+    public async Task No_reservation_state_lets_one_key_admit_a_recomputed_intent(string state)
+    {
+        var scenario = await SeedAsync();
+        var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        using var scope = fixture.BeginScope();
+        var ledger = scope.Resolve<IBudgetLedger>();
+        await ledger.ReserveAsync(scenario.RunId, scenario.TeamId, "llm:critic.review", "call", 5m, 10m, "test-v1", null, expiry, CancellationToken.None);
+        await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.Where(r => r.WorkflowRunId == scenario.RunId).ExecuteUpdateAsync(setters => setters.SetProperty(r => r.State, state));
+
+        var recomputed = await ledger.ReserveAsync(scenario.RunId, scenario.TeamId, "llm:critic.review", "call", 5m, 10m, "test-v1", null, expiry.AddMinutes(1), CancellationToken.None);
+        var identical = await ledger.ReserveAsync(scenario.RunId, scenario.TeamId, "llm:critic.review", "call", 5m, 10m, "test-v1", null, expiry, CancellationToken.None);
+
+        recomputed.Admitted.ShouldBeFalse($"a later deadline is a different request, and a {state} row is no authority for it");
+        recomputed.Reason.ShouldBe("reservation-intent-mismatch");
+        identical.Admitted.ShouldBeTrue($"the SAME request is still an idempotent lookup of a {state} row");
+        identical.ReservationState.ShouldBe(state);
+        (await RowAsync(scenario)).State.ShouldBe(state, "a replay never rewrites the row it found");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

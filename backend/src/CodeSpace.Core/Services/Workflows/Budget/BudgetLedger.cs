@@ -61,6 +61,13 @@ public sealed record BudgetAdmission(bool Admitted, Guid? ReservationId, decimal
     public BudgetCapGrain? RefusedGrain { get; init; }
 }
 
+/// <summary>
+/// One still-live claim an agent run holds, as a refusal needs to describe it: which invocation
+/// (<see cref="ScopeKey"/>), how much of the cap it is holding, and when it stops being credible as live. Its spend
+/// is unknown by construction — a live claim has not settled — so a caller may say what is HELD, never what was spent.
+/// </summary>
+public sealed record AgentRunClaimHold(string ScopeKey, decimal ReservedUsd, DateTimeOffset? ExpiresAt);
+
 public interface IBudgetLedger
 {
     /// <summary>Atomically reserve an estimate under BOTH the run's cap and the team's (P15-5b-ii), serialized per run and per team. This bounds admission commitments; it bounds the eventual provider bill only when the estimate is a trustworthy upper bound. Idempotent for the same run, team and reservation identity. A null <paramref name="capUsd"/> records an unbounded observability claim that never refuses (an <c>Unbudgeted</c> plane) — never a real admission gate, and never admitted against the team cap either.</summary>
@@ -68,6 +75,32 @@ public interface IBudgetLedger
 
     /// <summary>Record known actual spend exactly. Null actual keeps the reserved claim and records Indeterminate, never an invented bill. A later known receipt supersedes uncertain or released bookkeeping; a confirmed settlement is idempotent.</summary>
     Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Close every still-live <see cref="BudgetKinds.AgentRunMonitored"/> claim ONE agent run holds — every attempt's
+    /// and every revise round's, found by scope-key PREFIX, so a caller closes them all without knowing how many
+    /// there were. The query lives here rather than at each terminal writer: the executor's fold, an operator cancel
+    /// and the reconciler's abandon all reach a terminal by different routes, and a claim left live by any of them
+    /// rides to its deadline and is counted against the team's window at its full RESERVE.
+    ///
+    /// <para><paramref name="actualUsd"/> is the observed spend when something priced it, else null — which the settle
+    /// records as Indeterminate at the reserve, the pessimism an unknown bill already gets. Never an invented figure,
+    /// and never applied to more than one row (see the implementation).</para>
+    /// </summary>
+    /// <param name="agentRunId">
+    /// An AGENT RUN's id, NOT a workflow run's — the only agent-run-grain method on this interface, because the
+    /// scope keys it closes are minted per agent run (<c>{agentRunId:N}/e{epoch}[/r{round}]</c>) and span every
+    /// workflow-run-keyed row those attempts wrote. Passing a workflow run id here matches nothing.
+    /// </param>
+    Task CloseAgentRunClaimsByPrefixAsync(Guid agentRunId, Guid teamId, decimal? actualUsd, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The still-live monitored claims of one agent run whose scope key is NOT <paramref name="exceptScopeKey"/> —
+    /// what an EARLIER attempt of the same run is still holding when a later one is being refused. Diagnostic only:
+    /// it is read on the refusal path so the operator is told a previous attempt holds the cap with unknown spend,
+    /// rather than "cost cap reached" for money nothing has spent. The caller owns the scope-key grammar and the words.
+    /// </summary>
+    Task<IReadOnlyList<AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken);
 
     /// <summary>Release an unused reservation (the attempt never ran) — its headroom returns to the cap. Idempotent; a settled reservation is never released.</summary>
     Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken);
@@ -180,6 +213,42 @@ public sealed partial class BudgetLedger : IBudgetLedger, IPhysicalLlmInvocation
 
         await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task CloseAgentRunClaimsByPrefixAsync(Guid agentRunId, Guid teamId, decimal? actualUsd, CancellationToken cancellationToken)
+    {
+        // Ordered by id so a run's claims always close in the same sequence: a failure part-way leaves a PARTIAL
+        // close (the rest stay live for the expiry sweep, which is the same pessimism they would have had anyway),
+        // and a deterministic order makes the survivors the same set on every retry instead of an arbitrary one.
+        var live = await OpenAgentRunClaimsAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        // An observed figure is ONE invocation's bill. When a run left several claims live, no row can be given it
+        // without inventing the others', so they all settle Indeterminate at their own reserve instead.
+        var observed = live.Count == 1 ? actualUsd : null;
+
+        foreach (var row in live)
+            await SettleAsync(row.WorkflowRunId, teamId, row.Kind, row.ScopeKey, observed, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken) =>
+        (await OpenAgentRunClaimsAsync(agentRunId, teamId, cancellationToken).ConfigureAwait(false))
+            .Where(row => row.ScopeKey != exceptScopeKey && BudgetReservationStates.Live.Contains(row.State))
+            .Select(row => new AgentRunClaimHold(row.ScopeKey, row.ReservedUsd, row.ExpiresAt))
+            .ToList();
+
+    /// <summary>Every not-yet-Settled monitored row of one agent run, across its attempts and rounds. <c>Settled</c> is the one state nothing here may touch or count — a confirmed receipt.</summary>
+    private async Task<IReadOnlyList<OpenAgentRunClaim>> OpenAgentRunClaimsAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var prefix = agentRunId.ToString("N");
+        var unbudgeted = $"{BudgetKinds.UnbudgetedPrefix}{BudgetKinds.AgentRunMonitored}";
+
+        return await _db.BudgetReservation.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.ScopeKey.StartsWith(prefix) && (r.Kind == BudgetKinds.AgentRunMonitored || r.Kind == unbudgeted) && r.State != BudgetReservationStates.Settled)
+            .OrderBy(r => r.Id)
+            .Select(r => new OpenAgentRunClaim(r.WorkflowRunId, r.Kind, r.ScopeKey, r.State, r.ReservedUsd, r.ExpiresAt))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record OpenAgentRunClaim(Guid WorkflowRunId, string Kind, string ScopeKey, string State, decimal ReservedUsd, DateTimeOffset? ExpiresAt);
 
     public async Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken)
     {

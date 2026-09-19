@@ -306,6 +306,10 @@ public sealed class StructuredResponseContractTests
             return Task.CompletedTask;
         }
 
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Workflows.Budget.AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Workflows.Budget.AgentRunClaimHold>>([]);
+
+        public Task CloseAgentRunClaimsByPrefixAsync(Guid agentRunId, Guid teamId, decimal? actualUsd, CancellationToken cancellationToken) => Task.CompletedTask;
+
         public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken)
         {
             Releases++;

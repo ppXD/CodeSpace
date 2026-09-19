@@ -173,6 +173,60 @@ public sealed class AgentRunBudgetTests
             .ShouldBeNull("nothing left to claim is a REFUSAL, never a free launch on a zero-dollar claim");
     }
 
+    /// <summary>
+    /// What a terminal writer OUTSIDE the executor may settle a live claim at. Every non-figure — no result, an
+    /// unparseable one, a run whose own accounting came back indeterminate — must read as NOTHING KNOWN, because
+    /// the ledger settles a null pessimistically at the reserve while any number it is handed is recorded as a bill
+    /// the team was charged. An operator cancel and the reconciler's abandon have no other evidence to go on.
+    /// </summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("not json at all", null)]
+    [InlineData("""{"status":"Failed","exitReason":"x"}""", null)]
+    [InlineData("""{"status":"Failed","exitReason":"x","costUsd":0.75}""", 0.75)]
+    [InlineData("""{"status":"Failed","exitReason":"x","costUsd":0.75,"costIndeterminate":true}""", null)]
+    [InlineData("""{"status":"Failed","exitReason":"x","cumulativeCostUsd":9.5}""", null)]
+    public void Observed_spend_is_read_only_from_a_result_that_recorded_one(string? resultJson, double? expected)
+    {
+        // MUTATION THIS CATCHES: reading CumulativeCostUsd (the retry chain's running total) instead of this
+        // attempt's own CostUsd — the live claim would be charged for rounds that already settled at their own
+        // exits. Or dropping the CostIndeterminate guard, which turns "we could not price this" into a bill.
+        AgentRunBudget.ObservedUsd(resultJson).ShouldBe((decimal?)expected);
+    }
+
+    /// <summary>
+    /// The spend scope key's grammar, both ways. It is DURABLE state — every live <c>budget_reservation</c> row of
+    /// the agent-run plane carries one — and three separate things read it: the terminal close matches every key of
+    /// a run by its <c>{runId:N}</c> prefix, a refusal names the attempt back to an operator, and the ledger's own
+    /// exact-match replay rule depends on one attempt's key never colliding with another's.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 0, "/e1")]
+    [InlineData(1, 2, "/e1/r2")]
+    [InlineData(43, 0, "/e43")]
+    public void A_spend_scope_key_names_its_run_its_attempt_and_its_round(long epoch, int round, string suffix)
+    {
+        // MUTATION THIS CATCHES: dropping the epoch from the key. Two attempts of one run would collide on a single
+        // row, the second is refused as an intent mismatch, and the first attempt's spend settles at the second's.
+        var runId = Guid.NewGuid();
+        var key = AgentRunExecutor.RunSpendScopeKey(runId, epoch, round);
+
+        key.ShouldBe($"{runId:N}{suffix}");
+        key.ShouldStartWith(runId.ToString("N"), Case.Sensitive, "every key of one run must fall under the prefix its terminal closes by");
+        AgentRunExecutor.RunSpendScopeEpoch(key).ShouldBe(epoch.ToString());
+    }
+
+    [Theory]
+    [InlineData("0123456789abcdef0123456789abcdef", "unrecorded")]
+    [InlineData("0123456789abcdef0123456789abcdef/r1", "unrecorded")]
+    public void A_key_minted_before_the_attempt_grain_names_no_attempt(string legacyKey, string expected)
+    {
+        // Rows written before this shape existed are still live in production and still closed by the prefix; a
+        // refusal must describe them honestly rather than inventing an attempt number for them.
+        AgentRunExecutor.RunSpendScopeEpoch(legacyKey).ShouldBe(expected);
+    }
+
     [Theory]
     [InlineData(true, 0.99, false)]
     [InlineData(false, 1.00, true)]

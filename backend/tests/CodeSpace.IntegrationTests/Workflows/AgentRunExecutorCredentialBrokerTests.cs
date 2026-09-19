@@ -987,6 +987,7 @@ public partial class AgentRunExecutorTests
             scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Recovery.IRunCleanupLedger>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunReconcilerService>.Instance,
             credentialBroker: broker);
 
@@ -998,7 +999,7 @@ public partial class AgentRunExecutorTests
     private static IAgentRunService BuildCancelService(Autofac.ILifetimeScope scope, ISandboxRunner runner, IModelCredentialBroker broker) =>
         new AgentRunService(
             scope.Resolve<CodeSpaceDbContext>(),
-            new AgentRunRuntimeServices(scope.Resolve<IAdmissionController>(), new SandboxRunnerRegistry(new[] { runner }), scope.Resolve<AgentRunDurabilityServices>(), scope.Resolve<CodeSpace.Core.Services.Learning.IAgentLessonInjector>()),
+            new AgentRunRuntimeServices(scope.Resolve<IAdmissionController>(), new SandboxRunnerRegistry(new[] { runner }), scope.Resolve<AgentRunDurabilityServices>(), scope.Resolve<CodeSpace.Core.Services.Learning.IAgentLessonInjector>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>()),
             scope.Resolve<CodeSpace.Core.Services.Agents.Authority.ExecutionAuthorityService>(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunService>.Instance,
             credentialBroker: broker);

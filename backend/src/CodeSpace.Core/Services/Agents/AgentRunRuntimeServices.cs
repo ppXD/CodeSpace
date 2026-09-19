@@ -4,22 +4,32 @@ using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Learning;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CodeSpace.Core.Services.Agents;
 
 public sealed class AgentRunRuntimeServices : IScopedDependency
 {
-    public AgentRunRuntimeServices(IAdmissionController admission, ISandboxRunnerRegistry runners, AgentRunDurabilityServices durability, IAgentLessonInjector lessons)
+    public AgentRunRuntimeServices(IAdmissionController admission, ISandboxRunnerRegistry runners, AgentRunDurabilityServices durability, IAgentLessonInjector lessons, IServiceScopeFactory scopes)
     {
         Admission = admission;
         Runners = runners;
         Durability = durability;
         Lessons = lessons;
+        Scopes = scopes;
     }
     public IAdmissionController Admission { get; }
     public ISandboxRunnerRegistry Runners { get; }
     public AgentRunDurabilityServices Durability { get; }
     public IAgentLessonInjector Lessons { get; }
+
+    /// <summary>
+    /// Independent DI scopes for work that must NOT join the caller's unit of work. An operator cancel lands a run
+    /// Cancelled without the executor's fold, so the run's still-live spend claim is nobody else's to close — and
+    /// closing it on the scoped context would put a ledger transaction and its advisory locks inside the cancel
+    /// command's own transaction, where one failed settle aborts the whole kill wave after its processes are dead.
+    /// </summary>
+    public IServiceScopeFactory Scopes { get; }
     public IArtifactOffloader Offloader => Durability.Offloader;
     public IToolCallLedgerService Ledger => Durability.Ledger;
     public ICompletionContractStore Contracts => Durability.Contracts;
