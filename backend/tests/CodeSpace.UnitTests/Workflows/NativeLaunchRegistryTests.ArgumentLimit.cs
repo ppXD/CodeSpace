@@ -45,10 +45,13 @@ public sealed partial class NativeLaunchRegistryTests
     }
 
     [Fact]
-    public async Task The_refusal_is_unprocessable_so_the_launch_is_never_retried()
+    public async Task The_refusal_is_unprocessable()
     {
-        // A launch refused for its argument size fails identically on every attempt. Classifying it retryable is how
-        // the pre-guard failure burned a budget on a run that could not start.
+        // A launch refused for its argument size fails identically on every attempt. This pins the KIND only — that
+        // the node then declines to retry it is a separate claim, asserted against the real node mapping in
+        // AgentCodeNodeTests, because Kind alone is Unprocessable for every native-launch refusal and would pass
+        // here with the feature removed. Note the coupling AgentCodeNode makes: the verdict is only reached while
+        // no escalation is available, so a change there changes what this failure costs.
         var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(OversizedRequest("argv-limit-" + Guid.NewGuid().ToString("N")), CancellationToken.None));
 
         ((IFailure)refusal).Kind.ShouldBe(FailureKind.Unprocessable);
