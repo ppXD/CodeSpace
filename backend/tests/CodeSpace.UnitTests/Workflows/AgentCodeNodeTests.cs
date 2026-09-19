@@ -911,6 +911,72 @@ public class AgentCodeNodeTests
         task.RestoredTranscriptArtifactId.ShouldBe(artifactId);
     }
 
+    // ─── 3c: continuing an attempt whose HOST died ──────────────────────────────
+
+    [Fact]
+    public async Task A_respawn_after_a_host_loss_restores_the_checkpoint_and_says_the_tree_is_gone()
+    {
+        // The population 3c exists for. A run whose host died is abandoned by the reconciler with NO result at all,
+        // so the captured-transcript keys a warm retry normally reads are empty — the only thing left is the MID-RUN
+        // checkpoint the notifier projects off the run row. Without this the node respawns cold and the whole
+        // checkpoint is written for nobody.
+        // MUTATION: drop the `?? checkpoint` (or the whole checkpoint branch) from ApplyRespawnResumeHint → the task
+        // carries no transcript ref, no provenance and no honesty line → red.
+        var checkpointId = Guid.NewGuid();
+        var priorRunId = Guid.NewGuid();
+        var priorAttempt = JsonDocument.Parse($$"""
+            {"status":"Failed","error":"The agent run was abandoned","sessionId":"sess-lost",
+             "sessionTranscriptCheckpointArtifactId":"{{checkpointId}}","sessionTranscriptCheckpointAt":"2026-09-19T10:11:12+00:00",
+             "agentRunId":"{{priorRunId}}"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ResumeFromSessionId.ShouldBe("sess-lost", "the CLI is told WHICH conversation to resume; a transcript with no id names nothing");
+        task.RestoredTranscriptArtifactId.ShouldBe(checkpointId, "the checkpoint rides as a REF — the executor resolves it to bytes just before invocation");
+        task.RestoredTranscript.ShouldBeNull("an abandoned attempt left no inline transcript, and inventing one would be a claim about bytes nobody has");
+        task.ResumedFromCheckpointAt.ShouldBe(new DateTimeOffset(2026, 9, 19, 10, 11, 12, TimeSpan.Zero), "the launch stamps this onto the run's permanent confinement record");
+        task.ResumedFromAgentRunId.ShouldBe(priorRunId, "which attempt took over from which is a column, not prose");
+        task.Goal.ShouldContain("machine running your previous attempt was lost", Case.Sensitive, "a restored conversation describes a working tree this sandbox does not have, and the agent must be told");
+    }
+
+    [Fact]
+    public async Task No_checkpoint_means_a_cold_retry_that_says_so()
+    {
+        // The same abandon, from a run that never checkpointed — an envelope that did not opt in, or a harness with
+        // no addressable session transcript. There is nothing to restore, so the respawn cold-starts and says
+        // NOTHING about a lost machine: a run that claims a restored conversation it does not have is worse than one
+        // that admits it is starting over.
+        // MUTATION: stamp the lost-host block unconditionally → red.
+        var priorAttempt = JsonDocument.Parse("""
+            {"status":"Failed","error":"The agent run was abandoned","sessionId":"sess-lost"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, priorAttemptPayload: priorAttempt), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.RestoredTranscriptArtifactId.ShouldBeNull("no checkpoint was taken, so there is no conversation to restore");
+        task.ResumedFromCheckpointAt.ShouldBeNull();
+        task.ResumedFromAgentRunId.ShouldBeNull();
+        task.Goal.ShouldNotContain("machine running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
+    }
+
+    [Theory]
+    [InlineData(true)]    // the node's policy allows another attempt — somebody can consume a checkpoint
+    [InlineData(false)]   // one attempt only — a checkpoint would be written for nobody
+    public async Task A_node_checkpoints_its_session_only_when_a_failure_can_be_retried(bool retriesOnFailure)
+    {
+        // The produce-side opt-in. A checkpoint costs a whole-file read and an artifact write a minute, per running
+        // agent, per worker — so it is paid for only where a failure can actually buy another attempt, which is the
+        // engine's own answer about THIS node's retry policy rather than the node's guess.
+        // MUTATION: set CheckpointSessionTranscript unconditionally (or never) → one arm reds.
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, retriesOnFailure: retriesOnFailure), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!
+            .CheckpointSessionTranscript.ShouldBe(retriesOnFailure);
+    }
+
     [Fact]
     public async Task P2_3_a_first_pass_with_no_prior_attempt_cold_starts_byte_identical()
     {
@@ -1486,8 +1552,9 @@ public class AgentCodeNodeTests
         ["model"] = Str("gpt-5.3-codex"),
     };
 
-    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume, Dictionary<string, JsonElement>? inputs = null, JsonElement? priorAttemptPayload = null) => new()
+    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume, Dictionary<string, JsonElement>? inputs = null, JsonElement? priorAttemptPayload = null, bool retriesOnFailure = true) => new()
     {
+        RetriesOnFailure = retriesOnFailure,
         Inputs = inputs ?? new Dictionary<string, JsonElement>(),
         Config = config,
         RawInputs = JsonDocument.Parse("{}").RootElement,

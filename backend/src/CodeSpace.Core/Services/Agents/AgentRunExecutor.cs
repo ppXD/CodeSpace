@@ -186,9 +186,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // one of those is a live host, so a tear-down arm reading them would fail and kill a healthy agent. Optional like
     // the rest — a null one simply never takes the shutdown branch, which is the safe direction.
     private readonly Microsoft.Extensions.Hosting.IHostApplicationLifetime? _lifetime;
+    // The clock the 3c checkpoint cadence is measured on. Injected (TimeProvider is a registered singleton) so a test
+    // can advance the window instead of sleeping through it; defaulted so a hand-built executor needs to know nothing.
+    private readonly TimeProvider _clock;
+    // 3c: makes the run's resumable session transcript durable MID-run, so a host that dies leaves a conversation
+    // another host can continue. Optional for the same reason _logCapture and _nativeRecords are — a hand-built test
+    // double must not have to know about it — and a null one simply leaves the run resumable only from its own host,
+    // which is exactly the behaviour that existed before this seam.
+    private readonly Recovery.IAgentSessionTranscriptCheckpointer? _sessionCheckpointer;
+    // The one checkpoint allowed to be in flight, and the two watermarks the stateless checkpointer cannot hold. All
+    // three are read and written ONLY from the drain tick, which is single-threaded by construction (the durable tail
+    // loop awaits each onLine then onCheckpoint sequentially) — the background task itself touches none of them, so a
+    // tick that finds one incomplete simply skips rather than racing it.
+    private Task<Messages.Agents.SessionTranscriptCheckpoint?> _sessionCheckpoint = Task.FromResult<Messages.Agents.SessionTranscriptCheckpoint?>(null);
+    private DateTimeOffset? _sessionCheckpointAttemptedAt;
+    private readonly SessionCheckpointWatermark _sessionCheckpointWatermark = new();
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, Recovery.IAgentSessionTranscriptCheckpointer? sessionCheckpointer = null, TimeProvider? clock = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -213,6 +228,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _credentialBroker = credentialBroker;
         _logs = logs;
         _lifetime = lifetime;
+        _sessionCheckpointer = sessionCheckpointer;
+        _clock = clock ?? TimeProvider.System;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -467,12 +484,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var runContext = new HarnessRunContext
             {
                 Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy,
-                Harness = harness, Runner = runner, Spec = spec, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
+                Harness = harness, Runner = runner, Spec = spec, Task = effectiveTask, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
                 ModelBrokerRunToken = brokeredCredential?.RunToken, ModelCredentialBrokered = brokeredPosture,
                 ModelBrokerPort = brokeredCredential?.RebindPort, ModelBrokerRoute = brokeredCredential?.RebindRoute,
                 ModelBrokerCredentialId = brokeredCredential is null ? null : modelCredentialId, ModelBrokerProvider = brokeredCredential is null ? null : modelProvider,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
+                ResumedFromCheckpointAt = effectiveTask.ResumedFromCheckpointAt,
             };
 
             var modelPrices = await ResolveSpendPricesAsync(run, effectiveTask, cancellationToken).ConfigureAwait(false);
@@ -574,7 +592,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     break;
                 }
 
-                var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
+                var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, Task = reviseTask, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
 
                 spendClaim = await SettleInvocationSpendAsync(spendClaim, InvocationObservation(result, roundResult), reviseTask, modelPrices, cancellationToken).ConfigureAwait(false);
@@ -976,11 +994,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, redactor), context.Durable, handle, cancellationToken).ConfigureAwait(false);
         if (!ReferenceEquals(capture.Handle, handle) && capture.Handle != handle)
             await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-        var sandbox = await capture.ObserveAsync((capturedHandle, token) =>
+        SandboxResult sandbox;
+        try
         {
-            var replayHandle = capturedHandle with { StdoutOffset = Math.Min(capturedHandle.StdoutOffset, native.ReplayStartOffset) };
-            return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, new HarnessSinks(writer, native)));
-        }, cancellationToken).ConfigureAwait(false);
+            sandbox = await capture.ObserveAsync((capturedHandle, token) =>
+            {
+                var replayHandle = capturedHandle with { StdoutOffset = Math.Min(capturedHandle.StdoutOffset, native.ReplayStartOffset) };
+                return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, context.TeamId, context.Harness, context.Task.WorkspaceDirectory, facts))));
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await DrainSessionTranscriptCheckpointAsync(context.RunId, cancellationToken).ConfigureAwait(false);   // 3c: same reason as the live path, including the finally — a failed observe is a retry's best source of conversation
+        }
 
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1538,9 +1564,52 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (task.RestoredTranscriptArtifactId is not { } artifactId) return task;
 
-        var transcript = await _offloader.ResolveRequiredAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
+        if (!task.RestoredTranscriptIsCheckpoint)
+        {
+            var transcript = await _offloader.ResolveRequiredAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
 
-        return task with { RestoredTranscript = transcript, RestoredTranscriptArtifactId = null };
+            return task with { RestoredTranscript = transcript, RestoredTranscriptArtifactId = null };
+        }
+
+        return await ResolveCheckpointTranscriptAsync(task, teamId, artifactId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 3c: resolve a mid-run CHECKPOINT ref under the opposite policy to a captured one — unreadable degrades to a
+    /// COLD start instead of failing the launch.
+    ///
+    /// <para>Fail-closed is right for a captured transcript: the attempt that wrote it finished, so an unreadable ref
+    /// is a genuine fault and cold-starting a named session silently would hide it. A checkpoint is best-effort by
+    /// construction — its blob may have been collected, its destination may be unreachable — and this task is already
+    /// a RETRY of a lost host. Failing it would spend the very attempt the checkpoint exists to improve, on the one
+    /// fault that says nothing about the work.</para>
+    ///
+    /// <para>The degrade is total and honest: the session id goes with the ref (a <c>--resume</c> naming a session
+    /// whose transcript was never restored cold-starts in the CLI anyway, silently), the confinement stamp is cleared
+    /// so the run's permanent record does not claim a continuation it never had, and the goal is told.</para>
+    /// </summary>
+    private async Task<AgentTask> ResolveCheckpointTranscriptAsync(AgentTask task, Guid teamId, Guid artifactId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var transcript = await _offloader.ResolveRequiredAsync(teamId, task.RestoredTranscript, artifactId, cancellationToken).ConfigureAwait(false);
+
+            return task with { RestoredTranscript = transcript, RestoredTranscriptArtifactId = null, RestoredTranscriptIsCheckpoint = false };
+        }
+        catch (Exception unavailable) when (unavailable is not OperationCanceledException)
+        {
+            _logger.LogWarning(unavailable, "Agent run: the lost host's session checkpoint {ArtifactId} could not be read, so this retry runs COLD rather than failing on a best-effort recovery aid", artifactId);
+
+            // Every claim the checkpoint bought goes with it, including the source link — the row is promoted from
+            // this envelope at creation, and "resumed from run X" would be false for an attempt that restored
+            // nothing from X.
+            return task with
+            {
+                Goal = AgentRetryContinuity.WithUnreadableCheckpointHint(task.Goal),
+                RestoredTranscript = null, RestoredTranscriptArtifactId = null, RestoredTranscriptIsCheckpoint = false,
+                ResumeFromSessionId = null, ResumedFromCheckpointAt = null, ResumedFromAgentRunId = null,
+            };
+        }
     }
 
     /// <summary>
@@ -1553,9 +1622,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <c>rollout-&lt;id&gt;.jsonl</c> under the linked target — which a search-based locate like Codex's glob surfaces and
     /// a leaf-only resolve misses). So the check walks EVERY component from just below the config home to the leaf and
     /// fail-closes on ANY symlink: the CLIs only ever write real files/dirs here, so a symlink component in this subtree
-    /// is inherently hostile. Capture runs AFTER the agent process exits, so there is no live check-then-read race.
+    /// is inherently hostile.
     /// Returns null when the path escapes (the caller logs + skips); a non-existent in-bounds path is returned as-is
     /// (the caller's existence check then treats it as a cold-start).
+    ///
+    /// <para>TWO CALLERS, and they do NOT share a threat model. The end-of-run capture runs after the agent process
+    /// has exited, so its walk and its read cannot be raced — which is what this comment used to claim for everyone.
+    /// The 3c mid-run checkpoint (<see cref="StartSessionTranscriptCheckpoint"/>) runs while the agent is still
+    /// executing with write access to its own bind-mounted config home, so the walk here and the open that follows
+    /// ARE two syscalls with a live writer between them; a component swapped in that window would point the read at
+    /// a worker-readable host file, and its bytes would land in the team's artifact store and be restored into the
+    /// next attempt. This function cannot close that on its own — it returns a path, not a handle. The checkpointer
+    /// does, by verifying through <c>/proc/self/fd</c> that the file it OPENED is the path resolved here.</para>
     ///
     /// <para>RESIDUAL (documented, not closed here): a HARDLINK carries no link target, so a per-component symlink walk
     /// cannot see it. This is NOT a symlink-style escalation under the default hardening — Linux <c>protected_hardlinks=1</c>
@@ -1581,8 +1659,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return lexical;
     }
 
-    /// <summary>The session-transcript capture cap in bytes — the env override (<see cref="MaxSessionTranscriptBytesEnvVar"/>) when it parses to a positive long, else <see cref="DefaultMaxSessionTranscriptBytes"/>.</summary>
-    private static long MaxSessionTranscriptBytes() =>
+    /// <summary>The session-transcript capture cap in bytes — the env override (<see cref="MaxSessionTranscriptBytesEnvVar"/>) when it parses to a positive long, else <see cref="DefaultMaxSessionTranscriptBytes"/>. Internal, not private, because the mid-run checkpointer (<c>ArtifactSessionTranscriptCheckpointer</c>) reads the SAME file under the SAME limit — one knob for one decision, never a second one that could drift out from under an operator who tuned this.</summary>
+    internal static long MaxSessionTranscriptBytes() =>
         ParseMaxSessionTranscriptBytes(Environment.GetEnvironmentVariable(MaxSessionTranscriptBytesEnvVar), DefaultMaxSessionTranscriptBytes);
 
     /// <summary>Parse the cap override — a positive long wins; anything else (null / non-numeric / non-positive) falls back to <paramref name="fallback"/>. Pure, so the parse + fallback is unit-pinned without touching the process env.</summary>
@@ -3871,7 +3949,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(context, PersistLineAsync, PersistFrameAsync, new HarnessSinks(writer, native), cancellationToken).ConfigureAwait(false);
+        SandboxResult sandbox;
+        try
+        {
+            sandbox = await RunSandboxAsync(context, PersistLineAsync, PersistFrameAsync, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, context.TeamId, context.Harness, context.Spec.WorkingDirectory, facts)), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // 3c: let the in-flight checkpoint land before anything can unwind this round's scope. It is the LAST
+            // one — the most conversation any retry would get — and it is running against a DbContext this scope
+            // owns. In a FINALLY because the paths that skip the straight line — an admitted-launch failure, an
+            // ownership loss — are exactly the ones a retry follows. A CANCELLED token is not among them: the wait
+            // below throws on it at once and the checkpoint is abandoned, which is the right answer for a worker
+            // being torn down.
+            await DrainSessionTranscriptCheckpointAsync(context.RunId, cancellationToken).ConfigureAwait(false);
+        }
 
         // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
         // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
@@ -4023,6 +4115,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private static SandboxConfinement? WithCredentialPosture(SandboxConfinement? confinement, bool? brokered) =>
         confinement is null ? null : confinement with { ModelCredentialBrokered = brokered };
+
+    /// <summary>
+    /// 3c: add to the launch's posture that this attempt is the CONTINUATION of a run whose host died. Kept separate
+    /// from <see cref="WithCredentialPosture"/> so each merge states one fact, and recorded at all because a resumed
+    /// attempt is narrower than the one it continues — only the conversation was durable — and a reader who is not
+    /// told will read its transcript as evidence about a working tree it does not have. Unchanged for an ordinary
+    /// launch (null <paramref name="resumedFromCheckpointAt"/>) and for a runner that stamped no posture at all.
+    /// </summary>
+    private static SandboxConfinement? WithResumeProvenance(SandboxConfinement? confinement, DateTimeOffset? resumedFromCheckpointAt) =>
+        confinement is null || resumedFromCheckpointAt is null ? confinement : confinement with { ResumedFromCheckpointAt = resumedFromCheckpointAt };
 
     /// <summary>
     /// Stamp the run's posture with what a re-attach has just made true: its BROKERED model credential is gone. The
@@ -4804,7 +4906,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
-            await RecordConfinementAsync(context.Owner, WithCredentialPosture(handle.Confinement, context.ModelCredentialBrokered), cancellationToken).ConfigureAwait(false);
+            await RecordConfinementAsync(context.Owner, WithResumeProvenance(WithCredentialPosture(handle.Confinement, context.ModelCredentialBrokered), context.ResumedFromCheckpointAt), cancellationToken).ConfigureAwait(false);
             var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
             if (capture.Handle != handle)
                 await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(capture.Handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
@@ -4963,6 +5065,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// poll's lines, THEN persist the advanced spool offset onto the handle. The flush-before-offset ordering is the
     /// durability invariant — the persisted offset must never run ahead of flushed events, so a re-attach at worst
     /// re-emits the last batch (never loses a line). A pure jsonb UPDATE for the offset; never blocks completion.
+    ///
+    /// <para>3c rides this same tick to make the run's resumable CONVERSATION durable
+    /// (<see cref="CheckpointSessionTranscriptQuietlyAsync"/>). It goes LAST, after the two flushes and the offset,
+    /// because those are what the run's own completion depends on and the checkpoint is only what another host would
+    /// need if this one died — it is a recovery aid, and it may never be in front of the work.</para>
     /// </summary>
     private Func<long, CancellationToken, Task> CheckpointHandleOffset(AgentRunOwnerToken owner, SandboxHandle handle, HarnessSinks sinks) =>
         async (offset, ct) =>
@@ -4970,7 +5077,185 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             await sinks.Events.FlushAsync(ct).ConfigureAwait(false);
             await sinks.Frames.FlushAsync(ct).ConfigureAwait(false);   // the frame plane rides the same checkpoint — best-effort, so a refused frame flush stops capture for the round rather than holding the offset back
             await _runs.SetRunnerHandleAsync(owner, JsonSerializer.Serialize(handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, AgentJson.Options), ct).ConfigureAwait(false);
+
+            StartSessionTranscriptCheckpoint(owner, handle, sinks.SessionCheckpoint);
         };
+
+    /// <summary>
+    /// 3c: START a durable checkpoint of this tick's live session transcript, so an attempt whose host dies leaves a
+    /// conversation its retry can continue. Returns without awaiting it.
+    ///
+    /// <para>Off the tick, and in a DI SCOPE OF ITS OWN. This callback runs inside the durable runner's drain loop,
+    /// whose next poll carries the run's stdout, its exit marker, its wall-clock check and its progress lease — so a
+    /// read-and-upload on this thread would stall all four for as long as the artifact store took. And the scope is
+    /// not optional tidiness: the tick is already using this executor's scoped <c>DbContext</c> (the buffered event
+    /// flush, the spool-offset write), so a checkpoint sharing it would put two operations on one EF context at once.
+    /// EF refuses that on whichever statement starts second — as often the TICK's, unhandled inside the runner's
+    /// attach loop — which would kill a healthy run for a best-effort recovery aid. Same shape as
+    /// <see cref="AdmitRunSpendAsync"/> and the heartbeat, for the same reason.</para>
+    ///
+    /// <para>At most ONE is in flight: a tick that finds the previous one still running skips, so a slow store costs
+    /// checkpoints rather than queueing them up. Its result is harvested HERE, on the tick, so the growth watermark
+    /// is only ever touched by one thread.</para>
+    ///
+    /// <para>The order of the guards is the cost order. The two FREE reads come first — a harness with no resumable
+    /// transcript never has one, and a stream that has not yet named its session id cannot address one — because
+    /// claiming the cadence window for either would burn a whole interval on a tick that was never going to
+    /// checkpoint. Then the window, then the locate (Codex finds its rollout by a recursive walk, and this fires
+    /// several times a second), then the SAME security clamp the end-of-run capture uses.</para>
+    /// </summary>
+    private void StartSessionTranscriptCheckpoint(AgentRunOwnerToken owner, SandboxHandle handle, SessionCheckpointTick? tick)
+    {
+        if (_sessionCheckpointer is null || tick is null || !_sessionCheckpoint.IsCompleted) return;
+
+        HarvestSessionTranscriptCheckpoint();
+
+        if (tick.Harness is not IAgentSessionTranscript resumable || tick.Facts.SessionId is not { Length: > 0 } sessionId) return;
+
+        var now = _clock.GetUtcNow();
+
+        if (!SessionCheckpointDue(_sessionCheckpointAttemptedAt, now)) return;
+
+        _sessionCheckpointAttemptedAt = now;
+
+        var configHome = LocalProcessRunner.ConfigHomePath(handle.SpoolDirectory);
+
+        if (resumable.SessionTranscriptRelativePath(configHome, tick.WorkingDirectory, sessionId) is not { } relativePath) return;
+
+        if (ResolveSessionTranscriptPath(configHome, relativePath) is not { } path)
+        {
+            _logger.LogWarning("Agent run {RunId}: the live session-transcript path escaped the config home (hostile session id?); skipping the checkpoint", owner.RunId);
+            return;
+        }
+
+        var request = new Recovery.SessionTranscriptCheckpointRequest(tick.TeamId, owner, path, sessionId, _sessionCheckpointWatermark.Begin(path));
+
+        _sessionCheckpoint = Task.Run(() => CheckpointInOwnScopeAsync(request), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Resolve a FRESH checkpointer (and with it a fresh <c>DbContext</c> and artifact store) for this one upload —
+    /// see <see cref="StartSessionTranscriptCheckpoint"/> for why sharing the executor's would be a defect rather
+    /// than a saving — and bound it with a deadline OF ITS OWN.
+    ///
+    /// <para>Deliberately NOT the observer's token. That token is cancelled by exactly the terminations a warm retry
+    /// follows — a wall-clock timeout, a no-progress stall, an operator cancel — so threading it here would abort the
+    /// last checkpoint on precisely the runs whose conversation is most worth keeping. And deliberately not
+    /// unbounded either: a checkpoint that cannot finish inside <see cref="SessionCheckpointUploadBudget"/> is one
+    /// the next cadence would overlap.</para>
+    /// </summary>
+    private async Task<Messages.Agents.SessionTranscriptCheckpoint?> CheckpointInOwnScopeAsync(Recovery.SessionTranscriptCheckpointRequest request)
+    {
+        using var budget = new CancellationTokenSource(SessionCheckpointUploadBudget);
+        using var scope = _scopeFactory.CreateScope();
+
+        return await scope.ServiceProvider.GetRequiredService<Recovery.IAgentSessionTranscriptCheckpointer>().CheckpointAsync(request, budget.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>Advance the growth watermark from a COMPLETED checkpoint, on the tick's own thread.</summary>
+    private void HarvestSessionTranscriptCheckpoint()
+    {
+        if (_sessionCheckpoint.IsCompletedSuccessfully) _sessionCheckpointWatermark.Landed(_sessionCheckpoint.Result);
+    }
+
+    /// <summary>
+    /// How long ONE checkpoint's read and upload may take before it is abandoned. Sized for the work: the capture
+    /// cap is <see cref="DefaultMaxSessionTranscriptBytes"/> (32 MiB), so a budget that assumed a fast local store
+    /// would cancel every checkpoint of a long conversation on a throttled or cross-region destination — silently
+    /// un-recovering exactly the runs this feature exists for. Thirty seconds is comfortably inside the
+    /// <see cref="SessionCheckpointInterval"/> cadence, so a slow upload still cannot overlap the next attempt.
+    /// </summary>
+    internal static readonly TimeSpan SessionCheckpointUploadBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long the round WAITS for an in-flight checkpoint before landing anyway — deliberately much shorter than
+    /// <see cref="SessionCheckpointUploadBudget"/>, because it is bounding a different thing. That budget is how long
+    /// a checkpoint may take; this is how long a finished run's terminal write may be deferred by one, and a
+    /// best-effort recovery aid has no business holding a landing open for half a minute. Past it the run lands and
+    /// the upload is left to finish or not: its stamp is fenced on the run still being Running, so a late one is
+    /// refused by the database rather than writing onto a terminal row.
+    /// </summary>
+    internal static readonly TimeSpan SessionCheckpointDrainBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long after one checkpoint ATTEMPT the next may be made. Committed here and changed by a pull request —
+    /// there is no environment override, for the reason the retention policy states about its own windows: the cost
+    /// of a mistyped value is paid in bytes uploaded from every running agent on every worker, and a code review is
+    /// the control that belongs in front of it. Sixty seconds is the trade the whole slice rests on: a lost host
+    /// costs at most that much conversation, and a run is charged one whole-file read a minute rather than one per
+    /// poll of a loop that ticks several times a second.
+    /// </summary>
+    internal static readonly TimeSpan SessionCheckpointInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// The growth watermark one run's checkpoints are measured against: how many bytes of WHICH transcript file the
+    /// last LANDED checkpoint stored.
+    ///
+    /// <para>Its own type, and both halves written in one assignment, because splitting them re-creates the defect
+    /// the path key exists to prevent. A revise round opens a NEW config home whose transcript legitimately starts
+    /// smaller than the finished previous round's — so if the path advanced when an attempt was DISPATCHED while the
+    /// byte count advanced only when one LANDED, the ordinary first-tick decline (the CLI has not written its session
+    /// file yet) would leave the new round's path paired with the old round's byte count, and round two would never
+    /// checkpoint until it outgrew round one.</para>
+    ///
+    /// <para>Touched only from the drain tick, which is single-threaded by construction: the dispatching tick calls
+    /// <see cref="Begin"/> and a later tick calls <see cref="Landed"/> with the finished task's result. The
+    /// background upload itself touches nothing here.</para>
+    /// </summary>
+    internal sealed class SessionCheckpointWatermark
+    {
+        private (string Path, long Bytes)? _taken;
+        private string? _pending;
+
+        /// <summary>Record that an attempt for <paramref name="path"/> is starting, and hand back the byte count it must grow past — the last landed checkpoint's, and only when that checkpoint was of this same path.</summary>
+        public long? Begin(string path)
+        {
+            _pending = path;
+
+            return _taken is { } taken && string.Equals(taken.Path, path, StringComparison.Ordinal) ? taken.Bytes : null;
+        }
+
+        /// <summary>Settle the attempt <see cref="Begin"/> started. A null <paramref name="checkpoint"/> — the attempt DECLINED (no growth, no complete line, over the cap, lost fence) — leaves the watermark exactly where it was, so the next attempt is measured against what actually landed. An attempt that FAULTED never arrives here at all: the harvest only reads a task that completed successfully, so the watermark keeps its previous value by not being called.</summary>
+        public void Landed(Messages.Agents.SessionTranscriptCheckpoint? checkpoint)
+        {
+            if (checkpoint is not null && _pending is { } path) _taken = (path, checkpoint.Bytes);
+
+            _pending = null;
+        }
+    }
+
+    /// <summary>Whether the checkpoint cadence window is open. Pure, so the gate that decides how often a fleet uploads transcripts is pinned directly rather than through a timing-dependent drive.</summary>
+    internal static bool SessionCheckpointDue(DateTimeOffset? lastAttemptAt, DateTimeOffset now) =>
+        lastAttemptAt is not { } last || now - last >= SessionCheckpointInterval;
+
+    /// <summary>
+    /// Wait for the in-flight checkpoint before this round's scope can unwind.
+    ///
+    /// <para>Without it the fire-and-forget outlives its own dependencies: <c>ExecuteAsync</c> returns, the job scope
+    /// disposes the context and the store underneath a running upload, and the LAST checkpoint — the one holding the
+    /// most conversation — is lost to a swallowed <c>ObjectDisposedException</c>. That is exactly the minute a host
+    /// loss would have needed.</para>
+    ///
+    /// <para>Bounded by the transcript cap on the read and by <paramref name="cancellationToken"/> on the rest, so a
+    /// worker tear-down stops it instead of holding the drain budget open. Its result is harvested for the same
+    /// reason every other completion is: the watermark must reflect what actually landed.</para>
+    /// </summary>
+    private async Task DrainSessionTranscriptCheckpointAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (_sessionCheckpoint.IsCompleted) { HarvestSessionTranscriptCheckpoint(); return; }
+
+        try
+        {
+            // The DRAIN bound, not the round's token and not the upload's: this wait sits in front of the terminal
+            // write, so a slow destination must not defer that write for as long as an upload is allowed to take.
+            await _sessionCheckpoint.WaitAsync(SessionCheckpointDrainBudget, cancellationToken).ConfigureAwait(false);
+            HarvestSessionTranscriptCheckpoint();
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: the in-flight session-transcript checkpoint did not land before this round ended; the run stays recoverable only from its previous one", runId);
+        }
+    }
 
     /// <summary>
     /// The two durable sinks one harness round streams into: the normalized event log and the native-frame plane. One
@@ -5045,7 +5330,43 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private sealed record WorkspaceCaptureContext(AgentRunOwnerToken Owner, Guid TeamId, AgentTask Task, IWorkspaceHandle? Workspace);
     private sealed record RepositoryPushContext(AgentRunOwnerToken Owner, AgentTask Task, IWorkspaceHandle Workspace, IWorkspacePushHandle PushHandle);
 
-    private sealed record HarnessSinks(BufferedEventWriter Events, AgentNativeRecordPump Frames);
+    private sealed record HarnessSinks(BufferedEventWriter Events, AgentNativeRecordPump Frames, SessionCheckpointTick? SessionCheckpoint = null);
+
+    /// <summary>
+    /// What a checkpoint tick needs to locate and checkpoint the run's RESUMABLE session transcript — everything
+    /// except the two things the tick already holds (the owner token and the launched handle whose spool the config
+    /// home lives under). NULL on <see cref="HarnessSinks"/> when this run is not resumable at all, which is the
+    /// cheapest possible gate: no checkpointer deployed, a hand-built test double, or an envelope that did not opt in
+    /// (<see cref="AgentTask.CheckpointSessionTranscript"/>) — and a run whose failure nobody can retry must not pay for, or store,
+    /// a checkpoint.
+    ///
+    /// <para><paramref name="WorkingDirectory"/> is the directory the CLI process actually ran in
+    /// (<see cref="SandboxSpec.WorkingDirectory"/>), and nothing else will do: Claude's session path is
+    /// <c>projects/&lt;sanitized-cwd&gt;/&lt;id&gt;.jsonl</c>, so the encoding keys on the cwd. The primary repo's
+    /// directory is NOT that cwd for a multi-repo workspace (which runs at the workspace root) and does not exist at
+    /// all for a repo-less one — passing it silently addressed a file that was never written, and the whole feature
+    /// went quiet for exactly those runs.</para>
+    ///
+    /// <para>The session id is read LIVE off <see cref="AgentRunFacts"/> rather than passed in, because it is not
+    /// known at launch: the harness names it on its own first lifecycle line (Claude's <c>init</c>, Codex's
+    /// <c>thread.started</c>), which the fold has already consumed by the first checkpoint. Without it the file
+    /// cannot be addressed at all — both harness layouts key on the id.</para>
+    ///
+    /// <para>That is also why a RE-ATTACH may legitimately checkpoint nothing: its fold resumes from a frame
+    /// checkpoint, so the lifecycle line carrying the id is usually behind the replay head and its fresh facts never
+    /// see one. The launch's own last checkpoint then stands, which is the right answer — it is the newest
+    /// conversation anyone can prove.</para>
+    /// </summary>
+    private sealed record SessionCheckpointTick(Guid TeamId, IAgentHarness Harness, string? WorkingDirectory, AgentRunFacts Facts);
+
+    /// <summary>
+    /// The checkpoint coordinates for a run whose envelope OPTED IN, else null — the one place the opt-in is read, so
+    /// the produce side and the consume side cannot disagree about which runs are checkpointed. A run whose failed
+    /// attempt nobody can retry writes nothing, which is what keeps the artifact store free of a per-minute
+    /// transcript copy for every benchmark cell, review child and supervisor unit on the fleet.
+    /// </summary>
+    private static SessionCheckpointTick? CheckpointTickFor(AgentTask task, Guid teamId, IAgentHarness harness, string? workingDirectory, AgentRunFacts facts) =>
+        task.CheckpointSessionTranscript ? new SessionCheckpointTick(teamId, harness, workingDirectory, facts) : null;
 
     private sealed record HarnessRunContext
     {
@@ -5057,6 +5378,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public required IAgentHarness Harness { get; init; }
         public required ISandboxRunner Runner { get; init; }
         public required SandboxSpec Spec { get; init; }
+
+        /// <summary>The envelope this round is running — carried for the decisions that read the TASK rather than the spec built from it (3c's resume opt-in). Same object <see cref="Spec"/> was built from, so the two can never describe different work.</summary>
+        public required AgentTask Task { get; init; }
         public string? McpToken { get; init; }
 
         /// <summary>The address this run's endpoint bound, minted with an unguessable segment at launch. Carried here so the durable handle can be stamped with it — the only route a re-attach has back to it.</summary>
@@ -5080,6 +5404,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public required AgentTranscriptSpool Transcript { get; init; }
         public string? WorkspaceDirectory { get; init; }
         public string? WorkspaceBaseSha { get; init; }
+
+        /// <summary>3c: when this attempt was minted as the continuation of a checkpointed run whose host died — carried from the task so the launch's permanent confinement record can state it. Null for every ordinary launch.</summary>
+        public DateTimeOffset? ResumedFromCheckpointAt { get; init; }
     }
 
     private sealed record ReattachFoldContext

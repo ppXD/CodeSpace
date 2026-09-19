@@ -137,6 +137,16 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             sessionId = run.SessionId,
             sessionTranscript = result?.SessionTranscript,
             sessionTranscriptArtifactId = result?.SessionTranscriptArtifactId,
+            // 3c: the MID-RUN checkpoint, read off the ROW rather than the result — which is the whole point. An
+            // attempt whose host died has no result at all (the reconciler's abandon writes none), so the two keys
+            // above are null for exactly the population this one serves. Kept DISTINCT from them rather than merged,
+            // because they do not mean the same thing to the respawn: a captured transcript comes from an attempt
+            // that finished and left its workspace behind, while a checkpoint comes from one whose machine is gone
+            // and whose unpublished work went with it — and only the second owes the agent that sentence.
+            sessionTranscriptCheckpointArtifactId = run.SessionTranscriptCheckpointArtifactId,
+            sessionTranscriptCheckpointAt = run.SessionTranscriptCheckpointAt,
+            // The attempt this payload retires, so its successor can NAME it in a column instead of in prose.
+            agentRunId = run.Id,
         }, AgentJson.Options);
     }
 

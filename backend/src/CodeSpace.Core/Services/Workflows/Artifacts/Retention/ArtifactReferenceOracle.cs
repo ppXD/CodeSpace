@@ -25,6 +25,7 @@ public sealed class ArtifactReferenceOracle : IArtifactReferenceOracle, IScopedD
         ("artifact_manifest", "content_artifact_id"),
         ("publish_manifest", "patch_artifact_id"),
         ("agent_run_event", "data_artifact_id"),
+        ("agent_run", "session_transcript_checkpoint_artifact_id"),
         ("workflow_run_model_call", "request_artifact_id"),
         ("workflow_run_model_call_attempt", "request_artifact_id"),
         ("workflow_run_model_call_attempt", "response_artifact_id"),

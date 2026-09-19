@@ -103,6 +103,55 @@ public sealed record AgentTask
     public Guid? RestoredTranscriptArtifactId { get; init; }
 
     /// <summary>
+    /// 3c: whether this run's harness session transcript is CHECKPOINTED to durable storage while it runs, so an
+    /// attempt whose host dies leaves a conversation a later one can continue. False (the default, and every envelope
+    /// persisted before this field) ⇒ no checkpoints, byte-identical to a pre-3c run.
+    ///
+    /// <para>An opt-in rather than a default, because a checkpoint nobody will consume is pure waste: it costs a
+    /// whole-file read and an artifact write per minute, per running agent, per worker. Only a producer whose failed
+    /// attempt can actually be RETRIED sets it — today that is <c>agent.run</c> for a node whose own retry policy
+    /// allows more than one attempt. The benchmark lanes (one attempt per cell by protocol), review children and
+    /// supervisor units leave it false.</para>
+    ///
+    /// <para><c>[JsonIgnore(WhenWritingDefault)]</c> so an envelope that did not opt in adds nothing to task_json.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool CheckpointSessionTranscript { get; init; }
+
+    /// <summary>
+    /// 3c: whether <see cref="RestoredTranscriptArtifactId"/> is a mid-run CHECKPOINT rather than a completed
+    /// attempt's captured transcript. The two refs are resolved under opposite policies and the difference is the
+    /// point: a captured transcript was written by an attempt that FINISHED, so an unreadable one is a real fault
+    /// and the launch fails closed rather than silently cold-starting a named session. A checkpoint is best-effort
+    /// by construction — its blob may have been reaped, or its destination may be unreachable — and failing closed
+    /// on one would spend the very retry attempt it exists to improve. Unreadable ⇒ the attempt runs COLD and says
+    /// so. <c>[JsonIgnore(WhenWritingDefault)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RestoredTranscriptIsCheckpoint { get; init; }
+
+    /// <summary>
+    /// 3c: the agent run this attempt was staged to continue from a session checkpoint — the prior attempt whose
+    /// host died. Promoted to <c>agent_run.resumed_from_agent_run_id</c> at creation (the same way
+    /// <see cref="AgentDefinitionId"/> is), so "which attempt took over from which" is a column rather than a
+    /// sentence buried in an event. Cleared in-memory at launch when the checkpoint turns out to be unreadable, so
+    /// the envelope the agent actually runs under claims nothing it did not get. Null for every ordinary dispatch.
+    /// <c>[JsonIgnore(WhenWritingNull)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? ResumedFromAgentRunId { get; init; }
+
+    /// <summary>
+    /// 3c: when this attempt was minted as the CONTINUATION of a checkpointed run whose host died — null for every
+    /// ordinary dispatch. Rides the task because it must reach the launch that stamps
+    /// <c>SandboxConfinement.ResumedFromCheckpointAt</c>, which is the permanent per-run record (the runner handle it
+    /// would otherwise live on is reaped 24h after the run goes terminal).
+    /// <c>[JsonIgnore(WhenWritingNull)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? ResumedFromCheckpointAt { get; init; }
+
+    /// <summary>
     /// P3 (D1): the supervisor SUBTASK id this agent was spawned for — the linking key for retry-resume. When the
     /// supervisor RETRIES a subtask, the producer finds the prior attempt at the SAME subtask in the same run and
     /// resumes its conversation. Only the supervisor's spawn/retry stamps it; a top-level agent.run run leaves it null

@@ -78,6 +78,7 @@ public sealed class AgentReviewRunnerTests
         public Task<AgentRun> CreateReviewAsync(AgentReviewCreation request, CancellationToken cancellationToken) =>
             _createFault is { } fault ? throw fault : Task.FromResult(_createResult!);
 
+        public Task<bool> StampSessionTranscriptCheckpointAsync(AgentRunOwnerToken owner, SessionTranscriptCheckpoint checkpoint, string? sessionId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<ResumableSession?> FindResumableSessionAsync(Guid teamId, Guid? parentRunId, string nodeId, string iterationKey, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<ResumableSession?> FindResumableSubtaskAttemptAsync(Guid teamId, Guid supervisorRunId, string subtaskId, CancellationToken cancellationToken) => throw new NotSupportedException();

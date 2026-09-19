@@ -34,6 +34,15 @@ public interface IAgentRunService
     Task HeartbeatAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken);
     Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken);
     Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 3c: record the run's most recent MID-RUN session-transcript checkpoint (and the session id that addresses it),
+    /// fenced to <paramref name="owner"/> like the handle and confinement writes. Returns whether the row was won —
+    /// false, never a throw, because this rides an observer tick whose real work must not be endangered by a
+    /// best-effort recovery aid.
+    /// </summary>
+    Task<bool> StampSessionTranscriptCheckpointAsync(AgentRunOwnerToken owner, SessionTranscriptCheckpoint checkpoint, string? sessionId, CancellationToken cancellationToken);
+
     Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken);
     Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken);
     Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
@@ -226,6 +235,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             WorkflowRunId = creation.WorkflowRunId,
             NodeId = creation.NodeId,
             IterationKey = creation.IterationKey,
+            ResumedFromAgentRunId = creation.Task.ResumedFromAgentRunId,   // promoted from task_jsonb to a column, like AgentDefinitionId
             Harness = creation.Task.Harness,
             AgentDefinitionId = creation.Task.AgentDefinitionId,   // promoted from task_jsonb to a column so the runs index can filter by agent
             Status = AgentRunStatus.Queued,
@@ -525,16 +535,22 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         var sessionId = PersistedText.Sanitize(result.SessionId);
         var error = PersistedText.Sanitize(result.Error);
 
+        // 3c: the terminal write RELEASES the mid-run session checkpoint. It existed to let another host continue a
+        // run whose own host died, and this run has now landed — so the reference is stale by definition, and holding
+        // it would pin the artifact Referenced (terminal in the retention ledger) beside the end-of-run transcript the
+        // result already carries. Clearing it here is what turns the survivor of a run's minute-by-minute checkpoints
+        // into a reap candidate; the intermediates were already unreferenced the moment the next one replaced them.
         int flipped;
         if (owner is not null)
         {
-            flipped = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET status = {result.Status.ToString()}, result_jsonb = CAST({resultJson} AS jsonb), session_id = {sessionId}, error = {error}, completed_at = clock_timestamp() FROM locked WHERE target.id = locked.id AND target.status = {current.ToString()} AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+            flipped = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {runId} FOR UPDATE) UPDATE agent_run AS target SET status = {result.Status.ToString()}, result_jsonb = CAST({resultJson} AS jsonb), session_id = {sessionId}, error = {error}, completed_at = clock_timestamp(), session_transcript_checkpoint_artifact_id = NULL, session_transcript_checkpoint_at = NULL FROM locked WHERE target.id = locked.id AND target.status = {current.ToString()} AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
             if (flipped == 0) throw new AgentRunOwnershipLostException(runId);
         }
         else
         {
             flipped = await _db.AgentRun.Where(r => r.Id == runId && r.Status == current && r.OwnerId == null && r.ReattachReservationId == null && (expectedEpoch == null || r.FenceEpoch == expectedEpoch))
-                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, result.Status).SetProperty(r => r.ResultJson, resultJson).SetProperty(r => r.SessionId, sessionId).SetProperty(r => r.Error, error).SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, result.Status).SetProperty(r => r.ResultJson, resultJson).SetProperty(r => r.SessionId, sessionId).SetProperty(r => r.Error, error).SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow)
+                    .SetProperty(r => r.SessionTranscriptCheckpointArtifactId, (Guid?)null).SetProperty(r => r.SessionTranscriptCheckpointAt, (DateTimeOffset?)null), cancellationToken).ConfigureAwait(false);
             if (flipped == 0)
             {
                 await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
@@ -874,20 +890,27 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         var chainIds = chain.Select(id => (Guid?)id).ToList();
 
         // Every agent run at this cell anywhere in the chain that captured a session id (team-scoped; served by idx_agent_run_workflow_run).
+        // NEWEST first within a hop, exactly as FindResumableSubtaskAttemptAsync orders its own candidates. Without an
+        // ORDER BY the row a hop yields is whatever the plan happened to emit, which is not a decision anybody made —
+        // and a hop really can hold several session-bearing runs (a rerun of the cell, and since 3c an in-flight one
+        // that stamps its id at its first checkpoint), so "which attempt does this resume" needs an answer.
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(a => a.TeamId == teamId && chainIds.Contains(a.WorkflowRunId) && a.NodeId == nodeId && a.IterationKey == iterationKey && a.SessionId != null)
+            .OrderByDescending(a => a.CreatedDate).ThenByDescending(a => a.Id)
             .Select(a => new { a.Id, a.WorkflowRunId, a.SessionId, a.ResultJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // The NEAREST ancestor's RESUMABLE session — chain order (nearest first), skipping a captured-but-transcript-less
         // prior so it never masks an older resumable one, and treating a corrupt prior result as not-resumable (the
         // contract is cold-start, never a hard failure). Both-or-neither: a session id is resumable ONLY with a transcript.
+        // Nearest ancestor first, and EVERY candidate at that hop — not just the first row the list happened to hold.
+        // A hop can carry more than one session-bearing run (a rerun of the same cell, and since 3c an in-flight run
+        // that stamps its session id at its first checkpoint rather than only at completion), and a single
+        // FirstOrDefault let one of those mask an older attempt that IS resumable. Same shape as the subtask lookup
+        // below, which already scans its candidates.
         foreach (var runId in chain)
-        {
-            var candidate = candidates.FirstOrDefault(c => c.WorkflowRunId == runId);
-
-            if (candidate is not null && TryResumable(candidate.Id, candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
-        }
+            foreach (var candidate in candidates.Where(c => c.WorkflowRunId == runId))
+                if (TryResumable(candidate.Id, candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
 
         return null;
     }

@@ -25,6 +25,9 @@ public sealed class ThrowingAgentRunService : IAgentRunService
 
     public Task<AgentRun> CreateReviewAsync(CodeSpace.Core.Services.Agents.Review.AgentReviewCreation request, CancellationToken cancellationToken) => throw new NotSupportedException();
 
+
+    public Task<bool> StampSessionTranscriptCheckpointAsync(AgentRunOwnerToken owner, SessionTranscriptCheckpoint checkpoint, string? sessionId, CancellationToken cancellationToken) => _inner.StampSessionTranscriptCheckpointAsync(owner, checkpoint, sessionId, cancellationToken);
+
     public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
     {
         if (++_calls == _throwOnCall) throw new InvalidOperationException(FaultMessage);

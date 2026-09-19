@@ -716,6 +716,183 @@ public class AgentNodeFlowTests
         }
     }
 
+    // ── 3c: an agent node whose HOST died ───────────────────────────────────────
+
+    [Fact]
+    public async Task A_host_loss_abandon_of_an_agent_node_buys_a_second_attempt()
+    {
+        // The FACT the whole of 3c rests on, pinned before anything is built on it: a run whose host died is
+        // abandoned by the REAL reconciler (Failed + the abandoned error, no result at all), and the agent.run node
+        // reads that as a RETRYABLE failure — so the node's own retry policy stages a second agent run without any
+        // new machinery. 3c's job is not to buy that attempt; it is to make it WARM.
+        // MUTATION: make the abandon deterministic in AgentCodeNode's verdict (add the abandoned status to the
+        // non-retryable set) → no second run → red, and every warm-retry test below becomes unreachable.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var lostAgent = await GetAgentRunIdAsync(runId);
+
+            await LoseTheHostAsync(lostAgent, checkpointArtifactId: null, sessionId: null);
+            await ReconcileAsync();
+
+            using (var mid = _fixture.BeginScope())
+            {
+                var abandoned = await mid.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == lostAgent);
+                abandoned.Status.ShouldBe(AgentRunStatus.Failed, "the reconciler terminalizes a run whose host never came back");
+                abandoned.Error.ShouldNotBeNull().ShouldContain("abandoned", Case.Insensitive);
+                abandoned.ResultJson.ShouldBeNull("an abandon has no result — which is why a warm retry cannot come from the captured-transcript keys");
+            }
+
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var agents = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+
+            agents.Count.ShouldBe(2, $"a host-loss abandon must buy the node's second attempt; the run has {agents.Count} agent run(s)");
+            (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the fresh attempt parks the run again — the host loss was absorbed");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_retried_agent_node_restores_the_lost_hosts_checkpoint()
+    {
+        // The consumer, end to end on the production wiring: the abandoned run's MID-RUN checkpoint columns are read
+        // by the completion notifier off the ROW (an abandon leaves no result), ride the wait boundary as
+        // PriorAttemptPayload, and land on the SECOND agent run's own persisted task.
+        // MUTATION: drop the checkpoint branch from AgentCodeNode.ApplyRespawnResumeHint, or the two checkpoint keys
+        // from WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload → the fresh task is cold → red.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var checkpointArtifactId = Guid.NewGuid();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var lostAgent = await GetAgentRunIdAsync(runId);
+
+            using (var staged = _fixture.BeginScope())
+            {
+                var task = JsonSerializer.Deserialize<AgentTask>((await staged.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == lostAgent)).TaskJson, AgentJson.Options)!;
+                task.CheckpointSessionTranscript.ShouldBeTrue("a node whose policy allows a second attempt opts in to checkpointing — otherwise nothing below could exist");
+            }
+
+            await LoseTheHostAsync(lostAgent, checkpointArtifactId, sessionId: "sess-lost-host");
+            await ReconcileAsync();
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            var retry = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.Id != lostAgent).SingleAsync();
+            var resumed = JsonSerializer.Deserialize<AgentTask>(retry.TaskJson, AgentJson.Options)!;
+
+            resumed.ResumeFromSessionId.ShouldBe("sess-lost-host", "the CLI is told WHICH conversation to resume — a transcript with no id names nothing");
+            resumed.RestoredTranscriptArtifactId.ShouldBe(checkpointArtifactId, "the checkpoint rides as a REF the executor resolves just before invocation");
+            resumed.ResumedFromCheckpointAt.ShouldNotBeNull("the launch stamps this onto the run's permanent confinement record");
+            resumed.ResumedFromAgentRunId.ShouldBe(lostAgent, "which attempt took over from which is a column, not prose");
+            retry.ResumedFromAgentRunId.ShouldBe(lostAgent, "and the task's provenance is promoted onto the row, like AgentDefinitionId");
+            resumed.Goal.ShouldContain("machine running your previous attempt was lost", Case.Sensitive,
+                "a restored conversation describes a working tree this sandbox does not have, and the agent must be told rather than left to infer it");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_host_loss_with_no_checkpoint_is_retried_cold_and_claims_nothing()
+    {
+        // The same host loss from a run that checkpointed nothing — its harness had no addressable session
+        // transcript, or it died before its first checkpoint. There is nothing to restore, and the fresh attempt must
+        // say so by saying NOTHING: a task that claims a restored conversation it does not have is worse than one
+        // that admits it is starting over.
+        // MUTATION: stamp the lost-host block (or a transcript ref) unconditionally → red.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, RetryingAgentNodeDefinition(maxAttempts: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var lostAgent = await GetAgentRunIdAsync(runId);
+
+            await LoseTheHostAsync(lostAgent, checkpointArtifactId: null, sessionId: "sess-uncheckpointed");
+            await ReconcileAsync();
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var retry = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.Id != lostAgent).SingleAsync();
+            var resumed = JsonSerializer.Deserialize<AgentTask>(retry.TaskJson, AgentJson.Options)!;
+
+            resumed.RestoredTranscriptArtifactId.ShouldBeNull("no checkpoint was taken, so there is no conversation to restore");
+            resumed.ResumedFromCheckpointAt.ShouldBeNull();
+            resumed.ResumedFromAgentRunId.ShouldBeNull();
+            retry.ResumedFromAgentRunId.ShouldBeNull();
+            resumed.Goal.ShouldNotContain("machine running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    /// <summary>
+    /// Make a staged agent run look like one whose HOST died: Running, its lease lapsed, and a durable handle minted
+    /// on a host that never came back whose own wall clock has passed — the exact shape
+    /// <c>AgentRunReconcilerService.DeferToTheMintingHostAsync</c> stops deferring and abandons. The checkpoint
+    /// columns are stamped the way the observer's tick would have.
+    /// </summary>
+    private async Task LoseTheHostAsync(Guid agentRunId, Guid? checkpointArtifactId, string? sessionId)
+    {
+        var spoolDirectory = Path.Combine(Path.GetTempPath(), "cs-host-loss-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(spoolDirectory);
+
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 0x7FFFFFFF, LaunchHost = "a-host-that-never-came-back",
+            SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(-1),
+        };
+        var stale = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+
+        run.Status = AgentRunStatus.Running;
+        run.FenceEpoch = 1;
+        run.StartedAt = stale;
+        run.HeartbeatAt = stale;
+        run.LeaseExpiresAt = stale + AgentRunLiveness.Window;
+        run.RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options);
+        run.SessionId = sessionId;
+        run.SessionTranscriptCheckpointArtifactId = checkpointArtifactId;
+        run.SessionTranscriptCheckpointAt = checkpointArtifactId is null ? null : DateTimeOffset.UtcNow.AddMinutes(-2);
+
+        await db.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task P2_3_a_respawn_warm_resumes_the_prior_attempts_captured_session()
     {

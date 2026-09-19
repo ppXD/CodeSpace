@@ -34,7 +34,12 @@ public sealed class ArtifactRetentionPolicyTests
             .Select(value => ArtifactRetentionPolicy.For(value.ToString()).ShouldNotBeNull()).ToArray();
 
         rules.ShouldAllBe(rule => rule.MinimumAge == TimeSpan.FromDays(7) && rule.QuarantineWindow == TimeSpan.FromHours(24));
-        ArtifactRetentionPolicy.MinimumAgeFloor.ShouldBe(TimeSpan.FromDays(7), "the claim query pre-filters on the smallest floor across all classes");
+
+        // The floor is the SMALLEST across every registered class, and it is a claim-query pre-filter only — the exact
+        // per-class floor above is still enforced per row, so the short-floor session-transcript checkpoint class
+        // widens what the sweep LOOKS at without shortening what any of these four are kept for.
+        ArtifactRetentionPolicy.MinimumAgeFloor.ShouldBe(TimeSpan.FromHours(2),
+            "the claim query pre-filters on the smallest floor across all classes, which is now the session-transcript checkpoint's");
     }
 
     [Theory]
@@ -106,14 +111,24 @@ public sealed class ArtifactRetentionPolicyTests
             .Select(path => Path.GetRelativePath(sourceRoot, path).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(path => path, StringComparer.Ordinal).ToArray();
 
-        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs", "Services/Workflows/Artifacts/ArtifactOffloader.cs", "Services/Workflows/ModelCalls/WorkflowRunModelCallBodyArtifactWriter.cs", "Services/Workflows/Runtime/WorkflowSensitivePayloadStore.cs"],
+        ArtifactRetentionPolicy.SessionTranscriptCheckpoint.MinimumAge.ShouldBe(TimeSpan.FromHours(2),
+            "a run writes one checkpoint a minute and each supersedes the last, so the event class's seven-day floor would hold roughly a gigabyte of superseded transcript per long run for over a week");
+        ArtifactRetentionPolicy.SessionTranscriptCheckpoint.QuarantineWindow.ShouldBe(TimeSpan.FromHours(24),
+            "the short floor buys promptness; the second, independent unreferenced-observation wait is deliberately unchanged");
+        ArtifactRetentionPolicy.For(nameof(ArtifactRetentionClass.SessionTranscriptCheckpoint)).ShouldNotBeNull(
+            "an unregistered class settles Indeterminate and is kept for ever — which is exactly the leak this class exists to close");
+
+        callers.ShouldBe(["Services/Agents/Publish/ArtifactManifestStore.cs", "Services/Agents/Recovery/Checkpoints/ArtifactSessionTranscriptCheckpointer.cs", "Services/Workflows/Artifacts/ArtifactOffloader.cs", "Services/Workflows/ModelCalls/WorkflowRunModelCallBodyArtifactWriter.cs", "Services/Workflows/Runtime/WorkflowSensitivePayloadStore.cs"],
             "every retention-candidate id must be freshly obtained through PutDeclaredAsync immediately before its one oracle-visible holder write");
         typeof(IArtifactManifestStore).GetMethod(nameof(IArtifactManifestStore.CaptureDeclaredAsync))!.ReturnType.ShouldBe(typeof(Task<int>),
             "manifest capture must not return the candidate artifact id for a later writer to reuse without passing the store's availability/dedup fence again");
         File.ReadAllText(Path.Combine(sourceRoot, callers[0])).ShouldContain("ContentArtifactId = artifactId");
-        File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("request.HolderId");
-        File.ReadAllText(Path.Combine(sourceRoot, callers[2])).ShouldContain("request.CaptureId");
-        File.ReadAllText(Path.Combine(sourceRoot, callers[3])).ShouldContain("CiphertextArtifactId = artifactId");
+        // 3c: the checkpoint's one oracle-visible holder is agent_run.session_transcript_checkpoint_artifact_id, and
+        // the id it stamps is the one this call just obtained — never a re-read of the row or a remembered value.
+        File.ReadAllText(Path.Combine(sourceRoot, callers[1])).ShouldContain("write.ArtifactId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[2])).ShouldContain("request.HolderId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[3])).ShouldContain("request.CaptureId");
+        File.ReadAllText(Path.Combine(sourceRoot, callers[4])).ShouldContain("CiphertextArtifactId = artifactId");
         typeof(IArtifactRetentionOffloader).IsAssignableFrom(typeof(ArtifactOffloader)).ShouldBeTrue(
             "the service registered as IArtifactOffloader must carry the holder-aware sibling without widening the ordinary interface");
         var agentRunService = File.ReadAllText(Path.Combine(sourceRoot, "Services/Agents/AgentRunService.cs"));

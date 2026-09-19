@@ -218,6 +218,12 @@ public sealed class AgentCodeNode : INodeRuntime
             // force widens the code / document lanes it was written for and leaves research's base intact.
             Acceptance = acceptance,
             AcceptanceAuthority = ReadAcceptanceAuthority(context.Config),
+            // 3c: pay for durable session checkpoints only where a failure can actually be RETRIED. The engine's own
+            // answer, from this node's clamped retry policy — a single-attempt node has nobody to hand a restored
+            // conversation to, so checkpointing it would buy an artifact write a minute for a continuation that can
+            // never happen. This is the ONLY producer that sets it; benchmark cells, review children and supervisor
+            // units leave it false.
+            CheckpointSessionTranscript = context.RetriesOnFailure,
         };
 
         task = ApplyRespawnEscalation(ApplyRespawnResumeHint(task, context.PriorAttemptPayload), context.PriorAttemptPayload);
@@ -418,7 +424,7 @@ public sealed class AgentCodeNode : INodeRuntime
     {
         if (priorAttemptPayload is not { } payload) return task;
 
-        var (repinned, honestyOwed) = RepinWorkspaceToPriorAttempt(task, payload);
+        var (repinned, honestyOwed, publishedBranch) = RepinWorkspaceToPriorAttempt(task, payload);
 
         // The gateway mangled the wire, not the model: the claude CLI dies in seconds with "Content block is not a
         // thinking block", before any turn. Warm-resuming that attempt re-sends the very transcript the mangled
@@ -435,15 +441,45 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (ReadOptionalString(payload, "sessionId") is not { } sessionId) return repinned;
 
+        // 3c: the prior attempt's MID-RUN checkpoint, present exactly when its host died holding the conversation
+        // (the reconciler's abandon leaves no result, so the captured-transcript keys above are null for precisely
+        // this population). Its existence is also the capability proof: only a harness the executor found to be an
+        // IAgentSessionTranscript, and whose file it located, ever produces one — so the node needs no registry to
+        // know this conversation can be restored.
+        var captured = ReadOptionalGuid(payload, "sessionTranscriptArtifactId");
+        var checkpoint = ReadOptionalGuid(payload, "sessionTranscriptCheckpointArtifactId");
+
+        // A CAPTURED transcript always wins: the attempt that wrote it finished, so it is both newer and complete,
+        // where a checkpoint is by definition the conversation as of some moment before the end. Everything the
+        // checkpoint lane owes — the provenance stamps and the lost-host sentence — is therefore gated on the
+        // checkpoint actually being the ref that WON, never merely on one existing.
+        var fromCheckpoint = captured is null && checkpoint is { } resumeCheckpoint ? resumeCheckpoint : (Guid?)null;
+
         var resumed = repinned with
         {
             ResumeFromSessionId = sessionId,
             RestoredTranscript = ReadOptionalString(payload, "sessionTranscript"),
-            RestoredTranscriptArtifactId = ReadOptionalGuid(payload, "sessionTranscriptArtifactId"),
+            // The REF, never the bytes: the executor resolves it just before invocation, so a long conversation
+            // never lands inline in this task's persisted envelope.
+            RestoredTranscriptArtifactId = captured ?? fromCheckpoint,
+            RestoredTranscriptIsCheckpoint = fromCheckpoint is not null,
+            ResumedFromCheckpointAt = fromCheckpoint is null ? null : ReadOptionalDateTime(payload, "sessionTranscriptCheckpointAt"),
+            ResumedFromAgentRunId = fromCheckpoint is null ? null : ReadOptionalGuid(payload, "agentRunId"),
         };
+
+        // A checkpoint resume owes a DIFFERENT sentence from an ordinary warm retry, and owes it even when a branch
+        // was pinned: the prior attempt's machine is gone, so the conversation may describe turns the checkpoint
+        // never saw and edits the new sandbox does not contain. The ordinary line only covers "no branch to continue
+        // from", which is a smaller claim.
+        if (fromCheckpoint is not null)
+            return resumed with { Goal = AgentRetryContinuity.WithLostHostHint(resumed.Goal, publishedBranch, treeOwed: task.RepositoryId is not null) };
 
         return honestyOwed ? resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) } : resumed;
     }
+
+    /// <summary>A payload timestamp, or null when the key is absent or is not a readable ISO-8601 instant. Same defensive shape as the other optional readers — a projection that changed underneath must degrade, never throw into a respawn.</summary>
+    private static DateTimeOffset? ReadOptionalDateTime(JsonElement bag, string key) =>
+        bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var parsed) ? parsed : null;
 
     /// <summary>
     /// Point this respawn's clone at the branch(es) the RETIRING attempt pushed — the quick lane's counterpart to the
@@ -467,16 +503,16 @@ public sealed class AgentCodeNode : INodeRuntime
     /// is owed when there is no repository at all (an analysis-only run has no tree to have lost — the line would
     /// assert a git fact about a run that never had one).</para>
     /// </summary>
-    private static (AgentTask Task, bool HonestyOwed) RepinWorkspaceToPriorAttempt(AgentTask task, JsonElement payload)
+    private static (AgentTask Task, bool HonestyOwed, string? PublishedBranch) RepinWorkspaceToPriorAttempt(AgentTask task, JsonElement payload)
     {
-        if (task.RepositoryId is not { } primaryId) return (task, false);
+        if (task.RepositoryId is not { } primaryId) return (task, false, null);
 
         var produced = ReadProducedBranches(payload);
         var primaryBranch = ReadOptionalString(payload, "branch") ?? produced.GetValueOrDefault(primaryId);
         var authored = task.Workspace?.Primary;
         var (related, relatedRepinned) = RepinRelatedRepositories(RelatedRepositories(task.Workspace), produced);
 
-        if (primaryBranch is null && !relatedRepinned) return (task, true);
+        if (primaryBranch is null && !relatedRepinned) return (task, true, null);
 
         var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(primaryId, related,
             primaryRef: primaryBranch ?? authored?.Ref,
@@ -485,7 +521,7 @@ public sealed class AgentCodeNode : INodeRuntime
             primaryPinnedSha: primaryBranch is null ? authored?.PinnedSha : null,
             primaryRefRecoverySha: primaryBranch is null ? authored?.RefRecoverySha : null);
 
-        return (task with { Workspace = workspace }, primaryBranch is null);
+        return (task with { Workspace = workspace }, primaryBranch is null, primaryBranch);
     }
 
     /// <summary>Each repository the prior attempt PUSHED a branch for, keyed by repository id — the multi-repo half of the pin (the top-level <c>branch</c> mirrors the primary's). An entry with no id or no produced branch contributes nothing: it pushed nothing to continue from.</summary>
