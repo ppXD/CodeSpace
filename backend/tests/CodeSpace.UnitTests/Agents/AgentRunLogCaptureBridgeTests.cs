@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -89,7 +90,8 @@ public sealed class AgentRunLogCaptureBridgeTests
         var first = await bridge.OpenAsync(Request(source, 1, sessionId, redactor), CancellationToken.None);
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(600)))
         {
-            await Should.ThrowAsync<OperationCanceledException>(() => first.ObserveAsync(async (_, token) => { await Task.Delay(Timeout.InfiniteTimeSpan, token); return Result(); }, cts.Token));
+            await AwaitCancelledWithinAsync(first.ObserveAsync(async (_, token) => { await Task.Delay(Timeout.InfiniteTimeSpan, token); return Result(); }, cts.Token),
+                "the first capture session never returned after its observer was cancelled, so nothing below about the re-attach can run");
         }
         logs.Heads.Single(head => head.Metadata.StreamKind == AgentRunLogKinds.StandardOutput).CaptureFinalizedAt.ShouldBeNull();
 
@@ -104,6 +106,38 @@ public sealed class AgentRunLogCaptureBridgeTests
         var completeSource = prefix.Concat(suffix).ToArray();
         logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBe(redactor.CreateUtf8Stream().Transform(completeSource, final: true).Bytes.ToArray());
         logs.Heads.Single(head => head.Metadata.StreamKind == AgentRunLogKinds.StandardOutput).CaptureFinalizedAt.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task A_cancelled_observer_stops_the_capture_loop_even_though_the_source_never_looks_at_the_token()
+    {
+        // The worker-shutdown shape, reduced to the two facts that produce it: an observer that is cancelled, and a
+        // source whose "nothing new" answer touches no token (production's local spool read, whenever the file has
+        // grown by less than one minimum segment). The capture loop's poll wait was its only cancellation point, and
+        // Task.WhenAny hands back a cancelled delay rather than raising it — so this used to spin at full speed
+        // forever, and the tear-down that was awaiting the capture never returned. It is bounded and loud here
+        // because an unbounded await on it reports a wedged drain as silence (Rule 12.10).
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var source = new FakeLogSource();
+        source.Set("stdout", Enumerable.Repeat((byte)'q', 4096).ToArray());   // under one minimum segment: every live read answers NoData
+        source.Set("stderr", []);
+        var session = await Bridge(logs).OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
+        using var cancelled = new CancellationTokenSource();
+
+        var observing = session.ObserveAsync(async (_, token) => { cancelled.Cancel(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return Result(); }, cancelled.Token);
+
+        await AwaitCancelledWithinAsync(observing, "the capture session never returned after its observer was cancelled — its loop is consuming the cancellation instead of observing it, which is what wedges a worker on shutdown");
+        logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null,
+            "a cancelled capture leaves its streams Open and reconcilable; it may not invent a terminal verdict for bytes that are still in the spool");
+    }
+
+    /// <summary>Expect <paramref name="work"/> to end in a cancellation, within a deadline, with a message naming what did not happen (Rule 12.10).</summary>
+    private static async Task AwaitCancelledWithinAsync(Task work, string signal)
+    {
+        if (await Task.WhenAny(work, Task.Delay(Patience)).ConfigureAwait(false) != work)
+            throw new Xunit.Sdk.XunitException($"{signal} (waited {Patience.TotalSeconds:F0}s)");
+
+        await Should.ThrowAsync<OperationCanceledException>(() => work);
     }
 
     [Fact]
@@ -218,18 +252,21 @@ public sealed class AgentRunLogCaptureBridgeTests
     [Fact]
     public async Task Blocking_capture_backend_is_cancelled_by_one_total_shadow_budget_without_changing_the_sandbox_result()
     {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var logs = new FakeLogService { CurrentFence = 1, BlockAppend = true };
         var source = new FakeLogSource();
         source.Set("stdout", Enumerable.Repeat((byte)'x', 300 * 1024).ToArray());
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(150)));
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(150)), clock: clock);
         var expected = Result();
-        var watch = Stopwatch.StartNew();
 
         var session = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
-        var observed = await session.ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+        var observing = session.ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+        var spent = await AdvanceUntilAsync(clock, observing, "the provider never completes, so only the finalization budget can end this drain — it did not");
+        var observed = await observing;
 
-        watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(2), "one total finalization budget bounds a provider that never completes, instead of N segments multiplying the provider default");
+        spent.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(150), "the drain gave the provider its whole budget before giving up");
+        spent.ShouldBeLessThan(TimeSpan.FromMilliseconds(150) + AdvanceStep * 2, "ONE total finalization budget bounds a provider that never completes — N segments must not multiply it");
         observed.ShouldBeSameAs(expected);
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null, "timeout remains durably reconcilable Open state, never incomplete-but-Completed");
         logs.ObservedOperationTimeout.ShouldBe(TimeSpan.FromMilliseconds(40));
@@ -238,21 +275,54 @@ public sealed class AgentRunLogCaptureBridgeTests
     [Fact]
     public async Task Final_drain_retries_one_transient_append_and_preserves_the_complete_source()
     {
+        // The backoff (50ms) and the budget it has to fit inside (300ms) are BOTH on this clock. Measured on the wall
+        // clock they were 50ms and 300ms of real time, so a loaded runner could spend the budget before the one retry
+        // fired and the drain would honestly report a single attempt — the test failing for a reason that had nothing
+        // to do with the bridge. Virtual time cannot be spent by load; only the advance below spends it.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var logs = new FakeLogService { CurrentFence = 1, RetryableAppendFailures = 1 };
         var source = new FakeLogSource();
         source.Set("stdout", "eventually-durable"u8.ToArray());
         source.Set("stderr", []);
         var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance,
-            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(300)));
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), FinalizationBudget), clock: clock);
         var expected = Result();
 
-        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+        var observing = (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
             .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
 
+        var spent = await AdvanceUntilAsync(clock, observing, "the refused segment was never offered again — the drain is not retrying a transient refusal at all");
+        var observed = await observing;
+
         observed.ShouldBeSameAs(expected);
-        logs.AppendAttempts.ShouldBeGreaterThanOrEqualTo(2);
+        logs.AppendAttempts.ShouldBe(2, "the refused segment is offered again exactly once — the first attempt plus the retry this test advanced the clock to");
+        spent.ShouldBeGreaterThanOrEqualTo(FirstAppendBackoff, "the retry waits the backoff out rather than hammering the destination");
+        spent.ShouldBeLessThan(FinalizationBudget, "and it lands INSIDE the finalization budget — shrink the budget below the backoff and this drain is cancelled with one attempt, which is what the wall clock used to do at random");
         logs.Bytes(AgentRunLogKinds.StandardOutput).ShouldBe("eventually-durable"u8.ToArray());
         logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput).CaptureFinalizedAt.ShouldNotBeNull();
+    }
+
+    /// <summary>The wait before a refused segment's SECOND offer, asked of production rather than mirrored, so the bound below stays true after the backoff changes.</summary>
+    private static readonly TimeSpan FirstAppendBackoff = AgentRunLogCaptureBridge.AppendRetryDelay(1);
+
+    /// <summary>The ceiling that retry has to fit inside. Narrowed from production's 30s only to keep the virtual clock's travel short; what matters is that it is comfortably longer than one backoff.</summary>
+    private static readonly TimeSpan FinalizationBudget = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
+    /// The cadence every deployed capture actually runs at. Pinned to literals on purpose (Rule 8): moving a wait onto
+    /// another clock, or "tidying" a timer, is a one-line edit that changes how long every worker in the fleet spends
+    /// on a drain — and nothing else in the suite would notice, because every other test supplies its own narrowed
+    /// options. The numbers below are the ones that shipped; changing one means changing this line in the same PR.
+    /// </summary>
+    [Fact]
+    public void The_deployed_capture_cadence_is_unchanged()
+    {
+        AgentRunLogCaptureBridge.PollInterval.ShouldBe(TimeSpan.FromMilliseconds(250), "how often a live capture asks its source for more");
+        AgentRunLogCaptureBridge.DefaultOperationTimeout.ShouldBe(TimeSpan.FromSeconds(5), "one capture metadata/storage call's ceiling");
+        AgentRunLogCaptureBridge.DefaultFinalizationBudget.ShouldBe(TimeSpan.FromSeconds(30), "the whole final drain's ceiling — what a worker spends landing a run's log tail");
+        AgentRunLogCaptureBridge.AppendRetryDelay(1).ShouldBe(TimeSpan.FromMilliseconds(50), "the first backoff after a transient refusal on the final drain");
+        AgentRunLogCaptureBridge.AppendRetryDelay(2).ShouldBe(TimeSpan.FromMilliseconds(100), "and it doubles");
+        AgentRunLogCaptureBridge.AppendRetryDelay(99).ShouldBe(TimeSpan.FromSeconds(1), "and stops doubling at one second, so a long outage costs attempts rather than latency");
     }
 
     [Fact]
@@ -266,16 +336,16 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", Enumerable.Repeat((byte)'p', 300 * 1024).ToArray());
         source.Set("stderr", []);
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance,
-            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromSeconds(4)));
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromSeconds(4)), clock: clock);
         var expected = Result();
-        var watch = Stopwatch.StartNew();
 
         var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
             .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
 
         observed.ShouldBeSameAs(expected);
-        watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(3), "a permanent rejection must not be retried until the finalization budget cancels the capture");
+        clock.GetUtcNow().ShouldBe(DateTimeOffset.UnixEpoch, "a permanent rejection must not be retried at all: the drain settled without spending one tick of its budget, and nothing but this test can spend one");
         var stdout = logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput);
         stdout.Metadata.State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
         stdout.Metadata.ErrorCode.ShouldBe("capture-backend-unavailable");
@@ -289,14 +359,18 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource();
         source.Set("stdout", "still-in-native-spool"u8.ToArray());
         source.Set("stderr", []);
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), recovery, NullLogger<AgentRunLogCaptureBridge>.Instance,
-            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(120)));
+            new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(120)), clock: clock);
         var expected = Result();
 
-        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+        var observing = (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
             .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+        var spent = await AdvanceUntilAsync(clock, observing, "a destination that refuses every offer can only be given up on by the finalization budget — it never was");
+        var observed = await observing;
 
         observed.ShouldBeSameAs(expected);
+        spent.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(120), "the drain kept offering the segment until its budget, rather than giving up on the first refusal");
         var stdout = logs.Heads.Single(value => value.Metadata.StreamKind == AgentRunLogKinds.StandardOutput);
         stdout.Metadata.State.ShouldBe(AgentRunLogStreamState.Open);
         stdout.CaptureFinalizedAt.ShouldBeNull();
@@ -311,11 +385,15 @@ public sealed class AgentRunLogCaptureBridgeTests
         var source = new FakeLogSource { EmitEndOfSource = false };
         source.Set("stdout", []);
         source.Set("stderr", []);
-        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(100)));
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var bridge = new AgentRunLogCaptureBridge(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance, new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(100)), clock: clock);
         var expected = Result();
 
-        var observed = await (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
+        var observing = (await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None))
             .ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
+        await AdvanceUntilAsync(clock, observing, "a source that keeps answering \"not yet\" can only be given up on by the finalization budget — it never was");
+        var observed = await observing;
+
 
         observed.ShouldBeSameAs(expected);
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null);
@@ -400,6 +478,43 @@ public sealed class AgentRunLogCaptureBridgeTests
 
     private static AgentRunLogCaptureBridge Bridge(FakeLogService logs) => new(logs, new ReadyStorageResolver(), new FakeRecoveryService(), NullLogger<AgentRunLogCaptureBridge>.Instance);
 
+    /// <summary>How long a virtual-time test may spend in REAL seconds before it is a hang rather than a slow runner. Nothing is asserted against it; it only keeps a wedged drain from being reported as five silent minutes (Rule 12.10).</summary>
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
+
+    /// <summary>Wait for something the drain does on its own, with no clock to advance — the first offer of a segment, say. Real time, because only the ceilings are virtual.</summary>
+    private static async Task WaitAsync(Func<bool> condition, string signal)
+    {
+        var watch = Stopwatch.StartNew();
+        while (watch.Elapsed < Patience)
+        {
+            if (condition()) return;
+            await Task.Delay(5);
+        }
+        throw new Xunit.Sdk.XunitException($"{signal} (waited {Patience.TotalSeconds:F0}s)");
+    }
+
+    /// <summary>One step of virtual time. Small enough that a ceiling is never overshot by more than this, and stepped rather than jumped because a single jump can land in the window between a wait being decided on and its timer being armed — which would leave a timer due AFTER the jump and a test waiting for a moment that never comes.</summary>
+    private static readonly TimeSpan AdvanceStep = TimeSpan.FromMilliseconds(10);
+
+    /// <summary>
+    /// Push the virtual clock forward in <see cref="AdvanceStep"/> steps until <paramref name="work"/> settles, and
+    /// answer how much virtual time that took. The bridge's ceilings are on this clock, so one expires only because a
+    /// test expired it — never because the runner was busy — and the ORDER in which two expire is fixed by their due
+    /// times rather than by scheduling luck.
+    /// </summary>
+    private static async Task<TimeSpan> AdvanceUntilAsync(FakeTimeProvider clock, Task work, string signal)
+    {
+        var started = clock.GetUtcNow();
+        var watch = Stopwatch.StartNew();
+        while (!work.IsCompleted)
+        {
+            if (watch.Elapsed > Patience) throw new Xunit.Sdk.XunitException($"{signal} (advanced the virtual clock by {clock.GetUtcNow() - started} over {Patience.TotalSeconds:F0}s of real time)");
+            clock.Advance(AdvanceStep);
+            await Task.Delay(5);
+        }
+        return clock.GetUtcNow() - started;
+    }
+
     private static AgentRunLogCaptureOpenRequest Request(FakeLogSource source, long fence, Guid sessionId, SecretRedactor? redactor = null) => new()
     {
         TeamId = TeamId, AgentRunId = RunId, ActorId = ActorId, WorkerFenceEpoch = fence,
@@ -458,9 +573,14 @@ public sealed class AgentRunLogCaptureBridgeTests
             new("stderr", AgentRunLogKinds.StandardError, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "fake-spool/v1"),
         ];
 
+        /// <summary>
+        /// Deliberately does NOT observe the token, because production's does not either: the local spool's read
+        /// answers "nothing new" out of a length comparison, with no I/O and no cancellation check, whenever the file
+        /// has grown by less than one minimum segment. A fake that threw here made every cancellation bug in the
+        /// capture loop unreachable from this suite — which is exactly how one shipped.
+        /// </summary>
         public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             if (!_sources.TryGetValue(request.SourceKey, out var bytes))
                 return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Unavailable(new SandboxDurableLogProblem(SandboxDurableLogProblemCode.SourceMissing)));
             if (request.OffsetBytes > bytes.LongLength)

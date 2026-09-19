@@ -186,7 +186,14 @@ public sealed class AgentRunLogCaptureBackpressureTests
         var bridge = Bridge(logs, clock, stalls, gaps, finalizationBudget: TimeSpan.FromSeconds(2));
 
         var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
-        await capture.ObserveAsync((_, _) => { logs.RemoteUnavailable = true; return Task.FromResult(Result()); }, CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => { logs.RemoteUnavailable = true; return Task.FromResult(Result()); }, CancellationToken.None);
+
+        // Both of the drain's waits — the transient-append backoff and the finalization budget — are on THIS clock, so
+        // the drain is retrying the outage and will keep doing so until the test says the budget is spent. That is
+        // what makes the assertions below about the drain's behaviour rather than about how loaded the runner is.
+        await WaitAsync(() => stalls.Held.Count > 0, "the bridge never marked the outage that started on the final drain");
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await observing;
 
         stalls.Held.ShouldNotBeEmpty("an outage that starts on the final drain is the same outage; the Room cannot read \"Finalizing\" through it");
         stalls.Held[0].StallCode.ShouldBe("capture-backend-unavailable");
@@ -194,6 +201,68 @@ public sealed class AgentRunLogCaptureBackpressureTests
         stdout.State.ShouldBe(AgentRunLogStreamState.Open, "the final drain never parks: a stream its budget cancels stays Open and reconcilable");
         stdout.ErrorCode.ShouldBeNull();
         gaps.Gaps.ShouldBeEmpty("a marker is not a park, and only a park may declare a span lost");
+    }
+
+    [Fact]
+    public async Task A_drain_under_a_host_that_is_going_away_parks_on_the_first_refusal_instead_of_spending_the_landing_budget()
+    {
+        // The drain and the run's own terminal write share ONE deadline on a worker tear-down, so a destination that
+        // is refusing writes must not be waited out here: the verdict an operator needs costs seconds this retry
+        // would otherwise spend, and the log tail it buys is recoverable while the verdict is not. Every wait the
+        // drain could take is on this clock, so "did not wait" is observable rather than inferred from elapsed time.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var stalls = new FakeStallWriter();
+        var gaps = new FakeCompletenessWriter();
+        var source = new FakeLogSource();
+        source.Set("stdout", Payload(null, 4096));   // under one minimum segment: nothing is offered until the FINAL drain
+        source.Set("stderr", []);
+        var bridge = Bridge(logs, clock, stalls, gaps, finalizationBudget: TimeSpan.FromSeconds(30));
+        using var shutdown = new CancellationTokenSource();
+        shutdown.Cancel();
+
+        var capture = await bridge.OpenAsync(Request(source, hostShutdown: shutdown.Token), CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => { logs.RemoteUnavailable = true; return Task.FromResult(Result()); }, CancellationToken.None);
+
+        // Bounded and loud: with no clock to advance, a drain that decides to WAIT instead of parking waits on virtual
+        // time nobody is going to spend, and an unbounded await would report that as silence (Rule 12.10).
+        await AwaitWithinAsync(observing, "the drain never returned, so it is waiting out the refusal on a clock this test never advances — the shutdown park did not fire");
+
+        clock.GetUtcNow().ShouldBe(DateTimeOffset.UnixEpoch,
+            "the drain spent NOTHING of the budget it shares with the run's landing — a single backoff here is a second the terminal write does not get");
+        logs.AppendAttempts.ShouldBe(1, "the segment was offered once and then parked; a second offer means the tear-down is still waiting the destination out");
+        var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
+        stdout.State.ShouldBe(AgentRunLogStreamState.Open, "parking for a shutdown is local: the row stays Open at its own fence, which is the one state the recovery sweep can still finish");
+        stdout.ErrorCode.ShouldBeNull("nothing was permanently refused, so no terminal cause may be invented");
+        stalls.Held.ShouldNotBeEmpty("a stream left Open with no stall marker reads as \"still finalizing\" forever");
+        gaps.Gaps.ShouldBeEmpty("a park for shutdown is not a declared loss: the held span is still in the spool and still committable by whoever finishes the stream");
+    }
+
+    [Fact]
+    public async Task A_drain_on_a_healthy_host_still_waits_out_the_same_refusal()
+    {
+        // The other half of the arm above, and the thing that keeps it from being a blanket "stop retrying": with no
+        // host tear-down the SAME refusal is waited out exactly as before, which is what makes the transient outage
+        // survivable for an ordinary run (#1969's cadence is untouched).
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var stalls = new FakeStallWriter();
+        var source = new FakeLogSource();
+        source.Set("stdout", Payload(null, 4096));
+        source.Set("stderr", []);
+        var bridge = Bridge(logs, clock, stalls, finalizationBudget: TimeSpan.FromSeconds(30));
+
+        var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => { logs.RemoteUnavailable = true; return Task.FromResult(Result()); }, CancellationToken.None);
+
+        await WaitAsync(() => logs.AppendAttempts == 1, "the drain never offered the segment at all");
+        logs.RemoteUnavailable = false;
+        await AdvanceUntilAsync(clock, observing, "the refused segment was never offered again, so an ordinary run's drain is no longer waiting a transient outage out");
+        await observing;
+
+        logs.AppendAttempts.ShouldBe(2, "an ordinary run's final drain still offers a transiently refused segment again");
+        logs.Bytes(AgentRunLogKinds.StandardOutput).Length.ShouldBe(4096, "and the wait was worth making: every held byte landed");
+        logs.Head(AgentRunLogKinds.StandardOutput).CaptureFinalizedAt.ShouldNotBeNull();
     }
 
     [Fact]
@@ -283,11 +352,11 @@ public sealed class AgentRunLogCaptureBackpressureTests
             new AgentRunLogCaptureBridgeOptions(TimeSpan.FromMilliseconds(200), finalizationBudget ?? TimeSpan.FromSeconds(5)) { Backpressure = backpressure ?? CaptureBackpressureOptions.Default },
             stalls, gaps ?? new FakeCompletenessWriter(), clock);
 
-    private static AgentRunLogCaptureOpenRequest Request(ISandboxDurableLogSource source, SecretRedactor? redactor = null) => new()
+    private static AgentRunLogCaptureOpenRequest Request(ISandboxDurableLogSource source, SecretRedactor? redactor = null, CancellationToken hostShutdown = default) => new()
     {
         TeamId = TeamId, AgentRunId = RunId, ActorId = ActorId, WorkerFenceEpoch = 1,
         Handle = new SandboxHandle { Kind = "fake", ProcessId = 1, SpoolDirectory = "/opaque", Deadline = DateTimeOffset.MaxValue, AgentRunLogCaptureSessionId = Guid.NewGuid() },
-        Source = source, Redactor = redactor ?? SecretRedactor.None,
+        Source = source, Redactor = redactor ?? SecretRedactor.None, HostShutdown = hostShutdown,
     };
 
     private static SandboxResult Result() => new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "legacy", Stderr = "legacy-error" };
@@ -303,6 +372,31 @@ public sealed class AgentRunLogCaptureBackpressureTests
     }
 
     /// <summary>Explicit timeout with the watched signal named, so a failure says what never happened rather than only that time ran out (Rule 12.10).</summary>
+    /// <summary>Await work that must settle on its own — no clock to advance — with a deadline and a message naming what did not (Rule 12.10).</summary>
+    private static async Task AwaitWithinAsync(Task work, string signal)
+    {
+        if (await Task.WhenAny(work, Task.Delay(Patience)).ConfigureAwait(false) != work)
+            throw new Xunit.Sdk.XunitException($"{signal} (waited {Patience.TotalSeconds:F0}s)");
+
+        await work.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Push the virtual clock forward in small steps until <paramref name="work"/> settles. Stepped rather than
+    /// jumped because a single jump can land in the window between a wait being decided on and its timer being armed,
+    /// which leaves the timer due AFTER the jump and the test waiting on a moment that never comes.
+    /// </summary>
+    private static async Task AdvanceUntilAsync(FakeTimeProvider clock, Task work, string signal)
+    {
+        var watch = Stopwatch.StartNew();
+        while (!work.IsCompleted)
+        {
+            if (watch.Elapsed > Patience) throw new Xunit.Sdk.XunitException($"{signal} (advanced the virtual clock to {clock.GetUtcNow():O} over {Patience.TotalSeconds:F0}s of real time)");
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            await Task.Delay(5);
+        }
+    }
+
     private static async Task WaitAsync(Func<bool> condition, string signal)
     {
         var watch = Stopwatch.StartNew();
