@@ -252,7 +252,26 @@ public sealed record AgentTask
     /// <summary>What the agent is allowed to do — mapped by the harness onto its sandbox flags. Derived from <see cref="Autonomy"/> plus any per-field overrides.</summary>
     public AgentPermissions Permissions { get; init; } = new();
 
-    /// <summary>Extra environment for the agent process (short-lived credentials are injected here by AgentRunService, then wiped).</summary>
+    /// <summary>
+    /// Extra environment for the agent process — the LAST layer the runner applies, so an entry here wins over the
+    /// harness's own injected variables and over the inherit-allowlist.
+    ///
+    /// <para><b>Server-minted only. No authoring surface reaches this.</b> Every producer of a task leaves it empty
+    /// (the agent.run node, the supervisor's spawn, the benchmark cell, the review child), no node config schema and
+    /// no launch DTO carries an env key, and no endpoint accepts a task envelope — so nothing an operator types can
+    /// land here. Exactly two writers exist, both server-side and both transient: the executor layers the decrypted
+    /// model credential on in memory for the launch (never re-persisted), and a format-fault retry adds
+    /// <c>MAX_THINKING_TOKENS=0</c>. A review child is additionally REFUSED if it carries any entry at all
+    /// (<c>review-permissions-exceed-scope</c>).</para>
+    ///
+    /// <para><b>If an authoring surface is ever added, it must take a variable REFERENCE, not a value.</b> What is
+    /// serialized here is persisted whole into <c>agent_run.task_json</c> and replayed onto every respawn, so an
+    /// authored plaintext token would be a credential at rest that nobody can rotate or revoke — with no owning row
+    /// to revoke it FROM. The platform already has the indirection that answer needs (the <c>variable</c> table's
+    /// Secret rows, AES-256-GCM at rest, decrypted only for the engine): the surface should carry the row's identity
+    /// and resolve it at STAGING, exactly as the model credential above is resolved, leaving this envelope free of
+    /// secrets in the durable copy.</para>
+    /// </summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
     /// <summary>Wall-clock cap for the whole agent run, in seconds. Default 3600 (1h). <c>null</c> ⇒ NO wall-clock (unbounded) — the run is then bounded only by the stall watchdog (no-progress) + the cost cap; use for a genuinely long task. Never defaulted to null: an absent value falls back to the bounded default, so only an EXPLICIT null (the operator's "no timeout" choice) is unbounded.</summary>

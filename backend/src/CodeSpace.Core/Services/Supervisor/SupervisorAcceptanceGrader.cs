@@ -340,9 +340,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         // Model-authored setup/acceptance commands run INSIDE this clone next — strip the tokened origin via the
         // SAME shared helper LocalGitWorkspaceProvider's own branch-grading path uses (LocalGitWorkspaceProvider.
         // StripTokenFromRemoteAsync — one implementation, not a second copy that could drift), so no credential
-        // persists in .git/config for those commands to read. Best-effort: the clone already succeeded, so this
-        // never fails the grade. Guarded on a present token, mirroring MaterializeAsync's own call site exactly —
-        // a public repo with no credential has nothing to strip.
+        // persists in .git/config for those commands to read. FAIL-CLOSED: if the strip cannot be completed the
+        // helper throws a WorkspaceException, which this method's callers already catch into a typed grade failure
+        // and whose finally deletes the clone — the model-authored commands below are exactly the readers this
+        // credential must be kept from, so a grade is the cheaper thing to lose. Guarded on a present token,
+        // mirroring MaterializeAsync's own call site exactly — a public repo with no credential has nothing to strip.
         if (!string.IsNullOrEmpty(clone.Token))
             await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(GradingRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 

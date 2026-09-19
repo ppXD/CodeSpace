@@ -491,11 +491,18 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     }
 
     /// <summary>
+    /// The reason a clone is refused when its origin token could be neither rewritten nor removed. A constant, not
+    /// inline prose: it is the one string an operator greps the logs for after a run dies this way, and the test that
+    /// pins the fail-closed behaviour asserts THIS symbol rather than re-typing the sentence (which would let the two
+    /// drift until the test passes on a message nobody emits).
+    /// </summary>
+    internal const string TokenStripFailedDetail = "Could not strip or remove the tokened origin remote, so the clone may still carry the credential in .git/config; refusing to hand this workspace to an agent";
+
+    /// <summary>
     /// Rewrite origin to the tokenless URL so the cloned <c>.git/config</c> never persists credentials.
     /// If the rewrite fails, REMOVE the origin remote outright — the persisted config carrying a token is
     /// the credential-leak we must close, and the run captures changes via the local diff (not origin), so
-    /// dropping origin is safe. Only when both fail do we log an error; the workspace janitor is the final
-    /// backstop. The clone already succeeded, so this never fails the run.
+    /// dropping origin is safe. When BOTH fail the clone is FAIL-CLOSED (see the shared implementation).
     /// </summary>
     private Task StripTokenFromRemoteAsync(string cleanUrl, string directory, CancellationToken cancellationToken) =>
         StripTokenFromRemoteAsync(_runners.Resolve(Kind), CloneTimeoutSeconds, _logger, cleanUrl, directory, cancellationToken);
@@ -507,7 +514,17 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// <c>SupervisorAcceptanceGrader.CloneAtBaseAsync</c>, which must clone at an arbitrary base SHA rather than a
     /// named ref) reuses the EXACT same strip-then-fallback-to-remove logic — a security-sensitive path must have
     /// exactly one implementation, never two copies that can silently drift apart.
+    ///
+    /// <para><b>Fail-closed when both attempts fail.</b> It used to log an error and return, leaving the clone —
+    /// with a LIVE origin token in its <c>.git/config</c> — to be handed to the agent, and naming the janitor as the
+    /// backstop. The janitor reclaims the directory AFTER the run; the agent reads the file DURING it, with one
+    /// <c>cat .git/config</c>. That ordering makes "the janitor is the backstop" a lie for the only window that
+    /// matters, so the only honest exit is to refuse the workspace: every caller already turns a
+    /// <see cref="WorkspaceException"/> into a typed failure AND deletes the half-built clone on the way out
+    /// (<c>PrepareAsync</c>'s catch, the grader's <c>finally</c>), so failing here both withholds the credential and
+    /// destroys it. A run that never starts is the cheap outcome; a token an agent can exfiltrate is not.</para>
     /// </summary>
+    /// <exception cref="WorkspaceException">Neither <c>remote set-url</c> nor <c>remote remove</c> succeeded — the token may still be in <c>.git/config</c>.</exception>
     internal static async Task StripTokenFromRemoteAsync(ISandboxRunner runner, int timeoutSeconds, ILogger logger, string cleanUrl, string directory, CancellationToken cancellationToken)
     {
         Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args) =>
@@ -520,9 +537,14 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         var remove = await RunGitAsync(new[] { "-C", directory, "remote", "remove", "origin" }).ConfigureAwait(false);
 
         if (remove.Status == SandboxStatus.Success)
+        {
             logger.LogWarning("Token strip via set-url failed (exit {ExitCode}); removed the origin remote so no credential persists in .git/config", rewrite.ExitCode);
-        else
-            logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
+            return;
+        }
+
+        logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); refusing the clone so no agent reads the credential out of .git/config", rewrite.ExitCode, remove.ExitCode);
+
+        throw new WorkspaceException($"{TokenStripFailedDetail} (set-url exit {rewrite.ExitCode}, remove exit {remove.ExitCode}).");
     }
 
     /// <summary>
