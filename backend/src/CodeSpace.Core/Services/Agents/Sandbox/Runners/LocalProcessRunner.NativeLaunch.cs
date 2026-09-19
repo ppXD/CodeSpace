@@ -58,6 +58,14 @@ public sealed partial class LocalProcessRunner
     {
         cancellationToken.ThrowIfCancellationRequested();
         var spec = NativeLaunchProtocol.Freeze(request.Spec); // Snapshot before the first await: caller-owned lists cannot mutate this launch.
+
+        // Before anything is created on disk: a string past the kernel's per-string ceiling makes execve fail with
+        // E2BIG, and it fails it in the one place that cannot report back — the bootstrap has already replaced the
+        // image it would have written an exit marker from, so the run surfaces as a vanished process and is retried
+        // forever. Refusing here turns that into one attributable sentence, for every harness at once.
+        if (SandboxArgumentLimit.Exceeded(spec) is { } oversized)
+            throw new NativeLaunchException("argument-too-long", oversized);
+
         ValidateLaunchKey(request);
         var hash = NativeLaunchProtocol.SpecHash(spec);
         var spool = SpoolDirectoryFor(request.SpoolKey);
