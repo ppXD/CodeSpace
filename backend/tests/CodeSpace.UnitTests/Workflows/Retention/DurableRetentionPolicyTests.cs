@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Workflows.Retention;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Retention;
 using Shouldly;
 
@@ -38,6 +39,20 @@ public sealed class DurableRetentionPolicyTests
             customMessage: "a class with no rule is never claimed, so adding one to the enum without a rule silently disables its plane");
         Enum.GetValues<DurableRecordClass>().ShouldBe([DurableRecordClass.LogStream],
             customMessage: "a class belongs here only together with the cursor that sweeps it — add both in one change, never the rule first");
+    }
+
+    /// <summary>
+    /// Who a reclamation is attributed to. The seeder is the established identity for background work — Hangfire
+    /// workers, scheduled jobs and DbUp all write under it (<c>SystemUsers.cs</c>), and it holds a real seeded row, so
+    /// a purge receipt attributes to something that exists. A dedicated retention actor would be more specific, but it
+    /// would need its own seeded user and migration to be more HONEST; until then the choice is pinned here so
+    /// changing it is a decision rather than a diff.
+    /// </summary>
+    [Fact]
+    public void A_reclamation_is_attributed_to_the_system_background_actor()
+    {
+        SystemUsers.SeederId.ShouldBe(Guid.Parse("00000000-0000-0000-0000-000000000001"));
+        SystemUsers.SeederName.ShouldBe("System");
     }
 
     [Fact]

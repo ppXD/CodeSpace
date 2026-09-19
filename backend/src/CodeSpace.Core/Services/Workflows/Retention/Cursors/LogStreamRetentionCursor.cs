@@ -28,23 +28,26 @@ namespace CodeSpace.Core.Services.Workflows.Retention.Cursors;
 /// the question could not be asked: every failure answers <see cref="DurableReferenceVerdict.Indeterminate"/>, never
 /// "unreferenced".</para>
 ///
-/// <para><b>What this cursor cannot reclaim, and says so.</b> A REPLICATED object — one whose bytes sit at more than
-/// one destination — cannot be purged at all: <c>IArtifactCasPurgeCoordinator</c> refuses it before touching any
-/// location, because deleting every replica needs an object-level claim the schema does not yet represent. This
-/// cursor names that case from the locations it has already read rather than from the refusal, since the coordinator
-/// rejects it with the same code as "no location at all" and a caller that could not tell them apart would retry a
-/// call whose answer can never change. Such a stream is kept and logged under its own message; a deployment that
-/// replicates its log storage reclaims nothing here until that claim exists.</para>
+/// <para><b>Placements, not objects.</b> Two byte-identical writes deduplicate to ONE content-addressed object with a
+/// placement per write — and, because the object key is chosen per write, both can sit at the SAME destination. The
+/// drain therefore walks placements and NAMES each one in its purge request: an unnamed claim refuses an object with
+/// more than one placement outright (the coordinator will not guess which), which would make a stream that captured
+/// the same bytes twice permanently unreclaimable.</para>
+///
+/// <para><b>A placement the destination will not give up</b> — a <c>Corrupt</c> one, which is claimable but never
+/// deletable, or a destination that is refusing — is a keep, logged with the refusal's own code on every sweep and
+/// deferred for the class's recheck interval. Deliberately not a terminal state: this plane has nowhere to record
+/// one, and a refusal that becomes silent is how bytes stop being accounted for.</para>
 /// </summary>
 public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedDependency
 {
     /// <summary>
-    /// Objects purged per stream per sweep. A 4 GiB capture is thousands of segments, and a sweep that tried to drain
+    /// Placements purged per stream per sweep. A 4 GiB capture is thousands of segments, and a sweep that tried to drain
     /// one in a single pass would hold a worker for minutes on provider I/O. A partial drain deliberately writes
     /// NOTHING, so the stream is re-claimed on the very next tick and continues where it stopped — unlike a refusal,
     /// which defers it for the class's recheck interval.
     /// </summary>
-    internal const int MaxObjectsPerSweep = 64;
+    internal const int MaxPlacementsPerSweep = 64;
 
     /// <summary>
     /// Every place a log stream's CAS object can still be named, as <c>(what, why)</c>. This list IS the safety of the
@@ -190,17 +193,16 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
 
         if (!await objects.AnyAsync(cancellationToken).ConfigureAwait(false)) return NothingCaptured(candidate);
 
-        var reclaimable = await ReclaimableAsync(db, candidate, objects, cancellationToken).ConfigureAwait(false);
+        var placements = await ReclaimableAsync(db, candidate, objects, cancellationToken).ConfigureAwait(false);
 
-        if (reclaimable.Count == 0) return await DrainedOrLostAsync(db, candidate, objects, cancellationToken).ConfigureAwait(false);
-        if (reclaimable.FirstOrDefault(row => row.LiveLocations > 1) is { } replicated) return Replicated(candidate, replicated);
+        if (placements.Count == 0) return await DrainedOrLostAsync(db, candidate, objects, cancellationToken).ConfigureAwait(false);
 
-        foreach (var row in reclaimable.Take(MaxObjectsPerSweep))
+        foreach (var placement in placements.Take(MaxPlacementsPerSweep))
         {
-            if (!await PurgeObjectAsync(candidate, row.ObjectId, cancellationToken).ConfigureAwait(false)) return DrainOutcome.Refused;
+            if (!await PurgePlacementAsync(candidate, placement, cancellationToken).ConfigureAwait(false)) return DrainOutcome.Refused;
         }
 
-        return reclaimable.Count > MaxObjectsPerSweep ? DrainOutcome.Progressing : DrainOutcome.Drained;
+        return placements.Count > MaxPlacementsPerSweep ? DrainOutcome.Progressing : DrainOutcome.Drained;
     }
 
     /// <summary>The objects this stream's segments name — the entry point for every question the drain asks.</summary>
@@ -211,26 +213,24 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
             .Distinct();
 
     /// <summary>
-    /// The next objects whose bytes are still at a destination, each with how many destinations hold it, and one row
-    /// over the batch so the caller can see whether another sweep is needed. Read inside the collecting pass rather
-    /// than carried from the decision, so a resumed drain converges instead of re-asking about objects an earlier
-    /// pass already took.
+    /// The next placements whose bytes are still at a destination, one row over the batch so the caller can see
+    /// whether another sweep is needed. Read inside the collecting pass rather than carried from the decision, so a
+    /// resumed drain converges instead of re-asking about placements an earlier pass already took.
     /// </summary>
-    private static async Task<IReadOnlyList<SegmentObject>> ReclaimableAsync(CodeSpaceDbContext db, DurableRetentionCandidate candidate, IQueryable<Guid> objects, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<SegmentPlacement>> ReclaimableAsync(CodeSpaceDbContext db, DurableRetentionCandidate candidate, IQueryable<Guid> objects, CancellationToken cancellationToken)
     {
-        // Projected through an anonymous type rather than straight into the record: a positional constructor inside a
-        // GROUP BY projection is not translatable, and the exception it raises is swallowed as "could not be
-        // evaluated" — which reads exactly like a fail-closed keep and hides a cursor that reclaims nothing.
+        // Projected through an anonymous type rather than straight into the record: a positional constructor is not
+        // always translatable, and the exception it raises is swallowed as "could not be evaluated" — which reads
+        // exactly like a fail-closed keep and hides a cursor that reclaims nothing.
         var rows = await db.ArtifactLocation.AsNoTracking()
             .Where(location => location.TeamId == candidate.TeamId && objects.Contains(location.ArtifactObjectId)
                 && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted)
-            .GroupBy(location => location.ArtifactObjectId)
-            .Select(group => new { ObjectId = group.Key, LiveLocations = group.Count() })
-            .OrderBy(row => row.ObjectId)
-            .Take(MaxObjectsPerSweep + 1)
+            .OrderBy(location => location.ArtifactObjectId).ThenBy(location => location.Id)
+            .Select(location => new { LocationId = location.Id, location.ArtifactObjectId })
+            .Take(MaxPlacementsPerSweep + 1)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(row => new SegmentObject(row.ObjectId, row.LiveLocations)).ToArray();
+        return rows.Select(row => new SegmentPlacement(row.LocationId, row.ArtifactObjectId)).ToArray();
     }
 
     /// <summary>
@@ -245,19 +245,6 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
             .Any(location => location.TeamId == candidate.TeamId && location.ArtifactObjectId == objectId && location.State == ArtifactLocationState.Purged), cancellationToken).ConfigureAwait(false);
 
         return unaccounted == 0 ? DrainOutcome.Drained : BytesAlreadyGone(candidate, unaccounted);
-    }
-
-    /// <summary>
-    /// Named here rather than read off a refusal code, because the coordinator cannot tell this refusal from "no
-    /// location at all" — both reject with <c>ArtifactMissing</c>, and a cursor that guessed between them would keep
-    /// retrying a call whose answer can never change. The locations this drain already read say it exactly.
-    /// </summary>
-    private DrainOutcome Replicated(DurableRetentionCandidate candidate, SegmentObject replicated)
-    {
-        _logger.LogWarning("Log stream {StreamId}: object {ObjectId} holds bytes at {LocationCount} destinations, which this plane cannot reclaim — deleting every replica needs an object-level purge claim that does not exist yet, so the stream is kept",
-            candidate.Id, replicated.ObjectId, replicated.LiveLocations);
-
-        return DrainOutcome.Replicated;
     }
 
     private DrainOutcome NothingCaptured(DurableRetentionCandidate candidate)
@@ -275,9 +262,18 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
         return DrainOutcome.BytesAlreadyGone;
     }
 
-    private async Task<bool> PurgeObjectAsync(DurableRetentionCandidate candidate, Guid objectId, CancellationToken cancellationToken)
+    /// <summary>
+    /// One placement, NAMED. Leaving <c>ArtifactLocationId</c> null means "the only one", which an object with more
+    /// than one placement cannot answer — the coordinator refuses rather than guessing, so an unnamed claim would
+    /// make every deduplicated capture unreclaimable for good.
+    /// </summary>
+    private async Task<bool> PurgePlacementAsync(DurableRetentionCandidate candidate, SegmentPlacement placement, CancellationToken cancellationToken)
     {
-        var request = new ArtifactCasPurgeRequest { TeamId = candidate.TeamId, ArtifactObjectId = objectId, ActorId = SystemUsers.SeederId };
+        var request = new ArtifactCasPurgeRequest
+        {
+            TeamId = candidate.TeamId, ArtifactObjectId = placement.ObjectId,
+            ArtifactLocationId = placement.LocationId, ActorId = SystemUsers.SeederId,
+        };
         var outcome = await _purge.PurgeAsync(request, cancellationToken).ConfigureAwait(false);
 
         switch (outcome)
@@ -285,10 +281,11 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
             case ArtifactCasPurgeResult.Purged:
                 return true;
             case ArtifactCasPurgeResult.Rejected rejected:
-                _logger.LogWarning("Log stream {StreamId}: object {ObjectId} was not reclaimed ('{Problem}'); the stream keeps its bytes and its head row", candidate.Id, objectId, rejected.Problem.Code);
+                _logger.LogWarning("Log stream {StreamId}: placement {LocationId} of object {ObjectId} was not reclaimed ('{Problem}'); the stream keeps its bytes and its head row",
+                    candidate.Id, placement.LocationId, placement.ObjectId, rejected.Problem.Code);
                 return false;
             default:
-                _logger.LogWarning("Log stream {StreamId}: object {ObjectId} returned an unrecognised purge outcome; the stream is kept", candidate.Id, objectId);
+                _logger.LogWarning("Log stream {StreamId}: placement {LocationId} returned an unrecognised purge outcome; the stream is kept", candidate.Id, placement.LocationId);
                 return false;
         }
     }
@@ -350,8 +347,8 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
         return await db.Database.SqlQueryRaw<DateTimeOffset>("SELECT clock_timestamp() AS \"Value\"").SingleAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>One segment object as one read saw it: how many destinations still hold its bytes, and whether any location rests at Purged.</summary>
-    private sealed record SegmentObject(Guid ObjectId, int LiveLocations);
+    /// <summary>One placement still holding bytes for a segment object, as one read saw it.</summary>
+    private sealed record SegmentPlacement(Guid LocationId, Guid ObjectId);
 
     /// <summary>What one drain attempt established. Only <see cref="Drained"/> permits a tombstone.</summary>
     private enum DrainOutcome
@@ -362,11 +359,8 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
         /// <summary>Objects were removed and more remain. Write nothing: the next tick continues from here.</summary>
         Progressing,
 
-        /// <summary>The destination would not give the bytes up. Defer.</summary>
+        /// <summary>The destination would not give the bytes up — a refusing provider, or a Corrupt placement that is claimable but never deletable. Defer.</summary>
         Refused,
-
-        /// <summary>The bytes sit at more than one destination, which no claim in this schema can take. Defer, and say so.</summary>
-        Replicated,
 
         /// <summary>Nothing was captured, or the bytes left by a path this plane did not drive. Never a purge.</summary>
         BytesAlreadyGone,

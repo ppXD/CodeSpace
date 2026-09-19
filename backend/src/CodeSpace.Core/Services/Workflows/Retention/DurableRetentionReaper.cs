@@ -34,6 +34,9 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
     /// <summary>Records claimed per cursor per sweep. The cadence is hourly and every rule is measured in days, so the ceiling changes only how promptly a backlog drains — never what is collected.</summary>
     private const int BatchSize = 200;
 
+    /// <summary>Records asked for per claim. A fair cursor returns the per-tenant head, so the batch above is reached by asking repeatedly rather than in one query, and a tenant with a long backlog never holds the whole batch.</summary>
+    private const int ClaimSize = 25;
+
     private static readonly TimeSpan CandidateTimeout = TimeSpan.FromMinutes(2);
 
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
@@ -70,11 +73,24 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
         }
 
         var window = new DurableRetentionSweepWindow(now, now.Subtract(rule.MinimumAge), now.Subtract(rule.RecheckInterval));
-        var candidates = await cursor.ClaimAsync(window, BatchSize, cancellationToken).ConfigureAwait(false);
-        counts.Claimed += candidates.Count;
+        var seen = new HashSet<Guid>();
 
-        foreach (var candidate in candidates)
-            counts.Record(await SweepCandidateAsync(cursor, rule, candidate, now, cancellationToken).ConfigureAwait(false));
+        while (counts.Claimed < BatchSize)
+        {
+            var limit = Math.Min(ClaimSize, BatchSize - counts.Claimed);
+            var claimed = await cursor.ClaimAsync(window, limit, cancellationToken).ConfigureAwait(false);
+            // A cursor that claims fairly hands back one record per tenant, so the batch is reached by asking again —
+            // and the ids already settled this tick are excluded, because a settlement that writes nothing (a drain
+            // still making progress) leaves the record eligible and the loop would otherwise spin on it.
+            var candidates = claimed.Where(candidate => seen.Add(candidate.Id)).ToList();
+
+            if (candidates.Count == 0) break;
+
+            counts.Claimed += candidates.Count;
+
+            foreach (var candidate in candidates)
+                counts.Record(await SweepCandidateAsync(cursor, rule, candidate, now, cancellationToken).ConfigureAwait(false));
+        }
     }
 
     /// <summary>One candidate, start to finish. Every exit that is not a completed settlement keeps the record.</summary>

@@ -160,6 +160,31 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Throughput, which the per-tenant fairness of the claim query would otherwise cap at one record per tenant per
+    /// tick: with an hourly cadence and a two-visit collection that is about a dozen streams a team a day, while a
+    /// single run writes two. The loop asks again until the batch is full. Mutation: claim once and only the oldest
+    /// stream of the three is ever swept.
+    /// </summary>
+    [Fact]
+    public async Task One_sweep_reaches_every_eligible_stream_of_a_team_not_just_its_oldest()
+    {
+        var world = await SeedWorldAsync();
+        var streams = new List<Guid>();
+
+        foreach (var kind in new[] { AgentRunLogKinds.StandardOutput, AgentRunLogKinds.StandardError, AgentRunLogKinds.Transcript })
+        {
+            var stream = await CaptureAsync(world, $"archive {kind}", kind);
+            await AgeAsync(stream, TimeSpan.FromDays(31));
+            streams.Add(stream);
+        }
+
+        await SweepAsync();
+
+        foreach (var stream in streams)
+            (await StreamAsync(stream)).RetainUntil.ShouldNotBeNull($"stream {stream} of the same team was never reached by the sweep");
+    }
+
+    /// <summary>
     /// The atomicity claim, measured rather than asserted: <c>xmin</c> is the id of the transaction that inserted a
     /// row, so a result and its pins sharing one <c>xmin</c> IS "written in the same transaction". Mutation: move the
     /// pin write to its own <c>SaveChanges</c> (or its own scope) and the two ids differ — which is the crash window
@@ -247,7 +272,7 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
     public async Task A_drain_too_big_for_one_sweep_writes_nothing_and_the_next_sweep_finishes_it()
     {
         var world = await SeedWorldAsync();
-        var segments = LogStreamRetentionCursor.MaxObjectsPerSweep + 1;
+        var segments = LogStreamRetentionCursor.MaxPlacementsPerSweep + 1;
         var stream = await CaptureAsync(world, "first", AgentRunLogKinds.StandardOutput, segments);
         await AgeAsync(stream, TimeSpan.FromDays(31));
         await SweepAsync();
@@ -259,12 +284,35 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
         var partly = await StreamAsync(stream);
         partly.PurgedAt.ShouldBeNull("the tombstone waits until every object is gone");
         partly.LastModifiedAt.ShouldBe(beforeDrain.LastModifiedAt, "a drain that is progressing writes NOTHING, so the very next tick continues it");
-        (await UnpurgedLocationsAsync(world, stream)).ShouldBe(segments - LogStreamRetentionCursor.MaxObjectsPerSweep, "exactly one bounded batch of objects went");
+        (await UnpurgedLocationsAsync(world, stream)).ShouldBe(segments - LogStreamRetentionCursor.MaxPlacementsPerSweep, "exactly one bounded batch of objects went");
 
         await SweepAsync();
 
         (await StreamAsync(stream)).PurgedAt.ShouldNotBeNull("the second sweep finishes the drain and stamps the tombstone");
         (await UnpurgedLocationsAsync(world, stream)).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Deduplication INSIDE one stream. Two byte-identical segments are one content-addressed object with a placement
+    /// per write, both at the same destination, and nothing else names them — so the stream is collectable and the
+    /// drain has to take each placement by name. Mutation: purge by object id alone and the coordinator refuses to
+    /// guess which placement, so a capture that repeated itself would never be reclaimed at all.
+    /// </summary>
+    [Fact]
+    public async Task A_stream_that_captured_the_same_bytes_twice_is_still_collected()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await CaptureAsync(world, "identical", segments: 2, distinctSegments: false);
+        (await ObjectsOfAsync(world, stream)).Count.ShouldBe(1, "the premise: the CAS stored ONE object for the two identical segments");
+        (await UnpurgedLocationsAsync(world, stream)).ShouldBe(2, "and ONE placement per write, which an unnamed purge claim refuses to choose between");
+
+        await AgeAsync(stream, TimeSpan.FromDays(31));
+        await SweepAsync();
+        await ElapseQuarantineAsync(stream);
+        await SweepAsync();
+
+        (await StreamAsync(stream)).PurgedAt.ShouldNotBeNull("nothing outside this stream names these bytes, so repeating itself must not make a capture unreclaimable");
+        (await UnpurgedLocationsAsync(world, stream)).ShouldBe(0, "every placement of the object goes, not just the one an unnamed claim would have found");
     }
 
     /// <summary>
@@ -508,7 +556,7 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
     // ── The world, and the durable streams inside it ───────────────────────────────────────────────────────────────
 
     /// <summary>One real capture through the real service: an open, <paramref name="segments"/> segments at a real local-rwx destination, a finalized source and a v3 completion.</summary>
-    private async Task<Guid> CaptureAsync(World world, string text, string kind = AgentRunLogKinds.StandardOutput, int segments = 1)
+    private async Task<Guid> CaptureAsync(World world, string text, string kind = AgentRunLogKinds.StandardOutput, int segments = 1, bool distinctSegments = true)
     {
         using var scope = _fixture.BeginScope();
         var logs = Logs(scope);
@@ -518,9 +566,10 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
 
         for (var ordinal = 1; ordinal <= segments; ordinal++)
         {
-            // Distinct bytes per segment on purpose: the CAS is content-addressed, so repeating a payload would make
-            // two segments one object and the drain would have fewer objects to take than the test counted on.
-            var bytes = System.Text.Encoding.UTF8.GetBytes($"{text} #{ordinal:D4} {new string('x', 24)}");
+            // Distinct bytes per segment by default: the CAS is content-addressed, so repeating a payload makes two
+            // segments ONE object with a placement each — which is its own case, and the caller says when it wants it.
+            var suffix = distinctSegments ? $" #{ordinal:D4}" : string.Empty;
+            var bytes = System.Text.Encoding.UTF8.GetBytes($"{text}{suffix} {new string('x', 24)}");
             metadata = (await logs.AppendAsync(new AgentRunLogAppendRequest
             {
                 TeamId = world.TeamId, AgentRunId = world.AgentRunId, StreamId = metadata.StreamId, WorkerFenceEpoch = Fence,

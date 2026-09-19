@@ -12,9 +12,10 @@ namespace CodeSpace.UnitTests.Workflows.Retention;
 /// these places, so the list IS the completeness argument, and a citer missing from it makes the cursor answer
 /// "unreferenced" about bytes something still reaches.
 ///
-/// <para>The drift detector below is the half that cannot be forgotten: it reads the EF model rather than this list,
-/// so a future column that names an artifact object reds here even though nobody thought about retention while adding
-/// it.</para>
+/// <para>Two checks keep the list from being decoration. One reads the EF model rather than this list, so a future
+/// column that names an artifact object reds here even though nobody thought about retention while adding it. The
+/// other reads the cursor's own source, so an entry ADDED to the list without a probe beside it reds too — a pinned
+/// list nothing cross-checks is a comment with a test around it.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class LogStreamCitationSitesTests
@@ -58,8 +59,53 @@ public sealed class LogStreamCitationSitesTests
     }
 
     /// <summary>
-    /// A column names a CAS object when it ends in <c>artifact_object_id</c>. Three tables are excluded, each for a
-    /// stated reason rather than because it was inconvenient:
+    /// Every entry in the list has a probe beside it, checked against the cursor's own source: a site is only a site
+    /// if something asks it. The check is textual on purpose — the probes are LINQ over EF entities, so there is no
+    /// runtime handle to count, and the alternative (trusting the list) is what this test exists to refuse.
+    /// </summary>
+    [Fact]
+    public void Every_pinned_citation_site_is_actually_probed_by_the_cursor()
+    {
+        using var db = BuildContext();
+        var source = File.ReadAllText(Path.Combine(ProductionSourceRoot(), "CodeSpace.Core", "Services", "Workflows", "Retention", "Cursors", $"{nameof(LogStreamRetentionCursor)}.cs"));
+
+        var unprobed = LogStreamRetentionCursor.CitationSites
+            .Select(site => (site.Table, site.Column, Member: MemberOf(db, site.Table, site.Column)))
+            .Where(site => !source.Contains($".{site.Member}", StringComparison.Ordinal))
+            .Select(site => $"{site.Table}.{site.Column} (no use of .{site.Member})")
+            .ToList();
+
+        unprobed.ShouldBeEmpty(
+            $"a site listed in {nameof(LogStreamRetentionCursor.CitationSites)} that nothing reads is a claim the cursor does not keep — "
+            + "add the probe, or take the entry out:\n  " + string.Join("\n  ", unprobed));
+    }
+
+    /// <summary>The CLR property a column is mapped from — the name the cursor's LINQ has to mention if it reads that column at all.</summary>
+    private static string MemberOf(CodeSpaceDbContext db, string table, string column)
+    {
+        var entity = db.Model.GetEntityTypes().FirstOrDefault(type => type.GetTableName() == table)
+            ?? throw new InvalidOperationException($"'{table}' is not mapped, so a citation site names a table this build does not have.");
+
+        return (entity.GetProperties().FirstOrDefault(property => property.GetColumnName() == column)
+            ?? throw new InvalidOperationException($"'{table}.{column}' is not mapped, so a citation site names a column this build does not have.")).Name;
+    }
+
+    private static string ProductionSourceRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "backend", "src");
+            if (Directory.Exists(candidate)) return candidate;
+        }
+
+        throw new DirectoryNotFoundException($"'backend/src' was not found above '{AppContext.BaseDirectory}', so the probes were never checked. Run the unit suite from the repository checkout.");
+    }
+
+    /// <summary>
+    /// A column names a CAS object when it ends in <c>artifact_object_id</c> — which is a NAMING convention, not a
+    /// foreign key, so it catches a new column added in that shape and nothing else. A citer that named an object
+    /// under some other column name would pass this check; the pinned list above is what a reviewer reads for the
+    /// complete answer. Three tables are excluded, each for a stated reason rather than because it was inconvenient:
     ///
     /// <para><c>artifact_object</c> and <c>artifact_location</c> are the object's own identity and its placements,
     /// not a second holder of its bytes — the cursor reads both directly, and a purge is precisely what advances a

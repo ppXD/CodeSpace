@@ -323,6 +323,7 @@ function ReadProblem({ problem }: { problem: AgentRunLogRangeProblem }) {
   const title = (() => {
     switch (problem.availability) {
       case "Missing": case "PhysicalObjectMissing": return "Stored log bytes are missing";
+      case "Purged": return "Log bytes were reclaimed by retention";
       case "IntegrityFailure": return "Stored log bytes are corrupt";
       case "BackendUnavailable": return "Storage backend unavailable";
       case "AccessDenied": return "Storage access denied";
