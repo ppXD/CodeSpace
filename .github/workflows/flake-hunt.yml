@@ -1,0 +1,194 @@
+name: Flake hunt
+
+# On demand only. Runs ONE test selection REPEATEDLY on a Linux runner and reports how many rounds went red.
+#
+# Why this exists as a lane rather than a local loop: the intermittent reds this repo keeps seeing in the durable
+# launch family are Linux-only (a macOS dev box is green every time), so the only place a RATE can be measured is a
+# GitHub runner. Without it, "flaky" is an anecdote and a fix has nothing to be checked against. Run it before a fix
+# to get the rate, and after to show the rate is zero — the round logs carry the failure messages either way.
+#
+# The setup steps are copied verbatim from backend-unit.yml / backend-integration.yml (including the service
+# container and the committed master key) so a round here is the same round those lanes run. Deliberately a copy:
+# refactoring the real lanes into a shared template to serve a diagnostic would put this tool on their critical path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Which suite to repeat'
+        type: choice
+        options: [unit, integration]
+        default: unit
+      filter:
+        description: 'A dotnet test --filter expression, e.g. FullyQualifiedName~NativeLaunchRegistryTests'
+        type: string
+        required: true
+      rounds:
+        description: 'How many times to repeat it (1-30)'
+        type: string
+        default: '10'
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  unit:
+    name: repeat (UnitTests)
+    if: inputs.project == 'unit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-unit-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-unit-${{ runner.os }}-
+
+      - name: Build once
+        run: dotnet build backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+
+      - name: Repeat
+        shell: bash
+        env:
+          PROJECT: backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+          FILTER: ${{ inputs.filter }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          set -uo pipefail
+          set +e   # GitHub's default bash shell runs with -e; a hunt must not stop at its first red.
+          case "$ROUNDS" in ''|*[!0-9]*) echo "::error::rounds must be a number, got '$ROUNDS'"; exit 1 ;; esac
+          { [ "$ROUNDS" -ge 1 ] && [ "$ROUNDS" -le 30 ]; } || { echo "::error::rounds must be 1-30"; exit 1; }
+          logs=backend/TestResults/flake-hunt
+          mkdir -p "$logs"
+          red=0
+          for round in $(seq 1 "$ROUNDS"); do
+            echo "::group::round $round of $ROUNDS"
+            dotnet test "$PROJECT" --no-build --filter "$FILTER" \
+              --logger "console;verbosity=normal" --logger "trx;LogFileName=round-$round.trx" \
+              --results-directory "$logs" 2>&1 | tee "$logs/round-$round.log"
+            status=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            # Keep going after a red: one failure proves the defect exists, only the count says how often.
+            if [ "$status" -ne 0 ]; then
+              red=$((red + 1))
+              echo "::warning::round $round FAILED (exit $status)"
+              grep -B 2 -A 40 '^\s*Failed ' "$logs/round-$round.log" | head -300
+            fi
+          done
+          # A filter that matches nothing exits 0 every round, which would read as a clean hunt over no tests at all.
+          executed=$(grep -ohE 'executed="[0-9]+"' "$logs"/*.trx 2>/dev/null | grep -oE '[0-9]+' | sort -rn | head -1)
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::the filter '$FILTER' matched no tests, so these $ROUNDS rounds measured nothing"
+            exit 1
+          fi
+          echo "flake-hunt: $red of $ROUNDS rounds red (filter '$FILTER', up to $executed tests per round)"
+          [ "$red" -eq 0 ]
+
+      - name: Upload round logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-hunt-unit
+          path: backend/TestResults/flake-hunt/
+          if-no-files-found: ignore
+
+  integration:
+    name: repeat (IntegrationTests · Postgres)
+    if: inputs.project == 'integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      # Same committed local-dev test key backend-integration.yml carries; the DI container fail-fasts without one.
+      CODESPACE_VARIABLE_MASTER_KEY: 'bG9jYWwtZGV2LW9ubHkta2V5LW5vdC1mb3ItcHJvZCE='
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-integration-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-integration-${{ runner.os }}-
+
+      - name: Build once
+        run: dotnet build backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Repeat
+        shell: bash
+        env:
+          PROJECT: backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          FILTER: ${{ inputs.filter }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          set -uo pipefail
+          set +e   # GitHub's default bash shell runs with -e; a hunt must not stop at its first red.
+          case "$ROUNDS" in ''|*[!0-9]*) echo "::error::rounds must be a number, got '$ROUNDS'"; exit 1 ;; esac
+          { [ "$ROUNDS" -ge 1 ] && [ "$ROUNDS" -le 30 ]; } || { echo "::error::rounds must be 1-30"; exit 1; }
+          logs=backend/TestResults/flake-hunt
+          mkdir -p "$logs"
+          red=0
+          for round in $(seq 1 "$ROUNDS"); do
+            echo "::group::round $round of $ROUNDS"
+            dotnet test "$PROJECT" --no-build --filter "$FILTER" \
+              --logger "console;verbosity=normal" --logger "trx;LogFileName=round-$round.trx" \
+              --results-directory "$logs" 2>&1 | tee "$logs/round-$round.log"
+            status=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            # Keep going after a red: one failure proves the defect exists, only the count says how often.
+            if [ "$status" -ne 0 ]; then
+              red=$((red + 1))
+              echo "::warning::round $round FAILED (exit $status)"
+              grep -B 2 -A 40 '^\s*Failed ' "$logs/round-$round.log" | head -300
+            fi
+          done
+          # A filter that matches nothing exits 0 every round, which would read as a clean hunt over no tests at all.
+          executed=$(grep -ohE 'executed="[0-9]+"' "$logs"/*.trx 2>/dev/null | grep -oE '[0-9]+' | sort -rn | head -1)
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::the filter '$FILTER' matched no tests, so these $ROUNDS rounds measured nothing"
+            exit 1
+          fi
+          echo "flake-hunt: $red of $ROUNDS rounds red (filter '$FILTER', up to $executed tests per round)"
+          [ "$red" -eq 0 ]
+
+      - name: Upload round logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-hunt-integration
+          path: backend/TestResults/flake-hunt/
+          if-no-files-found: ignore
