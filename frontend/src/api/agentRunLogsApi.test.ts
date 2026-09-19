@@ -76,11 +76,14 @@ describe("Agent Run durable log API", () => {
   // wrong-but-well-formed answer, and it hides a healthy deployment doing exactly what its retention policy says.
   it("keeps the retention plane's Purged verdict distinct from a missing object", async () => {
     vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(json({ availability: "Purged", code: "log_bytes_purged", isRetryable: false, streamId: "s" }, 410))
-      .mockResolvedValueOnce(json({ availability: "PhysicalObjectMissing", code: "artifact_missing", isRetryable: false, streamId: "s" }, 410)));
+      .mockResolvedValueOnce(json({ availability: "Purged", code: "Purged", isRetryable: false, streamId: "s" }, 410))
+      .mockResolvedValueOnce(json({ availability: "PhysicalObjectMissing", code: "ArtifactMissing", isRetryable: false, streamId: "s" }, 410)));
 
-    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "Purged", code: "log_bytes_purged", isRetryable: false });
-    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "PhysicalObjectMissing", code: "artifact_missing", isRetryable: false });
+    // The codes are the backend's own AgentRunLogProblemCode names, which the controller sends verbatim
+    // (`ProblemCode = problem.Code.ToString()`); the pairing is pinned on that side by
+    // DurableRetentionPolicyTests.A_purged_read_puts_its_availability_and_code_on_the_wire_verbatim.
+    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "Purged", code: "Purged", isRetryable: false });
+    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "PhysicalObjectMissing", code: "ArtifactMissing", isRetryable: false });
   });
 
   it("fails closed when a success response omits or contradicts its range contract", async () => {

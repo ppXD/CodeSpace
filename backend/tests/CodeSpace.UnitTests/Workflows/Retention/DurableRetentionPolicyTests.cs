@@ -1,5 +1,10 @@
 using CodeSpace.Core.Services.Workflows.Retention;
+using CodeSpace.Core.Handlers.QueryHandlers.Agents;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.AgentRunLogging;
+using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Retention;
 using Shouldly;
 
@@ -40,6 +45,26 @@ public sealed class DurableRetentionPolicyTests
         Enum.GetValues<DurableRecordClass>().ShouldBe([DurableRecordClass.LogStream],
             customMessage: "a class belongs here only together with the cursor that sweeps it — add both in one change, never the rule first");
     }
+
+    /// <summary>
+    /// The exact strings a purged stream puts on the wire. The web client matches both literally — see
+    /// <c>frontend/src/api/agentRunLogsApi.test.ts</c>, which feeds this availability and this code through its own
+    /// decoder — and a client that does not recognise them reports the RESPONSE as malformed, which is a worse answer
+    /// than the wrong one it replaced. Renaming the enum member changes both, so it has to fail here first.
+    /// </summary>
+    [Fact]
+    public void A_purged_read_puts_its_availability_and_code_on_the_wire_verbatim()
+    {
+        var read = AgentRunLogWire.Unavailable(Metadata(), 0, new AgentRunLogProblem(AgentRunLogProblemCode.Purged));
+
+        read.Availability.ShouldBe(AgentRunLogReadAvailability.Purged);
+        read.Availability.ToString().ShouldBe("Purged");
+        read.ProblemCode.ShouldBe("Purged", "the controller sends ProblemCode as the response's `code`, so this literal IS the web client's contract");
+        read.IsRetryable.ShouldBeFalse("bytes reclaimed on purpose never come back, so no caller should retry the read");
+    }
+
+    private static AgentRunLogMetadata Metadata() => new(Guid.NewGuid(), Guid.NewGuid(), "stdout/v1", "text/plain", "utf-8", "spool/v1",
+        ArtifactRetention.Run, AgentRunLogStreamState.Completed, 2, 1, 3, 3, null, Now, Now, Now, null);
 
     /// <summary>
     /// Who a reclamation is attributed to. The seeder is the established identity for background work — Hangfire
