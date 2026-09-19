@@ -186,6 +186,32 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Only_a_queued_run_can_be_claimed_so_no_second_launch_can_share_an_attempts_claim()
+    {
+        // THE invariant the attempt grain rests on, and the reason it is currently unreachable: a second launch of a
+        // Running agent run is impossible, because ClaimOwnershipAsync admits from Queued alone. A Running run is
+        // re-taken only through ReserveReattachAsync, which re-tails the SAME CLI invocation and admits no new spend.
+        // So `claimedEpoch` is 1 for every launch in production today, and the tests above hand-mint the earlier
+        // invocation's hold.
+        // MUTATION THIS CATCHES: a future re-queue path (Running → Queued) added without a second look at the spend
+        // plane. Keyed on the run id alone, two launches would then share one claim row and settle it at whichever
+        // finished last — the first CLI's spend silently leaving the run cap, the team window and the Room. Keyed on
+        // the attempt, they cannot. If this assertion ever has to change, the claim key is what changes with it.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: TerminalClaimUsd, model: "claude-opus-4-8");
+
+        using var scope = _fixture.BeginScope();
+        var runs = scope.Resolve<IAgentRunService>();
+
+        var first = await runs.ClaimOwnershipAsync(runId, CancellationToken.None);
+        first.ShouldNotBeNull("precondition: a Queued run is claimable, or the refusal below proves nothing");
+        first.Epoch.ShouldBe(1, "a claim bumps the fence it found, and a created run starts at 0");
+
+        (await runs.ClaimOwnershipAsync(runId, CancellationToken.None))
+            .ShouldBeNull("a Running run cannot be claimed a second time — the only re-entry is ReserveReattachAsync, which admits no spend of its own");
+    }
+
+    [Fact]
     public async Task A_re_dispatch_under_a_new_epoch_mints_its_own_claim_beside_the_dead_attempts_hold()
     {
         // The re-entry this slice is about is NOT a Hangfire automatic retry — HangfireRegistrarBase pins
@@ -222,32 +248,42 @@ public partial class AgentRunExecutorTests
             .ShouldBe(2m, "the dead attempt's hold still counts against the cap; only a settle can release it");
     }
 
-    [Fact]
-    public async Task A_re_dispatch_is_refused_by_name_when_the_dead_attempt_holds_the_whole_cap()
+    [Theory]
+    [InlineData(BudgetReservationStates.Reserved)]
+    [InlineData(BudgetReservationStates.Indeterminate)]
+    [InlineData(BudgetReservationStates.Reconciled)]
+    public async Task A_re_dispatch_is_refused_by_name_when_an_earlier_invocation_holds_the_whole_cap(string holdState)
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // The trade-off this design accepts, stated out loud: an attempt that reserved the run's WHOLE remaining cap
-        // and then died holds it until it settles, so the re-dispatch has nothing to claim. Refusing is the honest
-        // outcome — that CLI may really have spent the money, and the platform never invents a figure — but "cost cap
-        // reached" would send an operator hunting for spend that no receipt shows.
-        // MUTATION THIS CATCHES: dropping RunSpendRefusedDetailAsync. The operator is told the cap is reached and
-        // given no way to find the attempt, the epoch, the amount, or when it clears.
+        // The trade-off this design accepts, stated out loud: an invocation that reserved the run's WHOLE remaining
+        // cap and then died holds it until it settles, so the next launch has nothing to claim. Refusing is the
+        // honest outcome — that CLI may really have spent the money, and the platform never invents a figure — but
+        // "cost cap reached" would send an operator hunting for spend that no receipt shows.
+        //
+        // The three states are the hold's whole lifetime, and RECONCILED is the one that matters: within a tick or
+        // two of SweepBudgetSettlement every orphan lands there, still holding its reserve in CommittedUsdAsync.
+        // MUTATION THIS CATCHES: the honest-refusal read keyed on BudgetReservationStates.Live, which omits
+        // Reconciled — the feature would work for minutes and then silently fall back to "cost cap reached" forever.
+        // Also: dropping RunSpendRefusedDetailAsync altogether.
         var teamId = await SeedTeamAsync();
         var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: TerminalClaimUsd);
         var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: TerminalClaimUsd, model: "claude-opus-4-8", workflowRunId: workflowRunId);
 
-        await MintLaunchClaimAsync(workflowRunId, teamId, runId, epoch: 7);
+        await MintLaunchClaimAsync(workflowRunId, teamId, runId, epoch: 6);
+        await ForceClaimStateAsync(workflowRunId, runId, epoch: 6, state: holdState);
+        await ArmNextAttemptAsync(runId, priorEpoch: 6);
 
         await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript));
 
         var result = await PersistedResultAsync(runId);
         result.ExitReason.ShouldBe(FailureCodes.RunBudgetExhausted);
-        result.Error.ShouldNotBeNull().ShouldContain("epoch 7", Case.Insensitive, "the refusal must name WHICH attempt holds the cap");
+        result.Error.ShouldNotBeNull().ShouldContain("attempt 6", Case.Insensitive, $"a {holdState} hold still charges the run — the refusal must name WHICH invocation holds the cap");
         result.Error!.ShouldContain("unknown spend", Case.Insensitive, "a held cap is not a spent cap, and the operator must be able to tell them apart");
 
-        var dead = (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 7, 0))).ShouldNotBeNull();
-        dead.State.ShouldBe(BudgetReservationStates.Indeterminate, "the refusal still lands a terminal, and the terminal closes every claim the run holds");
+        var dead = (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 6, 0))).ShouldNotBeNull();
+        dead.State.ShouldBe(holdState == BudgetReservationStates.Reconciled ? BudgetReservationStates.Reconciled : BudgetReservationStates.Indeterminate,
+            customMessage: "the refusal still lands a terminal, and the terminal closes every claim the run holds");
         dead.SettledUsd.ShouldBeNull("closing the bookkeeping of an unobserved CLI never invents its bill, so the hold stays — which is why the refusal above had to name it");
     }
 
@@ -265,18 +301,19 @@ public partial class AgentRunExecutorTests
         var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: TerminalClaimUsd);
         var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: TerminalClaimUsd, model: "claude-opus-4-8", workflowRunId: workflowRunId);
 
-        await MintLaunchClaimAsync(workflowRunId, teamId, runId, epoch: 7, reservedUsd: 1m);
+        await MintLaunchClaimAsync(workflowRunId, teamId, runId, epoch: 6, reservedUsd: 1m);
+        await ArmNextAttemptAsync(runId, priorEpoch: 6);
 
         await ExecuteAsync(runId, new UsageReportingHarness(PricedUsageScript));
 
         (await PersistedResultAsync(runId)).ExitReason.ShouldNotBe(FailureCodes.RunBudgetExhausted, "check AdmitRunSpendAsync — $4 of the run's cap is free");
         (await PersistedRunAsync(runId)).Status.ShouldBe(AgentRunStatus.Succeeded, "a refused re-dispatch never starts its CLI at all");
 
-        var live = (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 1, 0))).ShouldNotBeNull();
+        var live = (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 7, 0))).ShouldNotBeNull();
         live.ReservedUsd.ShouldBe(4m, "the new attempt claims what is left BESIDE the dead attempt's hold");
         live.SettledUsd.ShouldBe(PricedUsageCostUsd, "its own CLI really ran and reported its usage");
 
-        (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 7, 0)))
+        (await ReservationOfAsync(workflowRunId, runId, scopeKey: AgentRunExecutor.RunSpendScopeKey(runId, 6, 0)))
             .ShouldNotBeNull().State.ShouldBe(BudgetReservationStates.Indeterminate, "the dead attempt's spend is still unknown — the terminal closes its bookkeeping, it never invents a bill");
     }
 
@@ -352,6 +389,25 @@ public partial class AgentRunExecutorTests
 
         await scope.Resolve<CodeSpaceDbContext>().Database
             .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET result_jsonb = CAST({resultJson} AS jsonb) WHERE id = {runId}");
+    }
+
+    /// <summary>Move the run's fence on so the claim below it lands at <paramref name="priorEpoch"/> + 1 — <c>ClaimOwnershipAsync</c> bumps the epoch it finds, so this is how a test places an attempt anywhere but the first.</summary>
+    private async Task ArmNextAttemptAsync(Guid runId, long priorEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database
+            .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET fence_epoch = {priorEpoch} WHERE id = {runId} AND status = 'Queued'");
+    }
+
+    /// <summary>Put an existing claim into the state a sweep would have left it in. Forced rather than swept, because a bounded global sweep's reach is not this test's to assert.</summary>
+    private async Task ForceClaimStateAsync(Guid workflowRunId, Guid agentRunId, long epoch, string state)
+    {
+        using var scope = _fixture.BeginScope();
+        var key = AgentRunExecutor.RunSpendScopeKey(agentRunId, epoch, round: 0);
+
+        (await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.Where(r => r.WorkflowRunId == workflowRunId && r.ScopeKey == key)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.State, state))).ShouldBe(1, "the hold this test is about must exist before its state is forced");
     }
 
     /// <summary>Leave the run exactly as a vanished worker leaves it for the liveness sweep: Running, lease lapsed, no handle to probe and no recent events — the blind-abandon candidate.</summary>

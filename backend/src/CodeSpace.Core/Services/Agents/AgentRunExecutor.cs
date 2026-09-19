@@ -1265,7 +1265,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var epochs = string.Join(", ", held.Select(hold => RunSpendScopeEpoch(hold.ScopeKey)).Distinct());
         var settles = held.Max(hold => hold.ExpiresAt) is { } at ? $"by {at:u}" : "only when the recovery sweep closes it";
 
-        return $"{detail} — an earlier attempt of this run (epoch {epochs}) still holds ${held.Sum(hold => hold.ReservedUsd):0.####} of that cap with unknown spend; it settles {settles}, and the run is launchable again once it does";
+        return $"{detail} — an earlier invocation of this run (attempt {epochs}) still holds ${held.Sum(hold => hold.ReservedUsd):0.####} of that cap with unknown spend; it settles {settles}, and the run is launchable again once it does";
     }
 
     /// <summary>Record — never gate — the spend of a run nobody declared a ceiling for. A null cap can neither refuse nor be refused, and the reserve is ZERO because the Room sums an unbudgeted row's reserve AS spend; the settle lands the observed figure.</summary>
@@ -1372,7 +1372,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>The attempt a scope key names, for a refusal that has to say WHICH earlier attempt is holding the cap. Legacy rows minted before the attempt grain carry no marker and read as "an earlier one".</summary>
     internal static string RunSpendScopeEpoch(string scopeKey)
     {
-        var marker = scopeKey.Split('/').FirstOrDefault(part => part.StartsWith('e') && part.Length > 1 && part[1..].All(char.IsAsciiDigit));
+        // Skip(1): the first segment is the run's GUID, which may itself begin with a hex 'e'.
+        var marker = scopeKey.Split('/').Skip(1).FirstOrDefault(part => part.StartsWith('e') && part.Length > 1 && part[1..].All(char.IsAsciiDigit));
 
         return marker is null ? "unrecorded" : marker[1..];
     }
