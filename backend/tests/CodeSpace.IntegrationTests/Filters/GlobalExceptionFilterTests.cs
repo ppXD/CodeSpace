@@ -84,7 +84,7 @@ public class GlobalExceptionFilterTests
         // The single signal every act-as-user operation funnels through: the SPA's global
         // interceptor branches on code=actor_identity_required to open the link modal.
         var instanceId = Guid.NewGuid();
-        var result = Run(new ActorIdentityRequiredException(ProviderKind.GitLab, instanceId));
+        var result = Run(new ActorIdentityRequiredException(ProviderKind.GitLab, instanceId, Guid.NewGuid()));
         var body = Body(result);
 
         result.StatusCode.ShouldBe(StatusCodes.Status428PreconditionRequired);

@@ -34,7 +34,7 @@ public sealed record ReconcileStuckRunsResponse
     /// <summary>Stranded Timer waits re-fired because their scheduled wake was dropped (a lost Hangfire job past wake_at). 0 when no timer wake is overdue.</summary>
     public required int RecoveredStrandedTimerWait { get; init; }
 
-    /// <summary>Stranded SupervisorInfraPark waits re-fired because their scheduled deadline resume was dropped (P4.3). 0 when no infra-park deadline is overdue.</summary>
+    /// <summary>Stranded SELF-WAKING PARK waits re-fired because their scheduled deadline resume was dropped (P4.3): the model-plane-outage ladder AND the act-as-user identity-link ladder. The NAME is kept for its wire value — it is a response field callers already read — while the sweep behind it covers every park kind. 0 when no park deadline is overdue.</summary>
     public required int RecoveredStrandedSupervisorInfraParkWait { get; init; }
 
     /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost. 0 when no parent is parked on a terminal child.</summary>

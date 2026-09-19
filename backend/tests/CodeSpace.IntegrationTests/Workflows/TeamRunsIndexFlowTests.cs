@@ -855,6 +855,30 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task An_identity_link_park_needs_attention_and_is_never_counted_live()
+    {
+        // The park that LOOKS like a machine wait and is not. Its deadline only RE-CHECKS whether a specific person
+        // has connected their provider account, so the run can only ever finish if that person acts. Counting it Live
+        // would put it in the one bucket nobody watches and re-create the exact failure it exists to end: a run
+        // nobody is told about, that gives up when its window runs out.
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var parked = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(parked, WorkflowWaitKinds.ActorIdentityLink, WorkflowWaitStatuses.Pending);
+        var machineWait = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(machineWait, WorkflowWaitKinds.AgentRun, WorkflowWaitStatuses.Pending);
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+
+        s.SuspendedNeedingReview.ShouldBe(1, "the identity park is human-actionable; the agent-run wait genuinely auto-resumes");
+        s.Live.ShouldBe(1, "and the park must NOT also be counted as live, working-on-its-own work");
+
+        (await FilterAsync(teamA, new RunListFilter { NeedsAttention = true }))
+            .Select(r => r.Id).ShouldBe(new[] { parked }, "the attention ZONE and the card must agree — a parked run has to be reachable from the list a person actually opens");
+    }
+
+    [Fact]
     public async Task A_completion_park_needs_attention_and_is_never_counted_live()
     {
         // The third Suspended shape. An approval suspend holds a human wait; an agent suspend holds a machine wait
