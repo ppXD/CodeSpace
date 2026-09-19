@@ -94,7 +94,7 @@ internal static class NativeProcess
         {
             using var file = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            if (dup2((int)file.SafeFileHandle.DangerousGetHandle(), 2) < 0) Explain("bootstrap", $"diagnostics stayed on the inherited stderr: dup2 failed with errno {Marshal.GetLastPInvokeError()}");
+            if (dup2((int)file.SafeFileHandle.DangerousGetHandle(), 2) < 0) Explain("bootstrap", $"diagnostics stayed on the inherited stderr: dup2 refused it with {UnixError.Describe(Marshal.GetLastPInvokeError())}");
         }
         // Everything, not a list: this runs before Main's own handler, so an unreadable path, a refused mode, a libc
         // that has no dup2 — anything at all — would otherwise abort the process over its logging.
@@ -216,7 +216,7 @@ internal static class NativeProcess
         var error = Marshal.GetLastPInvokeError();
         if (read == Marshal.SizeOf<DarwinProcessInfo>() && info.Pid == pid) return info.Status == 5 ? null : info;
         if (IsAbsent(pid)) return null;
-        throw new IOException($"Native process identity is unavailable (read={read}, errno={error}); liveness cannot be assumed.");
+        throw new IOException($"Native process identity is unavailable (read={read}, {UnixError.Describe(error)}); liveness cannot be assumed.");
     }
 
     public static int Exec(NativeLaunchInvocation invocation)
@@ -239,7 +239,7 @@ internal static class NativeProcess
             var argv = Vector(new[] { invocation.Command }.Concat(invocation.Args));
             var env = Vector(invocation.Environment.Select(pair => pair.Key + "=" + pair.Value));
             execve(invocation.Command, argv, env);
-            Explain("exec", $"execve refused the workload with errno {Marshal.GetLastPInvokeError()}");
+            Explain("exec", $"execve refused the workload: {UnixError.Describe(Marshal.GetLastPInvokeError())}");
             return 126;
         }
         finally { foreach (var pointer in strings) Marshal.FreeCoTaskMem(pointer); }

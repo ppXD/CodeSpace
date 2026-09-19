@@ -256,6 +256,62 @@ public sealed partial class NativeLaunchRegistryTests
         (await Task.Run(NativeProcess.IsProcessLeaderThread)).ShouldBeFalse("a pool thread is not the thread the process was born on");
     }
 
+    [Theory]
+    // The errnos an exec can actually end on. A bare number is what an operator reads in a run's error text long
+    // after the process is gone, and "errno 2" does not tell them a harness binary is missing from the image.
+    [InlineData(2, "errno 2 (ENOENT: the executable does not exist at that path)")]
+    [InlineData(13, "errno 13 (EACCES: the file is not executable, or a directory on its path is not searchable)")]
+    [InlineData(8, "errno 8 (ENOEXEC: the file is not a format this kernel can execute)")]
+    [InlineData(12, "errno 12 (ENOMEM: the kernel could not allocate for the new image)")]
+    [InlineData(26, "errno 26 (ETXTBSY: the executable is open for writing)")]
+    [InlineData(7, "errno 7 (E2BIG: the argument and environment block is larger than the kernel accepts)")]
+    public void A_known_errno_is_named_and_explained(int error, string expected)
+    {
+        UnixError.Describe(error).ShouldBe(expected);
+    }
+
+    [Theory]
+    // Two symbols whose NUMBER differs between the supported platforms. A table pinned to Linux's values would name
+    // the wrong failure on a dev box, which is the class of divergence that lets a bug reach production unseen.
+    [InlineData(40, 62, "ELOOP")]
+    [InlineData(36, 63, "ENAMETOOLONG")]
+    public void A_platform_specific_errno_is_named_by_this_platforms_number(int linux, int macOS, string expected)
+    {
+        UnixError.Describe(OperatingSystem.IsMacOS() ? macOS : linux).ShouldContain(expected);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(4242)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void An_errno_the_table_does_not_know_is_reported_as_the_number_it_is(int error)
+    {
+        // Never guessed at, and never thrown over: this only ever runs to explain a failure that already happened,
+        // so inventing a meaning or raising a second failure would both be worse than saying the number.
+        Should.NotThrow(() => UnixError.Describe(error)).ShouldBe($"errno {error} (unknown)");
+    }
+
+    [Fact]
+    public async Task A_workload_the_kernel_refuses_to_exec_names_the_errno_that_refused_it()
+    {
+        // The real bootstrap reaching a real execve failure: the invocation's Command is not covered by the spec
+        // hash (the hash binds the SPEC), so a command that does not exist passes every admission gate and is
+        // refused by the kernel — which is exactly the shape an image missing its harness CLI produces.
+        await using var fixture = new Fixture();
+        fixture.Bind();
+        using var broker = fixture.Broker();
+        (await broker.StandardOutput.ReadLineAsync(fixture.Token)).ShouldBe("owned");
+
+        await NativeLaunchFiles.WriteFrameAsync(broker.StandardInput.BaseStream, fixture.Invocation() with { Command = Path.Combine(fixture.Root, "no-such-harness-binary") }, fixture.Token);
+        broker.StandardInput.Close();
+        await broker.WaitForExitAsync(fixture.Token);
+
+        var said = ProcessLiveness.DescribeBootstrap(fixture.Spool);
+        said.ShouldContain("execve refused the workload: errno 2 (ENOENT:", customMessage: $"a refused exec must name the errno an operator would act on, not a number. {said}");
+        fixture.StartCount.ShouldBe(0, "the workload never ran");
+    }
+
     [Fact]
     public async Task A_bootstrap_that_refuses_says_why_where_the_refusal_outlives_the_launch()
     {
