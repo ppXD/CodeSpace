@@ -146,7 +146,9 @@ public class AgentsController : ControllerBase
         AgentRunLogReadAvailability.InvalidRange => StatusCodes.Status400BadRequest,
         AgentRunLogReadAvailability.AccessDenied => StatusCodes.Status424FailedDependency,
         AgentRunLogReadAvailability.BackendUnavailable or AgentRunLogReadAvailability.ProviderTimeout => StatusCodes.Status503ServiceUnavailable,
-        AgentRunLogReadAvailability.PhysicalObjectMissing or AgentRunLogReadAvailability.IntegrityFailure => StatusCodes.Status410Gone,
+        // 410 for all three: the bytes are not coming back. The availability code beside it is what distinguishes a
+        // policy reclamation from a loss, which the status alone cannot say.
+        AgentRunLogReadAvailability.PhysicalObjectMissing or AgentRunLogReadAvailability.IntegrityFailure or AgentRunLogReadAvailability.Purged => StatusCodes.Status410Gone,
         _ => StatusCodes.Status422UnprocessableEntity,
     };
 

@@ -21,6 +21,13 @@ namespace CodeSpace.Core.Services.Workflows.Retention;
 /// tombstone is a conditional update on the record's revision. Two workers sweeping the same record at the same time
 /// therefore remove the bytes at most once, and exactly one of them writes the tombstone; the loser settles nothing
 /// and the next sweep meets a row it never held.</para>
+///
+/// <para><b>Why every decision is settled, including a keep.</b> A record nothing can ever reclaim — one a sealed
+/// result pins for good, one whose bytes another record also names — is claimed by the oldest-first query on every
+/// tick. If a keep wrote nothing, a few hundred such records deployment-wide would fill the batch for ever and the
+/// sweep would report a healthy-looking claim count while collecting nothing, never reaching the records behind
+/// them. So a keep is a settlement too: it advances the record's own modification time, and the claim query leaves
+/// it alone for the class's recheck interval.</para>
 /// </summary>
 public sealed class DurableRetentionReaper : IDurableRetentionReaper
 {
@@ -62,7 +69,8 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
             return;
         }
 
-        var candidates = await cursor.ClaimAsync(now, now.Subtract(rule.MinimumAge), BatchSize, cancellationToken).ConfigureAwait(false);
+        var window = new DurableRetentionSweepWindow(now, now.Subtract(rule.MinimumAge), now.Subtract(rule.RecheckInterval));
+        var candidates = await cursor.ClaimAsync(window, BatchSize, cancellationToken).ConfigureAwait(false);
         counts.Claimed += candidates.Count;
 
         foreach (var candidate in candidates)
@@ -92,16 +100,16 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
         }
     }
 
-    /// <summary>A settlement the cursor could not complete — a lost race, a refused removal, a drain that needs another sweep — is reported as the keep it is.</summary>
+    /// <summary>
+    /// Every decision is handed to the cursor, including the keeps: a keep that wrote nothing would be re-claimed on
+    /// every tick for ever. A settlement the cursor could not complete — a lost race, a refused removal, a drain that
+    /// needs another sweep — is reported as the keep it is.
+    /// </summary>
     private static async Task<DurableRetentionAction> ApplyAsync(IDurableRetentionCursor cursor, DurableRetentionCandidate candidate,
-        DurableRetentionDecision decision, CancellationToken cancellationToken)
-    {
-        if (decision.Action is not (DurableRetentionAction.Quarantine or DurableRetentionAction.Collect)) return decision.Action;
-
-        return await cursor.SettleAsync(candidate, decision, cancellationToken).ConfigureAwait(false)
+        DurableRetentionDecision decision, CancellationToken cancellationToken) =>
+        await cursor.SettleAsync(candidate, decision, cancellationToken).ConfigureAwait(false)
             ? decision.Action
             : DurableRetentionAction.Indeterminate;
-    }
 
     /// <summary>The database's clock, not the worker's: every deadline these decisions compare against was written by a database clock too.</summary>
     private async Task<DateTimeOffset> DatabaseClockAsync(CancellationToken cancellationToken)
@@ -117,22 +125,19 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
         private int Quarantined { get; set; }
         private int Collected { get; set; }
         private int Referenced { get; set; }
-        private int Indeterminate { get; set; }
-        private int Waiting { get; set; }
+        private int Kept { get; set; }
 
         public void Record(DurableRetentionAction action)
         {
             if (action == DurableRetentionAction.Quarantine) Quarantined++;
             else if (action == DurableRetentionAction.Collect) Collected++;
             else if (action == DurableRetentionAction.Referenced) Referenced++;
-            else if (action == DurableRetentionAction.Wait) Waiting++;
-            else Indeterminate++;
+            else Kept++;
         }
 
         public DurableRetentionSweepSummary Summary() => new()
         {
-            Claimed = Claimed, Quarantined = Quarantined, Collected = Collected,
-            Referenced = Referenced, Indeterminate = Indeterminate, Waiting = Waiting,
+            Claimed = Claimed, Quarantined = Quarantined, Collected = Collected, Referenced = Referenced, Kept = Kept,
         };
     }
 }

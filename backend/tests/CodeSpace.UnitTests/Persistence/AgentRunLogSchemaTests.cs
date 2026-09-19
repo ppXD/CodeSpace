@@ -28,6 +28,11 @@ public sealed class AgentRunLogSchemaTests
             "AgentRunId", "CaptureFinalizedAt", "CaptureSessionId", "CaptureSource", "CaptureSourceBaseOffsetBytes", "CompletedAt", "ContentDigest", "ContentDigestAlgorithm",
             "ContentEncoding", "ContentType", "CreatedAt", "ErrorCode", "ErrorMessage", "ExpiresAt", "Id", "LastModifiedAt", "ManifestDigest",
             "NextOffsetBytes", "NextSegmentOrdinal", "RemoteStallCode", "RemoteStallSince", "Retention", "Revision", "SchemaVersion", "SegmentCount", "State",
+            // The retention plane's two columns (migration 0235), and the only part of this row a process that is not
+            // the capturing worker may ever write: retain_until is the instant the bytes become reclaimable, purged_at
+            // the tombstone the head row keeps after they are gone. The guard admits them on a TERMINAL stream only,
+            // alone, and never in the same statement as anything else — so a purge can never pass for a capture verdict.
+            "PurgedAt", "RetainUntil",
             "SourceOffsetBytes", "StreamKind", "TeamId", "TotalBytes", "WorkerFenceEpoch", "Xmin",
         }.Order());
         entity.FindProperty(nameof(AgentRunLogStream.State))!.GetMaxLength().ShouldBe(24);

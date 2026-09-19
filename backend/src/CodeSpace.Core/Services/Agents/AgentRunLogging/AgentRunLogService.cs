@@ -315,6 +315,10 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
         var requestedEndUnbounded = request.OffsetBytes + request.Length;
         var snapshot = await ReadSnapshotAsync(request.TeamId, request.StreamId, cancellationToken, request.OffsetBytes, requestedEndUnbounded).ConfigureAwait(false);
         if (snapshot == null) return RejectRange(AgentRunLogProblemCode.Missing);
+        // Before the segment walk, and before any range arithmetic: a purged stream's locations are gone, so every
+        // path below it would end at ArtifactMissing — the code that means bytes vanished when they should not have.
+        // The reader has to be told which of the two happened, so the tombstone answers first and in its own words.
+        if (snapshot.Metadata.PurgedAt != null) return RejectRange(AgentRunLogProblemCode.Purged, metadata: snapshot.Metadata);
         if (request.OffsetBytes > snapshot.Metadata.TotalBytes) return RejectRange(AgentRunLogProblemCode.InvalidRequest, metadata: snapshot.Metadata);
 
         var requestedEnd = Math.Min(snapshot.Metadata.TotalBytes, checked(request.OffsetBytes + request.Length));
@@ -623,7 +627,14 @@ public sealed partial class AgentRunLogService : IAgentRunLogService
     private static AgentRunLogOpenResult.Opened Opened(AgentRunLogStream value, bool alreadyOpen, bool reclaimed) => new(Project(value), alreadyOpen, reclaimed) { CaptureSourceBaseOffsetBytes = value.CaptureSourceBaseOffsetBytes, CaptureFinalizedAt = value.CaptureFinalizedAt };
     private static AgentRunLogCaptureHead CaptureHead(AgentRunLogStream value) => new(Project(value), value.WorkerFenceEpoch!.Value, value.CaptureSessionId!.Value, value.CaptureSourceBaseOffsetBytes, value.CaptureFinalizedAt);
     private static AgentRunLogSegmentReceipt Receipt(AgentRunLogSegment value) => new(value.Id, value.SegmentOrdinal, value.StartOffsetBytes, value.LengthBytes, value.SourceStartOffsetBytes, value.SourceLengthBytes, value.ArtifactObjectId);
-    private static AgentRunLogMetadata Project(AgentRunLogStream value) => new(value.Id, value.AgentRunId, value.StreamKind, value.ContentType, value.ContentEncoding, value.CaptureSource, value.Retention, value.State, value.Revision, value.SegmentCount, value.TotalBytes, value.SourceOffsetBytes, value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest), value.CreatedAt, value.LastModifiedAt, value.CompletedAt, value.ErrorCode) { Integrity = ProjectIntegrity(value.SchemaVersion, value.ManifestDigest, value.SegmentCount, value.TotalBytes, value.CompletedAt) };
+    private static AgentRunLogMetadata Project(AgentRunLogStream value) => new(value.Id, value.AgentRunId, value.StreamKind, value.ContentType, value.ContentEncoding, value.CaptureSource, value.Retention, value.State, value.Revision, value.SegmentCount, value.TotalBytes, value.SourceOffsetBytes, value.ContentDigest == null ? null : Convert.ToHexStringLower(value.ContentDigest), value.CreatedAt, value.LastModifiedAt, value.CompletedAt, value.ErrorCode)
+    {
+        // A purged stream keeps its manifest receipt, and projecting it as an integrity proof would state that these
+        // bytes were verified — about bytes that are gone. The receipt stays in the row as the record of what WAS
+        // verified; the projection withholds it, and PurgedAt is what the reader gets instead.
+        Integrity = value.PurgedAt == null ? ProjectIntegrity(value.SchemaVersion, value.ManifestDigest, value.SegmentCount, value.TotalBytes, value.CompletedAt) : null,
+        PurgedAt = value.PurgedAt,
+    };
     private static bool SameIdentity(AgentRunLogStream stream, AgentRunLogOpenRequest request) => stream.ContentType == request.ContentType && stream.ContentEncoding == request.ContentEncoding && stream.CaptureSource == request.CaptureSource && stream.Retention == request.Retention && stream.ExpiresAt == request.ExpiresAt;
     private static bool Valid(AgentRunLogOpenRequest value, DateTimeOffset now) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && KeyPattern().IsMatch(value.StreamKind ?? "") && KeyPattern().IsMatch(value.CaptureSource ?? "") && value.ContentType is { Length: <= 255 } && ContentTypePattern().IsMatch(value.ContentType) && (value.ContentEncoding == null || EncodingPattern().IsMatch(value.ContentEncoding)) && Enum.IsDefined(value.Retention) && (value.ExpiresAt == null || value.ExpiresAt > now) && (value.Retention != ArtifactRetention.Ephemeral || value.ExpiresAt != null) && (value.Retention != ArtifactRetention.Permanent || value.ExpiresAt == null);
     private static bool Valid(AgentRunLogAppendRequest value) => value.TeamId != Guid.Empty && value.AgentRunId != Guid.Empty && value.StreamId != Guid.Empty && value.WorkerFenceEpoch > 0 && value.CaptureSessionId != Guid.Empty && value.ExpectedSegmentOrdinal > 0 && value.ExpectedOffsetBytes >= 0 && value.ExpectedSourceOffsetBytes >= 0 && value.SourceLengthBytes > 0 && value.StorageProfileId != Guid.Empty && value.StorageProfileRevision > 0 && value.ActorId != Guid.Empty && value.Bytes.Length is > 0 and <= MaximumAppendBytes && ValidTimeout(value.OperationTimeout);

@@ -2,7 +2,7 @@ using CodeSpace.Messages.Retention;
 
 namespace CodeSpace.Core.Services.Workflows.Retention;
 
-/// <summary>What a sweep decided to do with one durable record.</summary>
+/// <summary>What a sweep decided to do with one durable record. Every member except <see cref="Collect"/> is a keep.</summary>
 public enum DurableRetentionAction
 {
     /// <summary>First observation of "nothing cites this" — record the quarantine deadline, remove nothing.</summary>
@@ -11,13 +11,13 @@ public enum DurableRetentionAction
     /// <summary>Both waits have elapsed and nothing cites the record. The ONLY action that removes anything.</summary>
     Collect,
 
-    /// <summary>Something cites the record. Keep.</summary>
+    /// <summary>Something cites the record. Keep, and clear any quarantine the citation invalidated.</summary>
     Referenced,
 
     /// <summary>The status cannot be established. Keep.</summary>
     Indeterminate,
 
-    /// <summary>A scheduled wait (an age floor or a quarantine window). Keep, and re-ask when it elapses.</summary>
+    /// <summary>A scheduled wait (an age floor or a quarantine window) that has not elapsed. Keep.</summary>
     Wait,
 }
 
@@ -32,6 +32,11 @@ public sealed record DurableRetentionObservation(DateTimeOffset TerminalAt, Date
 /// its class's age floor keeps, whatever its citation status. Any verdict other than a definite "nothing cites this"
 /// keeps. And a first "nothing cites this" observation only ever quarantines — collection needs the quarantine window
 /// to have elapsed on top of the age floor, which is a second, independent wait.</para>
+///
+/// <para><see cref="RetainUntil"/> is not advice: it is the value the record's quarantine marker must hold after the
+/// settlement. A citation CLEARS it, which is the property that keeps the two waits independent — when a cited record
+/// later stops being cited, its quarantine starts again from that observation rather than inheriting a deadline set
+/// while something still pointed at it.</para>
 /// </summary>
 public sealed record DurableRetentionDecision(DurableRetentionAction Action, string? Code, DateTimeOffset? RetainUntil)
 {
@@ -44,15 +49,15 @@ public sealed record DurableRetentionDecision(DurableRetentionAction Action, str
     {
         ArgumentNullException.ThrowIfNull(observation);
 
-        if (rule is null) return Indeterminate("retention-class-unregistered");
+        if (rule is null) return Indeterminate("retention-class-unregistered", observation.RetainUntil);
 
         var eligibleAt = observation.TerminalAt.Add(rule.MinimumAge);
 
-        if (observation.Now < eligibleAt) return Wait("age-floor-open", eligibleAt);
+        if (observation.Now < eligibleAt) return Wait("age-floor-open", observation.RetainUntil);
 
         if (observation.Verdict == DurableReferenceVerdict.Referenced) return Referenced();
 
-        if (observation.Verdict != DurableReferenceVerdict.Unreferenced) return Indeterminate("reference-status-indeterminate");
+        if (observation.Verdict != DurableReferenceVerdict.Unreferenced) return Indeterminate("reference-status-indeterminate", observation.RetainUntil);
 
         if (observation.RetainUntil is not { } retainUntil) return Quarantine(observation.Now.Add(rule.QuarantineWindow));
 
@@ -61,7 +66,10 @@ public sealed record DurableRetentionDecision(DurableRetentionAction Action, str
 
     public static DurableRetentionDecision Quarantine(DateTimeOffset retainUntil) => new(DurableRetentionAction.Quarantine, null, retainUntil);
     public static DurableRetentionDecision Collect(DateTimeOffset retainUntil) => new(DurableRetentionAction.Collect, null, retainUntil);
+
+    /// <summary>A citation. The quarantine marker is cleared, because the observation it recorded has been contradicted.</summary>
     public static DurableRetentionDecision Referenced() => new(DurableRetentionAction.Referenced, null, null);
-    public static DurableRetentionDecision Indeterminate(string code) => new(DurableRetentionAction.Indeterminate, code, null);
-    public static DurableRetentionDecision Wait(string code, DateTimeOffset until) => new(DurableRetentionAction.Wait, code, until);
+
+    public static DurableRetentionDecision Indeterminate(string code, DateTimeOffset? retainUntil) => new(DurableRetentionAction.Indeterminate, code, retainUntil);
+    public static DurableRetentionDecision Wait(string code, DateTimeOffset? retainUntil) => new(DurableRetentionAction.Wait, code, retainUntil);
 }

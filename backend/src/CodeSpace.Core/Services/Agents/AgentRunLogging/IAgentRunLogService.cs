@@ -142,6 +142,14 @@ public sealed record AgentRunLogMetadata(
     string? ErrorCode)
 {
     public AgentRunLogIntegrity? Integrity { get; init; }
+
+    /// <summary>
+    /// When the retention plane reclaimed this stream's bytes, or null while they are still at their destination. It
+    /// rides on the metadata rather than only on the read result because a caller that LISTS streams never attempts a
+    /// read: without it, <c>GET /logs</c> would report a reclaimed archive as a completed capture with its byte count
+    /// intact, which is the precise lie the tombstone exists to prevent.
+    /// </summary>
+    public DateTimeOffset? PurgedAt { get; init; }
 }
 
 public sealed record AgentRunLogSegmentReceipt(Guid SegmentId, long SegmentOrdinal, long StartOffsetBytes, long LengthBytes, long SourceStartOffsetBytes, long SourceLengthBytes, Guid ArtifactObjectId);
@@ -246,4 +254,11 @@ public enum AgentRunLogProblemCode
     StorageActivationFailed,
     ProviderTimeout,
     Unsupported,
+
+    /// <summary>
+    /// The stream settled and its bytes were later reclaimed by the retention plane. Deliberately NOT
+    /// <see cref="ArtifactMissing"/>: that code says an object which should be there is not, and folding a policy
+    /// reclamation into it would make a healthy deployment indistinguishable from one losing data.
+    /// </summary>
+    Purged,
 }

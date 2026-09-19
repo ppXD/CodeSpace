@@ -15,15 +15,22 @@
 -- This migration adds ONE admissible shape, the sixth, and makes it as narrow as the row allows: a RETENTION
 -- STATEMENT may move retain_until and purged_at on a terminal stream and NOTHING else. It cannot change the state, the
 -- claim, the byte head, the source offsets, the finalization receipt, the digests or the error — so a purge can never
--- be mistaken for a capture verdict, and the durable prefix's metadata stays exactly as readable as it was. Three
--- further rules ride with it, each of which exists because its absence is silent data loss:
+-- be mistaken for a capture verdict, and the durable prefix's metadata stays exactly as readable as it was. A
+-- statement that touches anything else still reads the refusal it always did, word for word, because the arm
+-- reproduces it rather than replacing it. Three further rules ride with the arm, each of which exists because its
+-- absence is silent data loss:
 --
 --   * A stream that is still Open is never a retention candidate. Its bytes belong to a live capture session, so the
 --     columns are refused there rather than left to fall through an arm that does not enumerate them.
---   * A purge requires a retain_until that was already recorded. The reaper's two waits are an age floor and then a
---     quarantine, and the second one only exists if it was durably written first; without this rule one sweep could
---     both propose and execute a collection.
+--   * A purge requires a retain_until that was recorded by an EARLIER statement (OLD, not NEW). The reaper's two
+--     waits are an age floor and then a quarantine; without this rule one sweep could both propose and execute a
+--     collection in a single statement, and the second wait would never have existed at all.
 --   * A purge is final. Clearing purged_at would claim bytes are back that no one restored.
+--
+-- The arm matches on the SHAPE of the statement rather than on "one of the two columns changed value", because a
+-- sweep that looked at a stream and kept it must be able to record that it looked — advancing the revision and the
+-- modification time while both columns keep the values they had. Without that write the claim query would hand the
+-- same unreclaimable rows back on every tick, for ever.
 --
 -- The INSERT arm is tightened for the same reason it rejects a pre-set manifest receipt: a new stream that arrives
 -- already carrying a retention verdict is not a new stream.
@@ -76,19 +83,16 @@ BEGIN
     END IF;
 
     -- The SIXTH admissible update shape, and the reason this function is redefined: a RETENTION STATEMENT. It is
-    -- matched first and returns on its own, because the arms below are written for statements a capturing worker
-    -- makes and every one of them refuses a terminal row. Both columns are named explicitly, so a statement that
-    -- touches neither never reaches this arm at all.
-    IF NEW.retain_until IS DISTINCT FROM OLD.retain_until OR NEW.purged_at IS DISTINCT FROM OLD.purged_at THEN
-        IF OLD.state = 'Open' THEN
-            RAISE EXCEPTION 'agent_run_log_stream retention statement rejected on a live stream (id=%); its bytes belong to an open capture session.', OLD.id;
-        END IF;
-        IF OLD.purged_at IS NOT NULL THEN
-            RAISE EXCEPTION 'agent_run_log_stream purge is final; a purged stream admits no further retention statement (id=%).', OLD.id;
-        END IF;
-        IF NEW.purged_at IS NOT NULL AND NEW.retain_until IS NULL THEN
-            RAISE EXCEPTION 'agent_run_log_stream cannot be purged without the retain_until it was quarantined under (id=%).', OLD.id;
-        END IF;
+    -- matched first and answers EVERY update to a terminal row, because the arms below are written for statements a
+    -- capturing worker makes and each one refuses a terminal row outright. The refusal they used to reach is
+    -- reproduced here word for word, so a caller trying to revive or rewrite a settled stream still reads exactly the
+    -- message it always did.
+    --
+    -- The shape, not a value change, is what admits it: a retention statement may touch retain_until and purged_at,
+    -- must advance the revision and the modification time, and may touch NOTHING else. Matching on the shape rather
+    -- than on "one of the two columns differs" is deliberate — a sweep that looked at a stream and KEPT it has to be
+    -- able to record that it looked, and that statement changes neither column's value.
+    IF OLD.state <> 'Open' THEN
         IF NEW.id IS DISTINCT FROM OLD.id OR NEW.team_id IS DISTINCT FROM OLD.team_id
            OR NEW.agent_run_id IS DISTINCT FROM OLD.agent_run_id OR NEW.state IS DISTINCT FROM OLD.state
            OR NEW.stream_kind IS DISTINCT FROM OLD.stream_kind OR NEW.content_type IS DISTINCT FROM OLD.content_type
@@ -110,12 +114,24 @@ BEGIN
            OR NEW.manifest_digest IS DISTINCT FROM OLD.manifest_digest
            OR NEW.remote_stall_since IS DISTINCT FROM OLD.remote_stall_since
            OR NEW.remote_stall_code IS DISTINCT FROM OLD.remote_stall_code THEN
-            RAISE EXCEPTION 'agent_run_log_stream retention statement cannot rewrite anything but its own retention columns (id=%).', OLD.id;
+            RAISE EXCEPTION 'agent_run_log_stream terminal state is immutable (id=%, state=%).', OLD.id, OLD.state;
+        END IF;
+        IF OLD.purged_at IS NOT NULL THEN
+            RAISE EXCEPTION 'agent_run_log_stream purge is final; a purged stream admits no further retention statement (id=%).', OLD.id;
+        END IF;
+        -- OLD, not NEW: the quarantine must have been recorded by an EARLIER statement, or one sweep could both
+        -- propose a collection and carry it out, and the second of the two waits would never have existed.
+        IF NEW.purged_at IS NOT NULL AND OLD.retain_until IS NULL THEN
+            RAISE EXCEPTION 'agent_run_log_stream cannot be purged without the retain_until it was quarantined under (id=%).', OLD.id;
         END IF;
         IF NEW.revision <> OLD.revision + 1 OR NEW.last_modified_at < OLD.last_modified_at THEN
             RAISE EXCEPTION 'agent_run_log_stream revision/time must advance monotonically (id=%, old_revision=%, new_revision=%).', OLD.id, OLD.revision, NEW.revision;
         END IF;
         RETURN NEW;
+    END IF;
+
+    IF NEW.retain_until IS DISTINCT FROM OLD.retain_until OR NEW.purged_at IS DISTINCT FROM OLD.purged_at THEN
+        RAISE EXCEPTION 'agent_run_log_stream retention statement rejected on a live stream (id=%); its bytes belong to an open capture session.', OLD.id;
     END IF;
 
     IF NEW.manifest_digest IS DISTINCT FROM OLD.manifest_digest
@@ -144,9 +160,6 @@ BEGIN
        OR NEW.retention IS DISTINCT FROM OLD.retention OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
        OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
         RAISE EXCEPTION 'agent_run_log_stream stable identity is immutable (id=%).', OLD.id;
-    END IF;
-    IF OLD.state <> 'Open' THEN
-        RAISE EXCEPTION 'agent_run_log_stream terminal state is immutable (id=%, state=%).', OLD.id, OLD.state;
     END IF;
     IF NEW.revision <> OLD.revision + 1 OR NEW.last_modified_at < OLD.last_modified_at THEN
         RAISE EXCEPTION 'agent_run_log_stream revision/time must advance monotonically (id=%, old_revision=%, new_revision=%).', OLD.id, OLD.revision, NEW.revision;
