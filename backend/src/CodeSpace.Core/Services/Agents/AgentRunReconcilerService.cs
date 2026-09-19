@@ -119,12 +119,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly Capture.INativeRecordPlane _nativeRecords;
     private readonly IRunCleanupLedger _cleanup;
     private readonly AgentRunLogging.IAgentRunLogService _logs;
+    private readonly Workflows.Budget.IBudgetLedger _budget;
     // Withdraws an abandoned run's brokered model credential before its orphaned process is killed. Optional so a
     // deployment (or a hand-built double) without a broker has nothing to withdraw.
     private readonly Credentials.IModelCredentialBroker? _credentialBroker;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, IRunCleanupLedger cleanup, AgentRunLogging.IAgentRunLogService logs, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, Capture.ICaptureIntentService captureIntents, Capture.INativeRecordPlane nativeRecords, IRunCleanupLedger cleanup, AgentRunLogging.IAgentRunLogService logs, Workflows.Budget.IBudgetLedger budget, ILogger<AgentRunReconcilerService> logger, Credentials.IModelCredentialBroker? credentialBroker = null)
     {
         _db = db;
         _runs = runs;
@@ -136,6 +137,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         _nativeRecords = nativeRecords;
         _cleanup = cleanup;
         _logs = logs;
+        _budget = budget;
         _credentialBroker = credentialBroker;
         _logger = logger;
     }
@@ -939,7 +941,52 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         return StaleOutcome.Recovered;
     }
 
+    /// <summary>
+    /// The reconciler's ONE terminal write, and therefore the one place its runs' spend claims are closed. Every
+    /// abandon and every spool recovery arrives here, so a claim cannot be left live by an arm that forgot to
+    /// settle — the same by-construction shape the executor's own <c>CompleteAndNotifyAsync</c> uses.
+    /// </summary>
     private async Task<int> TerminalizeCandidateAsync(AgentRunReconciliationCandidate candidate, AgentRunStatus status, string? error, string? resultJson, CancellationToken cancellationToken)
+    {
+        var transitioned = await CasTerminalAsync(candidate, status, error, resultJson, cancellationToken).ConfigureAwait(false);
+
+        if (transitioned == 0) return 0;   // lost the CAS — another observer owns this run's terminal, and its claim
+
+        await SettleSpendClaimsQuietlyAsync(candidate, cancellationToken).ConfigureAwait(false);
+
+        return transitioned;
+    }
+
+    /// <summary>
+    /// Close the terminalized run's still-live spend claims. Nothing else will: the reconciler lands the run
+    /// WITHOUT the executor's fold, so each claim would ride to its reservation deadline (up to a day), expire to
+    /// Indeterminate at its full RESERVE, and be counted against the team's rolling window the whole time.
+    ///
+    /// <para>The figure is whatever the run's own result_jsonb ended up carrying — the spool recovery's salvaged
+    /// result, or nothing at all for an abandon, which settles Indeterminate rather than inventing a bill. Read
+    /// AFTER the CAS so it is the result the CAS itself just wrote. Best-effort: the terminal already stands.</para>
+    ///
+    /// <para>It swallows CANCELLATION too, unlike the sweep's other quiet closers. Those run before their
+    /// candidate's terminal; this one runs after a CAS that has already COMMITTED, and every remaining step —
+    /// invalidating the capture promises, revoking the credential, killing the orphan, appending the event — is
+    /// still owed to a run the database now calls terminal. Letting a shutdown escape here would skip all of them
+    /// and leave a Failed run with a live process holding its workspace.</para>
+    /// </summary>
+    private async Task SettleSpendClaimsQuietlyAsync(AgentRunReconciliationCandidate candidate, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var resultJson = await _db.AgentRun.AsNoTracking().Where(r => r.Id == candidate.RunId).Select(r => r.ResultJson).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+            await _budget.CloseAgentRunClaimsByPrefixAsync(candidate.RunId, candidate.TeamId, Cost.AgentRunBudget.ObservedUsd(resultJson), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: agent run {RunId} live budget reservations could not be closed; the expiry sweep reconciles them pessimistically", candidate.RunId);
+        }
+    }
+
+    private async Task<int> CasTerminalAsync(AgentRunReconciliationCandidate candidate, AgentRunStatus status, string? error, string? resultJson, CancellationToken cancellationToken)
     {
         var duration = AgentRunLiveness.LeaseDuration;
         return await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {candidate.RunId} FOR UPDATE) UPDATE agent_run AS target SET status = {status.ToString()}, error = {error}, result_jsonb = COALESCE(CAST({resultJson} AS jsonb), target.result_jsonb), completed_at = clock_timestamp(), fence_epoch = target.fence_epoch + 1 FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id IS NOT DISTINCT FROM {candidate.OwnerId} AND target.reattach_reservation_id IS NOT DISTINCT FROM {candidate.ReservationId} AND target.fence_epoch = {candidate.Epoch} AND target.runner_handle IS NOT DISTINCT FROM CAST({candidate.RunnerHandleJson} AS jsonb) AND target.reattach_attempts = {candidate.ReattachAttempts} AND (target.lease_expires_at <= clock_timestamp() OR (target.lease_expires_at IS NULL AND COALESCE(target.heartbeat_at, target.started_at, target.created_date) <= clock_timestamp() - {duration}))", cancellationToken).ConfigureAwait(false);

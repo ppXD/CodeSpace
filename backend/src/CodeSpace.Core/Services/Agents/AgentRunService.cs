@@ -13,6 +13,7 @@ using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -191,6 +192,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
     private readonly Completion.ICompletionContractStore _contracts;
     private readonly Capture.INativeRecordPlane _nativeRecords;
     private readonly Learning.IAgentLessonInjector _lessonInjector;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AgentRunService> _logger;
     private readonly Services.RunData.IRunDataCompletenessWriter? _completeness;
     // Withdraws a cancelled run's brokered model credential before its process is killed. Optional like _completeness
@@ -207,6 +209,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         _contracts = runtime.Contracts;
         _nativeRecords = runtime.NativeRecords;
         _lessonInjector = runtime.Lessons;
+        _scopeFactory = runtime.Scopes;
         _authority = authority;
         _logger = logger;
         _completeness = completeness;
@@ -766,7 +769,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // longer Running at this epoch → leave it alone.
         var snapshot = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => new { r.TeamId, r.Status, r.FenceEpoch, r.RunnerHandleJson })
+            .Select(r => new { r.TeamId, r.Status, r.FenceEpoch, r.RunnerHandleJson, r.ResultJson })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return false;
@@ -781,6 +784,9 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             .ConfigureAwait(false);
 
         if (cancelled == 0) return false;
+
+        // AFTER the CAS, never before: a cancel that lost the race leaves the claim to whoever lands the run.
+        await SettleSpendClaimsQuietlyAsync(runId, snapshot.TeamId, snapshot.ResultJson, cancellationToken).ConfigureAwait(false);
 
         // FIRST side effect of a won cancel: withdraw the run's brokered model credential. Before the kill, not
         // after — a kill is a signal that races the agent's next model call, and losing that race used to mean the
@@ -823,6 +829,31 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(exception, "Agent run {RunId} harness execution could not be terminalized after cancel (cause {Cause}); the row stays live for a later sweep", runId, cause);
+        }
+    }
+
+    /// <summary>
+    /// Close the cancelled run's still-live spend claims. A cancel lands the run terminal WITHOUT the executor's
+    /// fold, so nothing else ever closes them: each rides to its reservation deadline (up to a day), is expired to
+    /// Indeterminate at its full RESERVE, and is counted against the team's rolling window the whole time — a
+    /// cancelled run over-charging the team for the money it was stopped from spending.
+    ///
+    /// <para>The figure is whatever the run's own durable result recorded (normally nothing, for a run killed
+    /// mid-flight) — never an estimate dressed up as a bill. Best-effort like the closers around it: the run already
+    /// reached Cancelled, and the expiry sweep still reconciles anything this misses.</para>
+    /// </summary>
+    private async Task SettleSpendClaimsQuietlyAsync(Guid runId, Guid teamId, string? resultJson, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+
+        try
+        {
+            await scope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>()
+                .CloseAgentRunClaimsByPrefixAsync(runId, teamId, Cost.AgentRunBudget.ObservedUsd(resultJson), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: the cancelled run's live budget reservations could not be closed; the expiry sweep reconciles them pessimistically", runId);
         }
     }
 

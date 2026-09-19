@@ -10,6 +10,10 @@ public sealed class AdmitAllBudgetLedger : IBudgetLedger
 
     public Task SettleAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, decimal? actualUsd, CancellationToken cancellationToken) => Task.CompletedTask;
 
+    public Task<IReadOnlyList<AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<AgentRunClaimHold>>([]);
+
+    public Task CloseAgentRunClaimsByPrefixAsync(Guid agentRunId, Guid teamId, decimal? actualUsd, CancellationToken cancellationToken) => Task.CompletedTask;
+
     public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);

@@ -648,6 +648,10 @@ public class RecordingLLMClientDecoratorTests
             return Task.CompletedTask;
         }
 
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Workflows.Budget.AgentRunClaimHold>> LiveAgentRunClaimsAsync(Guid agentRunId, Guid teamId, string exceptScopeKey, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Workflows.Budget.AgentRunClaimHold>>([]);
+
+        public Task CloseAgentRunClaimsByPrefixAsync(Guid agentRunId, Guid teamId, decimal? actualUsd, CancellationToken cancellationToken) => Task.CompletedTask;
+
         public Task ReleaseAsync(Guid workflowRunId, Guid teamId, string kind, string scopeKey, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<int> ExpireOverdueAsync(int batchSize, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<decimal> CommittedUsdAsync(Guid workflowRunId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(0m);

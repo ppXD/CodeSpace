@@ -397,6 +397,7 @@ public sealed class AgentRunAbandonedLogCaptureFlowTests : IDisposable
             scope.Resolve<CodeSpace.Core.Services.Jobs.ICodeSpaceBackgroundJobClient>(), scope.Resolve<CodeSpace.Core.Services.Agents.Sandbox.ISandboxRunnerRegistry>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Mcp.IToolCallLedgerService>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>(), scope.Resolve<IRunCleanupLedger>(), logs,
+            scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentRunReconcilerService>.Instance);
 
     /// <summary>The production reducer over the production projection — the same two lines <c>RoomProjector.AgentLogsAsync</c> runs.</summary>
