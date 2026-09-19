@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
@@ -348,6 +349,15 @@ public sealed class AgentCodeNode : INodeRuntime
             // guess: the runner classified it from the cgroup's own oom_kill counter (SandboxStatus.ResourceExhausted).
             var resourceExhausted = exitReason == AgentRunExecutor.ResourceExhaustedExitReason;
 
+            // The same shape as the ceiling above, one layer lower and with no guess left in it at all: the invocation
+            // carries a string past the kernel's per-string argv/envp ceiling, so execve refuses it before a process
+            // exists. Those bytes are the same bytes on every host, so a respawn is an identical refusal — and this
+            // one used to be the most expensive row in this table, because before the preflight it reached the kernel,
+            // left no exit marker, and came back as the generic vanished-process sentinel that IS retryable. Note the
+            // deliberate narrowness: a native-launch SLOT refusal (foreign host, binding conflict, missing bootstrap)
+            // keeps its own code and stays retryable, because another worker may admit it.
+            var argumentTooLong = exitReason == FailureCodes.SandboxArgumentTooLong;
+
             // D3: the third carve-out, and the only one that is not about the FAILURE's nature but about whether
             // anything can be done differently. A non-infra acceptance failure is a verdict the SAME model will
             // reproduce — which is why it is deterministic — but the finished attempt may have left a resolved
@@ -366,7 +376,7 @@ public sealed class AgentCodeNode : INodeRuntime
             var formatFault = Supervisor.AgentRetryCauses.Classify(error) == Supervisor.AgentRetryCauses.GatewayFormatFault;
             var mitigationSpent = formatFault && ReadFlag(payload, "thinkingDisabled");
 
-            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted)
+            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong)
                                 && !acceptanceInfraFault
                                 && !stalled
                                 && !escalationAvailable)

@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.SandboxTests;
@@ -67,9 +68,9 @@ public sealed class SandboxArgumentLimitE2ETests : IDisposable
         var key = Stage();
         var spec = new SandboxSpec { Command = "/bin/echo", Args = ["--goal", new string('x', SandboxArgumentLimit.MaxStringBytes + 1)], TimeoutSeconds = 10 };
 
-        var refusal = await Should.ThrowAsync<NativeLaunchException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, key), CancellationToken.None));
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, key), CancellationToken.None));
 
-        refusal.Reason.ShouldBe("argument-too-long");
+        ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong);
         Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse(
             customMessage: $"nothing may be staged for a launch that cannot happen — inspect {LocalProcessRunner.SpoolDirectoryFor(key)} by hand if this fails");
     }
