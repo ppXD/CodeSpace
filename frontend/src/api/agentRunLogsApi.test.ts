@@ -71,6 +71,18 @@ describe("Agent Run durable log API", () => {
     await expect(agentsApi.readRunLogRange("r", "missing", 0, 1)).resolves.toMatchObject({ availability: "Missing", isRetryable: false });
   });
 
+  // A reclaimed archive and a lost object both answer 410. If the union or the runtime Set omits Purged, the reader
+  // falls through to InvalidResponse and the operator is told the RESPONSE was malformed — strictly worse than the
+  // wrong-but-well-formed answer, and it hides a healthy deployment doing exactly what its retention policy says.
+  it("keeps the retention plane's Purged verdict distinct from a missing object", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(json({ availability: "Purged", code: "log_bytes_purged", isRetryable: false, streamId: "s" }, 410))
+      .mockResolvedValueOnce(json({ availability: "PhysicalObjectMissing", code: "artifact_missing", isRetryable: false, streamId: "s" }, 410)));
+
+    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "Purged", code: "log_bytes_purged", isRetryable: false });
+    await expect(agentsApi.readRunLogRange("r", "s", 0, 1)).resolves.toEqual({ availability: "PhysicalObjectMissing", code: "artifact_missing", isRetryable: false });
+  });
+
   it("fails closed when a success response omits or contradicts its range contract", async () => {
     vi.stubGlobal("fetch", vi.fn(() => content(new Uint8Array([1, 2]), {
       "X-CodeSpace-Log-Offset": "0",

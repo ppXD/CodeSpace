@@ -246,6 +246,8 @@ export interface AgentRunLogStreamSummary {
   totalBytes: number;
   sha256: string | null;
   integrity?: AgentRunLogIntegrity | null;
+  /** When the retention plane reclaimed this stream's bytes. Set means the head row is a tombstone: the capture settled, the window elapsed, and `integrity` is deliberately absent because there is nothing left to verify. */
+  purgedAt?: string | null;
   createdAt: string;
   lastModifiedAt: string;
   completedAt: string | null;
@@ -257,7 +259,8 @@ export interface AgentRunLogPage {
   nextCursor: string | null;
 }
 
-export type AgentRunLogReadAvailability = "InvalidRange" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ProviderTimeout" | "Unsupported";
+/** `Purged` is the retention plane's own answer: the capture settled and its bytes were later reclaimed on purpose. It is NOT `PhysicalObjectMissing`, which says an object that should still be there is gone. */
+export type AgentRunLogReadAvailability = "InvalidRange" | "PhysicalObjectMissing" | "IntegrityFailure" | "BackendUnavailable" | "AccessDenied" | "ProviderTimeout" | "Unsupported" | "Purged";
 
 export interface AgentRunLogRangeAvailable {
   availability: "Available";
@@ -592,7 +595,7 @@ export const agentsApi = {
     fetchJson<AgentStatsRollup>(`/api/agents/stats${since ? `?since=${encodeURIComponent(since)}` : ""}`),
 };
 
-const LOG_READ_AVAILABILITIES = new Set<AgentRunLogReadAvailability>(["InvalidRange", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied", "ProviderTimeout", "Unsupported"]);
+const LOG_READ_AVAILABILITIES = new Set<AgentRunLogReadAvailability>(["InvalidRange", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied", "ProviderTimeout", "Unsupported", "Purged"]);
 const EVENT_DATA_READ_AVAILABILITIES = new Set<AgentRunEventDataReadAvailability>(["NotReferenced", "InvalidRange", "MetadataMissing", "PhysicalObjectMissing", "IntegrityFailure", "BackendUnavailable", "AccessDenied"]);
 const AGENT_EVENT_KINDS = new Set(["Queued", "Started", "AssistantMessage", "Reasoning", "PlanUpdate", "ToolCall", "CommandExecuted", "FileChanged", "TestOutput", "ApprovalRequested", "ApprovalResolved", "Warning", "Error", "FinalSummary", "Completed"]);
 const LOG_STATUSES = new Set<AgentRunLogStatus>(["Open", "Completed", "Truncated", "Unavailable", "Corrupt", "CaptureFailed"]);
