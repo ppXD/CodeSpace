@@ -16,6 +16,12 @@ namespace CodeSpace.Core.Services.Agents.Sandbox;
 /// operator can query names 131071, and <c>ulimit -s unlimited</c> raises the total while leaving this constant
 /// untouched (it has no sysctl and no rlimit knob).</para>
 ///
+/// <para>Two things this check does NOT cover, neither reachable from a goal. The model-broker host token is
+/// substituted into the environment AFTER it runs (<c>LocalProcessRunner.NativeLaunch.cs</c>'s
+/// <c>ResolveModelBrokerHost</c>), so a string within a few bytes of the ceiling could cross it post-check — a
+/// hostname's worth of bytes on a value already at 131 071. And the TOTAL argv+envp budget above is unmeasured here:
+/// a launch could clear every per-string check and still exceed it, which takes roughly sixteen maximal strings.</para>
+///
 /// <para>Without this preflight an over-long agent goal — the prompt is a trailing positional argument on both
 /// harnesses — reached <c>execve</c>, was refused with E2BIG, and never replaced the process image. The supervisor
 /// shell therefore never ran to write the spool's exit marker, so the runner reported the run as "exited with code -1
@@ -62,7 +68,10 @@ public static class SandboxArgumentLimit
     private static bool TooLong(string value) => Encoding.UTF8.GetByteCount(value) > MaxStringBytes;
 
     private static string Refusal(string position, string value) =>
-        $"{position} is {Bytes(Encoding.UTF8.GetByteCount(value))} bytes; this kernel accepts at most {Bytes(MaxStringBytes)} bytes in a single argument or environment value (MAX_ARG_STRLEN = 32 x {Bytes(MaxStringBytes / 32 + 1)}-byte page). This is an argument-size limit, not a memory limit — no process is created and no memory is allocated. Shorten the text or pass it to the agent as a file.";
+        $"{position} is {Bytes(Encoding.UTF8.GetByteCount(value))} bytes; {Accepts} at most {Bytes(MaxStringBytes)} bytes in a single argument or environment value (MAX_ARG_STRLEN = 32 x {Bytes(MaxStringBytes / 32 + 1)}-byte page). This is an argument-size limit, not a memory limit — no process is created and no memory is allocated. Shorten the text or pass it to the agent as a file.";
+
+    /// <summary>Whose ceiling this is. Off Linux it is not the local kernel's — macOS enforces no per-string cap — so saying "this kernel" there would be false, and the honest claim is the one the refusal is actually protecting: the strictest worker this launch could land on.</summary>
+    private static string Accepts => OperatingSystem.IsLinux() ? "this kernel accepts" : "the strictest Linux worker accepts";
 
     private static string Bytes(int count) => count.ToString(CultureInfo.InvariantCulture);
 }

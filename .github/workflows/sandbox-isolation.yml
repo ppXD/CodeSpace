@@ -106,16 +106,18 @@ jobs:
       - name: Assert the isolation tests actually ran (no silent skip)
         # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a trait regression
         # could make this job pass green while exercising nothing. Read the trx counters and require the
-        # 4 known confinement tests to have executed. (REQUIRE_SANDBOX=1 already turns a "ran but couldn't
-        # sandbox" degrade into a hard failure; this closes the complementary "matched nothing" hole.)
+        # lane's FULL count. A floor well under it protects nothing — at 15, an entire class could stop
+        # being collected and this step would still pass — so it tracks what the lane actually runs and a
+        # PR that adds or removes a case updates it deliberately. (REQUIRE_SANDBOX=1 already turns a "ran
+        # but couldn't sandbox" degrade into a hard failure; this closes the "matched nothing" hole.)
         run: |
           trx=backend/TestResults/sandbox.trx
           test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 15 ]; then
-            echo "::error::Expected >=15 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
+          if [ "${executed:-0}" -lt 46 ]; then
+            echo "::error::Expected >=46 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 

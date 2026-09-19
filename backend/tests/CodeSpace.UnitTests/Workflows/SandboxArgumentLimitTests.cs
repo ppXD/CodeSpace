@@ -73,7 +73,10 @@ public sealed class SandboxArgumentLimitTests
 
         offender.ShouldContain(oversized.ToString(), customMessage: "an operator cannot shorten a prompt without knowing how far over it is");
         offender.ShouldContain(SandboxArgumentLimit.MaxStringBytes.ToString());
-        offender.ShouldContain("4", customMessage: "the offending position — the goal is the 4th argument here");
+        // "4" alone is satisfied by the 4096 in every message, so it asserted nothing. The position is what a reader
+        // needs: argv here is spec-relative, and the real launch splices a supervisor/cgroup/netns/prlimit/bwrap
+        // prefix (and McpDeclarationArgs) ahead of it, so this number names the SPEC's argument, not the kernel's.
+        offender.ShouldContain("argument 4", customMessage: "the offending position — the goal is the 4th argument of the spec here");
     }
 
     [Fact]
