@@ -76,6 +76,94 @@ internal static class NativeProcess
         if (setsid() < 0) throw new IOException("Cannot establish the native controller session.");
     }
 
+    /// <summary>
+    /// Point THIS process's fd 2 — and therefore every bootstrap it forks, and the supervisor shell it execs into —
+    /// at <paramref name="path"/> instead of the stderr pipe it inherited. The AGENT's own stderr is unaffected: the
+    /// supervisor script redirects its child to the spool FIFO, so only the shell's own messages land here. The
+    /// launching app redirects that pipe and
+    /// stops reading it the moment the handle is built, so a bootstrap that refuses after that point writes its
+    /// reason into a pipe with no reader; the reason is lost and the write itself can fail. A file outlives the
+    /// launch, so the reason is still there when a later reader asks why the pid is a corpse.
+    ///
+    /// <para>Best effort by construction: a diagnostics channel must never be the thing that fails a launch, so an
+    /// unwritable directory leaves the inherited fd in place and this returns.</para>
+    /// </summary>
+    public static void RedirectDiagnostics(string path)
+    {
+        try
+        {
+            using var file = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            if (dup2((int)file.SafeFileHandle.DangerousGetHandle(), 2) < 0) Explain("bootstrap", $"diagnostics stayed on the inherited stderr: dup2 failed with errno {Marshal.GetLastPInvokeError()}");
+        }
+        // Everything, not a list: this runs before Main's own handler, so an unreadable path, a refused mode, a libc
+        // that has no dup2 — anything at all — would otherwise abort the process over its logging.
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// One line naming <paramref name="reason"/>, tagged with the mode and pid that said it. The newline is part of
+    /// the same write because O_APPEND makes each write atomic against the other bootstraps appending to the same
+    /// file — a trailing WriteLine would be a second append that another process can land between.
+    ///
+    /// <para>Total, by the same rule <see cref="RedirectDiagnostics"/> states: fd 2 is now a file on the run's own
+    /// spool filesystem, which is exactly what is full in the incident where a controller must still stop a run. A
+    /// throwing write here sits ahead of <c>KillSession</c> on the stop path, so it would skip the kill, unwind into
+    /// a handler that writes again, and take the process down with the workload still running.</para>
+    /// </summary>
+    public static void Explain(string mode, string reason)
+    {
+        // Saturating, not accumulating: an unconditional Add would wrap back under the budget after ~2 GiB of
+        // refusals and start writing again, which is the case the budget exists for.
+        if (Interlocked.CompareExchange(ref _explained, Math.Min(DiagnosticsBudgetBytes + 1, _explained + reason.Length + 64), _explained) > DiagnosticsBudgetBytes) return;
+
+        try { Console.Error.Write($"[{DateTimeOffset.UtcNow:O}] {mode} pid {Environment.ProcessId}: {reason}\n"); }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// How much THIS bootstrap may append to the shared diagnostics file. Every other spool file is bounded by the
+    /// supervisor's own <c>ulimit -f</c>; this one is written before that shell exists, so it bounds what it can.
+    /// The bound is per process, so a launch's three bootstraps can reach three times it, and it does not reach the
+    /// supervisor shell's own messages on the fd it inherits — those are the shell's, not this budget's to hold.
+    /// Reasons are short and few, so reaching this at all means something is repeating, which is not worth a disk.
+    /// </summary>
+    private const int DiagnosticsBudgetBytes = 64 * 1024;
+
+    private static int _explained;
+
+    /// <summary>
+    /// Which OS thread is about to run <see cref="Exec"/>. <c>leader: False</c> is the fingerprint of the defect this
+    /// reports: an <c>execve</c> from a thread that is not the process's own leader makes the kernel zombie the real
+    /// leader first, and for that whole window the run's pid reads as a corpse to every liveness check there is. The
+    /// claim is asserted, not merely logged — a launch whose diagnostics say <c>leader: False</c> is one bad enough
+    /// to make a live run look dead.
+    /// </summary>
+    public static string ExecThread()
+    {
+        // The last thing this process does before execve, so it answers or says it cannot — never throws. A refusal
+        // raised HERE would reject a launch whose receipt already said ready, for a line of diagnostics.
+        try { return $"tid {ThreadId()} of pid {Environment.ProcessId} (leader: {IsProcessLeaderThread()})"; }
+        catch (Exception) { return $"tid ? of pid {Environment.ProcessId} (leader: unknown)"; }
+    }
+
+    /// <summary>
+    /// Whether the calling thread is the one the process was born on — the Linux thread-group leader, or Darwin's
+    /// main thread. Read from <c>/proc</c> rather than <c>gettid(2)</c> on Linux: the libc wrapper only exists from
+    /// glibc 2.30 / musl 1.2.2, and an operator-supplied runner host (<c>CODESPACE_RUNNER_HOST_PATH</c>) can run on
+    /// an older one, where a <c>DllImport</c> of it throws rather than answers.
+    /// </summary>
+    public static bool IsProcessLeaderThread() => OperatingSystem.IsLinux() ? ThreadId() == Environment.ProcessId : pthread_main_np() != 0;
+
+    /// <summary>This THREAD's kernel id (field 1 of its own <c>stat</c>), which is the process id for the thread-group leader and something else for every other thread.</summary>
+    private static long ThreadId()
+    {
+        if (!OperatingSystem.IsLinux()) return Environment.CurrentManagedThreadId;
+
+        var stat = File.ReadAllText("/proc/thread-self/stat");
+        return long.Parse(stat.AsSpan(0, stat.IndexOf(' ')));
+    }
+
     public static void ProtectFromParentDeath(NativeProcessIdentity parent)
     {
         if (OperatingSystem.IsLinux() && prctl(1, 9, 0, 0, 0) != 0) throw new IOException("Cannot establish parent-death protection.");
@@ -151,6 +239,7 @@ internal static class NativeProcess
             var argv = Vector(new[] { invocation.Command }.Concat(invocation.Args));
             var env = Vector(invocation.Environment.Select(pair => pair.Key + "=" + pair.Value));
             execve(invocation.Command, argv, env);
+            Explain("exec", $"execve refused the workload with errno {Marshal.GetLastPInvokeError()}");
             return 126;
         }
         finally { foreach (var pointer in strings) Marshal.FreeCoTaskMem(pointer); }
@@ -177,7 +266,9 @@ internal static class NativeProcess
         [FieldOffset(128)] public ulong StartMicroseconds;
     }
     [DllImport("libc", SetLastError = true)] private static extern int setsid();
+    [DllImport("libc", SetLastError = true)] private static extern int dup2(int oldDescriptor, int newDescriptor);
     [DllImport("libc", SetLastError = true)] private static extern int getppid();
+    [DllImport("libc", SetLastError = true)] private static extern int pthread_main_np();
     [DllImport("libc", SetLastError = true)] private static extern int kill(int pid, int signal);
     [DllImport("libc", SetLastError = true)] private static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
     [DllImport("libc", SetLastError = true)] private static extern int execve([MarshalAs(UnmanagedType.LPUTF8Str)] string path, IntPtr argv, IntPtr env);

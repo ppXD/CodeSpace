@@ -15,6 +15,8 @@ public static class NativeLaunchProtocol
     public const string ExecutionFile = "execution.json";
     public const string GuardianFile = "guardian.json";
     public const string StopFile = "stop.json";
+    /// <summary>Where the bootstrap's OWN diagnostics land. Its stderr is otherwise a pipe the launching app never reads and closes as soon as the handle is built — so a bootstrap that refuses or dies after that point says why into a closed pipe, and every reader of the failed launch sees a bare dead pid. Reasons only: never argv, environment or any other invocation input.</summary>
+    public const string DiagnosticsFile = "bootstrap.err";
     public const string BinaryName = "codespace-runner-host";
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 

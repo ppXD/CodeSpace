@@ -641,9 +641,28 @@ public sealed partial class LocalProcessRunner
 
         await EmitNewFramesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onFrame, drainPartial: true, ct).ConfigureAwait(false);
 
-        var stderr = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+        var stderr = await ReadVanishedDiagnosticsAsync(handle).ConfigureAwait(false);
 
         return new SandboxResult { Status = status, ExitCode = -1, Stdout = "", Stderr = stderr };
+    }
+
+    /// <summary>
+    /// Why the tree vanished. The workload's own stderr first — but a tree that vanished without a marker may never
+    /// have BECOME the workload: a bootstrap that refuses, or is killed by its own controller, before it execs leaves
+    /// a spool whose stderr was never written, and this run would otherwise land Failed with nothing said about it at
+    /// all. The bootstrap's account of that launch is then the only one there is.
+    /// </summary>
+    private static async Task<string> ReadVanishedDiagnosticsAsync(SandboxHandle handle)
+    {
+        var workload = await ReadDiagnosticTailAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+
+        if (workload.Length > 0) return workload;
+
+        var bootstrap = await ReadDiagnosticTailAsync(NativeLaunchFiles.PathFor(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.DiagnosticsFile)).ConfigureAwait(false);
+
+        // Labelled, because the bootstrap's lines are an account of the LAUNCH, not of the workload: a silent run
+        // that something else killed would otherwise present a successful launch trace as its error text.
+        return bootstrap.Length == 0 ? "" : "The workload wrote nothing to stderr. Its bootstrap said:\n" + bootstrap;
     }
 
     /// <summary>

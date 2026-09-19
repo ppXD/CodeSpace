@@ -9,10 +9,19 @@ internal static class Program
 {
     private static readonly TimeSpan AdmissionTimeout = TimeSpan.FromSeconds(30);
 
-    public static async Task<int> Main(string[] args)
+    /// <summary>
+    /// Deliberately NOT <c>async Task&lt;int&gt;</c>. The exec bootstrap must run <c>execve</c> on the process's own
+    /// thread-group leader, and an async entry point leaves that thread blocked in the generated
+    /// <c>GetAwaiter().GetResult()</c> for the whole run — so the exec landed on whatever thread-pool thread the
+    /// admission handshake's last await resumed on. Blocking here explicitly is what gives that thread back.
+    /// </summary>
+    public static int Main(string[] args)
     {
         if (args is ["--protocol-version"]) { Console.WriteLine(NativeLaunchProtocol.Version); return 0; }
         if (args.Length != 2 || !Path.IsPathFullyQualified(args[1])) return 64;
+        // Before any work, so that everything below — including a .NET unhandled-exception abort — says why into a
+        // file that outlives this launch rather than into the app's stderr pipe, which is closed once the handle is built.
+        if (args[0] is "broker" or "exec" or "guardian") NativeProcess.RedirectDiagnostics(Path.Combine(args[1], NativeLaunchProtocol.DiagnosticsFile));
         try
         {
             return args[0] switch
@@ -21,18 +30,25 @@ internal static class Program
                 // refused an exclusive open, because an in-process second open cannot answer that on a Linux NFS
                 // client (flock is emulated with per-PROCESS fcntl locks there). No spool, no receipt, no secrets.
                 ExclusiveLockProbeChild.Argument => ExclusiveLockProbeChild.RunChild(args[1]),
-                "broker" => await BrokerAsync(args[1]).ConfigureAwait(false),
-                "exec" => await ExecAsync(args[1]).ConfigureAwait(false),
-                "guardian" => await GuardianAsync(args[1]).ConfigureAwait(false),
+                "broker" => BrokerAsync(args[1]).GetAwaiter().GetResult(),
+                "exec" => Exec(args[1]),
+                "guardian" => GuardianAsync(args[1]).GetAwaiter().GetResult(),
                 _ => 64,
             };
         }
         catch (Exception error)
         {
             // Invocation/env/config exceptions may contain credentials. Only a type, never raw input, goes to stderr.
-            Console.Error.WriteLine("Native launch rejected: " + error.GetType().Name);
+            NativeProcess.Explain(args[0], "rejected by " + error.GetType().Name);
             return 125;
         }
+    }
+
+    /// <summary>Say why this bootstrap is refusing, then refuse. Every <c>125</c> below is a workload that will never start, and one that exits without a word is indistinguishable from one the kernel killed.</summary>
+    private static int Refuse(string mode, string reason)
+    {
+        NativeProcess.Explain(mode, "refused: " + reason);
+        return 125;
     }
 
     private static async Task<int> BrokerAsync(string directory)
@@ -127,7 +143,37 @@ internal static class Program
         }
     }
 
-    private static async Task<int> ExecAsync(string directory)
+    /// <summary>
+    /// Become the workload — ON THIS THREAD, which is the process's thread-group leader.
+    ///
+    /// <para>Why that matters, measured on Linux CI: <c>execve</c> from a thread that is NOT the leader makes the
+    /// kernel run <c>de_thread()</c>, which kills the other threads and WAITS for the original leader to become a
+    /// zombie before the caller can take over its pid. For the whole of that window — unbounded, and longer the more
+    /// loaded the host — <c>/proc/&lt;pid&gt;/stat</c> reports the run's supervised pid as state <c>Z</c> with the
+    /// bootstrap's own comm. Every liveness read in this product treats <c>Z</c> as gone, so a run caught in the act
+    /// of BECOMING its workload was observed dead: the probe answered Gone, the observer landed it Failed, and the
+    /// reconciler abandoned it as process-confirmed-dead without killing anything — leaving the live agent running
+    /// against a workspace the database calls Failed.</para>
+    ///
+    /// <para>The leader exec's without that dance: it still waits for its siblings, but it never zombies, so the pid
+    /// stays observably alive and its identity survives the exec exactly as the protocol claims.</para>
+    /// </summary>
+    private static int Exec(string directory)
+    {
+        var admitted = AdmitExecutionAsync(directory).GetAwaiter().GetResult();
+
+        if (admitted.Invocation is null || admitted.Broker is null) return admitted.Refusal;
+
+        // Same PID/session/start identity across exec; no process-start-to-handle-persist window exists here.
+        // PDEATHSIG is thread-specific, so it is applied on the exact thread executing execve as well as before
+        // the initial pipe wait — which is now this one, the leader, for the reason above.
+        NativeProcess.ProtectFromParentDeath(admitted.Broker);
+        NativeProcess.Explain("exec", $"execve from {NativeProcess.ExecThread()} carrying birth key {admitted.BirthKey}");
+        return NativeProcess.Exec(admitted.Invocation);
+    }
+
+    /// <summary>Everything the exec bootstrap must agree with its broker about before it may become the workload. It returns that agreement rather than acting on it, so the act itself happens on the caller's thread.</summary>
+    private static async Task<ExecAdmission> AdmitExecutionAsync(string directory)
     {
         NativeProcess.NewSession();
         var request = ReadRequest(directory);
@@ -140,15 +186,21 @@ internal static class Program
         if (!NativeLaunchFiles.TryCreate(directory, NativeLaunchProtocol.ExecutionFile, NativeProcess.Current)) throw new IOException("The physical execution slot has already been used.");
         var release = new byte[1];
         await input.ReadExactlyAsync(release, admission.Token).ConfigureAwait(false);
-        if (release[0] != 1 || !NativeProcess.IsAlive(commitment.Broker) || DateTimeOffset.UtcNow >= request.Deadline) return 125;
+        if (release[0] != 1) return RefuseExec("the byte on the private pipe is not this protocol's release");
+        if (!NativeProcess.IsAlive(commitment.Broker)) return RefuseExec($"the launch broker (pid {commitment.Broker.ProcessId}) was gone at the release");
+        if (DateTimeOffset.UtcNow >= request.Deadline) return RefuseExec("the launch deadline elapsed before the release");
         var receipt = NativeLaunchFiles.Read<NativeLaunchReceipt>(directory, NativeLaunchProtocol.ReceiptFile);
-        if (receipt.State != "ready" || receipt.SpecHash != request.SpecHash || !NativeProcess.Same(receipt.Broker, commitment.Broker) || receipt.Execution is null || !NativeProcess.Same(receipt.Execution, NativeProcess.Current) || receipt.Guardian is null || !NativeProcess.IsAlive(receipt.Guardian)) return 125;
-        // Same PID/session/start identity across exec; no process-start-to-handle-persist window exists here.
-        // Async IO can resume on another native thread. PDEATHSIG is thread-specific; apply it on the exact
-        // thread executing execve as well as before the initial pipe wait.
-        NativeProcess.ProtectFromParentDeath(commitment.Broker);
-        return NativeProcess.Exec(invocation);
+        if (receipt.State != "ready" || receipt.SpecHash != request.SpecHash || !NativeProcess.Same(receipt.Broker, commitment.Broker) || receipt.Execution is null || !NativeProcess.Same(receipt.Execution, NativeProcess.Current))
+            return RefuseExec($"the committed receipt (state '{receipt.State}') does not release THIS execution");
+        if (receipt.Guardian is null || !NativeProcess.IsAlive(receipt.Guardian)) return RefuseExec($"the guardian (pid {receipt.Guardian?.ProcessId}) was gone at the release");
+
+        return new ExecAdmission(invocation, commitment.Broker, receipt.Execution.StartKey);
     }
+
+    private static ExecAdmission RefuseExec(string reason) => new(null, null, null, Refuse("exec", reason));
+
+    /// <summary>The admission handshake's outcome: the invocation this bootstrap is released to become plus the broker it stays bound to, or the exit code it refuses with.</summary>
+    private sealed record ExecAdmission(NativeLaunchInvocation? Invocation, NativeProcessIdentity? Broker, string? BirthKey, int Refusal = 0);
 
     private static async Task<int> GuardianAsync(string directory)
     {
@@ -156,8 +208,8 @@ internal static class Program
         var request = ReadRequest(directory);
         var commitment = NativeLaunchFiles.Read<NativeLaunchCommitment>(directory, NativeLaunchProtocol.CommitmentFile);
         var execution = NativeLaunchFiles.Read<NativeProcessIdentity>(directory, NativeLaunchProtocol.ExecutionFile);
-        if (!NativeProcess.IsAlive(commitment.Broker) || !NativeProcess.IsAlive(execution)) return 125;
-        if (!NativeLaunchFiles.TryCreate(directory, NativeLaunchProtocol.GuardianFile, NativeProcess.Current)) return 125;
+        if (!NativeProcess.IsAlive(commitment.Broker) || !NativeProcess.IsAlive(execution)) return Refuse("guardian", $"the broker (pid {commitment.Broker.ProcessId}) or the execution (pid {execution.ProcessId}) was already gone");
+        if (!NativeLaunchFiles.TryCreate(directory, NativeLaunchProtocol.GuardianFile, NativeProcess.Current)) return Refuse("guardian", "another guardian already owns this launch");
         while (NativeProcess.IsAlive(execution))
         {
             if (!NativeProcess.IsAlive(commitment.Broker)) { Stop(directory, execution, "broker-lost"); return 0; }
@@ -204,6 +256,7 @@ internal static class Program
 
     private static void Stop(string directory, NativeProcessIdentity execution, string reason)
     {
+        NativeProcess.Explain("controller", $"stopping the execution (pid {execution.ProcessId}): {reason}");
         try { NativeLaunchFiles.TryCreate(directory, NativeLaunchProtocol.StopFile, new NativeLaunchStop(reason, DateTimeOffset.UtcNow)); }
         finally { NativeProcess.KillSession(execution); }
     }
