@@ -340,12 +340,6 @@ public sealed class WorkflowRunDataCompletenessSchemaTests
         "AgentRunService.cs",
 
             "CodeSpaceDbContext.cs",
-
-            // Names the table to say it is NOT reaped, and why: workflow_run_capture_gap_guard() refuses DELETE
-            // because a removable gap makes a complete manifest reachable by deleting the evidence. The durable
-            // retention policy is a table of what IS reclaimed, so the plane it excludes has to be legible in it —
-            // and a future capture-gap cursor would be a new FILE, which this list would still go red for.
-            "DurableRetentionPolicy.cs",
             "IRunDataCompletenessReader.cs",
             "IRunDataCompletenessWriter.cs",
 

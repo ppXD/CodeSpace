@@ -17,19 +17,22 @@ namespace CodeSpace.Core.Services.Workflows.Retention.Cursors;
 /// admitted: <c>agent_run_cleanup_receipt</c> carries no trigger, and its only foreign key points AT the run, so a
 /// receipt can go while its run stays.</para>
 ///
-/// <para><b>Which outcomes are terminal, and the one that is not.</b> <see cref="RunResourceOutcome.Completed"/> and
-/// <see cref="RunResourceOutcome.Compensated"/> are settled by definition. <see cref="RunResourceOutcome.Unknown"/>
-/// joins them because nothing will ever settle it: the only sweep that revisits a receipt selects
-/// <c>outcome = 'Orphaned'</c> (migration 0229's partial index is the whole of its queue), so an Unknown row is
-/// terminal in practice however it reads — and a diagnosis nobody read in thirty days is not made more legible by
-/// keeping it for ever. <see cref="RunResourceOutcome.Orphaned"/> is NEVER reclaimed: it is addressed to a sweep, it
-/// names the host that owes the work, and it can still become Compensated. An orphan removed by a retention pass is a
-/// resource nobody will ever be told about again.</para>
+/// <para><b>Which outcomes are settled.</b> Exactly the two <c>RunCleanupReceipt.IsSettled</c> already names:
+/// <see cref="RunResourceOutcome.Completed"/> and <see cref="RunResourceOutcome.Compensated"/>. Neither of the other
+/// two is, and each for its own reason. <see cref="RunResourceOutcome.Orphaned"/> is addressed to a sweep on the host
+/// that owes the work and can still become Compensated; an orphan a retention pass removed is a resource nobody will
+/// ever be told about again. <see cref="RunResourceOutcome.Unknown"/> is REWRITABLE — the ledger's upsert fences only
+/// Completed and Compensated, and the orphan sweep answers Unknown when the host cannot even attempt a teardown, so a
+/// live leak can move from Orphaned to Unknown and leave the orphan queue for good. It is also READ: the Room counts
+/// Unknown receipts of the sweepable kinds and renders "N resources with an unknown cleanup state" with no age bound
+/// at all, so draining them per-team-head would walk that count down to a card that quietly disappears — a wrong
+/// number where the truth used to be.</para>
 ///
-/// <para><b>Starvation.</b> A pinned receipt is excluded by the CLAIM query rather than settled, so it never occupies
-/// a batch slot — which is why this plane needs one deadline column and not two. The predicate is repeated in the
-/// classification for the reason every fenced reaper repeats its guards: the claim and the deletion are different
-/// transactions, and a pin can land between them.</para>
+/// <para><b>Starvation.</b> A pinned receipt and an unsettled one are both excluded by the CLAIM query rather than
+/// settled, so neither occupies a batch slot — which is why this plane needs one deadline column and not two. A keep
+/// the cursor CAN reach — an unanswerable citation question — pushes the same deadline forward instead. Every claim
+/// predicate is repeated in the deleting statement for the reason every fenced reaper repeats its guards: the claim
+/// and the deletion are different transactions, and a pin, or a re-opened orphan, can land between them.</para>
 /// </summary>
 public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, IScopedDependency
 {
@@ -48,9 +51,21 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
         ("paired_qualification_result_pin", "pinned_id"),
     ];
 
-    /// <summary>The outcomes nothing will settle again. <see cref="RunResourceOutcome.Orphaned"/> is absent on purpose and its absence is pinned by a test.</summary>
-    internal static readonly RunResourceOutcome[] SettledOutcomes =
-        [RunResourceOutcome.Completed, RunResourceOutcome.Compensated, RunResourceOutcome.Unknown];
+    /// <summary>
+    /// The outcomes a receipt is SETTLED in — the same two <c>RunCleanupReceipt.IsSettled</c> names, and the same two
+    /// the ledger's upsert refuses to overwrite. Every absence is deliberate and pinned by a test.
+    ///
+    /// <para><see cref="SettledOutcomeNames"/> is the same set as the raw SQL sees it. The claim query cannot
+    /// parameterise an <c>IN</c> list of enum names, so the two forms exist side by side — and a test compares them,
+    /// because two copies of one rule drift silently.</para>
+    /// </summary>
+    internal static readonly RunResourceOutcome[] SettledOutcomes = [RunResourceOutcome.Completed, RunResourceOutcome.Compensated];
+
+    /// <summary>The literal the claim and the delete use. Compared against <see cref="SettledOutcomes"/> by a test that reads this file's own SQL.</summary>
+    internal const string SettledOutcomeNames = "'Completed', 'Compensated'";
+
+    /// <summary>The pin kind the claim and the probe ask about, as the raw SQL spells it. Pinned against <see cref="DurablePinKind.CleanupReceipt"/> by the same test.</summary>
+    internal const string PinnedKindName = "CleanupReceipt";
 
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
     private readonly ILogger<CleanupReceiptRetentionCursor> _logger;
@@ -77,7 +92,7 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
             WITH eligible AS MATERIALIZED (
                 SELECT DISTINCT ON (receipt.team_id) receipt.id, receipt.recorded_at
                 FROM agent_run_cleanup_receipt receipt
-                WHERE receipt.outcome IN ('Completed', 'Compensated', 'Unknown')
+                WHERE receipt.outcome IN ('Completed', 'Compensated')
                   AND receipt.recorded_at <= {{window.TerminalBefore}}
                   AND (receipt.retain_until IS NULL OR receipt.retain_until <= {{window.Now}})
                   AND NOT EXISTS (SELECT 1 FROM paired_qualification_result_pin pin WHERE pin.kind = 'CleanupReceipt' AND pin.pinned_id = receipt.id)
@@ -85,7 +100,7 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
             )
             SELECT receipt.* FROM agent_run_cleanup_receipt receipt
             JOIN eligible ON eligible.id = receipt.id
-            WHERE receipt.outcome IN ('Completed', 'Compensated', 'Unknown')
+            WHERE receipt.outcome IN ('Completed', 'Compensated')
               AND receipt.recorded_at <= {{window.TerminalBefore}}
               AND (receipt.retain_until IS NULL OR receipt.retain_until <= {{window.Now}})
             ORDER BY receipt.recorded_at, receipt.id
@@ -117,14 +132,22 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
         }
     }
 
-    public async Task<bool> SettleAsync(DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken)
+    /// <summary>
+    /// A keep this cursor cannot record any other way pushes the deadline FORWARD by the class's recheck interval —
+    /// the row has no modification time of its own, so without that a receipt whose citation question could not be
+    /// answered would be re-claimed on every tick for ever.
+    /// </summary>
+    public async Task<bool> SettleAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(window);
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(decision);
 
-        return decision.Action == DurableRetentionAction.Collect
-            ? await CollectAsync(candidate, cancellationToken).ConfigureAwait(false)
-            : await StampAsync(candidate, decision.RetainUntil, cancellationToken).ConfigureAwait(false);
+        if (decision.Action == DurableRetentionAction.Collect) return await CollectAsync(window, candidate, cancellationToken).ConfigureAwait(false);
+
+        var deadline = decision.Action == DurableRetentionAction.Quarantine ? decision.RetainUntil : window.RecheckAt;
+
+        return await StampAsync(window, candidate, deadline, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -132,13 +155,15 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
     /// keeps a receipt an orphan sweep re-opened between the claim and now — Orphaned again, addressed to a host —
     /// from being removed by a decision taken while it still read as settled.
     /// </summary>
-    private async Task<bool> CollectAsync(DurableRetentionCandidate candidate, CancellationToken cancellationToken)
+    private async Task<bool> CollectAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
 
         var deleted = await db.AgentRunCleanupReceipt
             .Where(receipt => receipt.Id == candidate.Id && receipt.TeamId == candidate.TeamId
                 && SettledOutcomes.Contains(receipt.Outcome)
+                && receipt.RecordedAt <= window.TerminalBefore
+                && receipt.RetainUntil != null && receipt.RetainUntil <= window.Now
                 && !db.PairedQualificationResultPin.Any(pin => pin.Kind == DurablePinKind.CleanupReceipt && pin.PinnedId == receipt.Id))
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
 
@@ -148,13 +173,14 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
         return deleted == 1;
     }
 
-    /// <summary>The quarantine deadline, written only onto a row that is still the one the claim saw — the receipt has no revision, so its own identity and outcome are the fence.</summary>
-    private async Task<bool> StampAsync(DurableRetentionCandidate candidate, DateTimeOffset? retainUntil, CancellationToken cancellationToken)
+    /// <summary>The deadline, written only onto a row that is still the one the claim saw — the receipt has no revision, so its identity, its outcome and its own age are the fence.</summary>
+    private async Task<bool> StampAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, DateTimeOffset? retainUntil, CancellationToken cancellationToken)
     {
         await using var db = CreateDb();
 
         var updated = await db.AgentRunCleanupReceipt
-            .Where(receipt => receipt.Id == candidate.Id && receipt.TeamId == candidate.TeamId && SettledOutcomes.Contains(receipt.Outcome))
+            .Where(receipt => receipt.Id == candidate.Id && receipt.TeamId == candidate.TeamId
+                && SettledOutcomes.Contains(receipt.Outcome) && receipt.RecordedAt <= window.TerminalBefore)
             .ExecuteUpdateAsync(set => set.SetProperty(receipt => receipt.RetainUntil, retainUntil), cancellationToken).ConfigureAwait(false);
 
         return updated == 1;

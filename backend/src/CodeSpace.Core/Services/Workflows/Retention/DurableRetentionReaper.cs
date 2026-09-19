@@ -31,7 +31,12 @@ namespace CodeSpace.Core.Services.Workflows.Retention;
 /// </summary>
 public sealed class DurableRetentionReaper : IDurableRetentionReaper
 {
-    /// <summary>Records claimed per cursor per sweep. The cadence is hourly and every rule is measured in days, so the ceiling changes only how promptly a backlog drains — never what is collected.</summary>
+    /// <summary>
+    /// Records claimed per cursor per sweep, and PER CURSOR rather than shared across them: one budget spent in class
+    /// order would let a plane with a standing backlog starve every plane after it for ever, while the sweep reported
+    /// a healthy claim count. The cadence is hourly and every rule is measured in days, so the ceiling changes only
+    /// how promptly one plane's backlog drains — never what is collected.
+    /// </summary>
     private const int BatchSize = 200;
 
     /// <summary>Records asked for per claim. A fair cursor returns the per-tenant head, so the batch above is reached by asking repeatedly rather than in one query, and a tenant with a long backlog never holds the whole batch.</summary>
@@ -72,12 +77,13 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
             return;
         }
 
-        var window = new DurableRetentionSweepWindow(now, now.Subtract(rule.MinimumAge), now.Subtract(rule.RecheckInterval));
+        var window = new DurableRetentionSweepWindow(now, now.Subtract(rule.MinimumAge), now.Subtract(rule.RecheckInterval), now.Add(rule.RecheckInterval));
         var seen = new HashSet<Guid>();
+        var claimedHere = 0;
 
-        while (counts.Claimed < BatchSize)
+        while (claimedHere < BatchSize)
         {
-            var limit = Math.Min(ClaimSize, BatchSize - counts.Claimed);
+            var limit = Math.Min(ClaimSize, BatchSize - claimedHere);
             var claimed = await cursor.ClaimAsync(window, limit, cancellationToken).ConfigureAwait(false);
             // A cursor that claims fairly hands back one record per tenant, so the batch is reached by asking again —
             // and the ids already settled this tick are excluded, because a settlement that writes nothing (a drain
@@ -86,16 +92,17 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
 
             if (candidates.Count == 0) break;
 
+            claimedHere += candidates.Count;
             counts.Claimed += candidates.Count;
 
             foreach (var candidate in candidates)
-                counts.Record(await SweepCandidateAsync(cursor, rule, candidate, now, cancellationToken).ConfigureAwait(false));
+                counts.Record(await SweepCandidateAsync(cursor, window, rule, candidate, cancellationToken).ConfigureAwait(false));
         }
     }
 
     /// <summary>One candidate, start to finish. Every exit that is not a completed settlement keeps the record.</summary>
-    private async Task<DurableRetentionAction> SweepCandidateAsync(IDurableRetentionCursor cursor, DurableRetentionRule rule, DurableRetentionCandidate candidate,
-        DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<DurableRetentionAction> SweepCandidateAsync(IDurableRetentionCursor cursor, DurableRetentionSweepWindow window, DurableRetentionRule rule,
+        DurableRetentionCandidate candidate, CancellationToken cancellationToken)
     {
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         operation.CancelAfter(CandidateTimeout);
@@ -103,9 +110,9 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
         try
         {
             var verdict = await cursor.ClassifyAsync(candidate, operation.Token).ConfigureAwait(false);
-            var decision = DurableRetentionDecision.Decide(rule, new DurableRetentionObservation(candidate.TerminalAt, candidate.RetainUntil, verdict, now));
+            var decision = DurableRetentionDecision.Decide(rule, new DurableRetentionObservation(candidate.TerminalAt, candidate.RetainUntil, verdict, window.Now));
 
-            return await ApplyAsync(cursor, candidate, decision, operation.Token).ConfigureAwait(false);
+            return await ApplyAsync(cursor, window, candidate, decision, operation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -121,9 +128,9 @@ public sealed class DurableRetentionReaper : IDurableRetentionReaper
     /// every tick for ever. A settlement the cursor could not complete — a lost race, a refused removal, a drain that
     /// needs another sweep — is reported as the keep it is.
     /// </summary>
-    private static async Task<DurableRetentionAction> ApplyAsync(IDurableRetentionCursor cursor, DurableRetentionCandidate candidate,
-        DurableRetentionDecision decision, CancellationToken cancellationToken) =>
-        await cursor.SettleAsync(candidate, decision, cancellationToken).ConfigureAwait(false)
+    private static async Task<DurableRetentionAction> ApplyAsync(IDurableRetentionCursor cursor, DurableRetentionSweepWindow window,
+        DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken) =>
+        await cursor.SettleAsync(window, candidate, decision, cancellationToken).ConfigureAwait(false)
             ? decision.Action
             : DurableRetentionAction.Indeterminate;
 

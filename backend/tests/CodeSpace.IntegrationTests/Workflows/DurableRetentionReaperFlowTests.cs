@@ -434,7 +434,7 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
         await ElapseQuarantineAsync(stream);   // somebody else moved the row after this claim was taken
         var moved = await StreamAsync(stream);
 
-        var settled = await Cursor().SettleAsync(claimed, DurableRetentionDecision.Quarantine(DateTimeOffset.UtcNow.AddDays(1)), CancellationToken.None);
+        var settled = await Cursor().SettleAsync(Window(), claimed, DurableRetentionDecision.Quarantine(DateTimeOffset.UtcNow.AddDays(1)), CancellationToken.None);
 
         settled.ShouldBeFalse("the claim is stale, so it settles nothing");
         var after = await StreamAsync(stream);
@@ -945,14 +945,18 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
         return new LogStreamRetentionCursor(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactCasPurgeCoordinator>(), NullLogger<LogStreamRetentionCursor>.Instance);
     }
 
-    /// <summary>What the production claim query returns for the window the loop would build right now.</summary>
-    private async Task<IReadOnlyList<DurableRetentionCandidate>> CandidatesAsync(int limit)
+    /// <summary>The window the loop would build right now, from this class's own rule.</summary>
+    private static DurableRetentionSweepWindow Window()
     {
         var rule = DurableRetentionPolicy.LogStream;
         var now = DateTimeOffset.UtcNow;
 
-        return await Cursor().ClaimAsync(new DurableRetentionSweepWindow(now, now - rule.MinimumAge, now - rule.RecheckInterval), limit, CancellationToken.None);
+        return new DurableRetentionSweepWindow(now, now - rule.MinimumAge, now - rule.RecheckInterval, now + rule.RecheckInterval);
     }
+
+    /// <summary>What the production claim query returns for that window.</summary>
+    private async Task<IReadOnlyList<DurableRetentionCandidate>> CandidatesAsync(int limit) =>
+        await Cursor().ClaimAsync(Window(), limit, CancellationToken.None);
 
     private async Task<IReadOnlyList<Guid>> ClaimAsync(int limit) => (await CandidatesAsync(limit)).Select(candidate => candidate.Id).ToList();
 

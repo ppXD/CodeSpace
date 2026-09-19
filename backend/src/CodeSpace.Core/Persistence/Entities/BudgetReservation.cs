@@ -20,9 +20,6 @@ public class BudgetReservation : IEntity<Guid>, IAuditable
     public decimal? SettledUsd { get; set; }
     public string PriceVersion { get; set; } = string.Empty;
     public DateTimeOffset? ExpiresAt { get; set; }
-
-    /// <summary>The earliest instant the retention plane may reclaim this claim, written by the first sweep that found it terminal and cited by nobody. Null until then, and on every row an older binary wrote.</summary>
-    public DateTimeOffset? RetainUntil { get; set; }
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
