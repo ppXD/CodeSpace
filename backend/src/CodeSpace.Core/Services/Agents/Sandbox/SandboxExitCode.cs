@@ -7,9 +7,16 @@ namespace CodeSpace.Core.Services.Agents.Sandbox;
 /// shell — and the durable spool's <c>exit</c> marker, which records <c>$?</c> of the wrapper chain — reports a
 /// signal-terminated child as <c>128+signum</c>, so a bare "exited with code 137" is really "killed by SIGKILL (9)":
 /// almost always an OOM or a resource-limit kill (<c>RLIMIT_NPROC</c> / <c>RLIMIT_FSIZE</c> / <c>RLIMIT_CPU</c>), NOT
-/// an application error. A code of <c>-1</c> is the durable runner's "process vanished with no exit marker" sentinel
-/// (a whole-tree SIGKILL / host teardown). Surfacing the signal name makes a runner-side kill self-explanatory in
-/// <c>AgentRun.Error</c> + the real-model verdict note, instead of an opaque number a reader must decode by hand.
+/// an application error. A code of <c>-1</c> is the durable runner's "process vanished with no exit marker" sentinel.
+/// Surfacing the signal name makes a runner-side kill self-explanatory in <c>AgentRun.Error</c> + the real-model
+/// verdict note, instead of an opaque number a reader must decode by hand.
+///
+/// <para>The <c>-1</c> text names BOTH readings and commits to neither, because the absence of a marker cannot tell
+/// them apart: the supervisor was killed before it could write one, or it never ran at all because the workload was
+/// never exec'd. It used to assert "likely an external/OOM kill or host teardown", which was backwards —
+/// <c>ExitStatusFor</c> consults the cgroup's own <c>oom_kill</c> counter first and renders a resource-ceiling
+/// message when it fires, so arriving here means an OOM was NOT established. That sentence is what sent a real
+/// investigation after memory ceilings for a run <c>execve</c> refused before any process existed.</para>
 /// </summary>
 public static class SandboxExitCode
 {
@@ -20,7 +27,7 @@ public static class SandboxExitCode
     public static string Describe(int exitCode)
     {
         if (exitCode < 0)
-            return $"{Num(exitCode)} (no exit marker — the process vanished, likely an external/OOM kill or host teardown)";
+            return $"{Num(exitCode)} (no exit marker — the process vanished: either killed along with its supervisor, or never started)";
 
         // 128+signum is the shell/wait convention for a signal-terminated child; signals run 1..64 (std + realtime).
         if (exitCode > 128 && exitCode <= 128 + 64)
