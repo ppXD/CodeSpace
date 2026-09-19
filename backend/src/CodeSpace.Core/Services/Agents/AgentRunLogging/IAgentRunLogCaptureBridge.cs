@@ -24,6 +24,18 @@ public sealed record AgentRunLogCaptureOpenRequest
     public required SandboxHandle Handle { get; init; }
     public required ISandboxDurableLogSource Source { get; init; }
     public required SecretRedactor Redactor { get; init; }
+
+    /// <summary>
+    /// The HOST's own tear-down signal (<c>IHostApplicationLifetime.ApplicationStopping</c>), which is what makes this
+    /// capture's drain budget SHARED rather than its own: a worker that is going away lands the run's verdict out of
+    /// the same seconds this drain is spending, and a destination that is refusing writes would otherwise spend all of
+    /// them. Raised ⇒ the final drain stops waiting out a refusal and parks — the stream stays Open at its own fence
+    /// with its stall marker, for the recovery sweep to finish.
+    ///
+    /// <para>Default (None) means no host tear-down is in progress, which is every ordinary run: the live and final
+    /// retry cadences are exactly what they were.</para>
+    /// </summary>
+    public CancellationToken HostShutdown { get; init; }
 }
 
 public sealed record AgentRunLogCaptureGapRequest

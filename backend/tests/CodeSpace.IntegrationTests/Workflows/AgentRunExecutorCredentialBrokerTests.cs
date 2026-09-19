@@ -16,6 +16,7 @@ using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -377,6 +378,148 @@ public partial class AgentRunExecutorTests
         {
             foreach (var captureScope in captureScopes) captureScope.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The same drain, with the ONE difference an operator can actually misconfigure: the team's Agent Run log route
+    /// points at a destination that refuses every write. The capture bridge is the deployed one, its storage resolves
+    /// Ready (the route IS Active), and only the bytes have nowhere to go — so the drain's final flush meets a
+    /// provider that answers "retryable" forever.
+    ///
+    /// <para>A drain that treats that as something to wait out spends the whole landing on it and lands nothing: the
+    /// verdict is what the operator needs, and the log tail is what they can afford to lose. So the run must still
+    /// land TYPED inside the budget, and the stream it could not flush stays Open at its fence for the recovery
+    /// sweep — the one state a later observer can still act on.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_worker_shutting_down_lands_its_brokered_run_within_the_budget_even_when_the_log_destination_refuses_every_write()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-unwritable-log-destination-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var destination = new UnwritableLogDestination();
+        await SeedAgentRunLogRouteAsync(teamId, destination.RootPath);
+
+        using var broker = new AddresslessBroker(new LoopbackModelCredentialBroker());
+        using var shutdown = new CancellationTokenSource();
+        var lifetime = new FakeHostLifetime();
+        using var captureScope = _fixture.BeginScope();
+
+        var execution = ExecuteUntilShutdownAsync(runId, broker, shutdown.Token, lifetime, productionCapturePlanes: true, logCapture: captureScope.Resolve<IAgentRunLogCaptureBridge>());
+
+        await WaitUntilAsync(() => broker.HasLease(runId), TimeSpan.FromSeconds(30), "the run never opened its credential lease");
+        await WaitUntilAsync(() => HandleOf(runId) is not null, TimeSpan.FromSeconds(30), "the run never persisted a durable handle, so there was no launched agent for a shutdown to account for");
+        await WaitUntilAsync(() => HasLogStream(runId), TimeSpan.FromSeconds(60),
+            "no agent_run_log_stream row appeared, so the capture bridge never opened one — this arm is about a destination that refuses WRITES, so a route that does not even resolve would make every claim below vacuous");
+
+        var pid = HandleOf(runId)!.ProcessId;
+        ProcessIsAlive(pid).ShouldBeTrue("precondition: the agent is alive at the moment the worker is told to go");
+
+        lifetime.Stop();
+        shutdown.Cancel();
+        await AwaitWithinAsync(execution, UnwritableDestinationDrainCeiling,
+            $"the draining executor never returned with an unwritable log destination — the landing is bounded by ShutdownLeaseLandingBudget, so a wait past {UnwritableDestinationDrainCeiling.TotalSeconds}s means the capture drain is retrying a dead destination instead of observing the shutdown token (diagnose by attaching to the test host and looking for AgentRunLogCaptureBridge.FlushBacklogAsync on a thread)");
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed,
+            "the run was left Running by a worker taking its model access with it — a log destination nobody can write to must not cost the operator the VERDICT as well as the log tail");
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options).ShouldNotBeNull();
+        result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost,
+            "the landing has to name the real cause; a storage outage during the drain is not what ended this run");
+
+        var streams = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
+            .Where(x => x.AgentRunId == runId).Select(x => new { x.StreamKind, x.State, x.WorkerFenceEpoch, x.RemoteStallSince, x.RemoteStallCode }).ToListAsync();
+
+        streams.ShouldNotBeEmpty($"run {runId} opened no log stream, so every claim below is about the empty set");
+        streams.ShouldAllBe(x => x.State != AgentRunLogStreamState.CaptureFailed && x.State != AgentRunLogStreamState.Truncated,
+            $"run {runId} stamped a terminal LOSS on a stream whose bytes the destination only refused transiently — nothing a later observer could still commit may be foreclosed by a drain that ran out of budget");
+
+        var held = streams.Where(x => x.StreamKind == AgentRunLogKinds.StandardOutput).ToList().ShouldHaveSingleItem($"run {runId} has no stdout log stream, so the claims below are about nothing");
+        held.State.ShouldBe(AgentRunLogStreamState.Open,
+            $"run {runId}'s stdout stream held bytes the destination refused, so it must stay Open — that is the one state the recovery sweep can still finish");
+        held.WorkerFenceEpoch.ShouldBe(run.FenceEpoch,
+            "the parked stream stays at the fence the landing left unchanged, which is what makes it reachable by the recovery sweep");
+        held.RemoteStallSince.ShouldNotBeNull($"run {runId} parked a stream without saying why — a stream left Open with no stall marker reads as 'still finalizing' forever, and the Room has nothing to show the operator");
+        held.RemoteStallCode.ShouldNotBeNull($"run {runId} recorded a stall with no code, so nothing tells an operator which destination fault held the bytes");
+
+        await WaitUntilAsync(() => !ProcessIsAlive(pid), TimeSpan.FromSeconds(15), $"the agent (pid {pid}) was still alive after its run was landed lease-lost; diagnose with `ps -p {pid} -o pid,stat,etime,command`");
+    }
+
+    /// <summary>
+    /// How long the whole tear-down may take when the capture destination refuses every write. Well above the
+    /// <c>ShutdownLeaseLandingBudget</c> the landing itself is bounded by (so a loaded runner does not fail it) and
+    /// far below the 120s the other arms allow, because the point of this arm is the DIFFERENCE between a bounded
+    /// drain and one that waits out a provider that is never coming back.
+    /// </summary>
+    private static readonly TimeSpan UnwritableDestinationDrainCeiling = TimeSpan.FromSeconds(45);
+
+    /// <summary>A destination that resolves and activates exactly like a real one, and whose root can never be created: its parent is a regular FILE, so every <c>Directory.CreateDirectory</c> under it is an IOException the provider reports as retryable.</summary>
+    private sealed class UnwritableLogDestination : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-dead-log-dest-" + Guid.NewGuid().ToString("N"));
+
+        public UnwritableLogDestination()
+        {
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(Path.Combine(_root, "blocked"), "not a directory");
+        }
+
+        public string RootPath => Path.Combine(_root, "blocked", "store");
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>Route this team's Agent Run log data class at <paramref name="rootPath"/> — an Active route over an Active profile, so the resolver answers Ready and only the WRITE fails.</summary>
+    private async Task SeedAgentRunLogRouteAsync(Guid teamId, string rootPath)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var profileId = Guid.NewGuid();
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath }));
+        var canonicalConfig = CodeSpace.Core.Services.Workflows.Artifacts.Profiles.StorageProfileRules.CanonicalJson(document.RootElement);
+        using var canonical = JsonDocument.Parse(canonicalConfig);
+
+        var profile = new StorageProfile
+        {
+            Id = profileId, TeamId = teamId, StableName = $"dead-log-dest-{profileId:N}", State = StorageProfileState.Active,
+            CurrentRevision = 1, CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        profile.Revisions.Add(new StorageProfileRevision
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, StorageProfileId = profileId, Revision = 1,
+            ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = canonicalConfig, CredentialRef = null,
+            NamespaceFingerprint = CodeSpace.Core.Services.Workflows.Artifacts.Profiles.StorageProfileRules.NamespaceFingerprint(LocalRwxArtifactStorageDriverFactory.TypeKey, canonical.RootElement),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId,
+        });
+        db.StorageProfile.Add(profile);
+
+        var route = new StorageRoute
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, DataClassTypeKey = AgentRunLogStorageResolver.DataClassTypeKey,
+            CurrentRevision = 1, State = StorageRouteState.Draft, CreatedDate = now, CreatedBy = SystemUsers.SeederId,
+            LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        route.Revisions.Add(new StorageRouteRevision
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, StorageRouteId = route.Id, Revision = 1,
+            StorageProfileId = profileId, ProfileRevisionMode = StorageProfileRevisionMode.CurrentAtWrite,
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId,
+        });
+        db.StorageRoute.Add(route);
+        await db.SaveChangesAsync();
+
+        route.State = StorageRouteState.Active;
+        route.LastModifiedDate = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
     }
 
     [Fact]

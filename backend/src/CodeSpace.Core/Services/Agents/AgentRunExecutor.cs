@@ -5087,6 +5087,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             {
                 TeamId = context.TeamId, AgentRunId = context.RunId, ActorId = context.ActorId,
                 WorkerFenceEpoch = context.WorkerFenceEpoch, Handle = handle, Source = source, Redactor = context.Redactor,
+                // The capture drain and this run's terminal write spend ONE budget on a worker tear-down
+                // (ShutdownLeaseLandingBudget), so the drain has to know a tear-down is happening: a destination that
+                // is refusing writes would otherwise wait out every second the landing needed. Same predicate the
+                // tear-down arm itself acts on — the HOST's lifetime, never a cancelled job token.
+                HostShutdown = _lifetime?.ApplicationStopping ?? CancellationToken.None,
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

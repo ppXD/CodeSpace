@@ -16,9 +16,21 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     internal const int MaximumSegmentBytes = 1024 * 1024;
 
     private const int MaximumReadsPerPoll = 8;
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan DefaultFinalizationBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the loop asks the source for more. Deliberately the ONE wait in this class left on the wall clock:
+    /// it is a liveness cadence rather than a ceiling — nothing is decided by how many times it ticked — and keeping
+    /// it real is what lets a test drive the ceilings on a <see cref="TimeProvider"/> while the loop keeps turning.
+    /// Every wait that a durable outcome DOES depend on (the operation timeout, the finalization budget, the
+    /// transient-append backoff) is on the injected clock.
+    ///
+    /// <para>This and the two ceilings below are the DEPLOYED cadence of every capture, and they are internal for the
+    /// same reason <see cref="MaximumSegmentBytes"/> is: a test pins them (InternalsVisibleTo) so that moving a wait
+    /// onto another clock — which is exactly what happened here — cannot quietly change what a deployment waits.</para>
+    /// </summary>
+    internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
+    internal static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan DefaultFinalizationBudget = TimeSpan.FromSeconds(30);
 
     /// <summary>The source proved complete but its own size cap cut it short: everything captured stays readable, and the stream terminalizes Truncated rather than claiming a whole capture it knows it does not have.</summary>
     private static readonly CaptureFailure Truncation = new("source-truncated", "The durable sandbox log source reached its spool size cap; the captured bytes are the head of a longer output.", AgentRunLogStreamState.Truncated);
@@ -55,8 +67,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 
     public async Task<IAgentRunLogCaptureSession> OpenAsync(AgentRunLogCaptureOpenRequest request, CancellationToken cancellationToken)
     {
-        using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        operation.CancelAfter(_operationTimeout);
+        using var budget = new CancellationTokenSource(_operationTimeout, _clock);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, budget.Token);
         var captureToken = operation.Token;
         try
         {
@@ -119,8 +131,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 
     public async Task RecordGapAsync(AgentRunLogCaptureGapRequest request, CancellationToken cancellationToken)
     {
-        using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        operation.CancelAfter(_operationTimeout);
+        using var budget = new CancellationTokenSource(_operationTimeout, _clock);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, budget.Token);
         var captureToken = operation.Token;
         try
         {
@@ -151,8 +163,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     public async Task CompleteRunAsync(Guid teamId, Guid agentRunId, long workerFenceEpoch, CancellationToken cancellationToken)
     {
         if (teamId == Guid.Empty || agentRunId == Guid.Empty || workerFenceEpoch <= 0) return;
-        using var finalization = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        finalization.CancelAfter(_finalizationBudget);
+        using var budget = new CancellationTokenSource(_finalizationBudget, _clock);
+        using var finalization = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, budget.Token);
         var captureToken = finalization.Token;
         IReadOnlyList<AgentRunLogCaptureHead> streams;
         try { streams = await _logs.ListCaptureHeadsAsync(teamId, agentRunId, captureToken).ConfigureAwait(false); }
@@ -209,6 +221,16 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         }
     }
 
+    /// <summary>
+    /// Tail the source into its streams until the observer finishes, then drain what is left.
+    ///
+    /// <para>The poll wait below is the live half's ONLY cancellation point, and it has to be asked explicitly:
+    /// <see cref="Task.WhenAny(Task,Task)"/> hands back a cancelled delay rather than raising it, and a source that
+    /// answers "nothing new" without touching the token — which is what the local spool's own read does whenever the
+    /// file has grown by less than one minimum segment — raises nothing either. So a capture whose observer was
+    /// cancelled used to spin here at full speed forever, and the tear-down waiting on this task never returned: a
+    /// worker with a reachable log destination hung on shutdown instead of landing its runs.</para>
+    /// </summary>
     private async Task CaptureLoopAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, IReadOnlyList<CaptureStream> streams, Task finish, CancellationToken cancellationToken)
     {
         try
@@ -218,6 +240,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 foreach (var stream in streams.Where(value => !value.Terminal))
                     await PumpAsync(request, captureSessionId, stream, final: false, cancellationToken).ConfigureAwait(false);
                 await Task.WhenAny(Task.Delay(PollInterval, cancellationToken), finish).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
             }
             while (streams.Any(value => !value.Terminal))
             {
@@ -296,9 +319,10 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     /// <see cref="DrainOutcome.Holding"/> is the wait; the caller may keep filling the window from the sandbox spool
     /// while it lasts, up to <see cref="CaptureBackpressureOptions.MaxLocalBacklogBytes"/>.
     ///
-    /// <para>The FINAL drain keeps its own tighter loop and never parks: it is already bounded by the finalization
-    /// budget, and a stream the budget cancels stays Open and reconcilable, which is strictly better than a terminal
-    /// verdict a later observer could not undo.</para>
+    /// <para>The FINAL drain keeps its own tighter loop and never parks TERMINALLY: it is already bounded by the
+    /// finalization budget, and a stream the budget cancels stays Open and reconcilable, which is strictly better than
+    /// a terminal verdict a later observer could not undo. The one thing that stops it early is the host going away
+    /// (<see cref="ParkedForHostShutdown"/>) — and that too leaves the stream Open rather than terminalizing it.</para>
     /// </summary>
     private async Task<DrainOutcome> FlushBacklogAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, bool final, CancellationToken cancellationToken)
     {
@@ -318,7 +342,9 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             await MarkStallAsync(request, captureSessionId, stream, stall, cancellationToken).ConfigureAwait(false);
             if (final)
             {
-                await Task.Delay(AppendRetryDelay(stall.Attempts), cancellationToken).ConfigureAwait(false);
+                if (ParkedForHostShutdown(request, stream, stall)) return DrainOutcome.Stopped;
+
+                await Task.Delay(AppendRetryDelay(stall.Attempts), _clock, cancellationToken).ConfigureAwait(false);
                 continue;
             }
             if (!Exhausted(stream, stall)) return DrainOutcome.Holding;
@@ -327,6 +353,27 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             return DrainOutcome.Stopped;
         }
         return DrainOutcome.Drained;
+    }
+
+    /// <summary>
+    /// Stop draining this stream because the HOST is going away — the one thing that ends a final drain before its own
+    /// budget does.
+    ///
+    /// <para>The drain and the run's terminal write spend ONE deadline (the worker's lease-landing budget). Waiting out
+    /// a destination that is refusing writes spends all of it, and the run then lands nothing: a misconfigured log
+    /// destination would cost the operator the VERDICT as well as the log tail, which is the wrong trade by a wide
+    /// margin. So the wait ends here, and only LOCALLY — the durable row keeps its Open state at its own fence, with
+    /// the stall marker <see cref="MarkStallAsync"/> already wrote, which is exactly the shape the recovery sweep
+    /// finishes. Nothing is terminalized, so nothing a later observer could have completed is foreclosed.</para>
+    /// </summary>
+    private bool ParkedForHostShutdown(AgentRunLogCaptureOpenRequest request, CaptureStream stream, RemoteStall stall)
+    {
+        if (!request.HostShutdown.IsCancellationRequested) return false;
+
+        stream.Terminal = true;
+        _logger.LogWarning("Agent run {RunId} log stream {StreamId} parked its final drain after {Attempts} refusal(s) ({Problem}) because this host is shutting down; it stays Open at its fence for the recovery sweep so the run's own landing keeps the rest of the shared budget", request.AgentRunId, stream.Metadata.StreamId, stall.Attempts, stall.Code);
+
+        return true;
     }
 
     /// <summary>One attempt at the queue's head segment. The head is dequeued ONLY on a committed receipt, so nothing is ever consumed by a failure.</summary>
@@ -620,7 +667,8 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private static bool Valid(AgentRunLogCaptureOpenRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.ActorId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool Valid(AgentRunLogCaptureGapRequest request, IReadOnlyList<SandboxDurableLogDescriptor> descriptors) => request.TeamId != Guid.Empty && request.AgentRunId != Guid.Empty && request.WorkerFenceEpoch > 0 && request.Handle.AgentRunLogCaptureSessionId is { } sessionId && sessionId != Guid.Empty && request.ErrorCode is { Length: > 0 and <= 128 } && request.ErrorMessage is { Length: > 0 and <= 2048 } && descriptors.Count > 0 && descriptors.Select(value => value.SourceKey).Distinct(StringComparer.Ordinal).Count() == descriptors.Count && descriptors.Select(value => value.StreamKind).Distinct(StringComparer.Ordinal).Count() == descriptors.Count;
     private static bool IsProcessStream(string streamKind) => streamKind is AgentRunLogKinds.StandardOutput or AgentRunLogKinds.StandardError;
-    private static TimeSpan AppendRetryDelay(int attempt) => TimeSpan.FromMilliseconds(Math.Min(1000, 50 * Math.Pow(2, Math.Min(Math.Max(attempt - 1, 0), 5))));
+    /// <summary>The wait before a refused segment's next offer on the FINAL drain: 50ms doubled per prior attempt, capped at one second. Internal so a test both PINS it and advances a virtual clock by exactly it, rather than mirroring the number and drifting.</summary>
+    internal static TimeSpan AppendRetryDelay(int attempt) => TimeSpan.FromMilliseconds(Math.Min(1000, 50 * Math.Pow(2, Math.Min(Math.Max(attempt - 1, 0), 5))));
     private static string Held(TimeSpan value) => $"{value.TotalMinutes.ToString("F1", CultureInfo.InvariantCulture)}m";
     private static string Code<T>(T value) where T : struct, Enum => string.Concat(value.ToString().Select((character, index) => char.IsUpper(character) && index > 0 ? $"-{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
 
@@ -653,8 +701,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             {
                 var result = await observer(Handle, cancellationToken).ConfigureAwait(false);
                 finish.TrySetResult();
-                captureCts.CancelAfter(_owner._finalizationBudget);
-                await capture.ConfigureAwait(false);
+                await DrainWithinBudgetAsync(capture, captureCts).ConfigureAwait(false);
                 if (_streams.Any(value => !value.Terminal))
                     _owner._logger.LogWarning("Agent run {RunId} source final drain exceeded its shadow budget and remains Open for reconciliation", _request.AgentRunId);
                 return result;
@@ -673,6 +720,15 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 await _owner.FailStreamsAsync(_request, _captureSessionId, _streams, new CaptureFailure("observer-failed-before-terminal", "The durable sandbox observer failed before a terminal result proved source completeness."), failure.Token).ConfigureAwait(false);
                 throw;
             }
+        }
+
+        /// <summary>Await the final drain under the finalization budget, on the INJECTED clock: a test advances the ceiling instead of sleeping through it, so a loaded runner can no longer spend a budget before the retry it is measuring. Production's clock is the system one, so the ceiling is the same it always was.</summary>
+        private async Task DrainWithinBudgetAsync(Task capture, CancellationTokenSource captureCts)
+        {
+            using var budget = new CancellationTokenSource(_owner._finalizationBudget, _owner._clock);
+            using var expiry = budget.Token.Register(static state => ((CancellationTokenSource)state!).Cancel(), captureCts);
+
+            await capture.ConfigureAwait(false);
         }
     }
 
