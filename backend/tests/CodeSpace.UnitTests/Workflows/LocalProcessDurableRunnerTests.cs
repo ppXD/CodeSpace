@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.NativeLaunch;
 using Shouldly;
@@ -99,7 +100,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, lines) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         result.ExitCode.ShouldBe(0);
         result.Stdout.ShouldBe("", "stdout is delivered live via the callback, not accumulated");
         lines.ShouldBe(new[] { "alpha", "beta", "gamma" });
@@ -115,7 +116,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, lines) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.Failed);
+        result.Status.ShouldBe(SandboxStatus.Failed, Why(handle, result));
         result.ExitCode.ShouldBe(2);
         lines.ShouldContain("partial", "what the process printed before exiting is still observed");
     }
@@ -491,7 +492,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var sourceKey = source.DescribeLogs(handle).Single(value => value.StreamKind == AgentRunLogKinds.StandardOutput).SourceKey;
         var end = await source.ReadAsync(new SandboxDurableLogReadRequest { Handle = handle, SourceKey = sourceKey, OffsetBytes = 4, MinimumBytes = 1, MaximumBytes = 32, FinalDrain = true }, CancellationToken.None);
 
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         lines.ShouldBe(new[] { "late" });
         File.Exists(Path.Combine(handle.SpoolDirectory, "logs.sealed")).ShouldBeTrue("the seal is written only after both FIFO writers reached EOF");
         end.ShouldBeOfType<SandboxDurableLogReadResult.EndOfSource>();
@@ -550,7 +551,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         new FileInfo(Path.Combine(handle.SpoolDirectory, "out.log")).Length.ShouldBe(1L * 1024 * 1024,
             "the spool stops AT the cap — 4 MiB of agent chatter must not land 4 MiB on the worker's disk");
-        result.Status.ShouldBe(SandboxStatus.Failed, "capping the spool never reinterprets the command's own outcome");
+        result.Status.ShouldBe(SandboxStatus.Failed, Why(handle, result, "capping the spool never reinterprets the command's own outcome"));
         result.ExitCode.ShouldBe(7, "the exit-code capture path is untouched by the cap — NOT TimedOut, NOT Stalled");
     }
 
@@ -566,7 +567,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, _) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.Success, "the command ran past the cap to its final marker and exited 0 — a blocked writer would have timed out instead");
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result, "the command ran past the cap to its final marker and exited 0 — a blocked writer would have timed out instead"));
         result.ExitCode.ShouldBe(0);
         File.ReadAllText(Path.Combine(handle.SpoolDirectory, "logs.copy-status")).Trim().ShouldBe("0:0", "both bounded copiers exit normally, so `wait` still yields a clean copier status");
         File.Exists(Path.Combine(handle.SpoolDirectory, "logs.sealed")).ShouldBeTrue("draining to real EOF keeps the seal authority intact");
@@ -629,7 +630,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var (result, lines) = await AttachCollectAsync(handle);
 
         File.ReadAllBytes(Path.Combine(handle.SpoolDirectory, "out.log")).ShouldBe("alpha\nbeta\ngamma\n"u8.ToArray(), "an under-cap spool is byte-identical to the unbounded copier's");
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         lines.ShouldBe(new[] { "alpha", "beta", "gamma" });
     }
 
@@ -734,7 +735,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, _) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.TimedOut, "the observer enforces the handle's wall-clock deadline");
+        result.Status.ShouldBe(SandboxStatus.TimedOut, Why(handle, result, "the observer enforces the handle's wall-clock deadline"));
         result.ExitCode.ShouldBe(-1);
     }
 
@@ -754,7 +755,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
             var (result, _) = await AttachCollectAsync(handle);
 
-            result.Status.ShouldBe(SandboxStatus.Stalled, "no spool advance for the 2s idle window → stalled, not a 30s timeout");
+            result.Status.ShouldBe(SandboxStatus.Stalled, Why(handle, result, "no spool advance for the 2s idle window → stalled, not a 30s timeout"));
             result.ExitCode.ShouldBe(-1);
         }
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
@@ -775,7 +776,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
             var (result, lines) = await AttachCollectAsync(handle);
 
-            result.Status.ShouldBe(SandboxStatus.Success, "spool advancing within the idle window is never falsely stalled");
+            result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result, "spool advancing within the idle window is never falsely stalled"));
             lines.ShouldContain("tick4");
         }
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
@@ -798,7 +799,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
             var (result, _) = await AttachCollectAsync(handle);
 
-            result.Status.ShouldBe(SandboxStatus.Success, "newline-less byte growth of the spool within the window is never falsely stalled");
+            result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result, "newline-less byte growth of the spool within the window is never falsely stalled"));
         }
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
     }
@@ -835,11 +836,11 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
             var (result, _) = await AttachCollectAsync(handle);
 
-            result.Status.ShouldBe(expected, timeoutSeconds is null
+            result.Status.ShouldBe(expected, Why(handle, result, timeoutSeconds is null
                 ? "with NO wall deadline the watchdog is the only bound, so a renewal must not defer it — otherwise a wedged unbounded run can never be collected"
                 : renew
                     ? "a silent run whose platform request keeps renewing the lease is WORKING — killing it is the failure mode this signal removes"
-                    : "with the renewal removed the same silent run must still be judged stalled");
+                    : "with the renewal removed the same silent run must still be judged stalled"));
         }
         finally
         {
@@ -893,7 +894,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var resumed = handle with { StdoutOffset = "one\n".Length };   // 4 bytes — resume past the first line
         var (result, lines) = await AttachCollectAsync(resumed);
 
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         lines.ShouldBe(new[] { "two", "three" });   // only the lines after the checkpoint offset are re-emitted
     }
 
@@ -928,7 +929,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, lines) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         lines.ShouldBe(new[] { "one", "two", "three" });   // attaching after the fact replays the whole spool from offset 0
     }
 
@@ -1031,7 +1032,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var handle = clearTheStamp ? LegacyProbeProjection(launched) with { LaunchHost = null } : launched;
 
         (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running,
-            "an unstamped handle keeps the pre-stamp behaviour, so upgrading never makes an in-flight run unanswerable");
+            $"an unstamped handle keeps the pre-stamp behaviour, so upgrading never makes an in-flight run unanswerable. {ProcessLiveness.Describe(launched)}");
 
         KillTree(launched.ProcessId);
     }
@@ -1628,7 +1629,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         var (result, lines) = await AttachCollectAsync(handle);
 
-        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
         var expected = Path.Combine(handle.SpoolDirectory, "agent-home");
         // The child read CLAUDE_CONFIG_DIR set to the isolated per-run home under the spool (not the operator's ~/.claude).
         lines.ShouldBe(new[] { expected });
@@ -1912,6 +1913,20 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     // These tests exercise the historical HANDLE reader against a real process. Clearing one field on a new
     // receipt-backed handle represents a corrupt modern projection, not a legacy record; use an actual legacy
     // locator with no native metadata instead. This helper does not claim to run a historical launch binary.
+    /// <summary>
+    /// Why a real launched run ended the way it did. A bare "should be Success but was Failed" is the shape this
+    /// suite keeps going red in on Linux CI, and it names neither of the two things that decide it: what the run
+    /// itself reported, and whether its supervised pid is alive, a corpse, or a launch that never started. Both are
+    /// unrecoverable by the time anyone reads the log.
+    /// </summary>
+    /// <para>Built EAGERLY, and it has to be: Shouldly 4.3.0 declares eighteen <c>ShouldBe</c> overloads and every
+    /// one of them takes a <c>string</c> — the assembly contains no <c>Func&lt;string?&gt; customMessage</c> parameter
+    /// at all (checked by reflection over <c>Shouldly.dll</c>; a lambda, an explicit <c>Func&lt;string?&gt;</c> local
+    /// and an explicit cast each fail to bind). Deferring it needs a Shouldly upgrade, not a different call shape.
+    /// The cost is one <c>/proc</c> read and one bounded file read per assertion.</para>
+    private static string Why(SandboxHandle handle, SandboxResult result, string because = "the launched run did not end the way this test requires") =>
+        $"{because} — the run reported {result.Status} (exit {result.ExitCode}) saying: {(string.IsNullOrWhiteSpace(result.Stderr) ? "(nothing)" : result.Stderr.Trim())}. {ProcessLiveness.Describe(handle)}";
+
     private SandboxHandle LegacyProbeProjection(SandboxHandle handle) => handle with { NativeLaunch = null, SpoolDirectory = TempDir() };
 
     private string TempDir()

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Infrastructure;
 
@@ -48,7 +49,7 @@ internal static class ProcessLiveness
     }
 
     /// <summary>The state field of a <c>/proc/pid/stat</c> line, read past the comm field's parentheses exactly as the product reads it (a comm may itself contain spaces and brackets).</summary>
-    internal static string LinuxState(string stat) => stat[(stat.LastIndexOf(')') + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+    internal static string LinuxState(string stat) => FieldsAfterComm(stat)[0];
 
     private static bool IsAliveByManagedHandle(int pid)
     {
@@ -71,11 +72,105 @@ internal static class ProcessLiveness
         return $"pid {pid}: mirror={IsAliveLikeTheProduct(pid)} managed(HasExited)={managed} {DescribeProcEntry(pid)} — diagnose by hand with `ps -p {pid} -o pid,ppid,stat,etime,command`";
     }
 
+    /// <summary>
+    /// Everything above about a LAUNCHED handle's pid, plus the birth key the product compares it against, plus what
+    /// the bootstrap that launched it said. Three different questions — what this pid is now, whether the product
+    /// still recognises it as OURS, and how it got that way — and a red carrying only the first is the shape this
+    /// family kept reappearing in. The birth key earns its place because a LIVE process whose recorded key no longer
+    /// matches field 22 of the stat above is reported Gone by the product, which reads identically to a dead one.
+    /// </summary>
+    public static string Describe(SandboxHandle handle) =>
+        $"{Describe(handle.ProcessId)}\nrecorded birth key {handle.NativeLaunch?.Execution?.StartKey ?? "(none: a legacy handle)"} — field 22 of the stat above is the live one\n{DescribeBootstrap(handle.SpoolDirectory)}";
+
+    /// <summary>
+    /// The TAIL of what the bootstrap itself said about this launch (<c>launch-v1/bootstrap.err</c> under
+    /// <paramref name="spoolDirectory"/>). A dead pid on its own cannot distinguish "the broker refused to release
+    /// this execution" from "the kernel killed it" from "execve failed" — the bootstrap names which, and a failure
+    /// message that omits it sends the reader to a CI log that no longer exists.
+    /// </summary>
+    public static string DescribeBootstrap(string? spoolDirectory)
+    {
+        if (string.IsNullOrEmpty(spoolDirectory)) return "no spool directory on the handle, so the bootstrap's own diagnostics cannot be located";
+        var path = Path.Combine(spoolDirectory, NativeLaunchProtocol.DirectoryName, NativeLaunchProtocol.DiagnosticsFile);
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(Math.Max(0, stream.Length - BootstrapTailBytes), SeekOrigin.Begin);
+            using var reader = new StreamReader(stream);
+            // Past the first newline: a byte-arbitrary cut lands mid-character and the tail opens with replacement
+            // marks. Whole lines only, unless the whole file is inside the budget.
+            if (stream.Length > BootstrapTailBytes) reader.ReadLine();
+            var tail = reader.ReadToEnd().Trim();
+            return tail.Length == 0 ? $"{path} is empty: the bootstrap died without a word" : $"the bootstrap said:\n{tail}";
+        }
+        catch (FileNotFoundException) { return $"{path} was never written: this launch had no bootstrap, or it died before it could open one"; }
+        catch (Exception error) { return $"{path} unreadable: {error.GetType().Name}"; }
+    }
+
+    /// <summary>Enough of the tail to carry the last few refusals without pasting a whole run's stderr into an assertion message.</summary>
+    private const int BootstrapTailBytes = 4096;
+
     private static string DescribeProcEntry(int pid)
     {
         if (!OperatingSystem.IsLinux()) return "(no /proc on this platform)";
 
-        try { var stat = File.ReadAllText($"/proc/{pid}/stat").Trim(); return $"state={LinuxState(stat)} stat=[{stat[..Math.Min(120, stat.Length)]}]"; }
+        try
+        {
+            var stat = File.ReadAllText($"/proc/{pid}/stat").Trim();
+            var fields = FieldsAfterComm(stat);
+            return $"comm={Comm(stat)} state={fields[0]} {DescribeParent(fields)} {DescribeExitCode(fields)} stat=[{stat[..Math.Min(120, stat.Length)]}]";
+        }
         catch (Exception error) { return $"/proc/{pid}/stat unreadable: {error.GetType().Name}: {error.Message}"; }
     }
+
+    /// <summary>Who has not reaped this corpse. A supervised pid whose parent is the LAUNCHING test host died before it ever became the workload; one whose parent is the bootstrap died under its own broker — different defects, indistinguishable from the pid alone.</summary>
+    private static string DescribeParent(string[] fields)
+    {
+        if (fields.Length < 2 || !int.TryParse(fields[1], out var parent)) return "ppid=?";
+
+        try { return $"ppid={parent} ({File.ReadAllText($"/proc/{parent}/comm").Trim()})"; }
+        catch (Exception error) { return $"ppid={parent} (comm unreadable: {error.GetType().Name})"; }
+    }
+
+    /// <summary>
+    /// Field 52 of <c>/proc/pid/stat</c> — the thread's exit status in <c>waitpid</c> form — decoded. The kernel only
+    /// fills it in for a corpse, so it is reported only for one: for anything still running it is a stale 0 that would
+    /// read as a clean exit. This is the field that separates "the workload refused itself" (exit 125/126) from "something
+    /// killed it" (signal 9), which no amount of staring at a zombie's state letter can.
+    /// </summary>
+    private static string DescribeExitCode(string[] fields)
+    {
+        if (!DeadLinuxStates.Contains(fields[0])) return "exit=(still running)";
+        if (fields.Length < 50 || !int.TryParse(fields[49], out var status)) return "exit=(the kernel did not report one)";
+
+        return "exit=" + DescribeWaitStatus(status);
+    }
+
+    /// <summary>A managed <see cref="Process.ExitCode"/> in words. On Unix .NET reports a signalled child as 128 + the signal, so a bare "134" reads as an exit status when it is really SIGABRT — which for a .NET child is its own unhandled exception, a completely different investigation from a kill.</summary>
+    public static string DescribeManagedExitCode(int exitCode) =>
+        exitCode is > 128 and < 192 ? $"{exitCode}: killed by signal {exitCode - 128} ({SignalName(exitCode - 128)})" : exitCode.ToString();
+
+    /// <summary>A <c>waitpid</c> status word in words: an exit code, or the signal that ended it.</summary>
+    internal static string DescribeWaitStatus(int status)
+    {
+        var signal = status & 0x7f;
+        if (signal == 0) return $"exited({(status >> 8) & 0xff})";
+        if (signal == 0x7f) return "stopped";
+
+        return $"killed by signal {signal} ({SignalName(signal)}){((status & 0x80) != 0 ? ", core dumped" : "")}";
+    }
+
+    private static string SignalName(int signal) => signal switch
+    {
+        1 => "SIGHUP", 2 => "SIGINT", 4 => "SIGILL", 6 => "SIGABRT", 7 => "SIGBUS", 8 => "SIGFPE",
+        9 => "SIGKILL", 11 => "SIGSEGV", 13 => "SIGPIPE", 15 => "SIGTERM", 24 => "SIGXCPU", 25 => "SIGXFSZ",
+        _ => "unnamed here",
+    };
+
+    /// <summary>The comm field, brackets stripped — truncated to 15 characters by the kernel, so <c>codespace-runne</c> IS the bootstrap.</summary>
+    internal static string Comm(string stat) => stat[(stat.IndexOf('(') + 1)..stat.LastIndexOf(')')];
+
+    /// <summary>Everything from the state field on, read past the comm's parentheses exactly as the product reads it.</summary>
+    internal static string[] FieldsAfterComm(string stat) => stat[(stat.LastIndexOf(')') + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
 }
