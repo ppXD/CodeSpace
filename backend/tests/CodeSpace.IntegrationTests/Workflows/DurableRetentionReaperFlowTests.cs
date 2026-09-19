@@ -14,6 +14,7 @@ using CodeSpace.Core.Services.Workflows.Retention.Cursors;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Artifacts;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Retention;
@@ -466,6 +467,55 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Who the reclamation is attributed to, and which placement it names — read off the requests the cursor actually
+    /// made, not off the constant it was supposed to use. Mutation: drop the actor (or the location id) from the
+    /// request and this reds, where a test that only pinned <c>SystemUsers.SeederId</c>'s value would not notice.
+    /// </summary>
+    [Fact]
+    public async Task Every_purge_this_plane_makes_names_its_placement_and_the_system_actor()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await CaptureAsync(world, "bytes with an audit trail", segments: 2);
+        await AgeAsync(stream, TimeSpan.FromDays(31));
+        await SweepAsync();
+        await ElapseQuarantineAsync(stream);
+        var placements = await PlacementsOfAsync(world, stream);
+
+        var requests = await SweepRecordingPurgesAsync();
+
+        requests.Select(request => request.ArtifactLocationId ?? Guid.Empty).ShouldBe(placements, ignoreOrder: true,
+            customMessage: "an unnamed claim refuses an object with more than one placement, so every request has to say WHICH");
+        requests.ShouldAllBe(request => request.ActorId == SystemUsers.SeederId);
+        requests.ShouldAllBe(request => request.TeamId == world.TeamId);
+        (await StreamAsync(stream)).PurgedAt.ShouldNotBeNull();
+    }
+
+    /// <summary>
+    /// A deduplicated object half of which left by another path. One placement this plane purged, one another path
+    /// deleted — and "reclaimed by policy" is not a statement that can cover only half a stream, because a reader
+    /// takes the tombstone to cover all of it. Mutation: treat ANY Purged placement as drained and this reds with a
+    /// policy tombstone on a partial loss.
+    /// </summary>
+    [Fact]
+    public async Task A_stream_one_of_whose_placements_left_by_another_path_is_never_tombstoned()
+    {
+        var world = await SeedWorldAsync();
+        var stream = await CaptureAsync(world, "identical", segments: 2, distinctSegments: false);
+        var placements = await PlacementsOfAsync(world, stream);
+        placements.Count.ShouldBe(2, "the premise: one object, one placement per write");
+
+        await PurgeOnePlacementAsync(world, stream, placements[0]);
+        await MarkPlacementDeletedAsync(placements[1]);
+        await AgeAsync(stream, TimeSpan.FromDays(31));
+        await SweepAsync();
+        await ElapseQuarantineAsync(stream);
+        await SweepAsync();
+
+        (await StreamAsync(stream)).PurgedAt.ShouldBeNull(
+            "one placement this plane purged beside one it did not is a partial loss, and the tombstone would report it as a complete policy reclamation");
+    }
+
+    /// <summary>
     /// Migration 0236's arm, at the only place that can pin it: the database. A terminal stream admits a retention
     /// statement and NOTHING else — a statement that smuggles anything alongside the two columns reads the same
     /// refusal it always did.
@@ -842,6 +892,40 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
         return await new DurableRetentionReaper(options, [cursor], NullLogger<DurableRetentionReaper>.Instance).SweepAsync(CancellationToken.None);
     }
 
+    /// <summary>The real reaper over the real cursor and the real coordinator, with every purge request it makes recorded on the way through.</summary>
+    private async Task<IReadOnlyList<ArtifactCasPurgeRequest>> SweepRecordingPurgesAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var options = scope.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+        var recorder = new RecordingPurgeCoordinator(scope.Resolve<IArtifactCasPurgeCoordinator>());
+        var cursor = new LogStreamRetentionCursor(options, recorder, NullLogger<LogStreamRetentionCursor>.Instance);
+        await new DurableRetentionReaper(options, [cursor], NullLogger<DurableRetentionReaper>.Instance).SweepAsync(CancellationToken.None);
+
+        return recorder.Requests;
+    }
+
+    /// <summary>Passes every call through to the real coordinator and keeps what was asked, so the audit facts are read off the requests the cursor made rather than off the constant it was meant to use.</summary>
+    private sealed class RecordingPurgeCoordinator : IArtifactCasPurgeCoordinator
+    {
+        private readonly IArtifactCasPurgeCoordinator _inner;
+
+        public RecordingPurgeCoordinator(IArtifactCasPurgeCoordinator inner) { _inner = inner; }
+
+        public List<ArtifactCasPurgeRequest> Requests { get; } = [];
+
+        public Task<ArtifactCasPurgeResult> PurgeAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+
+            return _inner.PurgeAsync(request, cancellationToken);
+        }
+
+        public Task<ArtifactCasPurgeClaimResult> ClaimAsync(ArtifactCasPurgeRequest request, CancellationToken cancellationToken) => _inner.ClaimAsync(request, cancellationToken);
+        public Task<ArtifactCasPurgeResult> DeleteAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.DeleteAsync(claim, cancellationToken);
+        public Task<ArtifactCasReleaseOutcome> ReleaseAsync(ArtifactCasPurgeClaim claim, ArtifactCasReleaseEvidence evidence, CancellationToken cancellationToken) => _inner.ReleaseAsync(claim, evidence, cancellationToken);
+        public Task<ArtifactCasAbandonResult> AbandonAsync(ArtifactCasPurgeClaim claim, CancellationToken cancellationToken) => _inner.AbandonAsync(claim, cancellationToken);
+    }
+
     /// <summary>A destination that answers every delete with a refusal and no effect — the shape a revoked key or a read-only bucket produces.</summary>
     private sealed class RefusingPurgeCoordinator : IArtifactCasPurgeCoordinator
     {
@@ -895,6 +979,52 @@ public sealed class DurableRetentionReaperFlowTests : IAsyncLifetime
         return await scope.Resolve<CodeSpaceDbContext>().Database.SqlQueryRaw<string>(
             "SELECT DISTINCT xmin::text AS \"Value\" FROM paired_qualification_result WHERE observation_group_id = {0} "
             + "UNION SELECT DISTINCT xmin::text FROM paired_qualification_result_pin WHERE result_id = {0}", resultId).ToListAsync();
+    }
+
+    /// <summary>Every placement still holding bytes for this stream's objects — the rows a drain has to name one by one.</summary>
+    private async Task<IReadOnlyList<Guid>> PlacementsOfAsync(World world, Guid streamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var objects = await ObjectsOfAsync(world, streamId);
+
+        return await db.ArtifactLocation.AsNoTracking()
+            .Where(location => location.TeamId == world.TeamId && objects.Contains(location.ArtifactObjectId)
+                && location.State != ArtifactLocationState.Purged && location.State != ArtifactLocationState.Deleted)
+            .OrderBy(location => location.Id).Select(location => location.Id).ToListAsync();
+    }
+
+    /// <summary>Drives ONE placement through the real purge lifecycle, leaving its siblings alone.</summary>
+    private async Task PurgeOnePlacementAsync(World world, Guid streamId, Guid locationId)
+    {
+        using var scope = _fixture.BeginScope();
+        var objectId = (await ObjectsOfAsync(world, streamId)).Single();
+        var outcome = await scope.Resolve<IArtifactCasPurgeCoordinator>().PurgeAsync(new ArtifactCasPurgeRequest
+        {
+            TeamId = world.TeamId, ArtifactObjectId = objectId, ArtifactLocationId = locationId, ActorId = SystemUsers.SeederId,
+        }, CancellationToken.None);
+
+        outcome.ShouldBeOfType<ArtifactCasPurgeResult.Purged>();
+    }
+
+    /// <summary>Takes one placement out of the lifecycle by a path this plane never drives. Guards suspended, exactly as the stream's are for time travel.</summary>
+    private async Task MarkPlacementDeletedAsync(Guid locationId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE artifact_location DISABLE TRIGGER USER");
+
+        try
+        {
+            await db.ArtifactLocation.Where(location => location.Id == locationId)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(location => location.State, ArtifactLocationState.Deleted)
+                    .SetProperty(location => location.Revision, location => location.Revision + 1));
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE artifact_location ENABLE TRIGGER USER");
+        }
     }
 
     private async Task<IReadOnlyList<Guid>> ObjectsOfAsync(World world, Guid streamId)

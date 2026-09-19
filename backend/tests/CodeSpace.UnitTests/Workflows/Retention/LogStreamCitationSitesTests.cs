@@ -69,15 +69,70 @@ public sealed class LogStreamCitationSitesTests
         using var db = BuildContext();
         var source = File.ReadAllText(Path.Combine(ProductionSourceRoot(), "CodeSpace.Core", "Services", "Workflows", "Retention", "Cursors", $"{nameof(LogStreamRetentionCursor)}.cs"));
 
+        // The EXISTENCE QUESTIONS only — not the whole file, and not even the whole probe method. The drain reads
+        // ArtifactObjectId in three other places, and the probe method itself reads it once more to name the stream's
+        // own objects, so any wider match keeps passing with the sibling-segment probe deleted: the exact hole this
+        // test is for. A site is probed when something ASKS whether a row still names it.
+        var probes = ExistenceQuestions(MethodBody(source, "IsPinnedAsync") + MethodBody(source, "SharesBytesAsync"));
+        probes.ShouldNotBeNullOrWhiteSpace("no existence question was found in the probe methods, so this test would pass by reading nothing at all");
+
         var unprobed = LogStreamRetentionCursor.CitationSites
             .Select(site => (site.Table, site.Column, Member: MemberOf(db, site.Table, site.Column)))
-            .Where(site => !source.Contains($".{site.Member}", StringComparison.Ordinal))
-            .Select(site => $"{site.Table}.{site.Column} (no use of .{site.Member})")
+            .Where(site => !probes.Contains($".{site.Member}", StringComparison.Ordinal))
+            .Select(site => $"{site.Table}.{site.Column} (no use of .{site.Member} in the citation probes)")
             .ToList();
 
         unprobed.ShouldBeEmpty(
-            $"a site listed in {nameof(LogStreamRetentionCursor.CitationSites)} that nothing reads is a claim the cursor does not keep — "
+            $"a site listed in {nameof(LogStreamRetentionCursor.CitationSites)} that the citation probes never read is a claim the cursor does not keep — "
             + "add the probe, or take the entry out:\n  " + string.Join("\n  ", unprobed));
+    }
+
+    /// <summary>
+    /// The arguments of every <c>AnyAsync</c> in the probes — each one an "does anything still name this" question,
+    /// which is what makes a listed table a citation SITE rather than a table the cursor happens to read. Each call in
+    /// these methods ends at its cancellation token, so that is where the span stops.
+    /// </summary>
+    private static string ExistenceQuestions(string source)
+    {
+        var questions = new System.Text.StringBuilder();
+
+        for (var index = source.IndexOf("AnyAsync(", StringComparison.Ordinal); index >= 0; index = source.IndexOf("AnyAsync(", index + 1, StringComparison.Ordinal))
+        {
+            var end = source.IndexOf("cancellationToken", index, StringComparison.Ordinal);
+
+            questions.Append(source[index..(end < 0 ? source.Length : end)]);
+        }
+
+        return questions.ToString();
+    }
+
+    /// <summary>
+    /// One method's text, from its declaration to the next member at class indentation. Crude on purpose: it has to
+    /// hold for an expression-bodied probe and a braced one alike, and anything cleverer would be a parser this test
+    /// would then depend on being right.
+    /// </summary>
+    private static string MethodBody(string source, string name)
+    {
+        var start = DeclarationOf(source, name);
+
+        if (start < 0) return string.Empty;
+
+        var next = source.IndexOf("\n    private ", start + 1, StringComparison.Ordinal);
+
+        return source[start..(next < 0 ? source.Length : next)];
+    }
+
+    /// <summary>The DECLARATION of a method, not the first mention of it: both probes are called from <c>ClassifyAsync</c> higher up the file, and a search that stopped there would read the caller instead of the probe.</summary>
+    private static int DeclarationOf(string source, string name)
+    {
+        for (var index = source.IndexOf($"{name}(", StringComparison.Ordinal); index >= 0; index = source.IndexOf($"{name}(", index + 1, StringComparison.Ordinal))
+        {
+            var lineStart = source.LastIndexOf('\n', index) + 1;
+
+            if (source[lineStart..index].Contains("private", StringComparison.Ordinal)) return index;
+        }
+
+        return -1;
     }
 
     /// <summary>The CLR property a column is mapped from — the name the cursor's LINQ has to mention if it reads that column at all.</summary>

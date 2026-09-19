@@ -235,14 +235,20 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
 
     /// <summary>
     /// Nothing is left to remove, so either this plane's own lifecycle emptied the stream or something else did. Only
-    /// the first may be tombstoned: an object whose locations never reached <c>Purged</c> is a loss this cursor did
-    /// not cause and must not claim. Counting the unaccounted objects over ALL of them, not the batch, is what keeps
-    /// a stream with more objects than one sweep can hold from being declared drained on a partial view.
+    /// the first may be tombstoned: EVERY placement of every object has to rest at <c>Purged</c>, which is the state
+    /// only this lifecycle writes. One <c>Purged</c> placement beside a <c>Deleted</c> one is a deduplicated object
+    /// half of which left by a path this cursor did not drive — and "some of it was reclaimed by policy" is not a
+    /// statement the tombstone can make, because a reader takes it to cover the whole stream.
+    ///
+    /// <para>Counting over ALL objects, not the batch, is what keeps a stream with more objects than one sweep can
+    /// hold from being declared drained on a partial view.</para>
     /// </summary>
     private async Task<DrainOutcome> DrainedOrLostAsync(CodeSpaceDbContext db, DurableRetentionCandidate candidate, IQueryable<Guid> objects, CancellationToken cancellationToken)
     {
-        var unaccounted = await objects.CountAsync(objectId => !db.ArtifactLocation
-            .Any(location => location.TeamId == candidate.TeamId && location.ArtifactObjectId == objectId && location.State == ArtifactLocationState.Purged), cancellationToken).ConfigureAwait(false);
+        var unaccounted = await objects.CountAsync(objectId =>
+            !db.ArtifactLocation.Any(location => location.TeamId == candidate.TeamId && location.ArtifactObjectId == objectId)
+            || db.ArtifactLocation.Any(location => location.TeamId == candidate.TeamId && location.ArtifactObjectId == objectId && location.State != ArtifactLocationState.Purged),
+            cancellationToken).ConfigureAwait(false);
 
         return unaccounted == 0 ? DrainOutcome.Drained : BytesAlreadyGone(candidate, unaccounted);
     }
