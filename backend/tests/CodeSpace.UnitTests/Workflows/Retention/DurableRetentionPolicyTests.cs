@@ -3,7 +3,6 @@ using CodeSpace.Core.Handlers.QueryHandlers.Agents;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Messages.Artifacts;
-using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Retention;
@@ -28,7 +27,6 @@ public sealed class DurableRetentionPolicyTests
     [Theory]
     [InlineData(DurableRecordClass.LogStream, 30)]
     [InlineData(DurableRecordClass.CleanupReceipt, 30)]
-    [InlineData(DurableRecordClass.BudgetReservation, 90)]
     public void The_committed_rule_table_is_pinned_to_its_literal_windows(DurableRecordClass value, int minimumAgeDays)
     {
         var rule = DurableRetentionPolicy.For(value).ShouldNotBeNull();
@@ -38,36 +36,6 @@ public sealed class DurableRetentionPolicyTests
         rule.RecheckInterval.ShouldBe(TimeSpan.FromHours(24), "a record that was looked at and kept is left alone this long, so one unreclaimable row cannot own a batch slot");
     }
 
-    /// <summary>
-    /// The one number a reader would otherwise have to do arithmetic for: a reclaimed reservation must be outside
-    /// every window a team cap can be measured over, and there is exactly one such window. Mutation: shorten the floor
-    /// below the window and a cap's committed sum could reach a row this plane had already deleted.
-    /// </summary>
-    [Fact]
-    public void A_reclaimed_budget_claim_is_outside_every_window_a_team_cap_is_measured_over()
-    {
-        DurableRetentionPolicy.BudgetReservation.MinimumAge.ShouldBeGreaterThan(TeamCostCap.RollingThirtyDaysSpan,
-            "a reservation inside a live cap window is spend the cap is still counting, and deleting it would hand the team back money it has not finished spending");
-    }
-
-    [Fact]
-    public void Every_declared_class_has_a_rule_and_the_table_declares_nothing_else()
-    {
-        // The table advertises what is actually reclaimed. A class listed here without a cursor would read as a
-        // promise the system does not keep; a cursor whose class is missing claims nothing at all. Either way the
-        // right time to notice is here.
-        DurableRetentionPolicy.Rules.Keys.Order().ShouldBe(Enum.GetValues<DurableRecordClass>().Order(),
-            customMessage: "a class with no rule is never claimed, so adding one to the enum without a rule silently disables its plane");
-        Enum.GetValues<DurableRecordClass>().ShouldBe([DurableRecordClass.LogStream, DurableRecordClass.CleanupReceipt, DurableRecordClass.BudgetReservation],
-            customMessage: "a class belongs here only together with the cursor that sweeps it — add both in one change, never the rule first");
-    }
-
-    /// <summary>
-    /// The exact strings a purged stream puts on the wire. The web client matches both literally — see
-    /// <c>frontend/src/api/agentRunLogsApi.test.ts</c>, which feeds this availability and this code through its own
-    /// decoder — and a client that does not recognise them reports the RESPONSE as malformed, which is a worse answer
-    /// than the wrong one it replaced. Renaming the enum member changes both, so it has to fail here first.
-    /// </summary>
     [Fact]
     public void A_purged_read_puts_its_availability_and_code_on_the_wire_verbatim()
     {

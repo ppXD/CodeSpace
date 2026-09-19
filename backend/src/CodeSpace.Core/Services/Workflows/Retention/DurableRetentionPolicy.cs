@@ -8,11 +8,17 @@ namespace CodeSpace.Core.Services.Workflows.Retention;
 /// mistyped retention window is unrecoverable data loss and a code review is the control that belongs in front of it.
 ///
 /// <para>A class is listed here together with the cursor that sweeps it, never ahead of one, so this table can always
-/// be read as "what is actually reclaimed". Two planes that might be expected are deliberately absent, each refused by
-/// a trigger whose own words say why: <c>workflow_run_capture_gap</c> ("a removable gap makes a complete manifest
-/// reachable by deleting the evidence", migration 0146) and <c>paired_qualification_result</c> ("paired qualification
-/// result is immutable", migration 0219) — and a result's citers are not enumerable in columns at all, since a
-/// qualification receipt records its cohort and metrics as JSON.</para>
+/// be read as "what is actually reclaimed". Three planes that might be expected are deliberately absent, each for a
+/// reason that survived being looked for:</para>
+///
+/// <para>Migration 0146's guard refuses to delete a run's capture-gap evidence, because a removable gap makes a
+/// complete manifest reachable by deleting the evidence for it; a gap can only honestly go with the manifest whose
+/// verdict it qualifies. Migration 0219's trigger refuses to delete or update a paired-qualification result, and a result's
+/// citers are not enumerable in columns at all — a qualification receipt records its cohort and its metrics as JSON,
+/// which is the shape this plane's charter excludes. And a terminal budget reservation is read UNWINDOWED by the
+/// Room: <c>RoomProjector.BudgetAsync</c> sums every reservation of a run to state what it committed, so reclaiming
+/// the oldest rows of a long run would leave that figure quietly wrong rather than absent. Reclaiming spend records
+/// needs a durable per-run summary to survive them first, which is a money-plane change and not a retention one.</para>
 ///
 /// <para>An unregistered class is NOT an error a cursor can shrug off: <see cref="For"/> returns null and the decision
 /// settles Indeterminate, which keeps the record forever. That is what makes removing a class from this table safe.</para>
@@ -38,21 +44,12 @@ public static class DurableRetentionPolicy
     public static readonly DurableRetentionRule CleanupReceipt =
         new(DurableRecordClass.CleanupReceipt, TimeSpan.FromDays(30), Quarantine, Recheck);
 
-    /// <summary>
-    /// Ninety days after the claim reached a terminal state. Three times the only window a team cap is ever measured
-    /// over (<c>TeamCostCap.RollingThirtyDays</c>), so a reclaimed row is one no cap arithmetic can still reach — a
-    /// property a test pins against that window rather than leaving it to arithmetic in a reader's head.
-    /// </summary>
-    public static readonly DurableRetentionRule BudgetReservation =
-        new(DurableRecordClass.BudgetReservation, TimeSpan.FromDays(90), Quarantine, Recheck);
-
     /// <summary>The committed table, public so a test can pin every literal value in it.</summary>
     public static readonly IReadOnlyDictionary<DurableRecordClass, DurableRetentionRule> Rules =
         new Dictionary<DurableRecordClass, DurableRetentionRule>
         {
             [LogStream.Class] = LogStream,
             [CleanupReceipt.Class] = CleanupReceipt,
-            [BudgetReservation.Class] = BudgetReservation,
         };
 
     /// <summary>The rule for <paramref name="value"/>, or null when this build registers none — which every consumer reads as keep.</summary>

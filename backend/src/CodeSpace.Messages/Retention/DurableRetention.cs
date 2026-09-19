@@ -17,9 +17,6 @@ public enum DurableRecordClass
 
     /// <summary>An <c>agent_run_cleanup_receipt</c> row (migration 0229) that settled — what became of one resource of one abandoned run.</summary>
     CleanupReceipt = 2,
-
-    /// <summary>A <c>budget_reservation</c> row (migration 0104) that reached a terminal state — a spend claim nothing can still change.</summary>
-    BudgetReservation = 3,
 }
 
 /// <summary>

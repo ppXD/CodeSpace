@@ -29,8 +29,9 @@ public sealed record DurableRetentionCandidate(Guid Id, Guid TeamId, long Revisi
 /// </summary>
 /// <param name="Now">The database clock at sweep start. Every deadline compared against it was written by a database clock too.</param>
 /// <param name="TerminalBefore">The age floor: a record that went terminal after this is not a candidate at all.</param>
-/// <param name="RecheckBefore">The deferral: a record last settled after this was already looked at recently and is left alone.</param>
-public sealed record DurableRetentionSweepWindow(DateTimeOffset Now, DateTimeOffset TerminalBefore, DateTimeOffset RecheckBefore);
+/// <param name="RecheckBefore">The deferral, read backwards: a record last settled after this was already looked at recently and is left alone.</param>
+/// <param name="RecheckAt">The same deferral, written forwards: where a cursor that keeps a record for a reason it cannot record puts its next look.</param>
+public sealed record DurableRetentionSweepWindow(DateTimeOffset Now, DateTimeOffset TerminalBefore, DateTimeOffset RecheckBefore, DateTimeOffset RecheckAt);
 
 /// <summary>
 /// One plane's answers to the three questions the reaper asks: which records are candidates, does anything still cite
@@ -58,10 +59,15 @@ public interface IDurableRetentionCursor
     Task<DurableReferenceVerdict> ClassifyAsync(DurableRetentionCandidate candidate, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Applies <paramref name="decision"/> under the candidate's revision fence. False means nothing was settled —
-    /// the record moved under this sweep, or the work it needed could not be finished — and the loop reports it as a
+    /// Applies <paramref name="decision"/> under the candidate's own fence. False means nothing was settled — the
+    /// record moved under this sweep, or the work it needed could not be finished — and the loop reports it as a
     /// keep. A cursor decides for itself whether an unfinished settlement also defers the record; work that is making
     /// progress must NOT, or a drain that needs several passes would take one recheck interval per pass.
+    ///
+    /// <para><paramref name="window"/> is the SAME window the claim used, handed back so a deleting statement can
+    /// repeat the time predicates that admitted the row. The claim and the deletion are different transactions, and a
+    /// record whose terminal instant or deadline moved in between must match nothing rather than be deleted on the
+    /// strength of a decision taken about the row it used to be.</para>
     /// </summary>
-    Task<bool> SettleAsync(DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken);
+    Task<bool> SettleAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken);
 }

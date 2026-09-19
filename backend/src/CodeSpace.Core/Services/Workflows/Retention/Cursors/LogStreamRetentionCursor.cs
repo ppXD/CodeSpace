@@ -140,8 +140,9 @@ public sealed class LogStreamRetentionCursor : IDurableRetentionCursor, IScopedD
         }
     }
 
-    public async Task<bool> SettleAsync(DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken)
+    public async Task<bool> SettleAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(window);
         ArgumentNullException.ThrowIfNull(candidate);
         ArgumentNullException.ThrowIfNull(decision);
 
