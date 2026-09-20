@@ -270,7 +270,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             ct => RenewObservationAndCredentialAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
             ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
-            heartbeatCts.Token);
+            heartbeatCts.Token,
+            _clock);
 
         // Holds the run's resolved secret(s) once the credential is resolved (below), so the catch-all can scrub
         // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
@@ -803,7 +804,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             ct => RenewObservationAndCredentialAsync(heartbeatRuns, owner, observerCts, ct),
             AgentRunLiveness.HeartbeatInterval,
             ex => _logger.LogWarning(ex, "Heartbeat ping failed for re-attached agent run {RunId}; lost ownership stops observation, transient failures retry", agentRunId),
-            heartbeatCts.Token);
+            heartbeatCts.Token,
+            _clock);
 
         var expectedEpoch = owner.Epoch;
 

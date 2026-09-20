@@ -59,6 +59,18 @@ public class AgentRunLivenessTests : IDisposable
     }
 
     [Fact]
+    public void HeartbeatInterval_defaults_to_one_hundred_seconds()
+    {
+        // The cadence a live agent run actually pings at — and the ONLY place it is pinned as a number, now that
+        // HeartbeatLoopTests drives a fake clock. A fake clock proves the loop honours whatever interval it is
+        // handed; it says nothing about which interval production hands it. Changing either half of the
+        // derivation (the 5-minute default window, or the /3) silently re-cadences every run, and reds here.
+        Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, null);
+
+        AgentRunLiveness.HeartbeatInterval.ShouldBe(TimeSpan.FromSeconds(100));
+    }
+
+    [Fact]
     public void HeartbeatInterval_stays_below_the_window_at_the_default()
     {
         // The no-drift invariant: a live worker pings comfortably before the reconciler would abandon.

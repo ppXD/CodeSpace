@@ -17,18 +17,23 @@ public static class HeartbeatLoop
     /// The first ping is deferred by one interval because the claim already stamped an initial heartbeat.
     ///
     /// <para><paramref name="timeProvider"/> exists so the cadence can be driven deterministically in a test instead
-    /// of raced against the wall clock. It is OPTIONAL and defaults to <see cref="TimeProvider.System"/>, so every
-    /// existing call site compiles unchanged and production behaviour is byte-identical — the system provider's
-    /// <c>Delay</c> IS the <c>Task.Delay</c> this used before. <see cref="TimeProvider"/> rather than a bespoke clock
-    /// interface: it is the BCL's own seam, so the next thing that needs one does not invent a second vocabulary.</para>
+    /// of raced against the wall clock. Production passes the DI-registered <see cref="TimeProvider.System"/>, whose
+    /// <c>Delay</c> IS the <c>Task.Delay</c> this used before, so production behaviour is byte-identical.
+    /// <see cref="TimeProvider"/> rather than a bespoke clock interface: it is the BCL's own seam, so the next thing
+    /// that needs one does not invent a second vocabulary.</para>
+    ///
+    /// <para>REQUIRED, not optional-defaulting-to-System. While it defaulted, BOTH executor call sites silently kept
+    /// the wall clock: the seam existed and nothing used it, so a test could only pin the loop by racing real
+    /// milliseconds. A required parameter makes "which clock does this run on" a decision the compiler asks at every
+    /// call site instead of one a default answers invisibly.</para>
     /// </summary>
-    public static async Task RunAsync(Func<CancellationToken, Task> ping, TimeSpan interval, Action<Exception> onPingError, CancellationToken cancellationToken, TimeProvider? timeProvider = null)
+    public static async Task RunAsync(Func<CancellationToken, Task> ping, TimeSpan interval, Action<Exception> onPingError, CancellationToken cancellationToken, TimeProvider timeProvider)
     {
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(interval, timeProvider ?? TimeProvider.System, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(interval, timeProvider, cancellationToken).ConfigureAwait(false);
 
                 try
                 {
