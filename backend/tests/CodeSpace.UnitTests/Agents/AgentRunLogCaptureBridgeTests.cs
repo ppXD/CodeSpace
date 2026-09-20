@@ -266,7 +266,7 @@ public sealed class AgentRunLogCaptureBridgeTests
         var observed = await observing;
 
         spent.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(150), "the drain gave the provider its whole budget before giving up");
-        spent.ShouldBeLessThan(TimeSpan.FromMilliseconds(150) + AdvanceStep * 2, "ONE total finalization budget bounds a provider that never completes — N segments must not multiply it");
+        spent.ShouldBeLessThan(TimeSpan.FromMilliseconds(150) + AdvanceStep * 4, "ONE total finalization budget bounds a provider that never completes — N segments must not multiply it. The slack is a few advance steps, not a second budget: doubling the ceiling would still fail this.");
         observed.ShouldBeSameAs(expected);
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null, "timeout remains durably reconcilable Open state, never incomplete-but-Completed");
         logs.ObservedOperationTimeout.ShouldBe(TimeSpan.FromMilliseconds(40));

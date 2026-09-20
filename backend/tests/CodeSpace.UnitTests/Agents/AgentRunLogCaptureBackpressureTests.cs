@@ -229,13 +229,44 @@ public sealed class AgentRunLogCaptureBackpressureTests
         await AwaitWithinAsync(observing, "the drain never returned, so it is waiting out the refusal on a clock this test never advances — the shutdown park did not fire");
 
         clock.GetUtcNow().ShouldBe(DateTimeOffset.UnixEpoch,
-            "the drain spent NOTHING of the budget it shares with the run's landing — a single backoff here is a second the terminal write does not get");
+            "the drain waited for NOTHING — on a tear-down every second it waits either delays the landing's start or is taken straight out of the landing's own budget, depending on which capture is draining");
         logs.AppendAttempts.ShouldBe(1, "the segment was offered once and then parked; a second offer means the tear-down is still waiting the destination out");
         var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
         stdout.State.ShouldBe(AgentRunLogStreamState.Open, "parking for a shutdown is local: the row stays Open at its own fence, which is the one state the recovery sweep can still finish");
         stdout.ErrorCode.ShouldBeNull("nothing was permanently refused, so no terminal cause may be invented");
         stalls.Held.ShouldNotBeEmpty("a stream left Open with no stall marker reads as \"still finalizing\" forever");
         gaps.Gaps.ShouldBeEmpty("a park for shutdown is not a declared loss: the held span is still in the spool and still committable by whoever finishes the stream");
+    }
+
+    [Fact]
+    public async Task A_drain_whose_source_never_seals_also_parks_for_a_host_that_is_going_away()
+    {
+        // The final drain has TWO ways to wait forever, and a refusal is only one of them. A source that never seals
+        // terminalizes nothing, so the drain loop keeps polling it until the finalization budget cancels the whole
+        // capture — 30 seconds, in production, of a worker that is already leaving. Nothing is refused here, so there
+        // is no stall marker to park behind: the park has to come from the loop itself.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var stalls = new FakeStallWriter();
+        var gaps = new FakeCompletenessWriter();
+        var source = new FakeLogSource { EmitEndOfSource = false };
+        source.Set("stdout", Payload(null, 4096));
+        source.Set("stderr", []);
+        var bridge = Bridge(logs, clock, stalls, gaps, finalizationBudget: TimeSpan.FromSeconds(30));
+        using var shutdown = new CancellationTokenSource();
+        shutdown.Cancel();
+
+        var capture = await bridge.OpenAsync(Request(source, hostShutdown: shutdown.Token), CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => Task.FromResult(Result()), CancellationToken.None);
+
+        await AwaitWithinAsync(observing, "the drain never returned, so it is still polling a source that will never seal — on this clock only the finalization budget could end it, and this test never advances one");
+
+        clock.GetUtcNow().ShouldBe(DateTimeOffset.UnixEpoch, "the drain waited for nothing: a worker that is leaving must not spend its finalization budget on a source a later owner can read just as well");
+        var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
+        stdout.State.ShouldBe(AgentRunLogStreamState.Open, "the row stays Open at its fence for the capture recovery sweep");
+        stdout.ErrorCode.ShouldBeNull("nothing failed — the host left; inventing a terminal cause would foreclose what a later owner can still finish");
+        stalls.Held.ShouldBeEmpty("nothing was refused, so nothing may claim the destination is stalled");
+        gaps.Gaps.ShouldBeEmpty("a park for shutdown is not a declared loss");
     }
 
     [Fact]
@@ -371,7 +402,6 @@ public sealed class AgentRunLogCaptureBackpressureTests
         return bytes;
     }
 
-    /// <summary>Explicit timeout with the watched signal named, so a failure says what never happened rather than only that time ran out (Rule 12.10).</summary>
     /// <summary>Await work that must settle on its own — no clock to advance — with a deadline and a message naming what did not (Rule 12.10).</summary>
     private static async Task AwaitWithinAsync(Task work, string signal)
     {
@@ -397,6 +427,7 @@ public sealed class AgentRunLogCaptureBackpressureTests
         }
     }
 
+    /// <summary>Explicit timeout with the watched signal named, so a failure says what never happened rather than only that time ran out (Rule 12.10).</summary>
     private static async Task WaitAsync(Func<bool> condition, string signal)
     {
         var watch = Stopwatch.StartNew();
@@ -465,12 +496,15 @@ public sealed class AgentRunLogCaptureBackpressureTests
             new("stderr", AgentRunLogKinds.StandardError, AgentRunLogRepresentations.PlainTextContentType, AgentRunLogRepresentations.Utf8ContentEncoding, "fake-spool/v1"),
         ];
 
+        /// <summary>False models a spool the copier has not sealed yet: the final drain gets "not yet" forever, which is the OTHER way it can run to its budget without anything being refused.</summary>
+        public bool EmitEndOfSource { get; init; } = true;
+
+        /// <summary>Does NOT observe the token, because production's does not: the local spool's read answers "nothing new" out of a length comparison, with no I/O and no cancellation check. A fake that threw here is what kept a capture-loop cancellation bug out of reach of this suite.</summary>
         public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var bytes = _sources[request.SourceKey];
             var available = bytes.LongLength - request.OffsetBytes;
-            if (available == 0 && request.FinalDrain) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource());
+            if (available == 0 && request.FinalDrain && EmitEndOfSource) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource());
             if (available == 0 || (!request.FinalDrain && available < request.MinimumBytes)) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.NoData());
             var length = (int)Math.Min(available, request.MaximumBytes);
             return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Available(bytes.AsMemory((int)request.OffsetBytes, length)));

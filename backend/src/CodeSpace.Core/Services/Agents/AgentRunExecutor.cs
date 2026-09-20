@@ -5087,10 +5087,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             {
                 TeamId = context.TeamId, AgentRunId = context.RunId, ActorId = context.ActorId,
                 WorkerFenceEpoch = context.WorkerFenceEpoch, Handle = handle, Source = source, Redactor = context.Redactor,
-                // The capture drain and this run's terminal write spend ONE budget on a worker tear-down
-                // (ShutdownLeaseLandingBudget), so the drain has to know a tear-down is happening: a destination that
-                // is refusing writes would otherwise wait out every second the landing needed. Same predicate the
-                // tear-down arm itself acts on — the HOST's lifetime, never a cancelled job token.
+                // A drain that waits out a destination which is refusing writes costs this run its VERDICT on a
+                // tear-down, in one of two ways depending on which capture is draining. For the session opened here on
+                // the LIVE path the token is the job's, and a drain that will not end is a tear-down that never STARTS
+                // — EndBrokeredAttemptOnShutdownAsync runs from the OperationCanceledException this drain is sitting
+                // on. For the session this very method opens again under EndBrokeredAttemptOnShutdownAsync the token
+                // IS ShutdownLeaseLandingBudget, and every second the drain spends is one the terminal write does not
+                // get. So the drain is told, with the same predicate the tear-down arm itself acts on — the HOST's own
+                // lifetime, never a cancelled job token.
                 HostShutdown = _lifetime?.ApplicationStopping ?? CancellationToken.None,
             }, cancellationToken).ConfigureAwait(false);
         }

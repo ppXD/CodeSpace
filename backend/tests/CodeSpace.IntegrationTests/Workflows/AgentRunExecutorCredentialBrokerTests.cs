@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -282,6 +283,13 @@ public partial class AgentRunExecutorTests
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-shutdown-drain-fixture");
         var runIds = new[] { await CreateRunWithCredentialAsync(teamId, credId), await CreateRunWithCredentialAsync(teamId, credId) };
 
+        // A destination that can actually take the bytes. Without one the bridge resolves Unavailable, fails every
+        // stream at open (before a single byte is read) and hands back a passthrough session — so the capture loop
+        // never runs and the terminal-state claim at the end of this test is satisfied by a row written during open.
+        // With it, the drain below is a real capture being torn down, which is what this arm says it covers.
+        using var destination = new WritableLogDestination();
+        await SeedAgentRunLogRouteAsync(teamId, destination.RootPath);
+
         // A broker that records NO re-bind address — the pre-upgrade generation, and the only generation this arm
         // still owns. A run whose handle DOES carry one is left running for the next worker instead (see
         // A_worker_shutting_down_leaves_a_rebindable_brokered_run_for_the_next_worker); what remains here is the run
@@ -366,6 +374,7 @@ public partial class AgentRunExecutorTests
                 .Where(x => x.AgentRunId == runId).Select(x => new { x.State, x.WorkerFenceEpoch }).ToListAsync();
 
             streams.ShouldNotBeEmpty($"run {runId} opened no log stream, so every claim below is about the empty set — check that the capture bridge reached the executor rather than its passthrough branch");
+            streams.Count.ShouldBe(2, $"run {runId} captured fewer than its two process streams, so this arm is not exercising the capture it claims to");
             streams.ShouldAllBe(x => x.State != AgentRunLogStreamState.Open,
                 $"run {runId} left a capture stream Open after the drain landed it terminal; nothing writes one of those afterwards (the landing leaves the fence unchanged, so even the owner-loss statement cannot match it) and the Room reports it as still finalizing forever");
 
@@ -451,12 +460,90 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>
+    /// The park's other reachable shape, and the one the drain arm above cannot show: an agent that FINISHES while
+    /// the host is stopping. Its observer returns normally, so the capture takes its ordinary final-drain path — with
+    /// <c>ApplicationStopping</c> already raised and a destination that refuses every write.
+    ///
+    /// <para>Nothing here is cancelled: the job token stays live and the run lands its own ordinary verdict. What is
+    /// under test is the seconds between the agent exiting and that verdict being written, which a drain that waits
+    /// the destination out spends on its full finalization budget while the process is being torn down around it.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_run_that_finishes_while_the_host_is_stopping_parks_its_capture_instead_of_draining_to_the_budget()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-finish-during-stop-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        using var destination = new UnwritableLogDestination();
+        await SeedAgentRunLogRouteAsync(teamId, destination.RootPath);
+
+        using var release = new TempDir();
+        var releaseFile = Path.Combine(release.Path, "release");
+        using var broker = new LoopbackModelCredentialBroker();
+        var lifetime = new FakeHostLifetime();
+        using var captureScope = _fixture.BeginScope();
+
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"echo '{ShutdownFactLine}'; while [ ! -f '{releaseFile}' ]; do sleep 0.2; done; echo done");
+        var execution = ExecuteAsync(runId, harness, logCapture: captureScope.Resolve<IAgentRunLogCaptureBridge>(), credentialBroker: broker, lifetime: lifetime, productionCapturePlanes: true);
+
+        await WaitUntilAsync(() => HasLogStream(runId), TimeSpan.FromSeconds(60),
+            "no agent_run_log_stream row appeared, so the capture bridge never opened one and every claim below is about the empty set");
+
+        // The host announces it is stopping while the agent is still working, and only THEN does the agent finish —
+        // so the final drain below is the first thing in this run to see ApplicationStopping raised.
+        lifetime.Stop();
+        await File.WriteAllTextAsync(releaseFile, "go");
+
+        var watch = Stopwatch.StartNew();
+        await AwaitWithinAsync(execution, ParkedDrainCeiling,
+            $"the run did not land within {ParkedDrainCeiling.TotalSeconds}s of its agent exiting — the capture drain is waiting out a destination that refuses every write instead of parking, which on a stopping host costs the whole 30s finalization budget");
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the agent exited 0; a log destination nobody can write to is not this run's verdict");
+        watch.Elapsed.ShouldBeLessThan(ParkedDrainCeiling, "and it landed without waiting the destination out");
+
+        var streams = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogStream.AsNoTracking()
+            .Where(x => x.AgentRunId == runId).Select(x => new { x.StreamKind, x.State, x.WorkerFenceEpoch, x.RemoteStallSince, x.RemoteStallCode }).ToListAsync();
+
+        var held = streams.Where(x => x.StreamKind == AgentRunLogKinds.StandardOutput).ToList().ShouldHaveSingleItem($"run {runId} has no stdout log stream");
+        held.State.ShouldBe(AgentRunLogStreamState.Open, "the parked stream stays Open — the one state the capture recovery sweep can still finish");
+        held.WorkerFenceEpoch.ShouldBe(run.FenceEpoch, "at the fence the run still holds, which is what makes it reachable by that sweep");
+        held.RemoteStallSince.ShouldNotBeNull($"run {runId} parked without saying why; an Open stream with no stall marker reads as \"still finalizing\" forever");
+        held.RemoteStallCode.ShouldNotBeNull();
+        streams.ShouldAllBe(x => x.State != AgentRunLogStreamState.CaptureFailed,
+            "nothing was permanently refused, so no stream may carry a terminal loss a later owner could have avoided");
+    }
+
+    /// <summary>How long after its agent exits a run may take to land while the host is stopping. Far below the bridge's own 30s finalization budget, which is exactly what a drain that waits an unwritable destination out would spend.</summary>
+    private static readonly TimeSpan ParkedDrainCeiling = TimeSpan.FromSeconds(20);
+
+    /// <summary>
     /// How long the whole tear-down may take when the capture destination refuses every write. Well above the
     /// <c>ShutdownLeaseLandingBudget</c> the landing itself is bounded by (so a loaded runner does not fail it) and
     /// far below the 120s the other arms allow, because the point of this arm is the DIFFERENCE between a bounded
     /// drain and one that waits out a provider that is never coming back.
     /// </summary>
     private static readonly TimeSpan UnwritableDestinationDrainCeiling = TimeSpan.FromSeconds(45);
+
+    /// <summary>A destination that takes the bytes — an ordinary empty directory the local-rwx provider can write under, cleaned up with the test.</summary>
+    private sealed class WritableLogDestination : IDisposable
+    {
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-log-dest-" + Guid.NewGuid().ToString("N"));
+
+        public WritableLogDestination() => Directory.CreateDirectory(_root);
+
+        public string RootPath => _root;
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
+        }
+    }
 
     /// <summary>A destination that resolves and activates exactly like a real one, and whose root can never be created: its parent is a regular FILE, so every <c>Directory.CreateDirectory</c> under it is an IOException the provider reports as retryable.</summary>
     private sealed class UnwritableLogDestination : IDisposable
