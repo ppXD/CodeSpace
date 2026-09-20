@@ -12,6 +12,16 @@ name: Sandbox · Isolation E2E
 # Sandbox__RequireConfinement=true is the fail-closed guarantee: if bubblewrap / userns is NOT working,
 # the tests do NOT silently skip — their gate asserts IsRequired==false and so fails HARD. Green here
 # therefore means "confinement was actually exercised", never "the environment couldn't sandbox".
+# CODESPACE_REQUIRE_CGROUP=1 carries the same contract for the cgroup-v2 caps — which is why this job
+# SELF-HEALS cgroup delegation before the tests instead of tolerating a flaky environment. cgroup-v2's
+# "no internal processes" rule forbids a non-root cgroup that holds processes from enabling controllers
+# for its children, and under a private cgroup namespace the container's visible root (/sys/fs/cgroup)
+# is NOT the real root: it holds PID 1 and the step's own shell, so `+memory +cpu +pids` into its
+# cgroup.subtree_control returns EBUSY and every cgroup E2E fails the fail-closed gate. Whether it bites
+# depends on the host runner's cgroup namespace/driver, so the lane went red on some runners and green
+# on a rerun. The heal is the kernel's own prescription — move the members into a child leaf, then
+# delegate from the now-childless root — never a relaxation of the gate: if delegation is still
+# unavailable afterwards the step fails loudly, and the tests still never degrade into skips.
 
 on:
   push:
@@ -83,6 +93,68 @@ jobs:
           else
             echo "⚠ userns probe failed — the REQUIRE_SANDBOX=1 test step is authoritative and will fail hard if confinement is truly unavailable"
           fi
+
+      - name: Delegate cgroup controllers to this container (self-heal the EBUSY)
+        # Authoritative, not informational: CODESPACE_REQUIRE_CGROUP=1 means the cgroup E2E may never skip, so a
+        # container that still cannot delegate after the heal must fail HERE, loudly, rather than as eleven identical
+        # test failures. cgroup-v2 forbids a non-root cgroup WITH member processes from enabling controllers for its
+        # children ("no internal processes"); under a private cgroup namespace /sys/fs/cgroup is such a cgroup — it
+        # holds PID 1 and this shell — so the delegating write returns EBUSY on some runners and succeeds on others.
+        # Moving the members into a child leaf is the kernel's own prescription, and it is what CgroupTestArena does
+        # for its own cgroup. Idempotent: once the controllers are enabled the kernel masks them out of the next
+        # write, which therefore no longer trips the EBUSY check, and this reports the no-heal-needed case.
+        run: |
+          root=/sys/fs/cgroup
+          leaf="$root/_ci-init"
+          directive="+memory +cpu +pids"
+          errfile="$(mktemp)"
+
+          if [ ! -f "$root/cgroup.controllers" ]; then
+            echo "::error::cgroup delegation: no cgroup-v2 unified hierarchy at $root — this container cannot delegate cgroups at all, and the lane is fail-closed (CODESPACE_REQUIRE_CGROUP=1)"
+            exit 1
+          fi
+
+          echo "cgroup.controllers here: [$(cat "$root/cgroup.controllers")]"
+          echo "cgroup.subtree_control before: [$(cat "$root/cgroup.subtree_control")]"
+
+          # Both probes go through an explicit `if`: a bare write would abort the step under `bash -e` on the very
+          # EBUSY this step exists to heal.
+          enable_controllers() { printf '%s\n' "$directive" > "$root/cgroup.subtree_control" 2>"$errfile"; }
+
+          delegated() {
+            enabled=" $(cat "$root/cgroup.subtree_control" 2>/dev/null) "
+            for c in memory cpu pids; do
+              case "$enabled" in *" $c "*) ;; *) return 1 ;; esac
+            done
+          }
+
+          if enable_controllers && delegated; then
+            echo "cgroup delegation: available without self-heal (subtree_control=[$(cat "$root/cgroup.subtree_control")])"
+            exit 0
+          fi
+
+          refusal="$(sed -e 's/.*: //' "$errfile" | tr -d '\n')"
+          echo "cgroup delegation: the root refused the controllers ('$refusal') — moving its members into $leaf so it holds no processes of its own"
+          mkdir -p "$leaf" || { echo "::error::cgroup delegation: self-heal FAILED: could not create $leaf"; exit 1; }
+
+          # Re-read the list until it drains rather than trusting one snapshot: a pid can be forked into the root
+          # while its siblings are being moved, and `self` is in there too (moving it carries this shell along).
+          moved=0
+          for _pass in 1 2 3 4 5 6 7 8 9 10; do
+            pids="$(cat "$root/cgroup.procs" 2>/dev/null || true)"
+            [ -n "$pids" ] || break
+            for pid in $pids; do
+              if printf '%s\n' "$pid" > "$leaf/cgroup.procs" 2>/dev/null; then moved=$((moved + 1)); fi
+            done
+          done
+
+          if enable_controllers && delegated; then
+            echo "cgroup delegation: self-healed: moved $moved pids into $leaf (subtree_control=[$(cat "$root/cgroup.subtree_control")])"
+            exit 0
+          fi
+
+          echo "::error::cgroup delegation: self-heal FAILED: $(sed -e 's/.*: //' "$errfile" | tr -d '\n') — $(grep -c . "$root/cgroup.procs" 2>/dev/null || echo '?') process(es) still in $root/cgroup.procs after moving $moved. Fail-closed (CODESPACE_REQUIRE_CGROUP=1): the cgroup E2E must exercise real caps, never skip."
+          exit 1
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
