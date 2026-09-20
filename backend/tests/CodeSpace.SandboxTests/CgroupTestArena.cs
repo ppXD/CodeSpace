@@ -18,6 +18,8 @@ public sealed class CgroupTestArena : IDisposable
 {
     private const string CgroupMount = "/sys/fs/cgroup";
     private const int DrainTimeoutMs = 5000;
+    private const int LeafifyPasses = 10;
+    private const int EnableRounds = 5;
 
     private static readonly string[] Controllers = { "memory", "cpu", "pids" };
     private static string EnableDirective => string.Join(" ", Controllers.Select(c => "+" + c));
@@ -185,9 +187,17 @@ public sealed class CgroupTestArena : IDisposable
         if (TryWrite(Path.Combine(dir, "cgroup.subtree_control"), EnableDirective, out error)) return true;
 
         // EBUSY: the cgroup has internal processes + is not the namespace root → move them into a leaf, then retry.
-        if (!TryLeafifyProcesses(dir, out var leafErr)) { error = $"{error}; leafify: {leafErr}"; return false; }
+        // A process forked into the cgroup by a sibling the leaf-ify has not reached yet keeps the write EBUSY even
+        // though the mover never saw it — and short-lived ones are gone again by the time the error is read, which is
+        // how this lane went red with an EMPTY cgroup.procs. So retry the drain-then-enable instead of trusting one pass.
+        for (var round = 0; round < EnableRounds; round++)
+        {
+            if (!TryLeafifyProcesses(dir, out var leafErr)) { error = $"{error}; leafify: {leafErr}"; return false; }
 
-        return TryWrite(Path.Combine(dir, "cgroup.subtree_control"), EnableDirective, out error);
+            if (TryWrite(Path.Combine(dir, "cgroup.subtree_control"), EnableDirective, out error)) return true;
+        }
+
+        return false;
     }
 
     private static bool AlreadyEnabled(string dir)
@@ -200,6 +210,7 @@ public sealed class CgroupTestArena : IDisposable
         catch { return false; }
     }
 
+    /// <summary>Move every process out of <paramref name="dir"/> into its <c>_cs-host</c> leaf, RE-READING cgroup.procs until it drains — one snapshot misses a pid forked while its siblings were being moved, and that straggler alone keeps the enable EBUSY.</summary>
     private static bool TryLeafifyProcesses(string dir, out string error)
     {
         error = "";
@@ -209,12 +220,21 @@ public sealed class CgroupTestArena : IDisposable
             Directory.CreateDirectory(host);
 
             var hostProcs = Path.Combine(host, "cgroup.procs");
-            foreach (var pid in File.ReadAllLines(Path.Combine(dir, "cgroup.procs")).Where(l => l.Trim().Length > 0))
-                try { File.WriteAllText(hostProcs, pid.Trim()); } catch { /* a pid may exit between read + move; skip it */ }
+
+            for (var pass = 0; pass < LeafifyPasses && ReadProcs(dir) is { Count: > 0 } pids; pass++)
+                foreach (var pid in pids)
+                    try { File.WriteAllText(hostProcs, pid); } catch { /* a pid may exit between read + move; skip it */ }
 
             return true;
         }
         catch (Exception ex) { error = ex.Message; return false; }
+    }
+
+    /// <summary>The pids currently listed in <paramref name="dir"/>'s <c>cgroup.procs</c>; empty when it is unreadable.</summary>
+    private static List<string> ReadProcs(string dir)
+    {
+        try { return File.ReadAllLines(Path.Combine(dir, "cgroup.procs")).Select(l => l.Trim()).Where(l => l.Length > 0).ToList(); }
+        catch { return new List<string>(); }
     }
 
     private static bool TryWrite(string path, string value, out string error)
