@@ -103,6 +103,11 @@ jobs:
         # Moving the members into a child leaf is the kernel's own prescription, and it is what CgroupTestArena does
         # for its own cgroup. Idempotent: once the controllers are enabled the kernel masks them out of the next
         # write, which therefore no longer trips the EBUSY check, and this reports the no-heal-needed case.
+        #
+        # `shell: bash` on purpose: a container job's default `sh -e` is dash, which collapses EVERY failed write into
+        # a generic "I/O error" and would leave the refusal this step reports — and the one it fails with — unable to
+        # name the errno that decides whether a rerun is worth anything (EBUSY = heal me, ENOENT = no such controller).
+        shell: bash
         run: |
           root=/sys/fs/cgroup
           leaf="$root/_ci-init"
