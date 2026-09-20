@@ -136,6 +136,12 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
     /// A keep this cursor cannot record any other way pushes the deadline FORWARD by the class's recheck interval —
     /// the row has no modification time of its own, so without that a receipt whose citation question could not be
     /// answered would be re-claimed on every tick for ever.
+    ///
+    /// <para>A CITATION is the exception, and honouring it is not optional: the decision clears the marker on
+    /// purpose, because a quarantine that elapsed while something still pointed at the row never waited for anything.
+    /// Writing a deadline there instead would let the row be collected on the FIRST uncited observation after the
+    /// citation went away — the second wait skipped, which is the one thing this column exists to prevent. It costs
+    /// no hot loop: a still-cited receipt is excluded by the claim query, not re-claimed.</para>
     /// </summary>
     public async Task<bool> SettleAsync(DurableRetentionSweepWindow window, DurableRetentionCandidate candidate, DurableRetentionDecision decision, CancellationToken cancellationToken)
     {
@@ -145,7 +151,12 @@ public sealed class CleanupReceiptRetentionCursor : IDurableRetentionCursor, ISc
 
         if (decision.Action == DurableRetentionAction.Collect) return await CollectAsync(window, candidate, cancellationToken).ConfigureAwait(false);
 
-        var deadline = decision.Action == DurableRetentionAction.Quarantine ? decision.RetainUntil : window.RecheckAt;
+        var deadline = decision.Action switch
+        {
+            DurableRetentionAction.Quarantine => decision.RetainUntil,
+            DurableRetentionAction.Referenced => null,
+            _ => window.RecheckAt,
+        };
 
         return await StampAsync(window, candidate, deadline, cancellationToken).ConfigureAwait(false);
     }

@@ -59,8 +59,13 @@ public sealed class RecordCitationSitesTests
         // ClassifyAsync's own body, never the whole file: the deleting statement repeats the same probe, so a wider
         // match would keep passing with the classification's probe removed — and the classification is what the loop
         // asks before anything is deleted.
-        var probes = ExistenceQuestions(MethodBody(Source(), "ClassifyAsync"));
+        var body = MethodBody(Source(), "ClassifyAsync");
+        var probes = ExistenceQuestions(body);
+
         probes.ShouldNotBeNullOrWhiteSpace("the classification asks no existence question at all, so this check would pass by reading nothing");
+        body.ShouldNotContain("SettleAsync(", customMessage:
+            "the extract ran past the method it was scoped to; a delimiter that stops only at private members walks through every public one after it, "
+            + "and a probe living there would satisfy this check without the classification ever asking");
 
         var unprobed = CleanupReceiptRetentionCursor.CitationSites
             .Select(site => (site.Table, site.Column, Member: MemberOf(db, site.Table, site.Column)))
@@ -102,20 +107,28 @@ public sealed class RecordCitationSitesTests
     [Fact]
     public void The_claims_raw_sql_says_exactly_what_the_allow_lists_say()
     {
-        var source = Source();
         var expected = string.Join(", ", CleanupReceiptRetentionCursor.SettledOutcomes.Select(outcome => $"'{outcome}'"));
 
         CleanupReceiptRetentionCursor.SettledOutcomeNames.ShouldBe(expected, "the SQL literal and the enum allow-list are one rule written twice");
         CleanupReceiptRetentionCursor.PinnedKindName.ShouldBe(DurablePinKind.CleanupReceipt.ToString());
 
-        var inLists = System.Text.RegularExpressions.Regex.Matches(source, @"outcome IN \(([^)]*)\)").Select(match => match.Groups[1].Value.Trim()).ToList();
-        var pinKinds = System.Text.RegularExpressions.Regex.Matches(source, @"pin\.kind = '([^']*)'").Select(match => match.Groups[1].Value).ToList();
+        // Three copies, not two: the claim, the delete, and migration 0237's PARTIAL INDEX, whose predicate has to
+        // match the claim's or the index quietly drops out of the plan and the sweep starts seq-scanning.
+        var inLists = OutcomeLists(Source()).Concat(OutcomeLists(Migration())).ToList();
+        var pinKinds = System.Text.RegularExpressions.Regex.Matches(Source(), @"pin\.kind = '([^']*)'").Select(match => match.Groups[1].Value).ToList();
 
-        inLists.ShouldNotBeEmpty("the claim's outcome filter was not found, so this check would pass by reading nothing");
+        inLists.Count.ShouldBeGreaterThanOrEqualTo(3, "the claim, the delete and the index predicate all name the settled set; finding fewer means this check read nothing");
         pinKinds.ShouldNotBeEmpty("the claim's pin filter was not found, so this check would pass by reading nothing");
-        inLists.ShouldAllBe(list => list == CleanupReceiptRetentionCursor.SettledOutcomeNames, "every outcome list in the cursor's SQL is the settled set, exactly");
+        inLists.ShouldAllBe(list => list == CleanupReceiptRetentionCursor.SettledOutcomeNames, "every outcome list — in the cursor AND in the migration — is the settled set, exactly");
         pinKinds.ShouldAllBe(kind => kind == CleanupReceiptRetentionCursor.PinnedKindName, "the pin kind the SQL names is the one the enum spells");
     }
+
+    private static IEnumerable<string> OutcomeLists(string sql) =>
+        System.Text.RegularExpressions.Regex.Matches(sql, @"outcome IN \(([^)]*)\)").Select(match => match.Groups[1].Value.Trim());
+
+    /// <summary>Migration 0237, read from the scripts that ship with the build rather than copied here.</summary>
+    private static string Migration() =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Persistence", "DbUpFiles", "0237_durable_retention_record_deadlines.sql"));
 
     /// <summary>
     /// A column names a cleanup receipt when it ends in <c>cleanup_receipt_id</c>, or when it is the generic pin
@@ -154,16 +167,24 @@ public sealed class RecordCitationSitesTests
         return questions.ToString();
     }
 
-    /// <summary>One method's text, from its declaration to the next member at class indentation.</summary>
+    /// <summary>
+    /// One method's text, from its declaration to the next member at class indentation — of ANY visibility, because
+    /// delimiting on private members alone runs a probe's extract on through every public member after it, which is
+    /// how a scoped check quietly becomes a whole-file one again.
+    /// </summary>
     private static string MethodBody(string source, string name)
     {
         var start = DeclarationOf(source, name);
 
         if (start < 0) return string.Empty;
 
-        var next = source.IndexOf("\n    private ", start + 1, StringComparison.Ordinal);
+        var next = new[] { "\n    private ", "\n    public ", "\n    internal ", "\n    protected " }
+            .Select(member => source.IndexOf(member, start + 1, StringComparison.Ordinal))
+            .Where(index => index >= 0)
+            .DefaultIfEmpty(source.Length)
+            .Min();
 
-        return source[start..(next < 0 ? source.Length : next)];
+        return source[start..next];
     }
 
     /// <summary>The DECLARATION of a method, not the first mention of it: a probe is called from elsewhere in the file, and a search that stopped there would read the caller instead.</summary>
