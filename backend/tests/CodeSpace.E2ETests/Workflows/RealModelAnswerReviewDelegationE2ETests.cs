@@ -109,7 +109,7 @@ public sealed class RealModelAnswerReviewDelegationE2ETests
             {
                 using var scope = _fixture.BeginScope();
                 await scope.Resolve<IAgentRunService>().HeartbeatAsync(owner, cancellationToken);
-            }, TimeSpan.FromSeconds(5), error => { Interlocked.CompareExchange(ref heartbeatFailure, error, null); deadline.Cancel(); }, heartbeatCancellation.Token);
+            }, TimeSpan.FromSeconds(5), error => { Interlocked.CompareExchange(ref heartbeatFailure, error, null); deadline.Cancel(); }, heartbeatCancellation.Token, TimeProvider.System);
 
             try
             {
