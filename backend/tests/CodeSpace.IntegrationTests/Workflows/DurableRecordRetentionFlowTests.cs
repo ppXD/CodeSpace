@@ -150,6 +150,24 @@ public sealed class DurableRecordRetentionFlowTests : IAsyncLifetime
         (await ReceiptExistsAsync(receipt)).ShouldBeTrue("a sealed result still cites this receipt; no elapsed window outranks that");
         (await Cursor().ClassifyAsync(CandidateFor(world, receipt), CancellationToken.None))
             .ShouldBe(DurableReferenceVerdict.Referenced, "and the verdict says WHY it was kept, not merely that it was");
+
+        // A citation lands between a claim and its classification — the one path on which a still-cited row IS
+        // settled. The marker it leaves behind decides what happens after the citation goes away: a deadline written
+        // here would let the very next uncited observation collect the row, skipping the second wait entirely.
+        var quarantined = await ReceiptAsync(world, RunResourceOutcome.Completed, RunResourceKind.Spool);
+        await AgeReceiptAsync(quarantined, TimeSpan.FromDays(31));
+        await SweepAsync();
+        (await RetainUntilAsync(quarantined)).ShouldNotBeNull("the premise: this row carries a quarantine a citation must now contradict");
+
+        // The deadline passes and the row is claimed again — the moment a pin can land between the claim and the
+        // classification, which is the only path on which a cited receipt is settled at all.
+        await ElapseQuarantineAsync(quarantined);
+        var claimed = (await CandidatesAsync()).Single(row => row.Id == quarantined);
+        var settled = await Cursor().SettleAsync(Window(), claimed, DurableRetentionDecision.Referenced(), CancellationToken.None);
+
+        settled.ShouldBeTrue();
+        (await RetainUntilAsync(quarantined)).ShouldBeNull(
+            "a citation CLEARS the quarantine it contradicts; leaving a deadline behind would collect the row on the first uncited observation after the pin went away");
     }
 
     /// <summary>The age floor at the CALL SITE: the window the loop computes from the class's rule is what keeps a young receipt out of the batch.</summary>

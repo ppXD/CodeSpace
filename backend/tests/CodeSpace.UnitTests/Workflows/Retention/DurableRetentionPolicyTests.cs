@@ -37,6 +37,24 @@ public sealed class DurableRetentionPolicyTests
     }
 
     [Fact]
+    public void Every_declared_class_has_a_rule_and_the_table_declares_nothing_else()
+    {
+        // The table advertises what is actually reclaimed. A class listed here without a cursor would read as a
+        // promise the system does not keep; a cursor whose class is missing claims nothing at all — the loop warns
+        // and moves on, which is a plane that is silently dead. Either way the right time to notice is here.
+        DurableRetentionPolicy.Rules.Keys.Order().ShouldBe(Enum.GetValues<DurableRecordClass>().Order(),
+            customMessage: "a class with no rule is never claimed, so adding one to the enum without a rule silently disables its plane");
+        Enum.GetValues<DurableRecordClass>().ShouldBe([DurableRecordClass.LogStream, DurableRecordClass.CleanupReceipt],
+            customMessage: "a class belongs here only together with the cursor that sweeps it — add both in one change, never the rule first");
+    }
+
+    /// <summary>
+    /// The exact strings a purged stream puts on the wire. The web client matches both literally — see
+    /// <c>frontend/src/api/agentRunLogsApi.test.ts</c>, which feeds this availability and this code through its own
+    /// decoder — and a client that does not recognise them reports the RESPONSE as malformed, which is a worse answer
+    /// than the wrong one it replaced. Renaming the enum member changes both, so it has to fail here first.
+    /// </summary>
+    [Fact]
     public void A_purged_read_puts_its_availability_and_code_on_the_wire_verbatim()
     {
         var read = AgentRunLogWire.Unavailable(Metadata(), 0, new AgentRunLogProblem(AgentRunLogProblemCode.Purged));
