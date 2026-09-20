@@ -237,16 +237,20 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
         {
             while (!finish.IsCompleted)
             {
-                foreach (var stream in streams.Where(value => !value.Terminal))
+                foreach (var stream in streams.Where(value => value.Draining))
                     await PumpAsync(request, captureSessionId, stream, final: false, cancellationToken).ConfigureAwait(false);
                 await Task.WhenAny(Task.Delay(PollInterval, cancellationToken), finish).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
             }
-            while (streams.Any(value => !value.Terminal))
+            while (streams.Any(value => value.Draining))
             {
-                foreach (var stream in streams.Where(value => !value.Terminal))
+                foreach (var stream in streams.Where(value => value.Draining))
                     await PumpAsync(request, captureSessionId, stream, final: true, cancellationToken).ConfigureAwait(false);
-                if (streams.Any(value => !value.Terminal)) await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+
+                if (!streams.Any(value => value.Draining)) break;
+                if (ParkedIncompleteSourcesForHostShutdown(request, streams)) break;
+
+                await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -260,7 +264,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     private async Task PumpAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, CaptureStream stream, bool final, CancellationToken cancellationToken)
     {
         var reads = 0;
-        while (!stream.Terminal && (final || reads < MaximumReadsPerPoll))
+        while (stream.Draining && (final || reads < MaximumReadsPerPoll))
         {
             var drain = await FlushBacklogAsync(request, captureSessionId, stream, final, cancellationToken).ConfigureAwait(false);
             if (drain == DrainOutcome.Stopped) return;
@@ -359,19 +363,43 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     /// Stop draining this stream because the HOST is going away — the one thing that ends a final drain before its own
     /// budget does.
     ///
-    /// <para>The drain and the run's terminal write spend ONE deadline (the worker's lease-landing budget). Waiting out
-    /// a destination that is refusing writes spends all of it, and the run then lands nothing: a misconfigured log
-    /// destination would cost the operator the VERDICT as well as the log tail, which is the wrong trade by a wide
-    /// margin. So the wait ends here, and only LOCALLY — the durable row keeps its Open state at its own fence, with
-    /// the stall marker <see cref="MarkStallAsync"/> already wrote, which is exactly the shape the recovery sweep
-    /// finishes. Nothing is terminalized, so nothing a later observer could have completed is foreclosed.</para>
+    /// <para>What waiting costs on a tear-down, stated exactly, because it differs by which capture is draining. A
+    /// session opened for the LIVE run holds the job's own token, and a drain that will not end there is a
+    /// <c>AgentRunExecutor</c> tear-down arm that never STARTS — it runs from the cancellation this drain is refusing
+    /// to observe. The session the tear-down itself opens to re-fold the dead agent holds
+    /// <c>ShutdownLeaseLandingBudget</c>, and every second this drain spends there is a second the terminal write does
+    /// not get. Either way the log tail is worth less than the verdict: the tail is still in the spool and still
+    /// committable by a later owner, while an unlanded run is a degrade nobody can see.</para>
+    ///
+    /// <para>So the wait ends here, and only LOCALLY — the durable row keeps its Open state at its own fence, with the
+    /// stall marker <see cref="MarkStallAsync"/> already wrote, which is exactly the shape the capture recovery sweep
+    /// re-claims. Nothing is terminalized, so nothing a later observer could have completed is foreclosed.</para>
     /// </summary>
     private bool ParkedForHostShutdown(AgentRunLogCaptureOpenRequest request, CaptureStream stream, RemoteStall stall)
     {
         if (!request.HostShutdown.IsCancellationRequested) return false;
 
-        stream.Terminal = true;
-        _logger.LogWarning("Agent run {RunId} log stream {StreamId} parked its final drain after {Attempts} refusal(s) ({Problem}) because this host is shutting down; it stays Open at its fence for the recovery sweep so the run's own landing keeps the rest of the shared budget", request.AgentRunId, stream.Metadata.StreamId, stall.Attempts, stall.Code);
+        stream.Parked = true;
+        _logger.LogWarning("Agent run {RunId} log stream {StreamId} parked its final drain after {Attempts} refusal(s) ({Problem}) because this host is shutting down; it stays Open at its fence for the capture recovery sweep, so the run's own landing is not spent waiting on a destination that is refusing writes", request.AgentRunId, stream.Metadata.StreamId, stall.Attempts, stall.Code);
+
+        return true;
+    }
+
+    /// <summary>
+    /// The final drain's OTHER unbounded wait, and the same answer. A source that is not sealed yet — or that is
+    /// answering retryably — terminalizes nothing, so the loop above keeps polling it until the finalization budget
+    /// cancels the whole capture. That is 30 seconds of a worker that is already going away, spent on a source whose
+    /// bytes a later owner can read just as well.
+    /// </summary>
+    private bool ParkedIncompleteSourcesForHostShutdown(AgentRunLogCaptureOpenRequest request, IReadOnlyList<CaptureStream> streams)
+    {
+        if (!request.HostShutdown.IsCancellationRequested) return false;
+
+        foreach (var stream in streams.Where(value => value.Draining))
+        {
+            stream.Parked = true;
+            _logger.LogWarning("Agent run {RunId} log stream {StreamId} parked its final drain with the source still incomplete because this host is shutting down; it stays Open at its fence for the capture recovery sweep", request.AgentRunId, stream.Metadata.StreamId);
+        }
 
         return true;
     }
@@ -597,7 +625,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 
     private async Task FailStreamsAsync(AgentRunLogCaptureOpenRequest request, Guid captureSessionId, IReadOnlyList<CaptureStream> streams, CaptureFailure failure, CancellationToken cancellationToken)
     {
-        foreach (var stream in streams.Where(value => !value.Terminal))
+        foreach (var stream in streams.Where(value => value.Draining))
             await FailStreamAsync(request, captureSessionId, stream, failure, cancellationToken).ConfigureAwait(false);
     }
 
@@ -702,7 +730,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 var result = await observer(Handle, cancellationToken).ConfigureAwait(false);
                 finish.TrySetResult();
                 await DrainWithinBudgetAsync(capture, captureCts).ConfigureAwait(false);
-                if (_streams.Any(value => !value.Terminal))
+                if (_streams.Any(value => value.Draining))
                     _owner._logger.LogWarning("Agent run {RunId} source final drain exceeded its shadow budget and remains Open for reconciliation", _request.AgentRunId);
                 return result;
             }
@@ -716,7 +744,7 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
             {
                 captureCts.Cancel();
                 try { await capture.ConfigureAwait(false); } catch { }
-                using var failure = new CancellationTokenSource(_owner._operationTimeout);
+                using var failure = new CancellationTokenSource(_owner._operationTimeout, _owner._clock);
                 await _owner.FailStreamsAsync(_request, _captureSessionId, _streams, new CaptureFailure("observer-failed-before-terminal", "The durable sandbox observer failed before a terminal result proved source completeness."), failure.Token).ConfigureAwait(false);
                 throw;
             }
@@ -765,7 +793,20 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
 
         /// <summary>The live outage, or null when the remote is answering.</summary>
         public RemoteStall? Stall { get; set; }
+
+        /// <summary>This stream concluded — a committed final-drain receipt, or a durable terminal verdict already written for it.</summary>
         public bool Terminal { get; set; }
+
+        /// <summary>
+        /// This stream stopped draining because the HOST is going away, NOT because anything about it concluded.
+        /// Distinct from <see cref="Terminal"/> on purpose: the row is still Open at its own fence for the capture
+        /// recovery sweep, no terminal verdict was written, and the drain's "exceeded its shadow budget" warning must
+        /// not claim a stream that deliberately stopped early and already said so in its own log line.
+        /// </summary>
+        public bool Parked { get; set; }
+
+        /// <summary>Whether this stream still wants pumping: neither concluded nor parked.</summary>
+        public bool Draining => !Terminal && !Parked;
 
         public void Enqueue(PendingAppend append)
         {

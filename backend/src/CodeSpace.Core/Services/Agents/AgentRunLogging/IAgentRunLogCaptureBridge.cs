@@ -26,11 +26,15 @@ public sealed record AgentRunLogCaptureOpenRequest
     public required SecretRedactor Redactor { get; init; }
 
     /// <summary>
-    /// The HOST's own tear-down signal (<c>IHostApplicationLifetime.ApplicationStopping</c>), which is what makes this
-    /// capture's drain budget SHARED rather than its own: a worker that is going away lands the run's verdict out of
-    /// the same seconds this drain is spending, and a destination that is refusing writes would otherwise spend all of
-    /// them. Raised ⇒ the final drain stops waiting out a refusal and parks — the stream stays Open at its own fence
-    /// with its stall marker, for the recovery sweep to finish.
+    /// The HOST's own tear-down signal (<c>IHostApplicationLifetime.ApplicationStopping</c>). Raised ⇒ the FINAL drain
+    /// stops waiting out a destination that is refusing writes and parks instead: the stream stays Open at its own
+    /// fence with its stall marker, for the capture recovery sweep to re-claim and finish.
+    ///
+    /// <para>What the waiting costs depends on which capture is draining, and it is never nothing. A session opened
+    /// for the live run holds the job's own token, so a drain that will not end is a worker tear-down that never
+    /// STARTS — it runs from the cancellation that drain is refusing to observe. A session the tear-down itself opens
+    /// to re-fold the dead agent holds the worker's lease-landing budget, so every second the drain spends there is a
+    /// second the run's terminal write does not get.</para>
     ///
     /// <para>Default (None) means no host tear-down is in progress, which is every ordinary run: the live and final
     /// retry cadences are exactly what they were.</para>
