@@ -1176,6 +1176,13 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // gateway outage is non-gating LOUD infra; a no-secret config skips NOT-EVALUATED. The perpetual-failure scenario
         // force-STOPs cleanly on a bound (no-progress / total-spawn cap), never a run Failure, so a model that recovered
         // reads Drove from the ledger and is never mis-gated as a CodeFault.
+        //
+        // SCOPE, for the host-loss slice: the retries this arm drives are COLD by construction and must stay so. Each
+        // agent here reaches a real terminal exit with its tree intact, so the row carries no mid-run checkpoint and
+        // the respawn resumes nothing — the warm arm needs a machine that never came back, which no live wire can
+        // stage. That path is pinned deterministically instead (SupervisorRetryWorldStateFlowTests drives the REAL
+        // reconciler's abandon; SupervisorDependencyStagingTests pins the fold). This arm asserts nothing about the
+        // opt-in itself — the staging seam's own tests do.
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);

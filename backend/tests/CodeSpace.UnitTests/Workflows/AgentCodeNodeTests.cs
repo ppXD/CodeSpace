@@ -1207,7 +1207,7 @@ public class AgentCodeNodeTests
     [Fact]
     public async Task A_respawn_whose_primary_push_failed_repins_the_sibling_but_is_still_told_the_truth()
     {
-        // The honesty decision follows the PRIMARY, exactly like the supervisor's workspaceHasPriorWork: a sibling's
+        // The honesty decision follows the PRIMARY, exactly like the supervisor's workspaceRef: a sibling's
         // successful push is still conserved (its own branch is repinned), but the agent's primary repo re-clones the
         // default branch, so the restored conversation MUST be told its changes are not there. An "any repo pushed"
         // read would suppress the line precisely where the primary lost its work — the worst place to go quiet.

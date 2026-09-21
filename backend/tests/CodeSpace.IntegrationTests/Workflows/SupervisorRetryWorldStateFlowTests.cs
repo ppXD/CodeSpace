@@ -194,6 +194,422 @@ public sealed class SupervisorRetryWorldStateFlowTests
         task.Goal.ShouldNotContain(AgentRetryContinuity.HonestNoContinuityHint, customMessage: "the resumed attempt's own branch IS preserved — asserting otherwise would be a lie");
     }
 
+    // ── 3c: a unit whose HOST died resumes from its mid-run checkpoint ─────────────
+
+    [Fact]
+    public async Task A_retry_of_a_unit_whose_host_died_resumes_from_its_checkpoint()
+    {
+        // The population #1994 excluded. A supervisor unit whose host is lost is abandoned by the reconciler with NO
+        // result at all, so the captured-transcript lookup every warm retry uses finds nothing. What survives is the
+        // checkpoint on the row, and a terminal row still naming one is the signature of that abandon: every clean
+        // landing — completion or cancel — releases those columns in its own terminal write.
+        // MUTATION: drop the TryResumableFromCheckpoint fall-through → the retry cold-starts with no provenance → red.
+        // MUTATION: drop the CheckpointAt branch in ApplyResumeRecord → the retry still resumes the checkpoint, but
+        // unmarked (an unreadable ref would then fail the attempt), with no provenance and the ordinary honest-redo
+        // line in place of the lost-host block → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var checkpointArtifactId = Guid.NewGuid();
+        var lostAttemptRunId = await SeedHostLostAttemptAsync(teamId, repoId, runId, (checkpointArtifactId, "sess-lost-host"));
+
+        var abandoned = await ReconcileUntilTerminalAsync(lostAttemptRunId);
+
+        abandoned.Status.ShouldBe(AgentRunStatus.Failed, "the reconciler terminalizes a run whose host never came back");
+        abandoned.SessionTranscriptCheckpointArtifactId.ShouldBe(checkpointArtifactId, "and the abandon KEEPS the checkpoint — releasing it is a clean landing's job, not the abandon's");
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan("sb"), priorAttempt: await FailedAttempt(teamId, "sb", lostAttemptRunId));
+
+        var task = await ExecuteRetryAsync(context, "sb");
+
+        task.ResumeFromSessionId.ShouldBe("sess-lost-host", "the CLI is told WHICH conversation to resume — a transcript with no id names nothing");
+        task.RestoredTranscriptArtifactId.ShouldBe(checkpointArtifactId, "the checkpoint rides as a REF the executor resolves just before invocation");
+        task.RestoredTranscriptIsCheckpoint.ShouldBeTrue("best-effort bytes: unreadable must cost the conversation, never this retry attempt");
+        task.ResumedFromCheckpointAt.ShouldNotBeNull("the launch stamps this onto the run's permanent confinement record");
+        task.ResumedFromAgentRunId.ShouldBe(lostAttemptRunId, "which attempt took over from which is a column, not prose");
+        task.Goal.ShouldContain(AgentRetryContinuity.LostHostPreamble, Case.Sensitive, "a restored conversation describes a machine that is gone, and the agent must be told");
+
+        using var verify = _fixture.BeginScope();
+        var respawn = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.Id != lostAttemptRunId).OrderByDescending(r => r.CreatedDate).FirstAsync();
+
+        respawn.ResumedFromAgentRunId.ShouldBe(lostAttemptRunId, "and the task's provenance is promoted onto the row, like AgentDefinitionId");
+    }
+
+    [Fact]
+    public async Task A_retry_of_a_unit_lost_without_a_checkpoint_is_cold_and_claims_nothing()
+    {
+        // The same host loss from a unit that checkpointed nothing — it never opted in, or died before its first
+        // checkpoint. Production leaves such a row with no session id either: the checkpoint stamp is the only writer
+        // of a Running row's session id, and it writes both together. Nothing to restore, so the respawn cold-starts
+        // and claims neither a lost machine nor a restored conversation.
+        // A NEGATIVE CONTROL, shielded twice: the lookup never loads a row with no session id, and the guard would
+        // refuse it anyway. No single-line mutation reaches it — dropping the guard alone stays green here.
+        // MUTATION: drop the lookup's session-id filter AND TryResumableFromCheckpoint's guard → the retry claims a
+        // conversation that was never written → red. The guard on its own is pinned where production can reach it:
+        // the deliberate-cancel arm (its row keeps a session id) and the still-running arm.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var lostAttemptRunId = await SeedHostLostAttemptAsync(teamId, repoId, runId, checkpoint: null);
+
+        (await ReconcileUntilTerminalAsync(lostAttemptRunId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan("sb"), priorAttempt: await FailedAttempt(teamId, "sb", lostAttemptRunId));
+
+        ShouldBeColdAndClaimNothing(await ExecuteRetryAsync(context, "sb"), "no checkpoint was taken, so there is no conversation to restore");
+    }
+
+    [Fact]
+    public async Task A_retry_of_a_unit_that_was_deliberately_cancelled_is_cold_and_claims_no_host_loss()
+    {
+        // A deliberate cancel (an operator's, or the parent-terminal sweep's) is a CLEAN landing: nobody owes the
+        // unit a continuation, so it releases its checkpoint exactly as completion does. Left in place, the next
+        // retry of the same subtask — after an operator's Continue revives the run — would read the cancel as a host
+        // loss and hand the agent three false claims (a lost machine, a checkpoint provenance stamp, and
+        // resumed_from_agent_run_id), and the reference would pin the artifact Referenced for good.
+        // MUTATION: drop the two checkpoint SetProperty calls from CancelRunningAsync → the cancelled row still names
+        // its checkpoint → red.
+        // MUTATION: relax TryResumableFromCheckpoint's guard to accept a bare session id (the cancel keeps it) → the
+        // retry resumes a conversation with no transcript behind it → red, whichever path the resume then takes.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var cancelledRunId = await SeedLiveAttemptAsync(teamId, repoId, runId, (Guid.NewGuid(), "sess-cancelled"));
+
+        (await CancelAsync(cancelledRunId)).ShouldBeTrue("the attempt was Running at the epoch the cancel read");
+
+        using (var mid = _fixture.BeginScope())
+        {
+            var cancelled = await mid.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == cancelledRunId);
+            cancelled.Status.ShouldBe(AgentRunStatus.Cancelled);
+            cancelled.SessionTranscriptCheckpointArtifactId.ShouldBeNull("a clean landing releases the checkpoint");
+            cancelled.SessionTranscriptCheckpointAt.ShouldBeNull();
+            cancelled.SessionId.ShouldBe("sess-cancelled", "the cancel releases the checkpoint, not the session id — which is what makes the guard reachable here");
+        }
+
+        (await FindResumableAsync(teamId, runId)).ShouldBeNull("a cancelled attempt left nothing a retry may resume");
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan("sb"), priorAttempt: await FailedAttempt(teamId, "sb", cancelledRunId));
+
+        ShouldBeColdAndClaimNothing(await ExecuteRetryAsync(context, "sb"), "a deliberately cancelled attempt's machine was not lost, and it left no conversation to restore");
+    }
+
+    [Fact]
+    public async Task A_retry_never_resumes_a_prior_attempt_that_is_still_running()
+    {
+        // The checkpoint columns are written while an attempt is Running, so a row still Running holds the checkpoint
+        // of a session that may be live: a kill-wave is best-effort, and once a revived parent is Pending again the
+        // orphan sweep stops selecting it. Resuming it would fork a conversation that is still being written.
+        // MUTATION: drop the terminal-status guard from TryResumableFromCheckpoint → the retry resumes the live
+        // session → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var liveRunId = await SeedLiveAttemptAsync(teamId, repoId, runId, (Guid.NewGuid(), "sess-still-live"));
+
+        (await FindResumableAsync(teamId, runId)).ShouldBeNull("a Running attempt's checkpoint belongs to a session that may still be live");
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan("sb"), priorAttempt: await FailedAttempt(teamId, "sb", liveRunId));
+
+        ShouldBeColdAndClaimNothing(await ExecuteRetryAsync(context, "sb"), "nothing may resume a conversation another process is still writing");
+    }
+
+    // ── 3c: the tree sentence describes the resumed attempt's OWN git state ─────────
+
+    [Fact]
+    public async Task A_dependent_unit_lost_before_it_pushed_is_told_its_work_is_gone_not_that_its_producers_branch_is_its_own()
+    {
+        // A dependent unit is cloned at its producer's handoff branch. When its own attempt lost its host before it
+        // pushed, that branch holds the PRODUCER's work and none of this attempt's, so the tree sentence must be the
+        // honest "nothing was preserved" — never "your previous attempt published `<the producer's branch>`".
+        // MUTATION: pass the effective clone ref (effectiveStaging.Ref) as the resumed attempt's workspaceRef → the
+        // goal names the producer's branch as this attempt's published work → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var producer = await RunProducerAsync(teamId, repoId, runId);
+        var lostAttemptRunId = await SeedHostLostAttemptAsync(teamId, repoId, runId, (Guid.NewGuid(), "sess-dependent"));
+
+        (await ReconcileUntilTerminalAsync(lostAttemptRunId)).Status.ShouldBe(AgentRunStatus.Failed);
+
+        var task = await ExecuteRetryAsync(DependentContext(runId, teamId, repoId, producer.Spawn, await FailedAttempt(teamId, "sb", lostAttemptRunId, sequence: 3)), "sb");
+
+        task.Workspace!.Repositories.Single().Ref.ShouldBe(producer.Branch, "staging is unchanged: a dependent unit still clones its producer's handoff");
+        task.RestoredTranscriptIsCheckpoint.ShouldBeTrue();
+        task.Goal.ShouldContain(AgentRetryContinuity.LostHostPreamble, Case.Sensitive);
+        task.Goal.ShouldContain(AgentRetryContinuity.HonestNoContinuityHint, Case.Sensitive, "the lost attempt pushed nothing, so none of its tree survived");
+        task.Goal.ShouldNotContain(AgentRetryContinuity.LostHostPublishedBranchHint(producer.Branch), Case.Sensitive, "the producer's branch is not this attempt's published work");
+    }
+
+    [Fact]
+    public async Task A_dependent_unit_resumed_from_a_captured_transcript_is_told_its_own_changes_were_not_preserved()
+    {
+        // The same rule on the ordinary path. An attempt that finished without pushing left its changes in a
+        // workspace nobody will see again; the clone ref is still its producer's handoff, but that is not THIS
+        // attempt's work, so it must not suppress the honest-redo line — which the effective ref used to do.
+        // MUTATION: pass effectiveStaging.Ref as workspaceRef → the producer's branch suppresses the line → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var producer = await RunProducerAsync(teamId, repoId, runId);
+        var (failedAttemptRunId, _) = await RunFailingPriorAttemptAsync(teamId, repoId, runId, "exit 1");
+        (await ManifestsAsync(failedAttemptRunId, teamId)).ShouldBeEmpty("precondition: the failed attempt pushed nothing of its own");
+
+        await StampResumableSessionAsync(failedAttemptRunId, "sess-captured", "the dependent attempt's conversation\n");
+
+        var task = await ExecuteRetryAsync(DependentContext(runId, teamId, repoId, producer.Spawn, await FailedAttempt(teamId, "sb", failedAttemptRunId, sequence: 3)), "sb");
+
+        task.ResumeFromSessionId.ShouldBe("sess-captured", "the captured conversation is still resumed");
+        task.Workspace!.Repositories.Single().Ref.ShouldBe(producer.Branch, "staging is unchanged: a dependent unit still clones its producer's handoff");
+        task.Goal.ShouldContain(AgentRetryContinuity.HonestNoContinuityHint, Case.Sensitive, "the restored conversation describes changes this workspace does not contain");
+        task.Goal.ShouldNotContain(AgentRetryContinuity.LostHostPreamble, Case.Sensitive, "an attempt that finished did not lose its machine");
+    }
+
+    [Fact]
+    public async Task A_dependent_unit_that_pushed_its_own_branch_before_its_host_died_is_told_that_branch_is_here()
+    {
+        // The other side of the same rule: when the lost attempt DID push, its own branch outranks the producer's
+        // handoff as the clone ref, the published work is there, and the sentence names THAT branch.
+        // MUTATION: drop the resumed attempt's ref (pass workspaceRef: null) → the goal says nothing was preserved
+        // while the clone holds this attempt's own pushed work → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var producer = await RunProducerAsync(teamId, repoId, runId);
+        var (lostAttemptRunId, _) = await RunPriorAttemptAsync(teamId, repoId, runId, "printf 'own work\\n' > own.txt; echo edited");
+        var ownBranch = (await SingleManifestAsync(lostAttemptRunId, teamId)).Branch.ShouldNotBeNull("precondition: the attempt published its own branch before its host died");
+
+        await LoseTheHostAfterPublishingAsync(lostAttemptRunId, (Guid.NewGuid(), "sess-published"));
+
+        var task = await ExecuteRetryAsync(DependentContext(runId, teamId, repoId, producer.Spawn, await FailedAttempt(teamId, "sb", lostAttemptRunId, sequence: 3)), "sb");
+
+        task.Workspace!.Repositories.Single().Ref.ShouldBe(ownBranch, "the attempt's own pushed branch outranks its producer's handoff");
+        task.RestoredTranscriptIsCheckpoint.ShouldBeTrue();
+        task.Goal.ShouldContain(AgentRetryContinuity.LostHostPublishedBranchHint(ownBranch), Case.Sensitive, "the published work IS here, and the agent is told which branch holds it");
+        task.Goal.ShouldNotContain(AgentRetryContinuity.LostHostPublishedBranchHint(producer.Branch), Case.Sensitive);
+        task.Goal.ShouldNotContain(AgentRetryContinuity.HonestNoContinuityHint, Case.Sensitive, "asserting its work is gone would be a lie");
+    }
+
+    // ── 3c: the checkpoint opt-in at the staging seam ─────────────────────────────
+
+    [Theory]
+    [InlineData(2, 8, true)]    // room for this retry AND another after it
+    [InlineData(7, 8, false)]   // this retry lands ON the cap — nothing can follow, so nobody would read a checkpoint
+    public async Task A_staged_unit_checkpoints_only_while_the_run_could_still_respawn_it(int totalSpawned, int cap, bool checkpoints)
+    {
+        // The opt-in, pinned at the STAGING SEAM rather than only as a pure predicate: this is the one place every
+        // spawn wave, retry and resolve passes through, so it is where the envelope either carries the flag or not.
+        // MUTATION: set CheckpointSessionTranscript unconditionally (or never) at that seam → one arm reds.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan("sb"), priorAttempt: null) with { TotalSpawnedAgents = totalSpawned, MaxTotalSpawns = cap };
+
+        (await ExecuteRetryAsync(context, "sb")).CheckpointSessionTranscript.ShouldBe(checkpoints);
+    }
+
+    [Theory]
+    [InlineData(5, 8, true)]    // 5 + 2 = 7 < 8: a retry still fits after the whole wave
+    [InlineData(6, 8, false)]   // 6 + 2 = 8: the WAVE lands on the cap, though one agent alone (6 + 1 = 7) would not
+    public async Task A_spawn_wave_checkpoints_only_when_a_retry_still_fits_after_the_whole_wave(int totalSpawned, int cap, bool checkpoints)
+    {
+        // The seam reads the WAVE's size, not one agent's: by the time any retry is decided, every agent this wave
+        // stages is already on the tape and counted.
+        // MUTATION: pass 1 instead of tasks.Count at the staging seam → the (6, 8) arm checkpoints both units → red.
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedWithOneCommitAsync();
+        var repoId = await SeedRepositoryAsync(teamId, remote.Url, await SeedCredentialAsync(teamId), RepositoryPublishMode.Branch);
+        var runId = await SeedSupervisorRunAsync(teamId);
+
+        var context = ContextWith(runId, teamId, repoId, plan: Plan(("sa", null), ("sb", null)), priorAttempt: null) with { TotalSpawnedAgents = totalSpawned, MaxTotalSpawns = cap };
+
+        var staged = await ExecuteSpawnAsync(context, "sa", "sb");
+
+        staged.Count.ShouldBe(2, "one wave, two units");
+        staged.ShouldAllBe(t => t.CheckpointSessionTranscript == checkpoints);
+    }
+
+    private static void ShouldBeColdAndClaimNothing(AgentTask task, string because)
+    {
+        task.ResumeFromSessionId.ShouldBeNull(because);
+        task.RestoredTranscript.ShouldBeNull(because);
+        task.RestoredTranscriptArtifactId.ShouldBeNull(because);
+        task.RestoredTranscriptIsCheckpoint.ShouldBeFalse(because);
+        task.ResumedFromCheckpointAt.ShouldBeNull(because);
+        task.ResumedFromAgentRunId.ShouldBeNull(because);
+        task.Goal.ShouldNotContain(AgentRetryContinuity.LostHostPreamble, customMessage: because);
+        task.Goal.ShouldNotContain(AgentRetryContinuity.HonestNoContinuityHint, customMessage: because);
+    }
+
+    /// <summary>
+    /// A prior attempt of "sb" in the state a HOST LOSS leaves it: created through the REAL
+    /// <see cref="IAgentRunService"/> (so its envelope, SubtaskId and columns are the production shape), claimed by a
+    /// worker that is now gone — its owner id and fence epoch still on the row, its lease lapsed — with a durable
+    /// handle minted on a host that never came back whose own wall clock has passed: the exact shape
+    /// <c>AgentRunReconcilerService.DeferToTheMintingHostAsync</c> stops deferring and abandons. A checkpoint, when
+    /// given, is stamped the way the observer's drain tick leaves it — artifact, time and session id together, the
+    /// only way production writes a Running row's session id.
+    ///
+    /// <para>Left un-executed rather than run and then aged, and the reason bounds what these arms prove: the stale
+    /// sweep deliberately EXCLUDES a run carrying events inside <see cref="AgentRunLiveness.Window"/> (a streaming
+    /// agent whose lease merely lapsed must never be abandoned), and <c>agent_run_event</c> is append-only by
+    /// trigger — so a run that genuinely executed cannot be backdated into this shape. Such a run also published
+    /// nothing; the published-branch case is <see cref="LoseTheHostAfterPublishingAsync"/>'s.</para>
+    /// </summary>
+    private Task<Guid> SeedHostLostAttemptAsync(Guid teamId, Guid repositoryId, Guid supervisorRunId, (Guid ArtifactId, string SessionId)? checkpoint) =>
+        SeedClaimedAttemptAsync(teamId, repositoryId, supervisorRunId, checkpoint, hostLost: true);
+
+    /// <summary>A prior attempt of "sb" still RUNNING on a live worker — claimed, its lease fresh, a checkpoint on the row. What a deliberate cancel lands on, and what a best-effort kill-wave or a revived parent can leave behind while a retry is decided.</summary>
+    private Task<Guid> SeedLiveAttemptAsync(Guid teamId, Guid repositoryId, Guid supervisorRunId, (Guid ArtifactId, string SessionId) checkpoint) =>
+        SeedClaimedAttemptAsync(teamId, repositoryId, supervisorRunId, checkpoint, hostLost: false);
+
+    private async Task<Guid> SeedClaimedAttemptAsync(Guid teamId, Guid repositoryId, Guid supervisorRunId, (Guid ArtifactId, string SessionId)? checkpoint, bool hostLost)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        // The envelope a supervisor unit really carries: SubtaskId is what FindResumableSubtaskAttemptAsync matches
+        // on, and CheckpointSessionTranscript is the opt-in that let its executor checkpoint at all.
+        var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "do sb", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId, SubtaskId = "sb", CheckpointSessionTranscript = true },
+            teamId, supervisorRunId, NodeId, iterationKey: "", cancellationToken: CancellationToken.None);
+
+        var run = await db.AgentRun.SingleAsync(r => r.Id == created.Id);
+        var claimedAt = DateTimeOffset.UtcNow - (hostLost ? TimeSpan.FromMinutes(20) : TimeSpan.FromMinutes(2));
+
+        run.Status = AgentRunStatus.Running;
+        run.OwnerId = Guid.NewGuid();
+        run.FenceEpoch = 1;
+        run.StartedAt = claimedAt;
+        run.HeartbeatAt = claimedAt;
+        run.LeaseExpiresAt = hostLost ? claimedAt + AgentRunLiveness.Window : DateTimeOffset.UtcNow + AgentRunLiveness.Window;
+        run.RunnerHandleJson = hostLost ? JsonSerializer.Serialize(ForeignHostHandle(), AgentJson.Options) : null;
+        run.SessionId = checkpoint?.SessionId;
+        run.SessionTranscriptCheckpointArtifactId = checkpoint?.ArtifactId;
+        run.SessionTranscriptCheckpointAt = checkpoint is null ? null : claimedAt + TimeSpan.FromMinutes(1);
+        await db.SaveChangesAsync();
+
+        return run.Id;
+    }
+
+    /// <summary>A durable handle minted on a host that never came back, whose own wall clock has already passed — the reconciler cannot probe it from here and stops deferring to it.</summary>
+    private static SandboxHandle ForeignHostHandle()
+    {
+        var spoolDirectory = Path.Combine(Path.GetTempPath(), "cs-supervisor-host-loss-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(spoolDirectory);
+
+        return new SandboxHandle { Kind = "local", ProcessId = 0x7FFFFFFF, LaunchHost = "a-host-that-never-came-back", SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(-1) };
+    }
+
+    /// <summary>
+    /// Turn an attempt that really ran and PUBLISHED into the row a host loss leaves when the machine dies between
+    /// the executor's publish and its terminal write: the manifest and the pushed branch are already real, and the
+    /// abandon then writes Failed with no result while keeping the checkpoint. Written directly rather than through
+    /// the reconciler because a run that really executed carries fresh events, which the stale sweep skips, and
+    /// <c>agent_run_event</c> is append-only — the reconciler's own abandon is what
+    /// <see cref="A_retry_of_a_unit_whose_host_died_resumes_from_its_checkpoint"/> drives.
+    /// </summary>
+    private async Task LoseTheHostAfterPublishingAsync(Guid agentRunId, (Guid ArtifactId, string SessionId) checkpoint)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var run = await db.AgentRun.SingleAsync(r => r.Id == agentRunId);
+
+        run.Status = AgentRunStatus.Failed;
+        run.ResultJson = null;
+        run.SessionId = checkpoint.SessionId;
+        run.SessionTranscriptCheckpointArtifactId = checkpoint.ArtifactId;
+        run.SessionTranscriptCheckpointAt = DateTimeOffset.UtcNow.AddMinutes(-2);
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Sweep with the REAL reconciler until the row this test owns is terminal, and return it. The stale sweep is
+    /// deployment-wide and takes the oldest lapsed leases first, <see cref="AgentRunReconcilerService.BatchSize"/> at
+    /// a time, so rows other tests left behind can fill a sweep; each sweep terminalizes what it takes, so a bounded
+    /// number of them reaches ours.
+    /// </summary>
+    private async Task<AgentRun> ReconcileUntilTerminalAsync(Guid agentRunId)
+    {
+        const int maxSweeps = 10;
+
+        for (var sweep = 0; sweep < maxSweeps; sweep++)
+        {
+            using var scope = _fixture.BeginScope();
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+            var row = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId);
+            if (AgentRunStateMachine.IsTerminal(row.Status)) return row;
+        }
+
+        throw new ShouldAssertException($"agent run {agentRunId} was still not terminal after {maxSweeps} reconciler sweeps. Check that its lease has lapsed, that it has no event inside AgentRunLiveness.Window, and that its handle's deadline has passed — the reconciler logs 'leaving agent run ... alone' when it defers.");
+    }
+
+    private async Task<bool> CancelAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IAgentRunService>().CancelRunningAsync(agentRunId, "Cancelled by an operator.", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
+    }
+
+    private async Task<ResumableSession?> FindResumableAsync(Guid teamId, Guid supervisorRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IAgentRunService>().FindResumableSubtaskAttemptAsync(teamId, supervisorRunId, "sb", CancellationToken.None);
+    }
+
+    /// <summary>Run the plan's producer "pa" for real and record it as a Succeeded spawn — the handoff a dependent "sb" is cloned at. Returns the producer's pushed branch and that spawn decision.</summary>
+    private async Task<(string Branch, SupervisorPriorDecision Spawn)> RunProducerAsync(Guid teamId, Guid repositoryId, Guid supervisorRunId)
+    {
+        var (producerRunId, _) = await RunPriorAttemptAsync(teamId, repositoryId, supervisorRunId, "printf 'producer work\\n' > producer.txt; echo edited", subtaskId: "pa");
+        var branch = (await SingleManifestAsync(producerRunId, teamId)).Branch.ShouldNotBeNull("precondition: the producer really pushed, so a dependent is cloned at its branch");
+
+        return (branch, await SucceededSpawn(teamId, "pa", producerRunId));
+    }
+
     // ─── Drive the real executor ──────────────────────────────────────────────────
 
     private async Task<AgentTask> ExecuteRetryAsync(SupervisorTurnContext context, string subtaskId)
@@ -213,6 +629,20 @@ public sealed class SupervisorRetryWorldStateFlowTests
         return JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)!;
     }
 
+    /// <summary>One spawn wave through the real executor, returning the envelope of every unit it staged.</summary>
+    private async Task<IReadOnlyList<AgentTask>> ExecuteSpawnAsync(SupervisorTurnContext context, params string[] subtaskIds)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = subtaskIds }, AgentJson.Options);
+
+        await scope.Resolve<ISupervisorActionExecutor>().ExecuteAsync(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = payload }, context, CancellationToken.None);
+
+        var runs = await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == context.SupervisorRunId && r.NodeId == NodeId).ToListAsync();
+
+        return runs.Select(r => JsonSerializer.Deserialize<AgentTask>(r.TaskJson, AgentJson.Options)!).ToList();
+    }
+
     // ─── Context / decision-tape builders ─────────────────────────────────────────
 
     private static SupervisorTurnContext ContextWith(Guid runId, Guid teamId, Guid repositoryId, SupervisorPriorDecision plan, SupervisorPriorDecision? priorAttempt) => new()
@@ -226,29 +656,51 @@ public sealed class SupervisorRetryWorldStateFlowTests
         AgentProfile = new CodeSpace.Messages.Dtos.Agents.SupervisorAgentProfile { RepositoryId = repositoryId },
     };
 
-    private static SupervisorPriorDecision Plan(string subtaskId)
+    /// <summary>The dependent shape: "sb" depends on the producer "pa", whose spawn and "sb"'s own recorded attempt follow the plan on the tape.</summary>
+    private static SupervisorTurnContext DependentContext(Guid runId, Guid teamId, Guid repositoryId, SupervisorPriorDecision producerSpawn, SupervisorPriorDecision dependentAttempt)
+    {
+        var plan = Plan(("pa", null), ("sb", new[] { "pa" }));
+
+        return ContextWith(runId, teamId, repositoryId, plan, priorAttempt: null) with { PriorDecisions = new[] { plan, producerSpawn, dependentAttempt } };
+    }
+
+    private static SupervisorPriorDecision Plan(string subtaskId) => Plan((subtaskId, null));
+
+    private static SupervisorPriorDecision Plan(params (string Id, string[]? DependsOn)[] subtasks)
     {
         var payload = JsonSerializer.Serialize(new SupervisorPlanPayload
         {
             Goal = Goal,
-            Subtasks = new List<SupervisorPlannedSubtask> { new() { Id = subtaskId, Title = subtaskId, Instruction = $"do {subtaskId}" } },
+            Subtasks = subtasks.Select(s => new SupervisorPlannedSubtask { Id = s.Id, Title = s.Id, Instruction = $"do {s.Id}", DependsOn = s.DependsOn }).ToList(),
         }, AgentJson.Options);
 
         return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = "{}" };
     }
 
     /// <summary>A prior FAILED spawn recording (subtaskId, REAL agentRunId) — the positional subtaskIds[i] ↔ agentResults[i] shape <see cref="SupervisorDependencyGate"/> reads to find "this subtask's latest attempt", UNFILTERED on success (the whole point of a retry).</summary>
-    private async Task<SupervisorPriorDecision> FailedAttempt(Guid teamId, string subtaskId, Guid agentRunId)
-    {
-        using var scope = _fixture.BeginScope();
-        var manifests = await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(agentRunId, teamId, CancellationToken.None);
+    private Task<SupervisorPriorDecision> FailedAttempt(Guid teamId, string subtaskId, Guid agentRunId, long sequence = 2) =>
+        RecordedSpawn(teamId, subtaskId, agentRunId, ("Failed", "acceptance failed"), sequence);
 
-        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = "Failed", Error = "acceptance failed", ProducedBranch = manifests.FirstOrDefault()?.Branch };
+    /// <summary>A prior SUCCEEDED spawn of a producer — what dependency staging reads to hand its branch to a dependent.</summary>
+    private Task<SupervisorPriorDecision> SucceededSpawn(Guid teamId, string subtaskId, Guid agentRunId) =>
+        RecordedSpawn(teamId, subtaskId, agentRunId, ("Succeeded", null), sequence: 2);
+
+    private async Task<SupervisorPriorDecision> RecordedSpawn(Guid teamId, string subtaskId, Guid agentRunId, (string Status, string? Error) outcome, long sequence)
+    {
+        var manifests = await ManifestsAsync(agentRunId, teamId);
+
+        var result = new SupervisorAgentResult { AgentRunId = agentRunId, Status = outcome.Status, Error = outcome.Error, ProducedBranch = manifests.FirstOrDefault()?.Branch };
 
         var payload = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { subtaskId } }, AgentJson.Options);
-        var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+        var outcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
 
-        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = outcome };
+        return new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = sequence, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payload, OutcomeJson = outcomeJson };
+    }
+
+    private async Task<IReadOnlyList<PublishManifest>> ManifestsAsync(Guid agentRunId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IPublishManifestStore>().ListForAgentRunAsync(agentRunId, teamId, CancellationToken.None);
     }
 
     /// <summary>A prior FAILED retry recording (subtaskId, REAL agentRunId), SEQUENCED AFTER <see cref="FailedAttempt"/> — the decision-tape-literal "latest attempt" <see cref="SupervisorDependencyGate.LatestAgentRunId"/> reads, independent of whether it is actually resumable.</summary>

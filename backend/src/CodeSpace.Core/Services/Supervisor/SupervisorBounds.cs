@@ -91,6 +91,28 @@ public static class SupervisorBounds
         return null;
     }
 
+    /// <summary>
+    /// Whether the run could still afford to RESPAWN a unit this wave is about to stage — read from the same
+    /// total-spawn bound <see cref="PostDecision"/> enforces, so the two can never disagree about what the run can
+    /// still do.
+    ///
+    /// <para>A later <c>retry</c> costs exactly one spawn, and <see cref="PostDecision"/> refuses it when
+    /// <c>TotalSpawnedAgents + 1</c> would exceed the cap. By then this wave's own <paramref name="waveSize"/> agents
+    /// are on the tape, so the room for it has to exist NOW: strictly less than the cap, not at it.</para>
+    ///
+    /// <para>The spawn cap and nothing else, deliberately. It is the one bound that says "no further agent can ever
+    /// be created" — whereas a run near its no-progress cap can still retry, because a wave that makes progress
+    /// resets that cadence. Gating on no-progress would leave the units most likely to be retried un-checkpointed,
+    /// which is the opposite of the point. The 3c consumer of this predicate pays a whole-file read and an artifact
+    /// write per minute, so it is worth asking whether anyone can consume the result.</para>
+    /// </summary>
+    public static bool CanRespawnAfterWave(SupervisorTurnContext context, int waveSize)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        return context.TotalSpawnedAgents + waveSize < (context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns);
+    }
+
     /// <summary>How many agents the decision would spawn: a spawn fans out its <c>subtaskIds</c>; a retry is exactly one. Best-effort read — a malformed payload reads 0 (it stages nothing, so it can't breach a count bound).</summary>
     internal static int SpawnCount(SupervisorDecision decision)
     {

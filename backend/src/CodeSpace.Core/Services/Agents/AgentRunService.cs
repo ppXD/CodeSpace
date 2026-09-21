@@ -774,13 +774,19 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return false;
 
+        // 3c: a deliberate cancel is a CLEAN landing, so it releases the mid-run session checkpoint exactly as
+        // completion does. Nobody owes this run a continuation, and a kept reference would pin the artifact
+        // Referenced (terminal in the retention ledger) for good — and make a later retry of the same subtask read
+        // the cancel as a host loss. Only the reconciler's abandon keeps these columns.
         var cancelled = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running && r.FenceEpoch == snapshot.FenceEpoch)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, AgentRunStatus.Cancelled)
                 .SetProperty(r => r.FenceEpoch, r => r.FenceEpoch + 1)
                 .SetProperty(r => r.Error, reason)
-                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow)
+                .SetProperty(r => r.SessionTranscriptCheckpointArtifactId, (Guid?)null)
+                .SetProperty(r => r.SessionTranscriptCheckpointAt, (DateTimeOffset?)null), cancellationToken)
             .ConfigureAwait(false);
 
         if (cancelled == 0) return false;
@@ -956,7 +962,7 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(a => a.TeamId == teamId && a.WorkflowRunId == supervisorRunId && a.SessionId != null)
             .OrderByDescending(a => a.CreatedDate).ThenByDescending(a => a.Id)
-            .Select(a => new { a.Id, a.SessionId, a.ResultJson, a.TaskJson })
+            .Select(a => new { a.Id, a.Status, a.SessionId, a.ResultJson, a.TaskJson, a.SessionTranscriptCheckpointArtifactId, a.SessionTranscriptCheckpointAt })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // The most-recent RESUMABLE prior attempt of THIS subtask — skip a captured-but-transcript-less attempt so it
@@ -966,10 +972,33 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             if (SubtaskIdOf(candidate.TaskJson) != subtaskId) continue;
 
             if (TryResumable(candidate.Id, candidate.SessionId, candidate.ResultJson) is { } resumable) return resumable;
+
+            // 3c: a prior attempt whose HOST died has no result at all — the reconciler's abandon writes none — so
+            // the captured-transcript read above finds nothing for exactly the population a warm retry helps most.
+            // Its mid-run checkpoint is what survives, and a TERMINAL row still naming one is the signature of an
+            // abandon: every clean landing — completion or cancel — releases these two columns in its own terminal
+            // write; only an abandon keeps them.
+            if (TryResumableFromCheckpoint(candidate.Id, candidate.Status, candidate.SessionId, candidate.SessionTranscriptCheckpointArtifactId, candidate.SessionTranscriptCheckpointAt) is { } continued) return continued;
         }
 
         return null;
     }
+
+    /// <summary>
+    /// A prior attempt's MID-RUN checkpoint as a resumable session — the host-loss counterpart of
+    /// <see cref="TryResumable"/>. Both halves are required for the same reason that one demands both: a session id
+    /// with no transcript resumes into "No conversation found", and a transcript nothing can address is not
+    /// resumable at all.
+    ///
+    /// <para>And only from a TERMINAL row. The checkpoint columns are written while the attempt is Running, so a
+    /// row still Running holds the checkpoint of a session that may be live — a kill-wave is best-effort, and a
+    /// revived parent stops the orphan sweep from selecting it — and resuming it would fork a conversation that is
+    /// still being written.</para>
+    /// </summary>
+    private static ResumableSession? TryResumableFromCheckpoint(Guid agentRunId, AgentRunStatus status, string? sessionId, Guid? checkpointArtifactId, DateTimeOffset? checkpointAt) =>
+        AgentRunStateMachine.IsTerminal(status) && sessionId is { Length: > 0 } sid && checkpointArtifactId is { } artifactId && checkpointAt is { } at
+            ? new ResumableSession(agentRunId, sid, null, artifactId, at)
+            : null;
 
     /// <summary>
     /// A prior agent run's (id, session id, result json) → its RESUMABLE session, or null when not resumable: no

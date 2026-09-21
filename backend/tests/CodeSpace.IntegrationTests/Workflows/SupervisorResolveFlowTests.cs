@@ -64,6 +64,29 @@ public sealed class SupervisorResolveFlowTests
         task.PushProducedBranch.ShouldBe(true, "the resolver MUST push its reconciled branch so a downstream PR-open has a head");
     }
 
+    [Fact]
+    public async Task A_resolver_unit_never_opts_into_the_session_checkpoint()
+    {
+        // Resolve stages through the same seam as spawn and retry, but its unit carries no subtask id — and the retry
+        // lookup matches on one, so nothing could ever resume a resolver's checkpoint. It would pay a whole-file read
+        // and an artifact write a minute for nothing, and keep the survivor for good on a host loss. The run here has
+        // ample spawn headroom, so only the subtask-id gate can keep the flag off.
+        // MUTATION: drop the SubtaskId gate from CheckpointsSessionTranscript → the resolver opts in → red.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var context = ContextWith(runId, teamId,
+            repositoryId: Guid.NewGuid(),
+            spawn: SpawnWithBranches("codespace/agent/web", "codespace/agent/api"),
+            merge: ConflictedMerge("src/Shared.cs"));
+
+        await ExecuteResolveAsync(context);
+
+        var task = JsonSerializer.Deserialize<AgentTask>((await StagedAgentRunsAsync(runId)).ShouldHaveSingleItem().TaskJson, AgentJson.Options)!;
+        task.SubtaskId.ShouldBeNull("precondition: a resolver's task is built without a subtask id");
+        task.CheckpointSessionTranscript.ShouldBeFalse("no retry can find a unit without a subtask id, so none may pay for a checkpoint");
+    }
+
     [Theory]
     [InlineData("no-conflict")]   // a clean merge on the tape → nothing to resolve
     [InlineData("no-repo")]       // conflict present but no repository bound

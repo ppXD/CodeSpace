@@ -35,11 +35,13 @@ public enum ArtifactRetentionClass
     /// A mid-run resumable session transcript, referenced only by
     /// <c>agent_run.session_transcript_checkpoint_artifact_id</c>. Its own class rather than
     /// <see cref="AgentRunEventData"/> because its lifetime is nothing like an event payload's: exactly one
-    /// checkpoint per run is ever useful (the newest), each one supersedes the last, and the run's terminal write
-    /// clears the column — so every intermediate is garbage within minutes and the survivor within hours. Sharing the
-    /// event class's seven-day floor would hold roughly a gigabyte of superseded transcript per long run for over a
-    /// week, and the growth gate that makes checkpoints worth taking is exactly what stops the content-addressed
-    /// store deduplicating them.
+    /// checkpoint per run is ever useful (the newest), each one supersedes the last, and a clean landing (completion
+    /// or a deliberate cancel) clears the column — so every intermediate is garbage within minutes and the survivor
+    /// within hours. An abandon-class ending (the reconciler's abandon, or its spool recovery) deliberately KEEPS the
+    /// column, because that survivor is what the retry resumes from, and a kept reference is Referenced for good.
+    /// Sharing the event class's seven-day floor would hold roughly a gigabyte of superseded transcript per long run
+    /// for over a week, and the growth gate that makes checkpoints worth taking is exactly what stops the
+    /// content-addressed store deduplicating them.
     /// </summary>
     SessionTranscriptCheckpoint = 5,
 }

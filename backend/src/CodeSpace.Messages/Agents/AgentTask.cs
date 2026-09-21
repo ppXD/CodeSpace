@@ -109,9 +109,10 @@ public sealed record AgentTask
     ///
     /// <para>An opt-in rather than a default, because a checkpoint nobody will consume is pure waste: it costs a
     /// whole-file read and an artifact write per minute, per running agent, per worker. Only a producer whose failed
-    /// attempt can actually be RETRIED sets it — today that is <c>agent.run</c> for a node whose own retry policy
-    /// allows more than one attempt. The benchmark lanes (one attempt per cell by protocol), review children and
-    /// supervisor units leave it false.</para>
+    /// attempt can actually be RETRIED sets it — today <c>agent.run</c> for a node whose own retry policy allows more
+    /// than one attempt, and a supervisor unit that carries a subtask id while its run can still afford to respawn
+    /// it. The benchmark lanes (one attempt per cell by protocol), review children and supervisor resolver units
+    /// leave it false.</para>
     ///
     /// <para><c>[JsonIgnore(WhenWritingDefault)]</c> so an envelope that did not opt in adds nothing to task_json.</para>
     /// </summary>
