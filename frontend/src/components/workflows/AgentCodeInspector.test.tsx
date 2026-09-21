@@ -144,6 +144,28 @@ describe("AgentCodeInspector", () => {
     expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", approvalConversationId: "conv1" });
   });
 
+  it("shows and edits the primary repository's base ref as an expression-capable input", () => {
+    const onInputsChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onInputsChange={onInputsChange} config={{ harness: "codex-cli" }} inputs={{ repositoryId: "p1", baseRef: "{{trigger.sourceBranch}}" }} />);
+
+    expect(screen.getByText("Base ref / 基础分支")).toBeInTheDocument();
+    const input = screen.getByLabelText("Default branch");
+    expect(input).toHaveValue("{{trigger.sourceBranch}}");
+
+    fireEvent.change(input, { target: { value: "release/2.x" } });
+
+    expect(onInputsChange).toHaveBeenCalledWith({ repositoryId: "p1", baseRef: "release/2.x" });
+  });
+
+  it("preserves baseRef when the repository workspace changes", () => {
+    const onInputsChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onInputsChange={onInputsChange} config={{ harness: "codex-cli" }} inputs={{ repositoryId: "p1", baseRef: "release/2.x" }} />);
+
+    fireEvent.click(screen.getByText("add-row"));
+
+    expect(onInputsChange).toHaveBeenCalledWith(expect.objectContaining({ baseRef: "release/2.x" }));
+  });
+
   // The picker's blank-row channel: "Add a repository" creates a row with an empty id, which neither
   // repositoryId nor relatedRepositories can carry. Both directions of the wiring must therefore survive —
   // feed drafts DOWN, and hand the emitted drafts back UP on onChange. Dropping either end makes the click a
