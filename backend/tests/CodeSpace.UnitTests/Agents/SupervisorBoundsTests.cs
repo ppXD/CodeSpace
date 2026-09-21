@@ -274,6 +274,50 @@ public class SupervisorBoundsTests
         SupervisorStopReasons.PlanInvalid.ShouldBe("plan structurally invalid");
     }
 
+    // ─── 3c: may a unit this wave stages ever be respawned? ─────────────────────────
+
+    [Theory]
+    [InlineData(0, 3, 10, true)]    // plenty of room after the wave
+    [InlineData(6, 3, 10, true)]    // 9 of 10 spent — one retry still fits
+    [InlineData(7, 3, 10, false)]   // the wave lands exactly ON the cap: no retry can follow
+    [InlineData(8, 3, 10, false)]   // the wave itself would breach it; PostDecision refuses the wave, and nothing follows either
+    [InlineData(0, 1, 1, false)]    // a one-spawn run: its only agent can never be retried
+    public void A_unit_is_checkpointed_only_while_the_run_could_still_respawn_it(int alreadySpawned, int waveSize, int cap, bool expected)
+    {
+        // The 3c opt-in. A checkpoint costs a whole-file read and an artifact write a minute for as long as the unit
+        // runs, so it is paid for only where somebody could consume it — and the only bound that says "no further
+        // agent can EVER be created" is the total-spawn cap. A later retry costs exactly one spawn, and by then this
+        // wave's own agents are on the tape, so the room has to exist now: strictly less than the cap, not at it.
+        // MUTATION: use <= instead of < → the exactly-on-the-cap arm reds, and every unit of a spent run would pay
+        // for a checkpoint nobody can consume.
+        var context = Context(turn: 1, totalSpawned: alreadySpawned) with { MaxTotalSpawns = cap };
+
+        SupervisorBounds.CanRespawnAfterWave(context, waveSize).ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(4)]      // an operator-set cap, which rehydrate copies onto the context from the plan
+    [InlineData(null)]   // a context carrying no cap (legacy): the predicate's fallback must be the plan's own default
+    public void The_respawn_headroom_reads_the_same_cap_the_spawn_bound_enforces(int? configuredCap)
+    {
+        // The two must never disagree about what the run can still do: if PostDecision would REFUSE a further retry,
+        // the unit must not have been checkpointed for one. Driven through both entry points on one context.
+        // MUTATION: `<=` for `<` → the explicit-cap arm reds; a fallback other than
+        // SupervisorLane.DefaultMaxTotalSpawns (or none) → the null arm reds, because the plan still enforces it.
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { Goal = "g", MaxTotalSpawns = configuredCap });
+        var cap = plan.MaxTotalSpawns;
+        var atCap = Context(turn: 1, totalSpawned: cap - 1) with { MaxTotalSpawns = configuredCap };
+
+        SupervisorBounds.CanRespawnAfterWave(atCap, waveSize: 1).ShouldBeFalse("the wave lands on the cap, so nothing can follow it");
+        SupervisorBounds.PostDecision(atCap with { TotalSpawnedAgents = cap }, plan, Spawn("a"))
+            .ShouldBe(SupervisorStopReasons.TotalSpawnCapReached, "and the bound agrees: the retry that would have consumed the checkpoint is refused");
+
+        var withRoom = Context(turn: 1, totalSpawned: cap - 2) with { MaxTotalSpawns = configuredCap };
+
+        SupervisorBounds.CanRespawnAfterWave(withRoom, waveSize: 1).ShouldBeTrue();
+        SupervisorBounds.PostDecision(withRoom with { TotalSpawnedAgents = cap - 1 }, plan, Spawn("a")).ShouldBeNull("the retry really is affordable — without this the predicate could be false-negative everywhere and still pass");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0, decimal runSpend = 0m) =>

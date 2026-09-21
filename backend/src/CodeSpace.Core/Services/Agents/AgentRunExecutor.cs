@@ -5408,7 +5408,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The checkpoint coordinates for a run whose envelope OPTED IN, else null — the one place the opt-in is read, so
     /// the produce side and the consume side cannot disagree about which runs are checkpointed. A run whose failed
     /// attempt nobody can retry writes nothing, which is what keeps the artifact store free of a per-minute
-    /// transcript copy for every benchmark cell, review child and supervisor unit on the fleet.
+    /// transcript copy for every benchmark cell, review child and supervisor unit that no retry could resume.
     /// </summary>
     private static SessionCheckpointTick? CheckpointTickFor(AgentTask task, Guid teamId, IAgentHarness harness, string? workingDirectory, AgentRunFacts facts) =>
         task.CheckpointSessionTranscript ? new SessionCheckpointTick(teamId, harness, workingDirectory, facts) : null;

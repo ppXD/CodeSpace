@@ -417,7 +417,7 @@ public class SupervisorDependencyStagingTests
         var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli" };
         var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
 
-        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceHasPriorWork: true);
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceRef: "agent/prior");
 
         resumed.ResumeFromSessionId.ShouldBe("sess-1");
         resumed.RestoredTranscript.ShouldBe("transcript");
@@ -430,10 +430,67 @@ public class SupervisorDependencyStagingTests
         var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli" };
         var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
 
-        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceHasPriorWork: false);
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceRef: null);
 
         resumed.ResumeFromSessionId.ShouldBe("sess-1", "the conversation is still restored");
         resumed.Goal.ShouldBe($"do the thing\n\n{AgentRetryContinuity.HonestNoContinuityHint}", "the goal now HONESTLY says the git changes are NOT present, so the agent never trusts a restored conversation implying work it can't see");
+    }
+
+    // ── 3c: a unit whose HOST died resumes from its checkpoint, and owes a different sentence ──
+
+    [Theory]
+    [InlineData("agent/prior", true, "published")]   // the lost attempt pushed its own branch — that work IS in the fresh clone
+    [InlineData(null, true, "redo")]                 // it pushed nothing — none of its tree survived
+    [InlineData(null, false, "none")]                // no repository at all — there was never a tree to lose
+    public void A_unit_resumed_from_a_host_loss_checkpoint_carries_its_provenance_and_the_lost_host_block(string? workspaceRef, bool hasRepository, string treeSentence)
+    {
+        // A checkpoint is not a captured transcript. The attempt that wrote it never finished: its machine is gone,
+        // so the conversation may describe turns the checkpoint never saw and edits the new sandbox does not
+        // contain — which is true even when a branch WAS pushed, because the unpublished remainder died with the
+        // host. The ordinary honest-redo line only covers "no branch to continue from", a smaller claim. The whole
+        // goal is asserted, so each arm pins exactly WHICH tree sentence follows the preamble.
+        // MUTATION: drop the CheckpointAt branch from ApplyResumeRecord → the task carries no provenance, is not
+        // marked a checkpoint (so an unreadable ref would FAIL the attempt instead of degrading), and the goal says
+        // only what an ordinary retry says → red.
+        // MUTATION: pass no branch to WithLostHostHint → the "published" arm reds; owe a tree regardless of the
+        // repository → the "none" arm reds.
+        var priorRunId = Guid.NewGuid();
+        var checkpointAt = DateTimeOffset.UtcNow.AddMinutes(-2);
+        var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli", RepositoryId = hasRepository ? Guid.NewGuid() : null };
+        var prior = new ResumableSession(priorRunId, "sess-lost", null, Guid.NewGuid(), checkpointAt);
+
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceRef);
+
+        resumed.ResumeFromSessionId.ShouldBe("sess-lost", "the CLI is told WHICH conversation to resume — a transcript with no id names nothing");
+        resumed.RestoredTranscriptArtifactId.ShouldBe(prior.TranscriptArtifactId, "the checkpoint rides as a REF the executor resolves just before invocation");
+        resumed.RestoredTranscriptIsCheckpoint.ShouldBeTrue("this ref is best-effort: unreadable must cost the conversation, never the attempt");
+        resumed.ResumedFromCheckpointAt.ShouldBe(checkpointAt, "the launch stamps this onto the run's permanent confinement record");
+        resumed.ResumedFromAgentRunId.ShouldBe(priorRunId, "which attempt took over from which is a column, not prose");
+        resumed.Goal.ShouldBe($"do the thing\n\n{AgentRetryContinuity.LostHostPreamble}{ExpectedTreeSentence(treeSentence, workspaceRef)}", "the preamble always, then exactly the one sentence that is true about the tree");
+    }
+
+    private static string ExpectedTreeSentence(string treeSentence, string? workspaceRef) => treeSentence switch
+    {
+        "published" => " " + AgentRetryContinuity.LostHostPublishedBranchHint(workspaceRef!),
+        "redo" => " " + AgentRetryContinuity.HonestNoContinuityHint,
+        _ => "",
+    };
+
+    [Fact]
+    public void A_unit_resumed_from_a_completed_attempt_claims_no_checkpoint()
+    {
+        // The other side of the same fork: an attempt that FINISHED left its workspace behind, so its transcript is
+        // a capture — fail-closed if unreadable — and it owes no lost-host sentence.
+        // MUTATION: mark every resume a checkpoint → red, and an unreadable captured ref would silently cold-start.
+        var task = new AgentTask { Goal = "do the thing", Harness = "codex-cli" };
+        var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
+
+        var resumed = RealSupervisorActionExecutor.ApplyResumeRecord(task, prior, workspaceRef: "agent/prior");
+
+        resumed.RestoredTranscriptIsCheckpoint.ShouldBeFalse();
+        resumed.ResumedFromCheckpointAt.ShouldBeNull();
+        resumed.ResumedFromAgentRunId.ShouldBeNull();
+        resumed.Goal.ShouldNotContain(AgentRetryContinuity.LostHostPreamble, Case.Sensitive);
     }
 
     // ── BuildBlockedSpawnOutcome: the wire shape resolve's conflict reader consumes ─────

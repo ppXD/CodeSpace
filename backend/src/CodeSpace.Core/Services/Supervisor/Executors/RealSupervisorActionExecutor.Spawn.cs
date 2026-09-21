@@ -161,6 +161,19 @@ public sealed partial class RealSupervisorActionExecutor
     internal static DependencyStagingResult PreferPriorAttemptStaging(DependencyStagingResult priorAttemptStaging, DependencyStagingResult dependencyStaging) =>
         priorAttemptStaging.Ref is not null ? priorAttemptStaging : dependencyStaging;
 
+    /// <summary>
+    /// 3c: whether a staged unit opts into the mid-run session checkpoint — only when a later retry could actually
+    /// consume it. A checkpoint costs a whole-file read and an artifact write a minute for as long as the unit runs,
+    /// and a host loss keeps the survivor for good, so a unit nobody can resume must not pay for one.
+    ///
+    /// <para>Two exclusions. A unit with no subtask id can never be FOUND by the retry lookup, which matches on it:
+    /// that is every resolver unit, whose task is built without one, and a re-resolve stages a fresh resolver rather
+    /// than resuming the old one. And a unit the run can no longer afford to respawn has nobody to hand a restored
+    /// conversation to (<see cref="SupervisorBounds.CanRespawnAfterWave"/>).</para>
+    /// </summary>
+    internal static bool CheckpointsSessionTranscript(AgentTask task, SupervisorTurnContext context, int waveSize) =>
+        task.SubtaskId is { Length: > 0 } && SupervisorBounds.CanRespawnAfterWave(context, waveSize);
+
     /// <summary>The subtask's target repository, resolved the SAME way <see cref="BuildTaskWithGoal"/> will resolve it — a pure pre-computation so dependency staging can look up the right repo's manifest before the task itself is built.</summary>
     private static Guid? ResolveTargetRepositoryId(SupervisorAgentDispatch? spec, SupervisorTurnContext context)
     {
@@ -433,7 +446,11 @@ public sealed partial class RealSupervisorActionExecutor
 
         var (escalatedTask, escalation) = await ApplyRetryEscalationAsync(builtTask, priorResult, context, cancellationToken).ConfigureAwait(false);
 
-        var task = ApplyRetryDisposition(escalatedTask, prior, priorResult, workspaceHasPriorWork: effectiveStaging.Ref is not null);
+        // The continuity sentence describes the resumed attempt's OWN git state, so it reads that attempt's own
+        // pushed branch — never the effective clone ref. For a dependent unit whose attempt pushed nothing, the
+        // effective ref is the PRODUCER's handoff branch: it says nothing about whether this attempt's work survived,
+        // and naming it would tell the agent another unit's branch is its own published work.
+        var task = ApplyRetryDisposition(escalatedTask, prior, priorResult, workspaceRef: priorAttemptStaging.Ref);
 
         if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
             _logger.LogWarning("Supervisor retry of subtask {SubtaskId}: the prior attempt died on a gateway FORMAT fault — retrying FRESH (a conversation replay re-triggers the fault) with extended thinking disabled ({EnvVar}=0)", retry.SubtaskId, AgentRetryCauses.MaxThinkingTokensEnvVar);
@@ -513,20 +530,44 @@ public sealed partial class RealSupervisorActionExecutor
     /// World-state continuity (the prior branch tip staging) is decided elsewhere and stays UNCHANGED either way —
     /// the degrade drops the broken conversation, never the preserved work.
     /// </summary>
-    internal static AgentTask ApplyRetryDisposition(AgentTask task, ResumableSession? prior, SupervisorAgentResult? priorResult, bool workspaceHasPriorWork)
+    internal static AgentTask ApplyRetryDisposition(AgentTask task, ResumableSession? prior, SupervisorAgentResult? priorResult, string? workspaceRef)
     {
         if (AgentRetryCauses.Classify(priorResult?.Error) == AgentRetryCauses.GatewayFormatFault)
             return AgentRetryCauses.ApplyFormatFaultMitigation(task);
 
-        return prior is null ? task : ApplyResumeRecord(task, prior, workspaceHasPriorWork);
+        return prior is null ? task : ApplyResumeRecord(task, prior, workspaceRef);
     }
 
-    /// <summary>The pure fold of a resumable prior attempt onto the task: always stamps the session/transcript, and — ONLY when <paramref name="workspaceHasPriorWork"/> is false — appends the honest-redo line so the hint's truth value always matches the actual git state. Internal + static so the honesty branch is unit-pinned directly.</summary>
-    internal static AgentTask ApplyResumeRecord(AgentTask task, ResumableSession prior, bool workspaceHasPriorWork)
+    /// <summary>
+    /// The pure fold of a resumable prior attempt onto the task: always stamps the session + transcript, then says
+    /// what is true about the WORLD that conversation refers to.
+    ///
+    /// <para>Two shapes, because the prior attempt ended two different ways. An attempt that FINISHED left its
+    /// workspace behind, so the only open question is whether it pushed a branch —
+    /// <paramref name="workspaceRef"/> null means it did not, and the honest-redo line says so. An attempt whose
+    /// HOST died (<see cref="ResumableSession.CheckpointAt"/>) left nothing but the conversation: its clone is
+    /// unreachable, so it owes the lost-host block instead, it carries its provenance onto the new run
+    /// (<c>ResumedFromCheckpointAt</c> for the permanent confinement record, <c>ResumedFromAgentRunId</c> for the
+    /// column), and its transcript ref is marked a CHECKPOINT so the executor degrades to a cold start rather than
+    /// failing the attempt when those bytes cannot be read.</para>
+    ///
+    /// <para>Internal + static so both honesty branches are unit-pinned directly.</para>
+    /// </summary>
+    /// <param name="workspaceRef">The branch the RESUMED attempt itself pushed, or null when it pushed none — never the effective clone ref, which for a dependent unit is its producer's handoff branch and says nothing about this attempt's work.</param>
+    internal static AgentTask ApplyResumeRecord(AgentTask task, ResumableSession prior, string? workspaceRef)
     {
         var resumed = task with { ResumeFromSessionId = prior.SessionId, RestoredTranscript = prior.InlineTranscript, RestoredTranscriptArtifactId = prior.TranscriptArtifactId };
 
-        return workspaceHasPriorWork ? resumed : resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) };
+        if (prior.CheckpointAt is { } checkpointAt)
+            return resumed with
+            {
+                RestoredTranscriptIsCheckpoint = true,
+                ResumedFromCheckpointAt = checkpointAt,
+                ResumedFromAgentRunId = prior.AgentRunId,
+                Goal = AgentRetryContinuity.WithLostHostHint(resumed.Goal, workspaceRef, treeOwed: task.RepositoryId is not null),
+            };
+
+        return workspaceRef is not null ? resumed : resumed with { Goal = AgentRetryContinuity.WithHonestNoContinuityHint(resumed.Goal) };
     }
 
     /// <summary>
@@ -775,9 +816,12 @@ public sealed partial class RealSupervisorActionExecutor
             var reclaimed = k < orphans.Count;
             reclaimedAny |= reclaimed;
 
+            // 3c: the ONE staging seam every spawn wave, retry and resolve passes through, so the checkpoint opt-in is
+            // decided once here rather than at each verb's own task build — see CheckpointsSessionTranscript for who
+            // is excluded and why.
             var agentRunId = reclaimed
                 ? orphans[k]
-                : await CreateResolvedAgentRunAsync(tasks[k].Task, tasks[k].Spec, context, cancellationToken).ConfigureAwait(false);
+                : await CreateResolvedAgentRunAsync(tasks[k].Task with { CheckpointSessionTranscript = CheckpointsSessionTranscript(tasks[k].Task, context, tasks.Count) }, tasks[k].Spec, context, cancellationToken).ConfigureAwait(false);
 
             StageAgentWait(context, k, agentRunId);
             agentRunIds.Add(agentRunId);

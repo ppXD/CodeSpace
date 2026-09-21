@@ -50,7 +50,7 @@ public class AgentRetryCausesTests
         var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
         var result = Result("API Error: Content block is not a thinking block");
 
-        var task = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior, result, workspaceHasPriorWork: true);
+        var task = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior, result, workspaceRef: "agent/prior");
 
         task.ResumeFromSessionId.ShouldBeNull("a conversation replay re-triggers the format fault deterministically — the retry must NOT resume");
         task.RestoredTranscript.ShouldBeNull();
@@ -63,11 +63,11 @@ public class AgentRetryCausesTests
     {
         var prior = new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null);
 
-        var resumed = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior, Result("acceptance: ./check.sh exited 2"), workspaceHasPriorWork: true);
+        var resumed = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior, Result("acceptance: ./check.sh exited 2"), workspaceRef: "agent/prior");
         resumed.ResumeFromSessionId.ShouldBe("sess-1");
         resumed.Environment.ContainsKey(AgentRetryCauses.MaxThinkingTokensEnvVar).ShouldBeFalse("no degrade on an ordinary failure");
 
-        var cold = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior: null, Result("boom"), workspaceHasPriorWork: false);
+        var cold = RealSupervisorActionExecutor.ApplyRetryDisposition(Task_(), prior: null, Result("boom"), workspaceRef: null);
         cold.ResumeFromSessionId.ShouldBeNull();
         cold.Environment.ContainsKey(AgentRetryCauses.MaxThinkingTokensEnvVar).ShouldBeFalse();
     }
@@ -125,7 +125,7 @@ public class AgentRetryCausesTests
         const string liveError = "API Error: Content block is not a thinking block";
 
         var supervisorTask = RealSupervisorActionExecutor.ApplyRetryDisposition(
-            Task_(), new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null), Result(liveError), workspaceHasPriorWork: true);
+            Task_(), new ResumableSession(Guid.NewGuid(), "sess-1", "transcript", null), Result(liveError), workspaceRef: "agent/prior");
 
         var priorAttempt = JsonDocument.Parse($$"""
             {"status":"Failed","exitReason":"non-zero-exit","error":"{{liveError}}","sessionId":"sess-1","sessionTranscript":"transcript"}

@@ -506,7 +506,8 @@ public sealed class AgentCodeNode : INodeRuntime
     /// base ref/pin byte-identical.</para>
     ///
     /// <para>The returned flag is whether the honest-redo line is OWED, and it follows the PRIMARY repo alone —
-    /// the same <c>workspaceHasPriorWork: effectiveStaging.Ref is not null</c> read the supervisor's retry uses. A
+    /// the same read the supervisor's retry makes of its prior attempt's own pushed branch
+    /// (<c>workspaceRef: priorAttemptStaging.Ref</c>), which is keyed on the target repository too. A
     /// multi-repo attempt whose primary push FAILED while a sibling's succeeded still repins that sibling, but its
     /// primary re-clones the default branch, so the resumed conversation must still be told its changes are not
     /// there: an OR across repos would suppress the line precisely where the agent's own repo lost its work. Nothing

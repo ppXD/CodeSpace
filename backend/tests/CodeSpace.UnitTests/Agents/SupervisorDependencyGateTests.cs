@@ -227,6 +227,25 @@ public class SupervisorDependencyGateTests
         SupervisorDependencyGate.LatestAgentRunId(Context(spawn), "legacy").ShouldBe(legacyRunId);
     }
 
+    // ── LatestResultsBySubtask: the roster SupervisorAmendPrecondition.GradedAttempts grades from ──
+
+    [Fact]
+    public void A_warm_respawn_of_a_lost_host_replaces_the_abandoned_attempt_rather_than_adding_a_second()
+    {
+        // The host-loss slice's billing question. A unit whose host died is abandoned with NO result at all and
+        // then respawned warm from its checkpoint — so the tape carries two entries for one subtask. The graded
+        // roster must keep exactly ONE, the respawn's, or a single host loss spends two of the run's graded
+        // attempts and the amend precondition grades a verdict the machine, not the work, produced.
+        // MUTATION: fold the tape in reverse (or keep the first write per subtask) → the abandoned attempt wins → red.
+        var tape = new[] { Spawn(("a", "Failed", null)), Retry(("a", "Succeeded", true)) };
+        var respawnRunId = SupervisorOutcome.ReadAgentResults(tape[1].OutcomeJson).Single().AgentRunId;
+
+        var graded = SupervisorDependencyGate.LatestResultsBySubtask(tape);
+
+        graded.Count.ShouldBe(1, "one subtask owes one graded attempt no matter how many machines it burned through");
+        graded["a"].AgentRunId.ShouldBe(respawnRunId, "the respawn's verdict is the subtask's verdict — the abandoned attempt was never graded by anything but the reconciler");
+    }
+
     // ── Frontier: the decider's guidance ───────────────────────────────────────────────
 
     [Fact]
