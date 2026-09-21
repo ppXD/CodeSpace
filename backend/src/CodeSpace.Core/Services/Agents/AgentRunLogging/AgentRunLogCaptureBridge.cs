@@ -242,13 +242,13 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
                 await Task.WhenAny(Task.Delay(PollInterval, cancellationToken), finish).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
             }
-            while (streams.Any(value => value.Draining))
+            for (var pass = 1; streams.Any(value => value.Draining); pass++)
             {
                 foreach (var stream in streams.Where(value => value.Draining))
                     await PumpAsync(request, captureSessionId, stream, final: true, cancellationToken).ConfigureAwait(false);
 
                 if (!streams.Any(value => value.Draining)) break;
-                if (ParkedIncompleteSourcesForHostShutdown(request, streams)) break;
+                if (pass > SourceSealGracePasses && ParkedIncompleteSourcesForHostShutdown(request, streams)) break;
 
                 await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
             }
@@ -374,6 +374,10 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     /// <para>So the wait ends here, and only LOCALLY — the durable row keeps its Open state at its own fence, with the
     /// stall marker <see cref="MarkStallAsync"/> already wrote, which is exactly the shape the capture recovery sweep
     /// re-claims. Nothing is terminalized, so nothing a later observer could have completed is foreclosed.</para>
+    ///
+    /// <para>It parks on the FIRST refusal, with no grace, because a destination that refused once is overwhelmingly
+    /// likely to refuse again — unlike <see cref="ParkedIncompleteSourcesForHostShutdown"/>, whose wait is on a local
+    /// copier and therefore gets a pass.</para>
     /// </summary>
     private bool ParkedForHostShutdown(AgentRunLogCaptureOpenRequest request, CaptureStream stream, RemoteStall stall)
     {
@@ -386,10 +390,31 @@ public sealed class AgentRunLogCaptureBridge : IAgentRunLogCaptureBridge
     }
 
     /// <summary>
-    /// The final drain's OTHER unbounded wait, and the same answer. A source that is not sealed yet — or that is
-    /// answering retryably — terminalizes nothing, so the loop above keeps polling it until the finalization budget
-    /// cancels the whole capture. That is 30 seconds of a worker that is already going away, spent on a source whose
-    /// bytes a later owner can read just as well.
+    /// How many final-drain passes a source gets to produce its seal before a host tear-down stops waiting for it.
+    /// ONE, which costs a quarter second of a ten-second landing and is what separates a copier that has not been
+    /// reaped yet from a source that is genuinely not coming: an agent this drain itself just killed
+    /// (<c>AttachAsync</c>'s timeout / stalled / vanished returns) can easily still have a <c>cat</c> draining its
+    /// FIFO when the first pass reads, and parking on that first read would call a capture whose every byte landed
+    /// incomplete over 250ms of scheduling.
+    /// </summary>
+    private const int SourceSealGracePasses = 1;
+
+    /// <summary>
+    /// The final drain's OTHER unbounded wait. A source that is not sealed yet — or that is answering retryably —
+    /// terminalizes nothing, so the loop above keeps polling it until the finalization budget cancels the whole
+    /// capture: 30 seconds of a worker that is already going away, spent on a source whose bytes a later owner can
+    /// read just as well.
+    ///
+    /// <para><b>It is not the same bet as the append park, and it does not get the same odds.</b> An append park
+    /// happens because the destination REFUSED — the next attempt is very unlikely to differ, so it parks at once.
+    /// Here the wait is on a local copier finishing, which is exactly the kind of thing that completes on the next
+    /// poll; hence <see cref="SourceSealGracePasses"/>, so this is consulted only from the second pass.</para>
+    ///
+    /// <para><b>The durable state the two leave differs too, deliberately.</b> An append park lands on top of the
+    /// <c>remote_stall</c> marker <see cref="MarkStallAsync"/> already wrote, so the Room can say WHY. This one writes
+    /// nothing: no destination refused anything here, and a stall marker would send an operator hunting a storage
+    /// incident that never happened. The cost is honest and worth naming — until the capture recovery sweep's terminal
+    /// grace elapses, such a stream reads as "Finalizing" with no reason attached.</para>
     /// </summary>
     private bool ParkedIncompleteSourcesForHostShutdown(AgentRunLogCaptureOpenRequest request, IReadOnlyList<CaptureStream> streams)
     {
