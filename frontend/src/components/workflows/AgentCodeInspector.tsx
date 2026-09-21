@@ -40,6 +40,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
   const credentialId = str(config.modelCredentialId);
   const credentialedModelId = str(config.modelCredentialModelId);
   const repositoryId = str(inputs.repositoryId);
+  const baseRef = str(inputs.baseRef);
   const approvalConversationId = str(config.approvalConversationId);
   const timeoutSeconds = typeof config.timeoutSeconds === "number" ? config.timeoutSeconds : undefined;
   const network = config.network === true;
@@ -186,6 +187,17 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
           />
           <span className="wf-form-help">The first repo is the primary — the writable workspace root the agent runs in. Add more to clone alongside it for a coordinated change (e.g. a frontend + its backend).</span>
         </div>
+
+        <label className="wf-form-row">
+          <span className="wf-form-label">Base ref / 基础分支</span>
+          <VariablePickerInput
+            value={baseRef}
+            onChange={(v) => onInputsChange({ ...inputs, baseRef: v })}
+            suggestions={suggestions}
+            placeholder="Default branch"
+          />
+          <span className="wf-form-help">Branch or ref to clone the primary repository at. Leave empty for its default branch.</span>
+        </label>
 
         <label className="wf-form-row">
           <span className="wf-form-label">Approval conversation</span>
