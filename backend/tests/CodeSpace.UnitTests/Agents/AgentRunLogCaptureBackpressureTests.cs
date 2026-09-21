@@ -270,6 +270,39 @@ public sealed class AgentRunLogCaptureBackpressureTests
     }
 
     [Fact]
+    public async Task A_source_that_seals_one_poll_late_is_finalized_rather_than_parked_when_the_host_is_stopping()
+    {
+        // The park above must not be an impatience. The drain's own kill is what usually ends a source, and the copier
+        // draining that agent's FIFO can easily still be running when the first final pass reads — so a park with no
+        // grace would call a capture whose every byte landed incomplete, and the recovery sweep would later stamp it
+        // CaptureFailed rather than re-read a spool it does not re-read. One pass of grace is the difference, and it
+        // costs a quarter second of a ten-second landing.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var logs = new FakeLogService { CurrentFence = 1 };
+        var stalls = new FakeStallWriter();
+        var gaps = new FakeCompletenessWriter();
+        var source = new FakeLogSource { SealAfterFinalReads = 1 };
+        source.Set("stdout", Payload(null, 4096));
+        source.Set("stderr", []);
+        var bridge = Bridge(logs, clock, stalls, gaps, finalizationBudget: TimeSpan.FromSeconds(30));
+        using var shutdown = new CancellationTokenSource();
+        shutdown.Cancel();
+
+        var capture = await bridge.OpenAsync(Request(source, hostShutdown: shutdown.Token), CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => Task.FromResult(Result()), CancellationToken.None);
+
+        await AwaitWithinAsync(observing, "the drain never returned while waiting one poll for a seal that does arrive");
+        await bridge.CompleteRunAsync(TeamId, RunId, 1, CancellationToken.None);
+
+        var stdout = logs.Head(AgentRunLogKinds.StandardOutput);
+        stdout.CaptureFinalizedAt.ShouldNotBeNull(
+            "the source sealed on the second pass and the drain was still there to take the receipt — park it on the first and this capture is reported incomplete for 250ms of scheduling");
+        stdout.Metadata.State.ShouldBe(AgentRunLogStreamState.Completed, "a capture with a final-drain receipt terminalizes Completed, not left for the sweep to fail");
+        logs.Bytes(AgentRunLogKinds.StandardOutput).Length.ShouldBe(4096, "and every byte is there");
+        stalls.Held.ShouldBeEmpty("nothing was refused; a stall marker here would send an operator hunting a storage incident that never happened");
+    }
+
+    [Fact]
     public async Task A_drain_on_a_healthy_host_still_waits_out_the_same_refusal()
     {
         // The other half of the arm above, and the thing that keeps it from being a blanket "stop retrying": with no
@@ -499,12 +532,18 @@ public sealed class AgentRunLogCaptureBackpressureTests
         /// <summary>False models a spool the copier has not sealed yet: the final drain gets "not yet" forever, which is the OTHER way it can run to its budget without anything being refused.</summary>
         public bool EmitEndOfSource { get; init; } = true;
 
+        /// <summary>How many final-drain reads AT THE END of each source answer "not yet" before its seal appears — the copier this drain's own kill has not reaped yet. Counted per source key, because the two streams are drained independently.</summary>
+        public int SealAfterFinalReads { get; init; }
+
+        private readonly ConcurrentDictionary<string, int> _finalReadsAtEnd = new(StringComparer.Ordinal);
+
         /// <summary>Does NOT observe the token, because production's does not: the local spool's read answers "nothing new" out of a length comparison, with no I/O and no cancellation check. A fake that threw here is what kept a capture-loop cancellation bug out of reach of this suite.</summary>
         public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
         {
             var bytes = _sources[request.SourceKey];
             var available = bytes.LongLength - request.OffsetBytes;
-            if (available == 0 && request.FinalDrain && EmitEndOfSource) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource());
+            if (available == 0 && request.FinalDrain && EmitEndOfSource && _finalReadsAtEnd.AddOrUpdate(request.SourceKey, 1, (_, seen) => seen + 1) > SealAfterFinalReads)
+                return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.EndOfSource());
             if (available == 0 || (!request.FinalDrain && available < request.MinimumBytes)) return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.NoData());
             var length = (int)Math.Min(available, request.MaximumBytes);
             return Task.FromResult<SandboxDurableLogReadResult>(new SandboxDurableLogReadResult.Available(bytes.AsMemory((int)request.OffsetBytes, length)));
