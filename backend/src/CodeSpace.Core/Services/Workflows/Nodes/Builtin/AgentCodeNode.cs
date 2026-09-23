@@ -373,16 +373,22 @@ public sealed class AgentCodeNode : INodeRuntime
             // that ALREADY ran mitigated (`thinkingDisabled`, projected from its own dispatched envelope) and died
             // of the SAME fault has proven the repair does not hold here, so a second identical respawn would only
             // re-bill a broken gateway and bury the one fact the operator needs.
-            var formatFault = Supervisor.AgentRetryCauses.Classify(error) == Supervisor.AgentRetryCauses.GatewayFormatFault;
+            var cause = Supervisor.AgentRetryCauses.Classify(error);
+            var formatFault = cause == Supervisor.AgentRetryCauses.GatewayFormatFault;
             var mitigationSpent = formatFault && ReadFlag(payload, "thinkingDisabled");
 
-            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong)
+            // The model refused the request as larger than its context window. A respawn warm-resumes, so it re-sends
+            // the goal inside a LONGER request and is refused again, harder — every attempt after the first is an
+            // identical, billed refusal. Deterministic unless a stronger model is on offer, which may have a larger window.
+            var contextWindowExceeded = cause == Supervisor.AgentRetryCauses.ContextWindowExceeded;
+
+            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong || contextWindowExceeded)
                                 && !acceptanceInfraFault
                                 && !stalled
                                 && !escalationAvailable)
                                 || mitigationSpent;
 
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(formatFault, mitigationSpent)}", retryable: !deterministic);
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}", retryable: !deterministic);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };
@@ -400,17 +406,21 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     /// <summary>
-    /// Name the CAUSE on a gateway format fault's failure message — the text the engine persists as this attempt's
-    /// <c>attempt.failed</c> / <c>node.failed</c> record, so the run's timeline says the gateway mangled the wire
-    /// instead of only echoing an opaque CLI line. Deliberately states no more than is true at that instant: it
-    /// never promises a respawn (whether one is bought is the node's retry budget, which this node cannot see),
-    /// and on the spent-mitigation arm it says the repair already ran. Empty for every other failure, so every
-    /// existing message stays byte-identical.
+    /// Name the CAUSE on a classified failure's message — the text the engine persists as this attempt's
+    /// <c>attempt.failed</c> / <c>node.failed</c> record, so the run's timeline says what happened instead of only
+    /// echoing an opaque CLI line. Deliberately states no more than is true at that instant: it never promises a
+    /// respawn (whether one is bought is the node's retry budget, which this node cannot see), and on the
+    /// spent-mitigation arm it says the repair already ran. A context overflow gets the author's remedy, because the
+    /// CLI's own text advises its interactive user (trim your tools, start a new thread), which a workflow author
+    /// cannot act on. Empty for every other failure, so every existing message stays byte-identical.
     /// </summary>
-    private static string FailureCauseSuffix(bool formatFault, bool mitigationSpent) =>
-        !formatFault ? ""
-            : mitigationSpent ? $" ({Supervisor.AgentRetryCauses.GatewayFormatFault}: a fresh conversation with extended thinking disabled hit the same fault)"
-                : $" ({Supervisor.AgentRetryCauses.GatewayFormatFault})";
+    private static string FailureCauseSuffix(string? cause, bool mitigationSpent) => cause switch
+    {
+        Supervisor.AgentRetryCauses.GatewayFormatFault when mitigationSpent => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault}: a fresh conversation with extended thinking disabled hit the same fault)",
+        Supervisor.AgentRetryCauses.GatewayFormatFault => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault})",
+        Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the goal is larger than this model's context window, so every attempt is refused the same way — shorten the goal, or choose a model with a larger window)",
+        _ => "",
+    };
 
     /// <summary>
     /// P2.3: stamp the retry-resume hint from the RETIRING prior attempt's own resume payload (the same
