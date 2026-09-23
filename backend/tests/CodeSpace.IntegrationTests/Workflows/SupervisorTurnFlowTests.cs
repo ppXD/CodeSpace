@@ -46,6 +46,13 @@ public class SupervisorTurnFlowTests
         // reset the shared fixture-singleton script (the E3 crown-jewel flips it to plan→spawn→stop).
         using var scope = _fixture.BeginScope();
         scope.Resolve<CodeSpace.IntegrationTests.Workflows.Infrastructure.SupervisorDecisionScript>().PlanThenStop();
+
+        // The self-advance is a job this flow DRAINS, so it owns the shared job client's state as well: executing, and
+        // holding nothing of anyone else's. A sibling that left it record-only (AutoExecute = false) parked every run
+        // here on turn 1 for good, and a sibling's undrained job would otherwise run inside this test's drain.
+        var jobClient = scope.Resolve<InMemoryBackgroundJobClient>();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
     }
 
     [Fact]
