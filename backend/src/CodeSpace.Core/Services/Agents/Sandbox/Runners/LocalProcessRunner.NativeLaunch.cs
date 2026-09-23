@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -83,15 +84,14 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// The kernel does not cap a pipe, but the prompt still crosses the private broker pipe inside the invocation frame,
-    /// and that frame is bounded (<see cref="NativeLaunchProtocol.MaximumFrameBytes"/>). Half of it goes to stdin, which
-    /// leaves the rest of the invocation — the spec's other fields appear twice, once in the spec and once in the
-    /// resolved argv and environment — far more room than it uses. Measured as encoded for the pipe, because the web
-    /// JSON defaults escape every non-ASCII character: a CJK-heavy prompt doubles, an emoji-heavy one triples.
+    /// The early, cheap cut for the one carrier that routinely grows with its input. The kernel does not cap a pipe,
+    /// but the prompt still crosses the private broker pipe inside the invocation frame, and that frame is bounded
+    /// (<see cref="NativeLaunchProtocol.MaximumFrameBytes"/>). Measured as encoded for the pipe, because the web JSON
+    /// defaults escape every non-ASCII character: a CJK-heavy prompt doubles, an emoji-heavy one triples.
     ///
-    /// <para>Checked here, before anything exists, for the same reason as the argument ceiling above: the frame write
-    /// otherwise fails AFTER transmission is marked started, which deliberately skips the netns/cgroup teardown (an
-    /// ACK may have been lost) and surfaces as a generic executor error the node retries.</para>
+    /// <para>Checked here, before a spool or a start commitment exists, so the common oversized case costs nothing.
+    /// It is NOT the whole frame — a continue's restored session transcript rides it too — so the complete bound is the
+    /// encoded frame itself, measured in <see cref="StartBrokerAsync"/> before transmission (<see cref="LaunchFrameRefusal"/>).</para>
     /// </summary>
     private static string? StandardInputPastTheLaunchPipe(SandboxSpec spec)
     {
@@ -101,6 +101,15 @@ public sealed partial class LocalProcessRunner
         var limit = NativeLaunchProtocol.MaximumFrameBytes / 2;
 
         return encoded <= limit ? null : $"the agent's standard input is {encoded} bytes once encoded for the launch pipe; a launch carries at most {limit}. This is a size limit of the launch, not a memory limit — no process is created and no memory is allocated. Shorten the text or pass it to the agent as a file.";
+    }
+
+    /// <summary>Host metadata for a frame past the pipe bound: its size, the bound, and the two carriers that can grow that large — never their contents.</summary>
+    private static string LaunchFrameRefusal(int frameBytes, SandboxSpec spec)
+    {
+        var stdin = spec.StandardInput is null ? 0 : Encoding.UTF8.GetByteCount(spec.StandardInput);
+        var restored = spec.ConfigHomeFiles.Sum(file => (long)Encoding.UTF8.GetByteCount(file.Content));
+
+        return $"this launch is {frameBytes} bytes once encoded for the launch pipe, which carries at most {NativeLaunchProtocol.MaximumFrameBytes}: the agent's standard input is {stdin} bytes and its config-home files (a continued session's restored transcript) {restored}. This is a size limit of the launch, not a memory limit — no process is created. Shorten the goal, or start a fresh session instead of continuing this one.";
     }
 
     private static async Task<NativeLaunchRecord> BindLaunchAsync(SandboxLaunchRequest request, string hash, string directory, CancellationToken cancellationToken)
@@ -164,9 +173,15 @@ public sealed partial class LocalProcessRunner
                 Environment = command.Environment.ToDictionary(pair => pair.Key, pair => pair.Value), EgressNetnsKey = egressKey, CgroupRunKey = cgroupKey,
                 Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix)),
             };
+            // Measured BEFORE transmission is marked started, so a frame no pipe can carry is refused while the catch
+            // below can still tear the netns and cgroup down, and the broker reads EOF and releases its slot as rejected.
+            var frame = NativeLaunchFiles.EncodeFrame(invocation);
+            if (frame.Length > NativeLaunchProtocol.MaximumFrameBytes)
+                throw new SandboxArgumentTooLongException(LaunchFrameRefusal(frame.Length, request.Spec));
+
             cancellationToken.ThrowIfCancellationRequested();
             transmissionStarted = true; // A write/flush exception may be an ACK loss. Never tear down an execution on that assumption.
-            await NativeLaunchFiles.WriteFrameAsync(process.StandardInput.BaseStream, invocation, cancellationToken).ConfigureAwait(false);
+            await NativeLaunchFiles.WriteFrameAsync(process.StandardInput.BaseStream, frame, cancellationToken).ConfigureAwait(false);
         }
         catch
         {

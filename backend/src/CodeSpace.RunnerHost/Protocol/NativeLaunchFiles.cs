@@ -66,9 +66,13 @@ internal static class NativeLaunchFiles
         finally { File.Delete(PathFor(directory, temporary)); }
     }
 
-    public static async Task WriteFrameAsync<T>(Stream stream, T value, CancellationToken cancellationToken)
+    public static Task WriteFrameAsync<T>(Stream stream, T value, CancellationToken cancellationToken) => WriteFrameAsync(stream, EncodeFrame(value), cancellationToken);
+
+    /// <summary>The frame body exactly as <see cref="WriteFrameAsync(Stream, byte[], CancellationToken)"/> sends it, so a sender can measure it against <see cref="NativeLaunchProtocol.MaximumFrameBytes"/> BEFORE it commits to transmitting.</summary>
+    public static byte[] EncodeFrame<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, NativeLaunchProtocol.Json);
+
+    public static async Task WriteFrameAsync(Stream stream, byte[] bytes, CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, NativeLaunchProtocol.Json);
         if (bytes.Length > NativeLaunchProtocol.MaximumFrameBytes) throw new InvalidDataException("Native invocation exceeds its pipe bound.");
         var size = new byte[4];
         BinaryPrimitives.WriteInt32LittleEndian(size, bytes.Length);
