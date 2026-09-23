@@ -154,7 +154,7 @@ public sealed class RealClaudeResumeE2ETests
             WorkingDirectory = spec.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = true,
+            RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             UseShellExecute = false,
         };
 
@@ -163,7 +163,8 @@ public sealed class RealClaudeResumeE2ETests
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
-        proc.StandardInput.Close();   // claude --print waits up to 3s for stdin otherwise; close it (the prompt is a positional arg)
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin (BuildInvocation), exactly as the runner hands it over
+        proc.StandardInput.Close();
 
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
         var stderrTask = proc.StandardError.ReadToEndAsync();
@@ -191,7 +192,7 @@ public sealed class RealClaudeResumeE2ETests
             WorkingDirectory = spec.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = true,
+            RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             UseShellExecute = false,
         };
 
@@ -200,6 +201,7 @@ public sealed class RealClaudeResumeE2ETests
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin (BuildInvocation), exactly as the runner hands it over
         proc.StandardInput.Close();
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));

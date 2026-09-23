@@ -63,7 +63,7 @@ public sealed partial class LocalProcessRunner
         // E2BIG, and it fails it in the one place that cannot report back — the bootstrap has already replaced the
         // image it would have written an exit marker from, so the run surfaces as a vanished process and is retried
         // forever. Refusing here turns that into one attributable sentence, for every harness at once.
-        if (SandboxArgumentLimit.Exceeded(spec) is { } oversized)
+        if ((SandboxArgumentLimit.Exceeded(spec) ?? StandardInputPastTheLaunchPipe(spec)) is { } oversized)
             throw new SandboxArgumentTooLongException(oversized);
 
         ValidateLaunchKey(request);
@@ -80,6 +80,27 @@ public sealed partial class LocalProcessRunner
             await StartBrokerAsync(new BrokerStart(request.SpoolKey, spec, spool, directory), cancellationToken).ConfigureAwait(false);
 
         return await DiscoverHandleAsync(record, directory, spool, LaunchPatience, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The kernel does not cap a pipe, but the prompt still crosses the private broker pipe inside the invocation frame,
+    /// and that frame is bounded (<see cref="NativeLaunchProtocol.MaximumFrameBytes"/>). Half of it goes to stdin, which
+    /// leaves the rest of the invocation — the spec's other fields appear twice, once in the spec and once in the
+    /// resolved argv and environment — far more room than it uses. Measured as encoded for the pipe, because the web
+    /// JSON defaults escape every non-ASCII character: a CJK-heavy prompt doubles, an emoji-heavy one triples.
+    ///
+    /// <para>Checked here, before anything exists, for the same reason as the argument ceiling above: the frame write
+    /// otherwise fails AFTER transmission is marked started, which deliberately skips the netns/cgroup teardown (an
+    /// ACK may have been lost) and surfaces as a generic executor error the node retries.</para>
+    /// </summary>
+    private static string? StandardInputPastTheLaunchPipe(SandboxSpec spec)
+    {
+        if (spec.StandardInput is not { } input) return null;
+
+        var encoded = JsonSerializer.SerializeToUtf8Bytes(input, NativeLaunchProtocol.Json).Length;
+        var limit = NativeLaunchProtocol.MaximumFrameBytes / 2;
+
+        return encoded <= limit ? null : $"the agent's standard input is {encoded} bytes once encoded for the launch pipe; a launch carries at most {limit}. This is a size limit of the launch, not a memory limit — no process is created and no memory is allocated. Shorten the text or pass it to the agent as a file.";
     }
 
     private static async Task<NativeLaunchRecord> BindLaunchAsync(SandboxLaunchRequest request, string hash, string directory, CancellationToken cancellationToken)

@@ -886,9 +886,11 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
         info.Environment["CSP_MAX_BYTES"] = SpoolCapBytes(spec).ToString(CultureInfo.InvariantCulture);
 
-        // Absent → the script falls back to /dev/null. Present → the prompt reaches the agent through a pipe, where no
-        // per-string kernel ceiling applies. Written by the host before launch, like the config-home files above.
-        if (WriteStandardInput(spec, spoolDir) is { } stdinPath) info.Environment["CSP_IN"] = stdinPath;
+        // Always set, like every other CSP_* path, and for the same reason: the supervisor opens this path on the HOST,
+        // outside the sandbox, so a CSP_IN surviving from the spec's own environment would hand the agent any host file
+        // as its stdin. Present → the prompt reaches the agent through a pipe, where no per-string kernel ceiling
+        // applies. Absent → /dev/null, never the worker's own stdin.
+        info.Environment["CSP_IN"] = WriteStandardInput(spec, spoolDir) ?? "/dev/null";
 
         // Point the config-isolating tool at the per-run home so a shelled-out CLI reads ONLY the credentials we
         // inject — never the operator's personal ~/.claude / ~/.codex. Set AFTER the scrub so the injected value wins.

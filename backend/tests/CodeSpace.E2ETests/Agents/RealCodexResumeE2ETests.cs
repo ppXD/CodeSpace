@@ -165,7 +165,7 @@ public sealed class RealCodexResumeE2ETests
             WorkingDirectory = spec.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = true,
+            RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             UseShellExecute = false,
         };
 
@@ -177,7 +177,8 @@ public sealed class RealCodexResumeE2ETests
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
-        proc.StandardInput.Close();   // `codex exec` reads stdin ("Reading additional input from stdin…") — close it; the prompt is a positional arg
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin behind `-` (BuildInvocation), exactly as the runner hands it over
+        proc.StandardInput.Close();
 
         var stderrTask = proc.StandardError.ReadToEndAsync();
         var stdout = new StringBuilder();
@@ -221,7 +222,7 @@ public sealed class RealCodexResumeE2ETests
             WorkingDirectory = spec.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = true,
+            RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             UseShellExecute = false,
         };
 
@@ -231,6 +232,7 @@ public sealed class RealCodexResumeE2ETests
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin (BuildInvocation), exactly as the runner hands it over
         proc.StandardInput.Close();
         _ = proc.StandardOutput.ReadToEndAsync();   // drain so the child's pipes never wedge
         _ = proc.StandardError.ReadToEndAsync();

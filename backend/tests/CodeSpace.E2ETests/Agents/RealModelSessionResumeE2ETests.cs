@@ -240,12 +240,13 @@ public sealed class RealModelSessionResumeE2ETests
     {
         LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configDir);
 
-        var psi = new ProcessStartInfo { FileName = spec.Command, WorkingDirectory = spec.WorkingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
+        var psi = new ProcessStartInfo { FileName = spec.Command, WorkingDirectory = spec.WorkingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false), UseShellExecute = false };
         foreach (var arg in spec.Args) psi.ArgumentList.Add(arg);
         psi.Environment[ClaudeCodeHarness.ConfigDirEnvVar] = configDir;
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin (BuildInvocation), exactly as the runner hands it over
         proc.StandardInput.Close();
 
         string? sessionId = null;
@@ -326,7 +327,7 @@ public sealed class RealModelSessionResumeE2ETests
             WorkingDirectory = spec.WorkingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = true,
+            RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             UseShellExecute = false,
         };
 
@@ -335,6 +336,7 @@ public sealed class RealModelSessionResumeE2ETests
         foreach (var (k, v) in spec.Environment) psi.Environment[k] = v;
 
         using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(spec.StandardInput ?? "");   // the prompt rides stdin (BuildInvocation), exactly as the runner hands it over
         proc.StandardInput.Close();
 
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
