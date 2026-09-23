@@ -547,6 +547,23 @@ public class AgentCodeNodeTests
         result.Retryable.ShouldBe(expectedRetryable, "the node's verdict tells the retry policy whether a fresh agent could change the outcome");
     }
 
+    [Theory]
+    [InlineData("Prompt is too long · the request is ~215000 tokens (limit 200000) but this conversation is only ~30286 tokens")]
+    [InlineData("API Error: 400 This model's maximum context length is 131072 tokens. However, you requested 161234 tokens.")]
+    [InlineData("Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.")]
+    public async Task A_context_window_overflow_is_not_respawned(string error)
+    {
+        // A respawn warm-resumes the conversation, so it re-sends the goal inside a LONGER request — it overflows again,
+        // harder. Every attempt after the first is an identical, billed refusal that buries the one fact the author needs.
+        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error, exitReason = "non-zero-exit" })).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldContain("context window", Case.Insensitive, customMessage: "the node's own message must name the cause, whatever advice the CLI's text gives");
+    }
+
     [Fact]
     public void The_two_watchdogs_are_classified_alike_because_neither_can_see_why_the_process_went_quiet()
     {
