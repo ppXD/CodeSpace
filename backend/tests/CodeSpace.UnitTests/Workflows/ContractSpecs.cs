@@ -17,6 +17,8 @@ internal static class ContractSpecs
     public static SandboxSpec PrintEnvVar(string name) => Shell(Win ? $"echo %{name}%" : $"printf '%s\\n' \"${name}\"");
     public static SandboxSpec PrintWorkingDirectory() => Shell(Win ? "cd" : "pwd");
     public static SandboxSpec MultiLine(params string[] lines) => Shell(Win ? string.Join("& ", lines.Select(l => $"echo {l}")) : "printf '" + string.Join("\\n", lines) + "\\n'");
+    /// <summary>A child that echoes its stdin back — the real reader of <see cref="SandboxSpec.StandardInput"/>, so an assertion on its stdout is an assertion on what the child actually received.</summary>
+    public static SandboxSpec EchoStdin(string? input) => Shell("cat") with { StandardInput = input };
     public static SandboxSpec PrintThenExit(string text, int code) => Shell(Win ? $"echo {text}& exit {code}" : $"printf '%s\\n' '{text}'; exit {code}");
 
     private static bool Win => OperatingSystem.IsWindows();

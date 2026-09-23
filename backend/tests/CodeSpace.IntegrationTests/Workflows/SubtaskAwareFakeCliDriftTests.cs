@@ -122,8 +122,8 @@ public class SubtaskAwareFakeCliDriftTests
     public void The_file_writing_fake_script_serves_the_dialect_of_whichever_harness_invokes_it()
     {
         // The end-to-end half the parse pins can't see: the SCRIPT's own `$1` discriminator (codex argv always
-        // starts with `exec`, claude with `--print`) and its last-positional goal extraction — both harnesses put
-        // the prompt last. Runs the materialized script through /bin/sh exactly as the runner would, once per
+        // starts with `exec`, claude with `--print`) and its goal read — both harnesses hand the prompt over stdin.
+        // Runs the materialized script through /bin/sh exactly as the runner would, once per
         // dialect, and asserts each stdout parses through ITS harness to the SAME summary + the goal-derived file
         // lands in the cwd (the workspace-clone edit the whole-loop arm integrates).
         if (OperatingSystem.IsWindows()) return;
@@ -138,8 +138,8 @@ public class SubtaskAwareFakeCliDriftTests
             File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            var codexStdout = RunScript(dir, script, CodexArgv(goal));
-            var claudeStdout = RunScript(dir, script, ClaudeArgv(goal));
+            var codexStdout = RunScript(dir, script, CodexInvocation(goal));
+            var claudeStdout = RunScript(dir, script, ClaudeInvocation(goal));
 
             var codex = new CodexHarness();
             var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), exitCode: 0, "");
@@ -177,7 +177,7 @@ public class SubtaskAwareFakeCliDriftTests
             File.WriteAllText(script, FileWritingFakeCli.ScriptBody);
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            RunScript(dir, script, CodexArgv(goal));   // asserts exit 0 internally — a failed write now exits 90 and fails HERE
+            RunScript(dir, script, CodexInvocation(goal));   // asserts exit 0 internally — a failed write now exits 90 and fails HERE
 
             var written = Directory.GetFiles(dir, FileWritingFakeCli.FilePrefix + "*.txt");
             written.ShouldHaveSingleItem("the truncated slug keeps a model-length goal writable — the whole point of the fix");
@@ -220,8 +220,8 @@ public class SubtaskAwareFakeCliDriftTests
             var codex = new CodexHarness();
             var claude = new ClaudeCodeHarness();
 
-            var codexStdout = RunScript(dir, script, expectedExit, CodexArgv(goal));
-            var claudeStdout = RunScript(dir, script, expectedExit, ClaudeArgv(goal));
+            var codexStdout = RunScript(dir, script, expectedExit, CodexInvocation(goal));
+            var claudeStdout = RunScript(dir, script, expectedExit, ClaudeInvocation(goal));
 
             var codexResult = codex.BuildResult(codexStdout.SelectMany(codex.ParseEvents).ToList(), expectedExit, "");
             var claudeResult = claude.BuildResult(claudeStdout.SelectMany(claude.ParseEvents).ToList(), expectedExit, "");
@@ -268,8 +268,8 @@ public class SubtaskAwareFakeCliDriftTests
 
             var codex = new CodexHarness();
             var claude = new ClaudeCodeHarness();
-            var codexResult = codex.BuildResult(RunScript(dir, script, 0, CodexArgv(resolverGoal)).SelectMany(codex.ParseEvents).ToList(), 0, "");
-            var claudeResult = claude.BuildResult(RunScript(dir, script, 0, ClaudeArgv(resolverGoal)).SelectMany(claude.ParseEvents).ToList(), 0, "");
+            var codexResult = codex.BuildResult(RunScript(dir, script, 0, CodexInvocation(resolverGoal)).SelectMany(codex.ParseEvents).ToList(), 0, "");
+            var claudeResult = claude.BuildResult(RunScript(dir, script, 0, ClaudeInvocation(resolverGoal)).SelectMany(claude.ParseEvents).ToList(), 0, "");
 
             codexResult.Summary.ShouldContain(SupervisorResolverRecipe.TestsPassedMarker);
             claudeResult.Summary.ShouldBe(codexResult.Summary, "the resolver's verified marker must survive verbatim in BOTH dialects, or the resolution stops grading Verified on a reconciled harness");
@@ -280,33 +280,36 @@ public class SubtaskAwareFakeCliDriftTests
         }
     }
 
-    /// <summary>The EXACT argv Codex would hand the fake for <paramref name="goal"/>.</summary>
-    private static string[] CodexArgv(string goal) => Argv(new CodexHarness(), CodexHarness.HarnessKind, goal);
+    /// <summary>The EXACT invocation Codex would hand the fake for <paramref name="goal"/>.</summary>
+    private static SandboxSpec CodexInvocation(string goal) => Invocation(new CodexHarness(), CodexHarness.HarnessKind, goal);
 
-    /// <summary>The EXACT argv Claude Code would hand the fake for <paramref name="goal"/>.</summary>
-    private static string[] ClaudeArgv(string goal) => Argv(new ClaudeCodeHarness(), ClaudeCodeHarness.HarnessKind, goal);
+    /// <summary>The EXACT invocation Claude Code would hand the fake for <paramref name="goal"/>.</summary>
+    private static SandboxSpec ClaudeInvocation(string goal) => Invocation(new ClaudeCodeHarness(), ClaudeCodeHarness.HarnessKind, goal);
 
     /// <summary>
-    /// Derive a dialect's argv from the harness's OWN <c>BuildInvocation</c> rather than hand-writing it (Rule 12.5: a
-    /// mirror that can drift is not a pin). The two things every fake script decides are decided FROM this argv — the
-    /// <c>$1</c> dialect discriminator and the last-positional goal extraction — so a hand-written short form tests the
+    /// Derive a dialect's invocation from the harness's OWN <c>BuildInvocation</c> rather than hand-writing it (Rule
+    /// 12.5: a mirror that can drift is not a pin). The two things every fake script decides are decided FROM it — the
+    /// <c>$1</c> dialect discriminator off the argv, and the goal off stdin — so a hand-written short form tests the
     /// script against a shape production never sends: the real claude argv carries <c>--verbose</c> and an
-    /// <c>--append-system-prompt</c> payload between the seed and the trailing prompt, and the real codex argv carries
-    /// its <c>-c</c> overrides. A harness that ever stopped putting the prompt last would red HERE instead of silently
-    /// feeding every fake a flag as its goal.
+    /// <c>--append-system-prompt</c> payload, and the real codex argv carries its <c>-c</c> overrides and the <c>-</c>
+    /// that tells it to read stdin. A harness that ever moved the goal back onto the argv would red HERE: the fake
+    /// would read an empty stdin, and every goal-derived assertion below would miss.
     /// </summary>
-    private static string[] Argv(IAgentHarness harness, string kind, string goal) =>
-        harness.BuildInvocation(new AgentTask { Goal = goal, Harness = kind }).Args.ToArray();
+    private static SandboxSpec Invocation(IAgentHarness harness, string kind, string goal) =>
+        harness.BuildInvocation(new AgentTask { Goal = goal, Harness = kind });
 
-    private static string[] RunScript(string cwd, string script, params string[] args) => RunScript(cwd, script, 0, args);
+    private static string[] RunScript(string cwd, string script, SandboxSpec invocation) => RunScript(cwd, script, 0, invocation);
 
-    private static string[] RunScript(string cwd, string script, int expectedExit, params string[] args)
+    /// <summary>Run the script the way the runner runs the harness: its argv, and its <see cref="SandboxSpec.StandardInput"/> on a stdin that then closes — never this test host's own stdin, which would hang a `$(cat)` or feed it nothing.</summary>
+    private static string[] RunScript(string cwd, string script, int expectedExit, SandboxSpec invocation)
     {
-        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
+        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true };
         psi.ArgumentList.Add(script);
-        foreach (var arg in args) psi.ArgumentList.Add(arg);
+        foreach (var arg in invocation.Args) psi.ArgumentList.Add(arg);
 
         using var process = System.Diagnostics.Process.Start(psi)!;
+        process.StandardInput.Write(invocation.StandardInput ?? "");
+        process.StandardInput.Close();
         var stdout = process.StandardOutput.ReadToEnd();
         process.WaitForExit(10_000).ShouldBeTrue("the fake script must exit promptly");
         process.ExitCode.ShouldBe(expectedExit);

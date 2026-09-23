@@ -46,6 +46,46 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         return (result, lines);
     }
 
+    /// <summary>The prompt a PR-review goal actually carried was ~156 KB — past the 131071-byte argv ceiling, and past any pipe buffer.</summary>
+    private static readonly string LargeStandardInput = string.Join('\n', Enumerable.Range(0, 6000).Select(i => $"line {i:D5} — 審查這一行 🚀 {new string('x', 40)}")) + "\n";
+
+    [Fact]
+    public async Task A_durable_child_reads_its_standard_input_byte_for_byte()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var (result, lines) = await AttachCollectAsync(await LaunchAsync(ContractSpecs.EchoStdin(LargeStandardInput)));
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        (string.Join('\n', lines) + "\n").ShouldBe(LargeStandardInput, customMessage: "what the CHILD read is the assertion — not what the runner wrote");
+    }
+
+    [Fact]
+    public async Task A_durable_child_without_standard_input_reads_EOF_at_once()
+    {
+        // The guarantee the /dev/null redirect has always given, now expressed as behaviour rather than as a string in
+        // the script: with nothing spooled, a stdin reader ends immediately instead of waiting on an inherited stdin.
+        if (OperatingSystem.IsWindows()) return;
+
+        var (result, lines) = await AttachCollectAsync(await LaunchAsync(ContractSpecs.EchoStdin(null) with { Args = ["-c", "cat; printf 'done\\n'"], TimeoutSeconds = 20 }));
+
+        result.Status.ShouldBe(SandboxStatus.Success, "a stdin reader with no StandardInput must get EOF, never the worker's stdin");
+        lines.ShouldBe(new[] { "done" });
+    }
+
+    [Fact]
+    public async Task The_spooled_standard_input_is_owner_only_and_never_named_to_the_child()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(ContractSpecs.EchoStdin("the prompt") with { Args = ["-c", "cat >/dev/null; printf '%s\\n' \"${CSP_IN-unset}\""] });
+        var (_, lines) = await AttachCollectAsync(handle);
+
+        lines.ShouldHaveSingleItem().ShouldBe("unset", customMessage: "the host path of the spooled prompt must not leak into the agent's environment");
+        File.GetUnixFileMode(Path.Combine(handle.SpoolDirectory, LocalProcessRunner.StdinFile)).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            "the spooled prompt can carry a repository's source — it is owner-only from the moment it exists");
+    }
+
     [Fact]
     public async Task Launches_a_supervised_process_and_records_a_handle()
     {
@@ -1319,10 +1359,12 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         File.Exists(argv[at + 1]).ShouldBeTrue("a --mcp-config path that does not exist is a hard CLI startup error");
         argv[at + 2].ShouldBe("--strict-mcp-config", "terminates the variadic --mcp-config AND shuts out the target repo's own untrusted .mcp.json");
 
-        // Position: ahead of the harness's own args, so the variadic value list is nowhere near the trailing prompt.
+        // Position: ahead of the harness's own args, which follow unchanged and end on a flag — the prompt is on stdin,
+        // so there is no trailing positional for the variadic value list to swallow as a config path.
         argv[0].ShouldBe("--mcp-config");
         argv[3].ShouldBe("--print", "the harness's own argv follows, unchanged");
-        argv[^1].ShouldBe("Fix the failing billing tests", "the trailing positional prompt survives — it must never be swallowed as a config path");
+        argv[^2].ShouldBe("--permission-mode", "the harness's argv ends on its last flag");
+        argv.ShouldNotContain("Fix the failing billing tests", "the goal rides stdin, never the argv");
     }
 
     [Fact]

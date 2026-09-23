@@ -47,14 +47,13 @@ public sealed class ConflictThenResolveFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Resolve the goal (Codex's last positional arg). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes one
+    /// Resolve the goal (read from stdin, where both harnesses hand the prompt). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes one
     /// reconciled <see cref="SharedFile"/> + ends its summary with the verified token. The two parallel agents write
     /// DIFFERENT content to <see cref="SharedFile"/> (alpha vs beta) so their diffs against the common base conflict.
     /// </summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +

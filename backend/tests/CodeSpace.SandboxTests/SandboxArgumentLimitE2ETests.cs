@@ -1,3 +1,5 @@
+using System.Text;
+using System.Globalization;
 using System.ComponentModel;
 using System.Diagnostics;
 using CodeSpace.Core.Services.Agents.Sandbox;
@@ -73,6 +75,32 @@ public sealed class SandboxArgumentLimitE2ETests : IDisposable
         ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong);
         Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse(
             customMessage: $"nothing may be staged for a launch that cannot happen — inspect {LocalProcessRunner.SpoolDirectoryFor(key)} by hand if this fails");
+    }
+
+    [Fact]
+    public async Task A_prompt_past_the_argv_ceiling_launches_when_it_rides_stdin()
+    {
+        // The mirror of the refusal above, and the reason the refusal is no longer what a large-PR review hits: the
+        // same bytes that execve refuses as one argv string go through a pipe untouched. Asserted on what the CHILD
+        // counted, through the real bootstrap and the real confinement chain — which is also the only place that can
+        // show the stdin descriptor survives being handed down through bwrap, prlimit and a netns prefix.
+        if (!OperatingSystem.IsLinux()) return;
+
+        var key = Stage();
+        var prompt = string.Concat(Enumerable.Repeat("審查這個 diff 🚀 ", SandboxArgumentLimit.MaxStringBytes / 8)) + "\n";
+        var expected = Encoding.UTF8.GetByteCount(prompt);
+        expected.ShouldBeGreaterThan(SandboxArgumentLimit.MaxStringBytes * 2, "fixture check: this prompt must be far past what one argv string may carry");
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = ["-c", "wc -c"], StandardInput = prompt, TimeoutSeconds = 30 };
+        var runner = new LocalProcessRunner();
+        var lines = new List<string>();
+
+        var handle = await runner.LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, key), CancellationToken.None);
+        var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text.Trim()); return Task.CompletedTask; }, CancellationToken.None);
+
+        result.Status.ShouldBe(SandboxStatus.Success,
+            customMessage: $"the launch did not complete (exit {result.ExitCode}, stderr: {result.Stderr}) — inspect {handle.SpoolDirectory}: '{LocalProcessRunner.StdinFile}' is what the host spooled, out.log what the child wrote");
+        lines.ShouldHaveSingleItem().ShouldBe(expected.ToString(CultureInfo.InvariantCulture),
+            customMessage: $"the child must count exactly the {expected} bytes the spec carried — fewer means the pipe was cut or re-encoded on the way down the confinement chain");
     }
 
     /// <summary>The errno <c>execve</c> set, or null when the child really started. Real fork+exec through the runtime, which reports a child's exec failure back as <see cref="Win32Exception"/>.</summary>

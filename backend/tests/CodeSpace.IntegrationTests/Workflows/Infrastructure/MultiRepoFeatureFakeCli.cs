@@ -11,7 +11,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// agent adds a DISJOINT, goal-slugged file in EACH repo, so both repos integrate CLEANLY (no conflict) and the run
 /// produces a per-repo reviewable head for EACH — the shape a multi-repo "feature spanning two repos" loop leaves.
 ///
-/// <para>Behaviour is a pure function of the GOAL (Codex's last positional arg) → no external state, bwrap-safe; writes
+/// <para>Behaviour is a pure function of the GOAL (read from stdin, where both harnesses hand the prompt) → no external state, bwrap-safe; writes
 /// only into the run's own multi-repo workspace. POSIX <c>/bin/sh</c> only. The disjoint per-goal filename means two
 /// parallel agents never collide, so a multi-agent fan-out integrates cleanly on BOTH axes.</para>
 /// </summary>
@@ -56,14 +56,13 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Derive a filesystem-safe filename from the goal (Codex's last positional arg) and write a DISJOINT file under
+    /// Derive a filesystem-safe filename from the goal (read from stdin, where both harnesses hand the prompt) and write a DISJOINT file under
     /// BOTH repo subdirs, then print the three-line codex-shaped JSONL stream the real ParseEvent folds. The per-repo
     /// writes land in each repo's clone → the executor captures a RepositoryRunResult for each → both integrate cleanly.
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "printf 'primary work for: %s\\n' \"$goal\" > \"" + PrimaryAlias + "/" + FilePrefix + "${fname}.txt\" || exit 90\n" +

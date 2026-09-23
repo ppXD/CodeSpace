@@ -169,8 +169,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose" };
 
         // P3.2: a CONTINUE re-stage threads the prior session id as `--resume <id>` to pick up the conversation.
-        // Placed right after the seed — before the variadic --allowed-tools / --permission-mode — so the trailing
-        // positional Goal is never swallowed. Null (a fresh run) → omitted, argv byte-identical.
+        // Placed right after the seed — before the variadic --allowed-tools / --permission-mode — so the variadic can
+        // never swallow it. The continuation prompt rides stdin like any other. Null (a fresh run) → omitted.
         if (task.ResumeFromSessionId is { Length: > 0 } resumeSessionId)
         {
             args.Add("--resume");
@@ -213,8 +213,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             args.Add(task.Model);
         }
 
-        // Project the tool allow-list. Placed BEFORE --permission-mode so the variadic stops at that flag and
-        // the trailing positional prompt is never swallowed. null/empty → omit (the harness's default toolset).
+        // Project the tool allow-list. Placed BEFORE --permission-mode so the variadic stops at that flag instead of
+        // running to the end of argv. null/empty → omit (the harness's default toolset).
         if (task.Tools is { Count: > 0 } tools)
         {
             args.Add("--allowed-tools");
@@ -224,12 +224,15 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         args.Add("--permission-mode");
         args.Add(PermissionMode(task.Permissions));
 
-        args.Add(task.Goal);   // the prompt is the trailing positional argument
-
+        // NO trailing positional: `claude -p` reads the prompt from stdin when none is given. The prompt used to ride
+        // here, and the kernel refuses any single argv string past MAX_ARG_STRLEN (131071 content bytes on a 4 KiB
+        // page) — so a goal carrying a pull request's diff could never launch. A pipe has no such ceiling. Nothing may
+        // follow the last flag: a stray positional would BECOME the prompt and demote stdin.
         return new SandboxSpec
         {
             Command = ResolveCommand(),
             Args = args,
+            StandardInput = task.Goal,
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = BuildEnvironment(task),
             TimeoutSeconds = task.TimeoutSeconds,

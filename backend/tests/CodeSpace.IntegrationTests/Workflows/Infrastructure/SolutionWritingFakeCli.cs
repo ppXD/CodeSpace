@@ -61,8 +61,7 @@ public sealed class SolutionWritingFakeCli : IDisposable
     /// </summary>
     private static string ScriptBody(string solutionBody) =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "cat > " + SolutionFile + " <<'CS_SOLUTION_EOF'\n" +
         solutionBody +

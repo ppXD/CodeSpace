@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Agents;
@@ -26,6 +27,37 @@ public class CodexHarnessTests
         Permissions = new AgentPermissions { WriteScope = scope },
         TimeoutSeconds = 900,
     };
+
+    [Fact]
+    public void The_goal_rides_stdin_behind_the_explicit_dash()
+    {
+        // `codex exec` reads stdin when the prompt is omitted OR `-`, but `codex exec resume <id> [PROMPT]` reads it
+        // ONLY for `-` — so the dash is the one spelling both forms accept. It must never be omitted-plus-positional
+        // either: with a real prompt argument AND a piped stdin, Codex demotes stdin to an appended `<stdin>` block.
+        var spec = Harness.BuildInvocation(Task());
+
+        spec.StandardInput.ShouldBe("Fix the failing billing tests");
+        spec.Args.ShouldNotContain("Fix the failing billing tests");
+        spec.Args[^1].ShouldBe("-");
+    }
+
+    [Fact]
+    public void A_resumed_thread_takes_its_prompt_from_stdin_behind_the_dash()
+    {
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
+
+        spec.Args.Take(3).ShouldBe(new[] { "exec", "resume", "thr-resume-1" });
+        spec.Args[^1].ShouldBe("-", customMessage: "resume reads stdin ONLY behind an explicit dash");
+        spec.StandardInput.ShouldBe("Fix the failing billing tests");
+    }
+
+    [Fact]
+    public void A_goal_past_the_argv_ceiling_builds_an_invocation_the_kernel_accepts()
+    {
+        var huge = new string('x', SandboxArgumentLimit.MaxStringBytes * 2);
+
+        SandboxArgumentLimit.Exceeded(Harness.BuildInvocation(Task(goal: huge))).ShouldBeNull();
+    }
 
     [Fact]
     public void Kind_is_codex_cli() => Harness.Kind.ShouldBe("codex-cli");
@@ -158,7 +190,7 @@ public class CodexHarnessTests
         agents.Content.ShouldContain("You are a meticulous reviewer.");
         agents.Content.ShouldContain("UNATTENDED agent", customMessage: "the operating contract composes after the persona");
 
-        spec.Args[^1].ShouldBe("Fix the failing billing tests", "the goal positional is the clean task, no persona baked in");
+        spec.StandardInput.ShouldBe("Fix the failing billing tests", customMessage: "the goal on stdin is the clean task, no persona baked in");
 
         CodexHarness.AgentsFile.ShouldBe("AGENTS.md");   // Rule 8: pin the native instruction file
     }
@@ -197,7 +229,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("codex");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
     }
@@ -211,7 +243,7 @@ public class CodexHarnessTests
         // while -c is accepted on it and sandbox_mode is the config key the flag maps to. The Goal stays last.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-" });
     }
 
     [Fact]
@@ -236,7 +268,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("resume");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" });
     }
 
     [Fact]
@@ -307,7 +339,7 @@ public class CodexHarnessTests
     {
         var spec = Harness.BuildInvocation(Task(model: model));
 
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "Fix the failing billing tests" },
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "-" },
             customMessage: "a blank model must omit --model entirely (not emit `--model \"\"`, which Codex rejects) so the CLI uses its default");
     }
 
@@ -319,7 +351,7 @@ public class CodexHarnessTests
         var withTools = Harness.BuildInvocation(Task() with { Tools = new[] { "Read", "Grep" } });
 
         withTools.Args.ShouldNotContain("--allowed-tools");
-        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" },
+        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" },
             customMessage: "a tools list must not change the Codex invocation — it has no faithful projection there");
     }
 
@@ -329,7 +361,7 @@ public class CodexHarnessTests
         // B1 asymmetry pin: Claude injects AgentOperatingContract via --append-system-prompt; Codex exec has no native
         // system-prompt flag, and prepending to the prompt would conflate it with the goal, so the Codex projection is a
         // deferred follow-up. This pins the CURRENT state so wiring it later is a conscious change, not a silent surprise.
-        Harness.BuildInvocation(Task()).Args[^1].ShouldBe("Fix the failing billing tests", "the prompt is the bare goal — no operating contract is prepended (deferred)");
+        Harness.BuildInvocation(Task()).StandardInput.ShouldBe("Fix the failing billing tests", customMessage: "the prompt is the bare goal — no operating contract is prepended (deferred)");
     }
 
     [Fact]
@@ -356,11 +388,11 @@ public class CodexHarnessTests
         spec.Args.ShouldContain("model_providers.codespace.wire_api=responses");
         spec.Args.ShouldContain("model_providers.codespace.env_key=OPENAI_API_KEY");
 
-        // The overrides are flags: they must land AFTER --sandbox and BEFORE the goal positional (which stays last).
+        // The overrides are flags: they must land AFTER --sandbox and BEFORE the stdin `-` positional (which stays last).
         var args = new List<string>(spec.Args);
         args.IndexOf("--sandbox").ShouldBeLessThan(args.IndexOf("model_provider=codespace"));
         args.IndexOf("model_provider=codespace").ShouldBeLessThan(args.Count - 1);
-        spec.Args[^1].ShouldBe("Fix the failing billing tests");
+        spec.Args[^1].ShouldBe("-");
     }
 
     [Fact]

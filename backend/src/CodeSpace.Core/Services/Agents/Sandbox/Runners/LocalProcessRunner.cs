@@ -100,6 +100,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
         await ProcessLaunchThread.StartAsync(process, cancellationToken).ConfigureAwait(false);
         using var pipes = new CommandPipeLifetime(process, _logger);
+        FeedStandardInput(process, spec);
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(pipes.Token);
         var stderrTask = process.StandardError.ReadToEndAsync(pipes.Token);
@@ -130,6 +131,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
         await ProcessLaunchThread.StartAsync(process, cancellationToken).ConfigureAwait(false);
         using var pipes = new CommandPipeLifetime(process, _logger);
+        FeedStandardInput(process, spec);
 
         // stderr captured in full (diagnostic context for the result); stdout is pumped line-by-line to the consumer.
         var stderrTask = process.StandardError.ReadToEndAsync(pipes.Token);
@@ -243,6 +245,9 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         return new SandboxResult { Status = stalled ? SandboxStatus.Stalled : SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
+    /// <summary>How <see cref="SandboxSpec.StandardInput"/> is encoded on every path: UTF-8 with NO byte-order mark, which a CLI would otherwise read as the first characters of its prompt.</summary>
+    private static readonly UTF8Encoding StandardInputEncoding = new(encoderShouldEmitUTF8Identifier: false);
+
     /// <summary>Builds the child <see cref="ProcessStartInfo"/> from a scrubbed environment. Internal + static so the scrub behaviour is unit-testable against a real <see cref="ProcessStartInfo"/>.</summary>
     internal static ProcessStartInfo BuildStartInfo(SandboxSpec spec)
     {
@@ -251,10 +256,13 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
             FileName = spec.Command,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = spec.StandardInput is not null,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = spec.WorkingDirectory ?? string.Empty,
         };
+
+        if (spec.StandardInput is not null) info.StandardInputEncoding = StandardInputEncoding;
 
         foreach (var arg in spec.Args) info.ArgumentList.Add(arg);
 

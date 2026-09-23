@@ -47,8 +47,7 @@ public sealed class HighVolumeSubtaskFakeCli : IDisposable
 
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "i=1\n" +
         "while [ $i -le " + LineCount + " ]; do\n" +

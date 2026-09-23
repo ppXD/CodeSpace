@@ -63,7 +63,7 @@ public sealed class ConvergenceFeatureFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Walk the positional args so <c>$goal</c> ends as the LAST one (Codex puts the prompt last), then write the
+    /// Read <c>$goal</c> from stdin (where Codex reads its prompt), then write the
     /// feature whose marker the goal carries (BETA first — see the type doc on marker ordering) via a QUOTED heredoc
     /// (literal body), and print the three-line codex-shaped JSONL stream the real Codex ParseEvent folds. When
     /// <paramref name="preservePriorWork"/> is false, the B branch also overwrites <c>a.sh</c> with a broken body.
@@ -76,8 +76,7 @@ public sealed class ConvergenceFeatureFakeCli : IDisposable
 
         return
             "#!/bin/sh\n" +
-            "goal=\"\"\n" +
-            "for goal in \"$@\"; do :; done\n" +
+            "goal=\"$(cat)\"\n" +
             "case \"$goal\" in\n" +
             "  *" + BetaMarker + "*)\n" +
             "    cat > b.sh <<'CS_FEAT_EOF'\n" +

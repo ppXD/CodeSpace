@@ -50,11 +50,10 @@ public sealed class ReviseHealingFakeCli : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    /// <summary>Resolve the goal (Codex's last positional arg); write draft or revised content into the fixed file keyed on the revise prefix; emit the codex-style success stream either way.</summary>
+    /// <summary>Resolve the goal (read from stdin, where both harnesses hand the prompt); write draft or revised content into the fixed file keyed on the revise prefix; emit the codex-style success stream either way.</summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g' | tr '\\n' ' ')\n" +
         "case \"$goal\" in\n" +
         "  \"" + AgentRunExecutor.ReviseInstructionPrefix + "\"*)\n" +

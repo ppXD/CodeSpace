@@ -56,6 +56,29 @@ public sealed partial class LocalProcessRunner
         }
     }
 
+    /// <summary>
+    /// Hand <see cref="SandboxSpec.StandardInput"/> to a started child, then close it so the child reads EOF. On a pool
+    /// thread, concurrently with the output reads: a synchronous write larger than a pipe buffer would wait for the
+    /// child to drain it while the child waits for someone to drain ITS stdout — a deadlock the moment the prompt is
+    /// bigger than 64 KiB, which is exactly the prompt this exists for. A child that exits without reading everything
+    /// breaks the pipe under the write; its exit code, not this write, is the verdict.
+    /// </summary>
+    private static void FeedStandardInput(Process process, SandboxSpec spec)
+    {
+        if (spec.StandardInput is not { } input) return;
+
+        var stdin = process.StandardInput;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await stdin.WriteAsync(input).ConfigureAwait(false);
+                stdin.Close();
+            }
+            catch (Exception error) when (error is IOException or ObjectDisposedException) { }
+        });
+    }
+
     private sealed class CommandPipeLifetime(Process process, ILogger logger) : IDisposable
     {
         private readonly CancellationTokenSource _cancellation = new();

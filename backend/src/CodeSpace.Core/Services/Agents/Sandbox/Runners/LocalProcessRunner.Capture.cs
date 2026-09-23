@@ -19,6 +19,7 @@ public sealed partial class LocalProcessRunner
         using var process = new Process { StartInfo = invocation.StartInfo };
         await ProcessLaunchThread.StartAsync(process, cancellationToken).ConfigureAwait(false);
         using var pipes = new CommandPipeLifetime(process, _logger);
+        FeedStandardInput(process, spec);
         using var timeout = WallClockCts(spec.TimeoutSeconds);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         var stdout = new CommandStreamCapture(request.OnStdoutLine is null ? budget.StdoutBytes : 0, request.OnStdoutLine is not null);

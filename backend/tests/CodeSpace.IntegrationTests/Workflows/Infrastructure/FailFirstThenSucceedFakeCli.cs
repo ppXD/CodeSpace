@@ -55,14 +55,13 @@ public sealed class FailFirstThenSucceedFakeCli : IDisposable
     public static string FileFor(string goal) => FileWritingFakeCli.FileFor(goal);
 
     /// <summary>
-    /// Resolve the goal (Codex's last positional arg). A goal carrying <see cref="FailMarker"/> but NOT
+    /// Resolve the goal (read from stdin, where both harnesses hand the prompt). A goal carrying <see cref="FailMarker"/> but NOT
     /// <see cref="RetryMarker"/> emits an error event + exits 1 (a real failed run, no file). Any other goal — incl.
     /// the retry's revised instruction — writes its file + emits the success stream.
     /// </summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "case \"$goal\" in\n" +

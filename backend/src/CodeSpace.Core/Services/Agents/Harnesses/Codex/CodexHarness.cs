@@ -140,8 +140,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     {
         // P3.2: a CONTINUE re-stage rewrites the `exec --json` seed to `exec resume <id> --json` so Codex picks up the
         // prior thread. The subcommand must follow `exec` directly; --model, the `-c` overrides (incl. the sandbox on
-        // the resume path — see AppendSandbox), and the Goal positional follow. Null (a fresh run) → the plain seed,
-        // argv byte-identical.
+        // the resume path — see AppendSandbox), and the stdin `-` positional follow. Null (a fresh run) → the plain seed.
         var args = task.ResumeFromSessionId is { Length: > 0 } resumeThreadId
             ? new List<string> { "exec", "resume", resumeThreadId, "--json" }
             : new List<string> { "exec", "--json" };
@@ -161,8 +160,8 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
 
         AppendSandbox(args, task);
 
-        // Point Codex at a custom gateway (when one was projected) BEFORE the prompt positional — Codex parses `-c`
-        // overrides as flags, so they must precede the goal.
+        // Point Codex at a custom gateway (when one was projected) BEFORE the `-` positional — Codex parses `-c`
+        // overrides as flags, so they must precede it.
         AppendModelProviderConfig(args, task);
         AppendTelemetryConfig(args, task);
 
@@ -174,13 +173,20 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
 
         // B1: Codex exec has NO system-prompt flag, so the persona + operating contract ride an AGENTS.md in the config
         // home (see BuildConfigHomeFiles) — verified against codex 0.142.2 that it loads $CODEX_HOME/AGENTS.md (and merges
-        // it with any workspace AGENTS.md). So the Goal positional stays the CLEAN task, never conflated with the persona.
-        args.Add(task.Goal);
+        // it with any workspace AGENTS.md). So the goal stays the CLEAN task, never conflated with the persona.
+        //
+        // The goal itself rides stdin behind an explicit `-`, never argv: the kernel refuses any single argv string past
+        // MAX_ARG_STRLEN (131071 content bytes on a 4 KiB page), which a goal carrying a pull request's diff exceeds.
+        // The dash is the one spelling BOTH forms accept — `exec` reads stdin for an omitted prompt or `-`, but
+        // `exec resume <id> [PROMPT]` only for `-` — and it must not be a real prompt: with a prompt argument AND a
+        // piped stdin, Codex appends stdin as a `<stdin>` block instead of reading it as the instructions.
+        args.Add("-");
 
         return new SandboxSpec
         {
             Command = ResolveCommand(),
             Args = args,
+            StandardInput = task.Goal,
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = task.Environment,
             TimeoutSeconds = task.TimeoutSeconds,

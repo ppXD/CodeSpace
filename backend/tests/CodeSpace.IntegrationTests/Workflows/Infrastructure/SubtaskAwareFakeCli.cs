@@ -8,7 +8,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// that the static-fixture <c>FakeCli</c> in <c>RealHarnessExecutionTests</c> can't give. The REAL
 /// <c>AgentRunExecutor</c> drives the REAL <c>LocalProcessRunner</c>, which spawns THIS script as the agent
 /// process (the harness's <see cref="CodexHarness.CommandEnvVar"/> points at it). Each map branch passes a
-/// DIFFERENT goal (<c>"Work on alpha"</c> / <c>"Work on beta"</c> / …) as Codex's last positional arg; the
+/// DIFFERENT goal (<c>"Work on alpha"</c> / <c>"Work on beta"</c> / …) on stdin, where Codex reads its prompt; the
 /// script echoes a <c>codex exec --json</c>-shaped event stream whose final <c>agent_message</c> is
 /// <c>"DONE: &lt;goal&gt;"</c>, so the executor's real <c>ParseEvent</c> + <c>BuildResult</c> fold a per-branch
 /// <see cref="Messages.Agents.AgentRunResult.Summary"/> the synthesizer composes.
@@ -63,15 +63,14 @@ public sealed class SubtaskAwareFakeCli : IDisposable
 
     /// <summary>
     /// Strictly-POSIX emitter (the runner spawns this via its <c>#!/bin/sh</c> shebang, which may be dash — no
-    /// bashisms). Walk the positional args so <c>$goal</c> ends as the LAST one (Codex puts the prompt last in
-    /// BuildInvocation), JSON-escape its quotes/backslashes, and print a three-line codex-shaped JSONL stream
+    /// bashisms). Read <c>$goal</c> from stdin (CodexHarness.BuildInvocation hands the prompt over
+    /// stdin), JSON-escape its quotes/backslashes, and print a three-line codex-shaped JSONL stream
     /// whose final assistant message is <c>"DONE: &lt;goal&gt;"</c>. No env, no network, no codex binary — just
     /// /bin/sh + printf.
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         FakeAgentCliDialect.Dialects(
             "printf '{\"type\":\"agent_reasoning\",\"message\":\"Planning work for: %s\"}\\n' \"$esc\"\n" +

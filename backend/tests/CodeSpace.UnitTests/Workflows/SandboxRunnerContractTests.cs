@@ -41,6 +41,20 @@ public abstract class SandboxRunnerContractTests
         result.Stderr.ShouldContain("err-contract");
     }
 
+    /// <summary>Larger than any pipe buffer, multi-line, and non-ASCII: a synchronous feed would deadlock against a child that writes back before it has drained its stdin, and a BOM or a re-encoding would show up as a mismatch.</summary>
+    protected static string LargeStandardInput { get; } = string.Join('\n', Enumerable.Range(0, 6000).Select(i => $"line {i:D5} — 審查這一行 🚀 {new string('x', 40)}")) + "\n";
+
+    [Fact]
+    public async Task Standard_input_reaches_the_child_byte_for_byte()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var result = await Runner.RunAsync(ContractSpecs.EchoStdin(LargeStandardInput), CancellationToken.None);
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        result.Stdout.ShouldBe(LargeStandardInput, "the child must read exactly the bytes the spec carried — no BOM, no truncation, no re-encoding");
+    }
+
     [Fact]
     public async Task Environment_is_passed_through()
     {
