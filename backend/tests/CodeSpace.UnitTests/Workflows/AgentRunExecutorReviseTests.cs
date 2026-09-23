@@ -151,6 +151,51 @@ public sealed class AgentRunExecutorReviseTests
     }
 
     [Fact]
+    public void A_session_too_large_for_the_launch_pipe_makes_the_revision_cold()
+    {
+        // The transcript crosses the launch pipe inside the invocation frame. A warm revise with one the pipe cannot
+        // carry is refused at launch, terminally — although the same repair can go on in a fresh conversation. So it
+        // goes cold, and the goal restates the whole contract because no conversation carries it.
+        var huge = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes + 1);
+        var result = AcceptanceFailed("exit 1") with { SessionId = "sess-1", SessionTranscript = huge };
+
+        var revise = AgentRunExecutor.BuildReviseTask(TaskWith(), result, "the check failed");
+
+        revise.ResumeFromSessionId.ShouldBeNull("a transcript the pipe cannot carry is never handed to --resume");
+        revise.RestoredTranscript.ShouldBeNull();
+        revise.Goal.ShouldContain("Original goal", customMessage: "a cold revise must carry the full contract");
+        revise.Goal.ShouldContain("fix the flaky test");
+    }
+
+    [Fact]
+    public void A_restored_continuation_too_large_for_the_launch_pipe_runs_cold_and_says_so()
+    {
+        // A node retry or a continue hands the executor a transcript it resolves only just before launch — the first
+        // moment its size is known. Past the pipe it would be refused terminally; it runs cold instead, dropping every
+        // claim of continuity, and the goal is told the conversation it was promised is not there.
+        var task = TaskWith() with
+        {
+            ResumeFromSessionId = "sess-1", RestoredTranscript = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes + 1),
+            ResumedFromAgentRunId = Guid.NewGuid(), Goal = AgentRetryContinuity.WithHonestNoContinuityHint("fix the flaky test"),
+        };
+
+        var launched = AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe(task);
+
+        launched.ResumeFromSessionId.ShouldBeNull();
+        launched.RestoredTranscript.ShouldBeNull();
+        launched.ResumedFromAgentRunId.ShouldBeNull("'resumed from run X' would be false for an attempt that restored nothing from X");
+        launched.Goal.ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
+    }
+
+    [Fact]
+    public void A_restored_continuation_the_pipe_can_carry_is_left_alone()
+    {
+        var task = TaskWith() with { ResumeFromSessionId = "sess-1", RestoredTranscript = "{\"line\":1}" };
+
+        AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe(task).ShouldBeSameAs(task);
+    }
+
+    [Fact]
     public void An_ancestor_continue_resume_is_superseded_by_this_runs_own_session()
     {
         var task = TaskWith() with { ResumeFromSessionId = "ancestor", RestoredTranscript = "old", RestoredTranscriptArtifactId = Guid.NewGuid() };

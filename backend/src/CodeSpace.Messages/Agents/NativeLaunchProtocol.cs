@@ -8,6 +8,12 @@ public static class NativeLaunchProtocol
 {
     public const int Version = 1;
     public const int MaximumFrameBytes = 16 * 1024 * 1024;
+
+    /// <summary>The share of <see cref="MaximumFrameBytes"/> one large carrier may take — an agent's standard input, or a continued session's restored transcript — leaving the rest of the invocation far more room than it uses. Measured as encoded for the pipe (<see cref="EncodedBytes"/>).</summary>
+    public const int LargeCarrierBudgetBytes = MaximumFrameBytes / 2;
+
+    /// <summary>The bytes <paramref name="value"/> occupies once encoded for the frame. The web JSON defaults escape every non-ASCII character, so CJK text roughly doubles and emoji triple.</summary>
+    public static int EncodedBytes(string value) => JsonSerializer.SerializeToUtf8Bytes(value, Json).Length;
     public const string DirectoryName = "launch-v1";
     public const string RequestFile = "request.json";
     public const string CommitmentFile = "commitment.json";
