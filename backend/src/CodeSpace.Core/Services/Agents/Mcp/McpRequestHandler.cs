@@ -67,6 +67,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>The default bounded-block window (10 minutes) when the env override is unset. A real CLI tolerates a multi-minute synchronous tools/call; past this the call returns the pending-ticket so the turn never hangs forever.</summary>
     public const int DefaultApprovalBoundSeconds = 600;
 
+    /// <summary>
+    /// The ledger error — and the model's answer — for a GOVERNED call interrupted mid-flight, by the tool's own timeout
+    /// or by the run's cancellation. Load-bearing: the row is terminal, so an identical re-call replays exactly this text
+    /// without running the tool, and a timed-out write may already have landed. It must never invite a blind retry.
+    /// </summary>
+    public const string InterruptedToolCallError = "This tool call was interrupted before it completed (the tool timed out, or the run was cancelled), so whether its effect was applied is unknown; it may have been. It is recorded as failed: re-issuing it with identical arguments returns this same result without running it again. Check whether it took effect (for example, read back the PR or comment it would have created or changed) before re-issuing it with changed arguments.";
+
     /// <summary>The approval card's two button keys. The resolver (<see cref="IToolCallApprovalResolver"/>) only ever acts on these two; both resolve the wait (first-wins) — reject fails the call, approve stamps the decision for the handler to execute.</summary>
     private const string ApproveKey = "approve";
     private const string RejectKey = "reject";
@@ -159,8 +166,18 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <see cref="HandleAsync"/> (violating its "never throws except cancellation" contract), propagate out of the
     /// framing loop, and drop the run's MCP connection for the rest of the turn. We degrade it instead to a RETRYABLE
     /// tool result (isError) the model can re-issue — NOT fail-open (no side effect runs ungoverned: a throw means the
-    /// claim/approval gate never passed) and the visible-degradation posture is preserved. Cancellation still
+    /// claim/approval gate never passed) and the visible-degradation posture is preserved. The RUN's cancellation still
     /// propagates. The message routes through the <see cref="ToolResult"/> redactor choke point.
+    ///
+    /// <para>Only the RUN's cancellation may pass. An <see cref="OperationCanceledException"/> while
+    /// <paramref name="cancellationToken"/> is still live is a call that cancelled itself — <c>HttpClient.Timeout</c>
+    /// (Octokit's GitHub calls included) and any <c>CancelAfter</c> inside a tool throw <see cref="TaskCanceledException"/>
+    /// — and letting it through would end the framing pump and close the run's MCP connection, so the model would lose
+    /// every tool for the rest of the run. What reaches here is an ungoverned (read-only) tool, whose re-call really runs
+    /// again, so it gets a retryable isError result. A governed tool's own cancellation is answered earlier, by
+    /// <see cref="ExecuteAndRecordAsync"/>: only it knows the effect may have landed and that the row now replays. The
+    /// run's token is the discriminator, not the exception's: the run's cancel often arrives through a token LINKED to
+    /// it.</para>
     /// </summary>
     private async Task<JsonRpcResponse> DispatchToolCallAsync(JsonElement id, JsonElement request, CancellationToken cancellationToken)
     {
@@ -174,7 +191,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
             return JsonRpcResponse.Ok(id, ToolResult(isError: true, "This tool call could not be governed right now; retry shortly."));
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            LogToolCancelledItself(ex, ReadToolNameOrNull(request));
+
+            return JsonRpcResponse.Ok(id, ToolResult(isError: true, "The tool timed out or was cancelled internally before it finished; the run is still live, so retry the call."));
+        }
     }
+
+    /// <summary>The one warning for a tool that cancelled itself while the run was live — shared by the dispatch boundary and the governed execution, so both answers read the same in the logs.</summary>
+    private void LogToolCancelledItself(OperationCanceledException exception, string? toolName) =>
+        _logger.LogWarning(exception, "Agent run {RunId}: tool {ToolName} cancelled itself (a timeout or a stray cancellation) while the run was live; answering a tool error instead of closing the MCP connection", _runId, toolName ?? "(unknown)");
 
     /// <summary>The tool name off the <c>tools/call</c> request's <c>params.name</c>, for the dispatch-catch log — best-effort, since the request may be malformed enough that <see cref="HandleToolCallAsync"/> never got far enough to parse it itself.</summary>
     private static string? ReadToolNameOrNull(JsonElement request) =>
@@ -807,11 +834,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <para>Liveness: the row is non-terminal (Pending on Allow, Running on the approval path). A tool call that is CANCELLED (timeout / endpoint teardown /
     /// harness disconnect) or that throws MUST NOT leave that row stranded Pending forever — the key is deterministic,
     /// so a re-call on the reattached run would otherwise hit InFlight indefinitely and the interrupted side effect
-    /// could never be retried. So an interruption records a terminal Failed on a BEST-EFFORT basis BEFORE propagating
-    /// (see <see cref="RecordInterruptedThenRethrow"/>). The only remaining stranded-Pending window is a hard crash
-    /// (SIGKILL) between the Pending INSERT and the recovery write; that is recovered by a future Pending-row reaper —
-    /// the item-C analogue of the run-level reconciler that recovers stranded Running runs — which is out of scope for
-    /// this PR.</para>
+    /// could never be retried. So an interruption records a terminal Failed carrying
+    /// <see cref="InterruptedToolCallError"/>: best-effort BEFORE the run's cancellation propagates (see
+    /// <see cref="RecordInterruptedThenRethrow"/>), or as the answer itself when the tool cancelled itself while the run
+    /// is live. Both writes take <see cref="CancellationToken.None"/>, so a cancel landing mid-write cannot abandon them.
+    /// A row is still stranded by a hard crash (SIGKILL) between the INSERT and the recovery write, or by that write
+    /// failing: <see cref="IToolCallLedgerService.ExpireStaleToolCallsAsync"/> fails it once the owning run is terminal
+    /// and past its worker's lease — never while a reattached run is still live.</para>
     /// </summary>
     private async Task<JsonElement> ExecuteAndRecordAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
@@ -831,11 +860,22 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
             return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Succeeded, resultJson: wire.GetRawText(), error: null, wire, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The TOOL cancelled itself (its own timeout) while the run is live: a tool fault, recorded and answered like a
+            // thrown one. But its side effect may already have landed, and an identical re-call replays this row without
+            // running the tool — so the recorded and answered text says exactly that, never "retry". The write takes
+            // CancellationToken.None, as RecordInterruptedThenRethrow's does: a run cancelled mid-write must not strand
+            // the row, and a sibling catch cannot catch what this block throws.
+            LogToolCancelledItself(ex, tool.Kind);
+
+            return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Failed, resultJson: null, InterruptedToolCallError, ToolResult(isError: true, InterruptedToolCallError), CancellationToken.None).ConfigureAwait(false);
+        }
         catch (OperationCanceledException)
         {
-            // The call was interrupted (timeout / teardown / disconnect). Record a terminal Failed best-effort so the
-            // non-terminal row (Pending on Allow, Running on the approval path) is never stranded, then re-throw —
-            // cancellation must still propagate.
+            // The RUN was cancelled mid-call (timeout / teardown / disconnect). Record the same terminal best-effort so the
+            // non-terminal row (Pending on Allow, Running on the approval path) is never stranded, then re-throw — the
+            // run's cancellation must still propagate.
             await RecordInterruptedThenRethrow(teamId, ledgerId).ConfigureAwait(false);
             throw;
         }
@@ -884,19 +924,19 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>
     /// Best-effort terminal write for an interrupted call, under <see cref="CancellationToken.None"/> so cancellation
     /// can't skip it. SWALLOWS any failure of the recovery write (e.g. the scope is disposing during teardown) — if
-    /// even this fails the row stays non-terminal (Pending / Running) and the future Pending-row reaper (out of scope,
-    /// see <see cref="ExecuteAndRecordAsync"/>) catches it. NEVER throws from the recovery path (the caller re-throws
-    /// the original cancellation).
+    /// even this fails the row stays non-terminal (Pending / Running) until
+    /// <see cref="IToolCallLedgerService.ExpireStaleToolCallsAsync"/> fails it, once the run is terminal and past its
+    /// worker's lease. NEVER throws from the recovery path (the caller re-throws the original cancellation).
     /// </summary>
     private async Task RecordInterruptedThenRethrow(Guid teamId, Guid ledgerId)
     {
         try
         {
-            await _ledger!.RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Failed, resultJson: null, error: "tool call interrupted before completion; safe to retry", CancellationToken.None).ConfigureAwait(false);
+            await _ledger!.RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Failed, resultJson: null, error: InterruptedToolCallError, CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {
-            // Swallow: the row stays non-terminal and the future reaper recovers it. Never throw from recovery.
+            // Swallow: the row stays non-terminal until ExpireStaleToolCallsAsync fails it. Never throw from recovery.
         }
     }
 
@@ -923,7 +963,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // A thrown tool exception is surfaced to the MODEL as a tool failure (isError), not a JSON-RPC protocol
-            // error — the request itself was well-formed. (Cancellation propagates, by the filter above.)
+            // error — the request itself was well-formed. (Cancellation propagates, by the filter above, to
+            // DispatchToolCallAsync, which tells the run's cancellation from the tool's own timeout.)
             return ToolResult(isError: true, ex.Message);
         }
     }

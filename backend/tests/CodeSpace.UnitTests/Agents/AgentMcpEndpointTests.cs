@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Authority;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -16,7 +17,8 @@ namespace CodeSpace.UnitTests.Agents;
 /// Pins the per-run UDS MCP endpoint (<see cref="AgentMcpEndpoint"/>): the enabling env-var literal (Rule 8), and that
 /// <see cref="AgentMcpEndpoint.DisposeAsync"/> is IDEMPOTENT and NEVER throws — after a clean connection end AND after
 /// a cancel with no connection. Dispose drops the run from the connect registry, disposes the dedicated scope, AND
-/// unlinks the socket file. A connection that presents a WRONG token is closed without ever serving JSON-RPC. Tier 🟢:
+/// unlinks the socket file. A connection that presents a WRONG token is closed without ever serving JSON-RPC. A tool that
+/// times out on its own is answered as a tool error and the same connection keeps serving. Tier 🟢:
 /// real production endpoint over a real <c>AF_UNIX</c> socket in a temp dir. Skips on a host without UDS support.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -187,6 +189,41 @@ public class AgentMcpEndpointTests
         response.ShouldBeNull(customMessage: "a wrong token must close the connection before any JSON-RPC reply");
     }
 
+    [Fact]
+    public async Task A_tools_own_timeout_is_answered_and_the_same_connection_keeps_serving()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var dir = new TempDir();
+        using var upstream = new HungUpstream();
+        var socketPath = Path.Combine(dir.Path, "mcp.sock");
+        const string token = "the-token";
+
+        await using var endpoint = new AgentMcpEndpoint(Guid.NewGuid(), new SingleToolRegistry(new HungUpstreamFetchTool(upstream.Url)), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, token, new AgentMcpConnectRegistry(), new TrackingScope(new AllowingAuthorityStub()), CancellationToken.None, NullLogger.Instance);
+
+        using var client = await ConnectAsync(socketPath);
+        await using var net = new NetworkStream(client, ownsSocket: false);
+        using var reader = new StreamReader(net, Encoding.UTF8);
+        await SendLineAsync(client, token);
+
+        // The tool's real HTTP call times out on its own (HttpClient.Timeout → TaskCanceledException) while the run is live.
+        await SendLineAsync(client, """{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hung.fetch","arguments":{}}}""");
+        var timedOut = await ReadLineOrNullIfClosedAsync(reader, TimeSpan.FromSeconds(10));
+
+        timedOut.ShouldNotBeNull("the tool's own timeout closed the run's MCP connection instead of answering — the model would lose every tool for the rest of the run");
+        var result = JsonDocument.Parse(timedOut).RootElement.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue("a tool's own timeout comes back as a tool error the model can retry");
+
+        // The SAME connection serves the next request — the pump survived the tool's fault.
+        await SendLineAsync(client, """{"jsonrpc":"2.0","id":2,"method":"tools/list"}""");
+        var listed = await ReadLineOrNullIfClosedAsync(reader, TimeSpan.FromSeconds(10));
+
+        listed.ShouldNotBeNull("the connection must still be serving after a tool's own timeout");
+        var reply = JsonDocument.Parse(listed).RootElement;
+        reply.GetProperty("id").GetInt32().ShouldBe(2);
+        reply.GetProperty("result").GetProperty("tools")[0].GetProperty("name").GetString().ShouldBe("hung.fetch");
+    }
+
     /// <summary>
     /// Read one reply, treating a HARD close as the same "served nothing" a graceful EOF is. The endpoint decides to
     /// close the moment it sees a bad token, and this test writes a second line AFTER that — writing to a peer that
@@ -203,6 +240,12 @@ public class AgentMcpEndpointTests
     {
         using var reader = new StreamReader(net, Encoding.UTF8);
 
+        return await ReadLineOrNullIfClosedAsync(reader, timeout);
+    }
+
+    /// <summary>The next line off a reader the test keeps for the whole connection, or null when the endpoint closed it — a graceful EOF or a reset, for the reason <see cref="ReadReplyOrNullIfClosedAsync"/> gives. A hang still reds: the timeout is not absorbed.</summary>
+    private static async Task<string?> ReadLineOrNullIfClosedAsync(StreamReader reader, TimeSpan timeout)
+    {
         try
         {
             return await reader.ReadLineAsync().WaitAsync(timeout);
@@ -310,19 +353,65 @@ public class AgentMcpEndpointTests
         public IAgentTool? Resolve(string kind) => null;
     }
 
+    private sealed class SingleToolRegistry(IAgentTool tool) : IAgentToolRegistry
+    {
+        public IReadOnlyList<IAgentTool> All { get; } = new[] { tool };
+        public IAgentTool? Resolve(string kind) => kind == tool.Kind ? tool : null;
+    }
+
+    /// <summary>A loopback listener that completes the TCP handshake (the kernel backlog) and never answers — an upstream that hangs. The port is the OS's pick, never a hardcoded one.</summary>
+    private sealed class HungUpstream : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+
+        public HungUpstream() => _listener.Start();
+
+        public string Url => $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/";
+
+        public void Dispose() => _listener.Stop();
+    }
+
+    /// <summary>A read-only tool whose call is a real HTTP request to a hung upstream, so what reaches the handler is the exact <see cref="TaskCanceledException"/> <c>HttpClient.Timeout</c> throws — Octokit's GitHub calls throw the same — with the run's token never cancelled.</summary>
+    private sealed class HungUpstreamFetchTool(string url) : IAgentTool
+    {
+        public string Kind => "hung.fetch";
+        public string Description => "fetch from an upstream that never answers";
+        public JsonElement InputSchema { get; } = JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone();
+        public JsonElement OutputSchema { get; } = JsonDocument.Parse("{}").RootElement.Clone();
+        public bool IsReadOnly => true;
+        public bool IsDestructive => false;
+
+        public AgentToolValidation ValidateInput(JsonElement input) => AgentToolValidation.Valid;
+
+        public async Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken)
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(200) };
+
+            await http.GetAsync(url, cancellationToken);
+
+            return AgentToolResult.Ok(JsonDocument.Parse("{}").RootElement.Clone(), 2);
+        }
+    }
+
     // The endpoint takes an IServiceScope (it mints per-connection child scopes for the ledger when governance is on).
     // These tests run governance OFF, so the provider is never asked for the ledger — an empty provider suffices.
-    // These unit tests exercise framing with an empty registry. No fake principal authorizes a tool;
+    // These unit tests exercise framing with an empty registry. No fake principal authorizes a tool — except in the
+    // tool-timeout test, whose subject is the pump surviving a tool's fault, so it must reach a tool at all;
     // real receipt/revocation behavior is exercised by AgentExecutionAuthorityFlowTests against PostgreSQL.
     private sealed class TransportAuthorityStub : IAgentAuthorityCallGuard
     {
         public Task<AuthorityCallFailure?> CheckAsync(Guid runId, Guid teamId, string toolKind, CancellationToken cancellationToken) => Task.FromResult<AuthorityCallFailure?>(new("agent.authority_denied", "transport-test", "No execution principal in this transport fixture.", false));
     }
 
-    private sealed class TrackingScope : IServiceScope
+    private sealed class AllowingAuthorityStub : IAgentAuthorityCallGuard
+    {
+        public Task<AuthorityCallFailure?> CheckAsync(Guid runId, Guid teamId, string toolKind, CancellationToken cancellationToken) => Task.FromResult<AuthorityCallFailure?>(null);
+    }
+
+    private sealed class TrackingScope(IAgentAuthorityCallGuard? guard = null) : IServiceScope
     {
         public bool Disposed { get; private set; }
-        public IServiceProvider ServiceProvider { get; } = new ServiceCollection().AddSingleton<IAgentAuthorityCallGuard, TransportAuthorityStub>().BuildServiceProvider();
+        public IServiceProvider ServiceProvider { get; } = new ServiceCollection().AddSingleton(guard ?? new TransportAuthorityStub()).BuildServiceProvider();
         public void Dispose() => Disposed = true;
     }
 
