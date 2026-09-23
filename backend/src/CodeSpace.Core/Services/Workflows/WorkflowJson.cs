@@ -20,10 +20,14 @@ public static class WorkflowJson
     /// template, and by any projection that must stay byte-identical to one (<c>MapResultsPrompt</c>). Characters are
     /// left as themselves: the HTML-safe default turned every CJK character and every <c>+ &lt; &gt; &amp; '</c> into a
     /// six-character <c>\uXXXX</c>, so a pull-request diff bound into a review prompt reached the model as escape
-    /// codes at up to twice its size — while the string branch beside it already inserted all of those raw, so the
-    /// escaping protected nothing. What JSON itself requires is still escaped (the quote, the backslash, control
-    /// characters), so a value embedded in a JSON body stays parseable. One exception no built-in encoder lifts: a
-    /// character outside the Basic Multilingual Plane (an emoji) is still written as its surrogate-pair escape.
+    /// codes at up to twice its size. An object now behaves like the string branch beside it, which has always inserted
+    /// those characters raw. That is not a new exposure, but it is not "the escaping protected nothing" either: in a
+    /// URL query, a header or a single-quoted <c>sh -c</c> string the escape codes did keep an object's <c>&amp;</c> or
+    /// <c>'</c> from reading as syntax — protection a string value there never had, so no template could rely on it,
+    /// and a value bound into such a context needs that context's own encoding. What JSON itself requires is still
+    /// escaped (the quote, the backslash, control characters), so a value embedded in a JSON body stays parseable.
+    /// One exception no built-in encoder lifts: a character outside the Basic Multilingual Plane (an emoji) is still
+    /// written as its surrogate-pair escape.
     /// </summary>
     public static JsonSerializerOptions InterpolatedText { get; } = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
