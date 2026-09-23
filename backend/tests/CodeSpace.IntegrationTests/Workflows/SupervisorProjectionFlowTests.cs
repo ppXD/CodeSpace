@@ -46,6 +46,7 @@ public class SupervisorProjectionFlowTests : IDisposable
     {
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
+        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;   // the test switches the shared client to record-only; hand it back executing
     }
 
     [Fact]
