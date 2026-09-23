@@ -446,8 +446,8 @@ public class SupervisorDependencyStagingTests
     {
         // A checkpoint is not a captured transcript. The attempt that wrote it never finished: its machine is gone,
         // so the conversation may describe turns the checkpoint never saw and edits the new sandbox does not
-        // contain — which is true even when a branch WAS pushed, because the unpublished remainder died with the
-        // host. The ordinary honest-redo line only covers "no branch to continue from", a smaller claim. The whole
+        // contain — which is true even when a branch WAS pushed, because the unpublished remainder was lost with that
+        // attempt. The ordinary honest-redo line only covers "no branch to continue from", a smaller claim. The whole
         // goal is asserted, so each arm pins exactly WHICH tree sentence follows the preamble.
         // MUTATION: drop the CheckpointAt branch from ApplyResumeRecord → the task carries no provenance, is not
         // marked a checkpoint (so an unreadable ref would FAIL the attempt instead of degrading), and the goal says

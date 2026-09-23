@@ -1244,7 +1244,7 @@ public class AgentCodeNodeTests
         // agent the same thing about a tree that does not carry its prior work. The literal is pinned because the
         // supervisor's own behaviour test asserts this exact wording — a reword must be a visible decision.
         AgentRetryContinuity.HonestNoContinuityHint.ShouldBe(
-            "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own) — you must redo any relevant file changes from scratch.");
+            "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own for this repository) — you must redo any relevant file changes from scratch.");
     }
 
     [Fact]

@@ -232,7 +232,7 @@ public sealed class SupervisorBranchlessStopGradeTests
         // scope carries. Every other seam is untouched by ApplyStopAcceptanceGradeAsync.
         var service = new SupervisorTurnService(null!, null!, null!, db: Infrastructure.EmptyTestDb.New(), grader, null!, null!, null!, null!,
             null!, null!, new NoManifests(), new FakeSupervisorPublishedBranchResolver(), null!, new AdmitAllBudgetLedger(),
-            null!, NullLogger<SupervisorTurnService>.Instance, rubricJudge);
+            null!, null!, NullLogger<SupervisorTurnService>.Instance, rubricJudge);
 
         var context = new SupervisorTurnContext
         {

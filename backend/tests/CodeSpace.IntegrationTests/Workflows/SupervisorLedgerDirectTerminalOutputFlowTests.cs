@@ -191,7 +191,7 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
         scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
-        scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private sealed class AlwaysStopDecider : ISupervisorDecider
     {

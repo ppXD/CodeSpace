@@ -62,8 +62,7 @@ public static class ArtifactRetentionPolicy
             [SessionTranscriptCheckpoint.Class] = SessionTranscriptCheckpoint,
         };
 
-    /// <summary>The rule for <paramref name="value"/>, or null when the running policy does not register it — which the reaper reads as "cannot tell" and keeps.</summary>
-    /// <summary>The rule for a class NAME, or null when this build registers none — including a name a rolled-back build wrote that this one has never heard of. Null settles as keep.</summary>
+    /// <summary>The rule for the class NAME <paramref name="value"/>, or null when this build registers none — including a name a rolled-back build wrote that this one has never heard of. The reaper reads null as "cannot tell" and keeps.</summary>
     public static ArtifactRetentionRule? For(string value) => Enum.TryParse<ArtifactRetentionClass>(value, ignoreCase: false, out var parsed) && Rules.TryGetValue(parsed, out var rule) ? rule : null;
 
     /// <summary>

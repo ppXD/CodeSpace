@@ -219,7 +219,7 @@ public sealed class LessonArmSupervisorFlowTests
         scope.Resolve<Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<Core.Services.Workflows.Budget.IBudgetLedger>(),
         lessons ?? scope.Resolve<ILessonReader>(),
-        scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private static Lesson Lesson(Guid teamId, string howToApply) => new()
     {

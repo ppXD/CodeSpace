@@ -112,5 +112,5 @@ public class LessonArmFreezeTests
     }
 
     private static SupervisorTurnService Service(FakeSupervisorDecisionLog ledger, ILessonReader lessons) =>
-        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), lessons, NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), lessons, null!, NullLogger<SupervisorTurnService>.Instance);
 }
