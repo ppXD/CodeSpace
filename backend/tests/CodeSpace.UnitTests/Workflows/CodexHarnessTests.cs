@@ -1,3 +1,6 @@
+using CodeSpace.Messages.Failures;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
+using System.Globalization;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
@@ -49,6 +52,46 @@ public class CodexHarnessTests
         spec.Args.Take(3).ShouldBe(new[] { "exec", "resume", "thr-resume-1" });
         spec.Args[^1].ShouldBe("-", customMessage: "resume reads stdin ONLY behind an explicit dash");
         spec.StandardInput.ShouldBe("Fix the failing billing tests");
+    }
+
+    [Fact]
+    public void Codexs_own_input_cap_is_pinned()
+    {
+        // codex-rs refuses a turn/start input past this many characters (input_too_large) before any model request —
+        // verified against 0.142.2, the worker's pin, and 0.147.0. If a Codex bump moves it, this moves by PR.
+        CodexHarness.MaxInputCharacters.ShouldBe(1_048_576);
+    }
+
+    [Fact]
+    public void A_goal_at_codexs_input_cap_builds_an_invocation()
+    {
+        Should.NotThrow(() => Harness.BuildInvocation(Task(goal: new string('x', CodexHarness.MaxInputCharacters))));
+    }
+
+    [Fact]
+    public void A_goal_past_codexs_input_cap_is_refused_before_launch_as_deterministic()
+    {
+        // Without this the launch succeeds, `codex exec -` reads stdin, and exits 1 before any request with the refusal
+        // on stderr only — a run that clones, provisions and launches only to be told no, and that a retry reproduces.
+        var goal = new string('x', CodexHarness.MaxInputCharacters + 1);
+
+        var refusal = Should.Throw<SandboxArgumentTooLongException>(() => Harness.BuildInvocation(Task(goal: goal)));
+
+        ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong, customMessage: "every attempt is refused identically, so it must not be retried");
+        refusal.Message.ShouldContain(CodexHarness.MaxInputCharacters.ToString(CultureInfo.InvariantCulture));
+        refusal.Message.ShouldContain((CodexHarness.MaxInputCharacters + 1).ToString(CultureInfo.InvariantCulture), customMessage: "the author needs to know how far over the goal is");
+        refusal.Message.ShouldNotContain("xxxx", Case.Sensitive, "a refusal is host metadata — never the goal itself");
+    }
+
+    [Fact]
+    public void Codexs_input_cap_counts_characters_not_utf16_units()
+    {
+        // Codex is Rust: its "characters" are Unicode scalar values. An emoji is one of them and two UTF-16 units, so a
+        // UTF-16 count would refuse a goal Codex accepts.
+        var emoji = string.Concat(Enumerable.Repeat("🚀", CodexHarness.MaxInputCharacters / 2 + 1));
+        emoji.Length.ShouldBeGreaterThan(CodexHarness.MaxInputCharacters, "fixture check: over the cap in UTF-16 units");
+
+        Should.NotThrow(() => Harness.BuildInvocation(Task(goal: emoji)));
     }
 
     [Fact]

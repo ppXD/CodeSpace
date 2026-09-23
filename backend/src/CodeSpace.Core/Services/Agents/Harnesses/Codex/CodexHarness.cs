@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Skills;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -136,8 +137,18 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
 
     public IReadOnlyList<string> Models { get; } = new[] { "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-codex" };
 
+    /// <summary>
+    /// The most characters Codex accepts in one input. codex-rs refuses a longer <c>turn/start</c> with
+    /// <c>input_too_large</c> before any model request — verified against 0.142.2 (the worker's pin) and 0.147.0 — and
+    /// says so on stderr only. Counted as Unicode scalar values, the way Rust counts a string's characters. Pinned by a
+    /// test; it moves by PR with the CLI.
+    /// </summary>
+    public const int MaxInputCharacters = 1_048_576;
+
     public SandboxSpec BuildInvocation(AgentTask task)
     {
+        EnsureWithinInputCap(task.Goal);
+
         // P3.2: a CONTINUE re-stage rewrites the `exec --json` seed to `exec resume <id> --json` so Codex picks up the
         // prior thread. The subcommand must follow `exec` directly; --model, the `-c` overrides (incl. the sandbox on
         // the resume path — see AppendSandbox), and the stdin `-` positional follow. Null (a fresh run) → the plain seed.
@@ -285,6 +296,19 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         model = AgentRunFactScan.ReadString(obj, FactKeys.ModelKeys) ?? "";
 
         return model.Length > 0;
+    }
+
+    /// <summary>
+    /// Refuse a goal Codex would refuse, before a sandbox is provisioned for it. The limit belongs to this CLI, not to
+    /// the launch (Rule 7), so it lives on this harness; the refusal is the same terminal, non-retried one an argument
+    /// the kernel cannot take gets, because every attempt meets the identical cap.
+    /// </summary>
+    private static void EnsureWithinInputCap(string goal)
+    {
+        var characters = goal.EnumerateRunes().Count();
+
+        if (characters > MaxInputCharacters)
+            throw new SandboxArgumentTooLongException($"the agent's goal is {characters} characters; codex accepts at most {MaxInputCharacters} in one input and refuses anything longer before any model request. This is an input-size limit of the codex CLI, not a memory limit — shorten the goal, or run this agent on a harness without that cap.");
     }
 
     /// <summary>
