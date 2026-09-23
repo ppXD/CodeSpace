@@ -309,13 +309,49 @@ public class McpRequestHandlerTests
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldBe("kaboom");
     }
 
-    [Fact]
-    public async Task ToolsCall_cancellation_propagates_and_is_not_swallowed()
+    [Theory]
+    [InlineData(false)]   // the tool rethrows the run's own token
+    [InlineData(true)]    // the run's cancel reaches the tool through a token LINKED to it, the way an HttpClient or EF call surfaces it
+    public async Task ToolsCall_cancellation_propagates_and_is_not_swallowed(bool throughALinkedToken)
     {
-        var tool = new FakeTool { Kind = "cancels", OnCall = (_, ct) => throw new OperationCanceledException(ct) };
+        var tool = new FakeTool { Kind = "cancels", OnCall = (_, ct) => throw new OperationCanceledException(throughALinkedToken ? CancellationTokenSource.CreateLinkedTokenSource(ct).Token : ct) };
 
         await Should.ThrowAsync<OperationCanceledException>(async () =>
             await Handler(tool).HandleAsync(Parse(Call("cancels", "{}")), new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public async Task ToolsCall_a_tools_own_timeout_is_a_retryable_isError_result_not_a_run_cancellation()
+    {
+        // HttpClient.Timeout — Octokit's GitHub calls included — throws TaskCanceledException, and so does any CancelAfter
+        // inside a tool: an OperationCanceledException the RUN never asked for. Propagating it ends the framing pump and
+        // closes the run's MCP connection, so the model loses every tool for the rest of the run instead of reading a
+        // retryable error.
+        using var run = new CancellationTokenSource();
+        var logger = new CapturingLogger();
+        var tool = new FakeTool { Kind = "git.fetch_pr_diff", OnCall = (_, _) => TimesOutOnItsOwnAsync() };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, logger: logger);
+
+        JsonElement? resp = null;
+        var escaped = await Record.ExceptionAsync(async () => resp = await handler.HandleAsync(Parse(Call("git.fetch_pr_diff", "{}")), run.Token));
+
+        escaped.ShouldBeNull("the tool's own timeout is a tool fault — HandleAsync must answer it, not propagate it as if the run were cancelled");
+        resp!.Value.TryGetProperty("error", out _).ShouldBeFalse("a tool's own timeout is a tool result, not a JSON-RPC protocol error");
+        var result = resp.Value.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull().ShouldContain("retry the call", customMessage: "an ungoverned (read-only) tool's re-call really runs again, so the model is told to retry it");
+        run.IsCancellationRequested.ShouldBeFalse("the run stayed live throughout — the cancellation was the tool's own");
+        logger.Warnings.ShouldHaveSingleItem("the degrade is logged, so an operator can tell a timing-out tool from a model that never called one");
+    }
+
+    /// <summary>A tool body that hits its OWN deadline: the real <see cref="TaskCanceledException"/> a <c>CancelAfter</c> inside a tool throws, carrying a token the run never saw — the same shape <c>HttpClient.Timeout</c> produces.</summary>
+    private static async Task<AgentToolResult> TimesOutOnItsOwnAsync()
+    {
+        using var own = new CancellationTokenSource(TimeSpan.FromMilliseconds(1));
+
+        await Task.Delay(Timeout.Infinite, own.Token);
+
+        return AgentToolResult.Ok(Parse("{}"), 2);
     }
 
     // ── tools/call autonomy gate ──────────────────────────────────────────────
@@ -812,9 +848,16 @@ public class McpRequestHandlerTests
             return Task.FromResult(ClaimResult?.Invoke() ?? ToolCallClaim.Proceed(Guid.NewGuid()));
         }
 
+        /// <summary>When set, runs as RecordTerminalAsync starts — the seam for cancelling the run WHILE a row is being settled.</summary>
+        public Action? OnRecordTerminal { get; init; }
+
         public Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken ct)
         {
+            OnRecordTerminal?.Invoke();
+
             if (OnRecordThrow is { } make) throw make();
+
+            ct.ThrowIfCancellationRequested();   // the real write hands its token to both the read and the ExecuteUpdate
 
             Terminals.Add((ledgerId, teamId, status, resultJson, error));
             return Task.CompletedTask;
@@ -1133,6 +1176,70 @@ public class McpRequestHandlerTests
         result.GetProperty("isError").GetBoolean().ShouldBeTrue();
         result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("retry");
         tool.CallCount.ShouldBe(0, "an approval-begin fault means the call never parked or approved — the side effect must NOT run");
+    }
+
+    [Fact]
+    public async Task Governance_ON_a_tools_own_timeout_settles_the_row_and_answers_that_its_effect_is_unknown()
+    {
+        // A governed (side-effecting) call that times out on its own may already have landed — a GitHub write can commit
+        // before the response is lost — and its row is terminal, so an identical re-call REPLAYS it without running the
+        // tool. The answer must say exactly that; "retry the call" would be false here.
+        var ledger = new SpyLedger();
+        var logger = new CapturingLogger();
+        var tool = new FakeTool { Kind = "git.post_pr_comment", IsDestructiveOverride = true, OnCall = (_, _) => TimesOutOnItsOwnAsync() };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 7, governanceEnabled: true, logger: logger);
+
+        JsonElement? resp = null;
+        var escaped = await Record.ExceptionAsync(async () => resp = await Respond(handler, Call("git.post_pr_comment", "{}")));
+
+        escaped.ShouldBeNull("a governed tool's own timeout is answered as well — propagating it would close the run's MCP connection");
+        var result = resp!.Value.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull();
+        text.ShouldContain("is unknown", customMessage: "the side effect may have landed — the model must not assume it did not");
+        text.ShouldContain("identical arguments returns this same result", customMessage: "the row is terminal, so an identical re-call replays it without running the tool");
+        text.ShouldNotContain("retry", customMessage: "a re-call replays the row — the answer must never invite a blind retry");
+        tool.CallCount.ShouldBe(1);
+        var terminal = ledger.Terminals.ShouldHaveSingleItem("the interrupted call's row is settled terminal, never stranded Pending");
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+        terminal.Error.ShouldBe(text, "the answer is exactly what an identical re-call replays from the row");
+        logger.Warnings.ShouldHaveSingleItem("the governed degrade is logged like the ungoverned one");
+    }
+
+    [Theory]
+    [InlineData(false)]   // the tool observes the run's own token
+    [InlineData(true)]    // the run's cancel reaches the tool through a token LINKED to it, the way an HttpClient or EF call surfaces it
+    public async Task Governance_ON_a_run_cancelled_mid_call_settles_the_row_and_still_propagates(bool throughALinkedToken)
+    {
+        // The governed catch answers only the TOOL's own cancellation. When the RUN is cancelled mid-call, the row is still
+        // settled with the same effect-unknown text, and the cancellation propagates so the pump ends with the run.
+        using var run = new CancellationTokenSource();
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.post_pr_comment", IsDestructiveOverride = true, OnCall = (_, ct) => { run.Cancel(); throw new OperationCanceledException(throughALinkedToken ? CancellationTokenSource.CreateLinkedTokenSource(ct).Token : ct); } };
+
+        await Should.ThrowAsync<OperationCanceledException>(async () => await GovernedHandler(ledger, governanceEnabled: true, tool).HandleAsync(Parse(Call("git.post_pr_comment", "{}")), run.Token));
+
+        var terminal = ledger.Terminals.ShouldHaveSingleItem("the run's interruption settles the row before propagating — never stranded Pending");
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+        terminal.Error.ShouldBe(McpRequestHandler.InterruptedToolCallError, "a run cancelled mid-write leaves the effect just as unknown as the tool's own timeout does");
+    }
+
+    [Fact]
+    public async Task Governance_ON_a_run_cancelled_while_a_tools_own_timeout_is_recorded_still_settles_the_row()
+    {
+        // The tool timed out on its own, and while its row is being settled the run is cancelled too — a worker drain
+        // disposing the endpoint. The write must not be abandoned: the run is reattached under the same id, and a row left
+        // Pending (Running on the approval path) answers its identical re-call "already in progress" for the rest of it.
+        using var run = new CancellationTokenSource();
+        var ledger = new SpyLedger { OnRecordTerminal = run.Cancel };
+        var tool = new FakeTool { Kind = "git.post_pr_comment", IsDestructiveOverride = true, OnCall = (_, _) => TimesOutOnItsOwnAsync() };
+
+        // Answered or cancelled, the pump ends with the run either way; what must hold is the settled row.
+        _ = await Record.ExceptionAsync(() => GovernedHandler(ledger, governanceEnabled: true, tool).HandleAsync(Parse(Call("git.post_pr_comment", "{}")), run.Token));
+
+        var terminal = ledger.Terminals.ShouldHaveSingleItem("the settle write must not take the run's token — a cancel mid-write would strand the row");
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+        terminal.Error.ShouldBe(McpRequestHandler.InterruptedToolCallError);
     }
 
     [Fact]

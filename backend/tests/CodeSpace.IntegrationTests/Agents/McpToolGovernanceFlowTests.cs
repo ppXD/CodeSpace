@@ -106,34 +106,68 @@ public class McpToolGovernanceFlowTests
     {
         // The BLOCKER regression: a tool call interrupted by cancellation (timeout / teardown / disconnect) must NOT
         // leave its Pending row stranded forever — it records a terminal Failed best-effort BEFORE the cancellation
-        // propagates. So a subsequent identical call dedups to that terminal Failed and the model can retry, rather
-        // than wedging on InFlight indefinitely (the deterministic key would otherwise hit the stranded Pending row).
+        // propagates. So a subsequent identical call dedups to that terminal Failed and the model learns the call's effect
+        // is unknown, rather than wedging on InFlight indefinitely (the deterministic key would otherwise hit the stranded
+        // Pending row).
         var teamId = await SeedTeamAsync();
         var runId = Guid.NewGuid();
-        var tool = new CancellingWriteTool();
+        using var run = new CancellationTokenSource();
+        var tool = new CancellingWriteTool(run);
 
         using var scope = _fixture.BeginScope();
         var handler = GovernedHandler(scope, teamId, runId, tool);
 
-        // First call is interrupted: the tool throws OperationCanceledException. The handler re-throws (cancellation
-        // must propagate) AFTER recording the terminal Failed row.
-        await Should.ThrowAsync<OperationCanceledException>(() => CallToolAsync(handler, "git.open_pr", new { branch = "main" }));
+        // First call is interrupted: the run is cancelled mid-call and the tool observes it. The handler re-throws (the
+        // run's cancellation must propagate) AFTER recording the terminal Failed row.
+        await Should.ThrowAsync<OperationCanceledException>(() => CallToolAsync(handler, "git.open_pr", new { branch = "main" }, run.Token));
 
         var ledger = scope.Resolve<IToolCallLedgerService>();
         var afterInterrupt = (await ledger.GetForRunAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
         afterInterrupt.Status.ShouldBe(ToolCallLedgerStatus.Failed, "an interrupted call records a TERMINAL Failed — the Pending row is never stranded");
-        afterInterrupt.Error.ShouldContain("interrupted", customMessage: "the recovery row says it's safe to retry");
+        afterInterrupt.Error.ShouldBe(McpRequestHandler.InterruptedToolCallError, "the recovery row says the effect is unknown and that an identical re-call replays it — never that a retry is safe: the write may have landed");
 
-        // The re-call dedups to that terminal Failed (NOT InFlight) and returns the Failed result — the model is told
-        // the prior call failed and can retry, instead of being told forever that the call is in progress.
+        // The re-call dedups to that terminal Failed (NOT InFlight) and returns the Failed result — the model is told the
+        // prior call's effect is unknown, instead of being told forever that the call is in progress.
         tool.NextCallSucceeds = true;   // even if the tool would now succeed, dedup replays the terminal Failed
         var reCall = await CallToolAsync(handler, "git.open_pr", new { branch = "main" });
 
         reCall.GetProperty("isError").GetBoolean().ShouldBeTrue("the re-call dedups to the terminal Failed, not InFlight");
         Text(reCall).ShouldNotContain("in progress", customMessage: "the wedged-InFlight failure mode must NOT occur — the row is terminal");
+        Text(reCall).ShouldBe(McpRequestHandler.InterruptedToolCallError, "the identical re-call replays the row's effect-unknown text");
         tool.SuccessCallCount.ShouldBe(0, "dedup replays the recorded Failed — it never re-runs the (now-succeeding) side effect");
 
         (await ledger.GetForRunAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem().Status.ShouldBe(ToolCallLedgerStatus.Failed, "still exactly one terminal Failed row after the re-call");
+    }
+
+    [Fact]
+    public async Task A_tools_own_timeout_settles_its_row_Failed_and_answers_that_the_effect_is_unknown_instead_of_throwing()
+    {
+        // The same interruption, but the TOOL's: its own timeout fires while the run is live. The row must still settle
+        // terminal Failed — and HandleAsync must ANSWER, because propagating the exception ends the framing pump and
+        // closes the run's MCP connection for the rest of the run. The answer promises that an identical re-call returns
+        // the same result without running the tool again; the re-call below holds it to that.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var tool = new TimingOutWriteTool();
+
+        using var scope = _fixture.BeginScope();
+        var handler = GovernedHandler(scope, teamId, runId, tool);
+
+        JsonElement? result = null;
+        var escaped = await Record.ExceptionAsync(async () => result = await CallToolAsync(handler, "git.open_pr", new { branch = "main" }));
+
+        escaped.ShouldBeNull("the tool's own timeout is a tool fault — HandleAsync answers it rather than propagating it as the run's cancellation");
+        result!.Value.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(result.Value).ShouldBe(McpRequestHandler.InterruptedToolCallError, "a governed write that timed out may have landed — the answer says the effect is unknown, never \"retry\"");
+
+        var row = (await scope.Resolve<IToolCallLedgerService>().GetForRunAsync(runId, teamId, CancellationToken.None)).ShouldHaveSingleItem();
+        row.Status.ShouldBe(ToolCallLedgerStatus.Failed, "the timed-out call's row is terminal — never stranded Pending, so a re-call dedups instead of wedging on InFlight");
+        row.Error.ShouldBe(Text(result.Value), "the answer is exactly the text the row replays");
+
+        var reCall = await CallToolAsync(handler, "git.open_pr", new { branch = "main" });
+
+        Text(reCall).ShouldBe(Text(result.Value), "an identical re-call returns this same result, as the answer promised");
+        tool.CallCount.ShouldBe(1, "...without running the tool again");
     }
 
     [Fact]
@@ -178,10 +212,10 @@ public class McpToolGovernanceFlowTests
     private static McpRequestHandler GovernedHandler(ILifetimeScope scope, Guid teamId, Guid runId, IAgentTool tool) =>
         new(new SingleToolRegistry(tool), AgentAutonomyLevel.Unleashed, teamId, null, runId, scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: true);
 
-    private static async Task<JsonElement> CallToolAsync(McpRequestHandler handler, string name, object arguments)
+    private static async Task<JsonElement> CallToolAsync(McpRequestHandler handler, string name, object arguments, CancellationToken runToken = default)
     {
         var request = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name, arguments } });
-        var resp = (await handler.HandleAsync(JsonDocument.Parse(request).RootElement.Clone(), CancellationToken.None))!.Value;
+        var resp = (await handler.HandleAsync(JsonDocument.Parse(request).RootElement.Clone(), runToken))!.Value;
         return resp.GetProperty("result");
     }
 
@@ -226,10 +260,14 @@ public class McpToolGovernanceFlowTests
         }
     }
 
-    /// <summary>A side-effecting tool whose first call throws OperationCanceledException (an interruption), then succeeds.
-    /// Proves the interrupted call records a terminal Failed (never stranded Pending) and the re-call dedups to it.</summary>
+    /// <summary>A side-effecting tool whose first call is interrupted by the RUN's cancellation — it cancels the run mid-call,
+    /// as a run timeout / endpoint teardown / harness disconnect would — then succeeds. Proves the interrupted call records
+    /// a terminal Failed (never stranded Pending) and the re-call dedups to it.</summary>
     private sealed class CancellingWriteTool : IAgentTool
     {
+        private readonly CancellationTokenSource _run;
+        public CancellingWriteTool(CancellationTokenSource run) => _run = run;
+
         public bool NextCallSucceeds { get; set; }
         public int SuccessCallCount { get; private set; }
         public string Kind => "git.open_pr";
@@ -243,10 +281,40 @@ public class McpToolGovernanceFlowTests
 
         public Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken ct)
         {
-            if (!NextCallSucceeds) throw new OperationCanceledException("interrupted mid-call");   // the interruption
+            if (!NextCallSucceeds)
+            {
+                _run.Cancel();                       // the run is cancelled mid-call
+                ct.ThrowIfCancellationRequested();   // the interruption, observed through the run's own token
+            }
 
             SuccessCallCount++;
             return Task.FromResult(AgentToolResult.Ok(JsonDocument.Parse("""{"opened":true}""").RootElement.Clone(), 14));
+        }
+    }
+
+    /// <summary>A side-effecting tool whose call hits its OWN deadline — the real TaskCanceledException a CancelAfter inside a
+    /// tool throws, the shape HttpClient.Timeout produces — while the run's token stays live.</summary>
+    private sealed class TimingOutWriteTool : IAgentTool
+    {
+        public int CallCount { get; private set; }
+        public string Kind => "git.open_pr";
+        public string Description => "open a PR";
+        public JsonElement InputSchema { get; } = JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone();
+        public JsonElement OutputSchema { get; } = JsonDocument.Parse("{}").RootElement.Clone();
+        public bool IsReadOnly => false;
+        public bool IsDestructive => true;
+
+        public AgentToolValidation ValidateInput(JsonElement input) => AgentToolValidation.Valid;
+
+        public async Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken ct)
+        {
+            CallCount++;
+
+            using var own = new CancellationTokenSource(TimeSpan.FromMilliseconds(1));
+
+            await Task.Delay(Timeout.Infinite, own.Token);
+
+            return AgentToolResult.Ok(JsonDocument.Parse("""{"opened":true}""").RootElement.Clone(), 14);
         }
     }
 
