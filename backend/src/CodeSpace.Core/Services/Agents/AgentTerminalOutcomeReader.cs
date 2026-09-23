@@ -14,6 +14,15 @@ namespace CodeSpace.Core.Services.Agents;
 public static class AgentTerminalOutcomeReader
 {
     /// <summary>
+    /// The <see cref="AgentRunResult.ExitReason"/> a harness's folder stamps when its CLI's OWN terminal event says the
+    /// model refused the request as larger than its context window — a field or status the CLI wrote, never a phrase in
+    /// the agent's prose. Harness-agnostic, like the rest of this reader: each folder knows its CLI's shape, and every
+    /// consumer (the retry-cause classifier, and through it the agent.run node's retry verdict) keys on this one code.
+    /// Pinned by a unit test (Rule 8) so the producers and the verdict cannot drift apart.
+    /// </summary>
+    public const string ContextWindowExceededExitReason = "context-window-exceeded";
+
+    /// <summary>
     /// True when the last Completed-or-Error event in the stream is an Error — i.e. the harness itself reported
     /// the run failed, even if the OS exit code was 0. False when no such event exists (nothing to reconcile
     /// against, so the exit code alone decides) or the last one was Completed.

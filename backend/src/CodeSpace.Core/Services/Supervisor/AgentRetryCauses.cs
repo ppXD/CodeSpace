@@ -32,11 +32,17 @@ public static class AgentRetryCauses
     public const string ModelAccessLost = "model-access-lost";
 
     /// <summary>
-    /// The model refused the request as larger than its context window — deterministic on replay. A retry warm-resumes
-    /// the conversation, so its request carries the goal AGAIN and is longer still; a fresh one carries the same goal.
-    /// Either way the same refusal comes back, billed, and buries the one fact the author needs: the goal is too big
-    /// for this model. No mitigation, like <see cref="ModelAccessLost"/> — its only consumer that matters is
-    /// <c>AgentCodeNode</c>, which stops respawning it.
+    /// The model refused the request as larger than its context window
+    /// (<see cref="Agents.AgentTerminalOutcomeReader.ContextWindowExceededExitReason"/>) — deterministic on replay. A retry
+    /// warm-resumes the conversation, so its request carries the goal AGAIN and is longer still; a fresh one carries
+    /// the same goal. Either way the same refusal comes back, billed, and buries the one fact the author needs: the
+    /// agent is being given more than this model can read. No mitigation, like <see cref="ModelAccessLost"/> — its
+    /// only consumer that matters is <c>AgentCodeNode</c>, which stops respawning it.
+    ///
+    /// <para>Typed by the harness that folded the run, from a field its CLI wrote, and read here off the exit reason
+    /// only. Never from text: a fail-closed acceptance verdict overwrites the error with the rubric's own words, and a
+    /// review whose rubric is ABOUT context windows would otherwise classify — which switches the escalation trigger
+    /// off for exactly the failed grade it exists to act on.</para>
     /// </summary>
     public const string ContextWindowExceeded = "context-window-exceeded";
 
@@ -44,28 +50,16 @@ public static class AgentRetryCauses
     private static readonly string[] FormatFaultMarkers = { "is not a thinking block" };
 
     /// <summary>
-    /// What the CLIs themselves print for an over-long prompt — each observed from the real binary (Claude Code
-    /// 2.1.226, Codex 0.147.0 and 0.142.2) answered with the provider's own error body, and pinned through the real
-    /// harness folds by <c>AgentContextWindowRetryTests</c>. Provider- and CLI-authored phrases, not words an agent's
-    /// own prose is likely to end on; the vocabulary stays closed like the one above.
-    /// </summary>
-    private static readonly string[] ContextWindowMarkers =
-    {
-        "Prompt is too long",                        // Claude Code, for either Anthropic overflow body (terminal_reason=prompt_too_long)
-        "maximum context length is",                 // OpenAI-compatible gateways (vLLM, LiteLLM), passed through verbatim
-        "context_length_exceeded",                   // OpenAI error code, which Codex passes through
-        "exceeds the context window",                // OpenAI's message for the same code
-        "out of room in the model's context window", // Codex's rewording of a streaming response.failed
-        "input_too_large",                           // Codex refusing an input past its own 1,048,576-character cap
-    };
-
-    /// <summary>
     /// The prior attempt's retry-relevant cause, reading its DECLARED exit reason before any text. A typed code is this
     /// codebase's own diagnosis and can never be prose about one, so it settles the question outright; only an attempt
     /// that declared nothing falls through to the marker scan.
     /// </summary>
-    public static string? Classify(string? exitReason, string? error) =>
-        exitReason == Messages.Failures.FailureCodes.ModelCredentialLeaseLost ? ModelAccessLost : Classify(error);
+    public static string? Classify(string? exitReason, string? error) => exitReason switch
+    {
+        Messages.Failures.FailureCodes.ModelCredentialLeaseLost => ModelAccessLost,
+        Agents.AgentTerminalOutcomeReader.ContextWindowExceededExitReason => ContextWindowExceeded,
+        _ => Classify(error),
+    };
 
     /// <summary>The prior attempt's retry-relevant cause read from its error TEXT alone, or null for every ordinary failure (default resume semantics stand unchanged). Prefer the overload above wherever the exit reason is in hand.</summary>
     public static string? Classify(string? error)
@@ -74,9 +68,6 @@ public static class AgentRetryCauses
 
         foreach (var marker in FormatFaultMarkers)
             if (error.Contains(marker, StringComparison.OrdinalIgnoreCase)) return GatewayFormatFault;
-
-        foreach (var marker in ContextWindowMarkers)
-            if (error.Contains(marker, StringComparison.OrdinalIgnoreCase)) return ContextWindowExceeded;
 
         return null;
     }

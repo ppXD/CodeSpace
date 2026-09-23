@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -12,9 +13,22 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// </summary>
 internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
 {
-    private readonly AgentResultFold _fold = new();
+    /// <summary>
+    /// What an OpenAI-compatible gateway (vLLM, LiteLLM) answers an over-long request with, which the CLI passes
+    /// through verbatim as <c>terminal_reason: api_error</c> — the one overflow shape it does not stamp as its own.
+    /// Observed from Claude Code 2.1.226 answered with each body; read only off a 400 refusal on the result line.
+    /// </summary>
+    private static readonly string[] GatewayOverflowMarkers = { "maximum context length is", "context_length_exceeded" };
 
-    public void Add(AgentEvent normalized) => _fold.Add(normalized);
+    private readonly AgentResultFold _fold = new();
+    private JsonElement? _lastErrorLine;
+
+    public void Add(AgentEvent normalized)
+    {
+        _fold.Add(normalized);
+
+        if (normalized.Kind == AgentEventKind.Error) _lastErrorLine = normalized.Data;
+    }
 
     public AgentRunResult BuildResult(AgentRunFacts facts, int exitCode, string diagnostics)
     {
@@ -52,8 +66,34 @@ internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
                     ?? AgentDiagnosticExcerpt.Explain($"claude exited with code {SandboxExitCode.Describe(exitCode)}", diagnostics);
 
-        var exitReason = exitCode != 0 ? "non-zero-exit" : "harness-reported-failure";
+        var exitReason = _fold.ReportedFailure && RefusedAsOverContextWindow(_lastErrorLine) ? AgentTerminalOutcomeReader.ContextWindowExceededExitReason
+                         : exitCode != 0 ? "non-zero-exit" : "harness-reported-failure";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = exitReason, Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage, SessionId = sessionId, Model = model };
     }
+
+    /// <summary>
+    /// Whether the CLI's own terminal result line says the model refused the request as larger than its context
+    /// window. Read off fields the CLI writes (<c>terminal_reason</c>, <c>api_error_status</c>) and, for the gateway
+    /// shape, off the refusal body it relays — never off the agent's prose, which is how a crash's last message or a
+    /// rubric's wording would otherwise pass for a diagnosis. A 5xx is the gateway failing, not the model refusing,
+    /// so it stays an ordinary, retryable failure whatever its body says.
+    /// </summary>
+    private static bool RefusedAsOverContextWindow(JsonElement? line)
+    {
+        if (line is not { ValueKind: JsonValueKind.Object } result) return false;
+
+        var terminalReason = ReadString(result, "terminal_reason");
+
+        if (terminalReason == "prompt_too_long") return true;
+
+        if (terminalReason != "api_error" || !result.TryGetProperty("api_error_status", out var status) || !status.TryGetInt32(out var code) || code != 400) return false;
+
+        var body = ReadString(result, "result");
+
+        return GatewayOverflowMarkers.Any(marker => body.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string ReadString(JsonElement root, string key) =>
+        root.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
 }
