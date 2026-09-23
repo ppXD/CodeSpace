@@ -1,11 +1,12 @@
 #!/bin/sh
 # Fake codex CLI for the deploy compose E2E — the worker's CodexHarness is pointed here via
 # CODESPACE_CODEX_CLI_PATH, so NO model credential or network is needed to prove the agent-run path through the
-# real worker image. It is the static twin of tests/.../FakeCodexCli.cs: take the LAST positional arg as the goal
-# (codex puts the prompt last), JSON-escape it, and print a three-line `codex exec --json`-shaped stream whose
-# final agent_message is "DONE: <goal>" so the real executor's ParseEvent/BuildResult fold a Succeeded run.
-goal=""
-for goal in "$@"; do :; done
+# real worker image. It is the static twin of tests/.../FakeCodexCli.cs: read the goal from stdin — CodexHarness
+# hands it over there behind a trailing `-`, never on the argv, which is capped per string by the kernel — JSON-escape
+# it, and print a three-line `codex exec --json`-shaped stream whose final agent_message is "DONE: <goal>" so the real
+# executor's ParseEvent/BuildResult fold a Succeeded run. run.sh asserts that summary, which is what makes this a
+# check that the prompt crossed the real images rather than only that some process exited 0.
+goal="$(cat)"
 esc=$(printf '%s' "$goal" | sed 's/\\/\\\\/g; s/"/\\"/g')
 printf '{"type":"agent_reasoning","message":"Planning work for: %s"}\n' "$esc"
 printf '{"type":"agent_message","message":"DONE: %s"}\n' "$esc"
