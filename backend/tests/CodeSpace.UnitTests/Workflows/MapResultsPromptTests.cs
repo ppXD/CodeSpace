@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using WorkflowJson = CodeSpace.Core.Services.Workflows.WorkflowJson;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using Shouldly;
@@ -42,7 +43,7 @@ public class MapResultsPromptTests
 
         // The ordinary fan-out: the model must see EXACTLY what the raw-array binding produced — the same call
         // VariableResolver's array arm makes on the same element. Not "equivalent JSON": the same characters.
-        projected.ShouldBe(JsonSerializer.Serialize(results),
+        projected.ShouldBe(JsonSerializer.Serialize(results, WorkflowJson.InterpolatedText),
             customMessage: "a fan-out inside the budget must not be reshaped at all — the bound may only bind when it binds");
     }
 
@@ -51,7 +52,7 @@ public class MapResultsPromptTests
     {
         var results = Results(new string('x', 50_000));
 
-        MapResultsPrompt.Project(results, 0).Text.ShouldBe(JsonSerializer.Serialize(results),
+        MapResultsPrompt.Project(results, 0).Text.ShouldBe(JsonSerializer.Serialize(results, WorkflowJson.InterpolatedText),
             customMessage: "budget <= 0 means no bound — every map that declares none keeps its pre-existing output");
     }
 
@@ -107,7 +108,7 @@ public class MapResultsPromptTests
         var projected = MapResultsPrompt.Project(results, Budget).Text;
 
         foreach (var (element, i) in results.EnumerateArray().Select((e, i) => (e, i)).Where(x => x.i != pathologicalIndex))
-            projected.ShouldContain(JsonSerializer.Serialize(element),
+            projected.ShouldContain(JsonSerializer.Serialize(element, WorkflowJson.InterpolatedText),
                 customMessage: $"small sibling {i} must survive in FULL — one oversized branch may not evict it, wherever the oversized branch sits");
 
         CountBranchMarkers(projected).ShouldBe(1,
@@ -151,6 +152,9 @@ public class MapResultsPromptTests
         {
             Obj("""{"status":"Succeeded","summary":"renamed the module","changedFiles":["a.cs","b.cs"]}"""),
             Obj("""{"status":"Succeeded","summary":"added the tests","changedFiles":["c.cs"]}"""),
+            // Characters the resolver and the projection must write the same way. With two different encoders these
+            // two strings agree on plain ASCII and diverge on the first CJK character, '+', '<', '&' or quote.
+            Obj("""{"status":"Succeeded","summary":"修复 List<T> & 'x' a+b","changedFiles":["d.cs"]}"""),
         };
 
         var outputs = WorkflowEngine.BuildMapOutputs("results", results, failed: 0, promptBudgetChars: Budget);
@@ -245,8 +249,8 @@ public class MapResultsPromptTests
 
         var projection = MapResultsPrompt.Project(results, budget);
 
-        projection.Coverage.Complete.ShouldBe(projection.Text == JsonSerializer.Serialize(results),
-            customMessage: $"{branches} branches of {branchChars} chars at a {budget}-char budget recorded Complete={projection.Coverage.Complete} over a text that is {(projection.Text == JsonSerializer.Serialize(results) ? "" : "NOT ")}the whole serialization");
+        projection.Coverage.Complete.ShouldBe(projection.Text == JsonSerializer.Serialize(results, WorkflowJson.InterpolatedText),
+            customMessage: $"{branches} branches of {branchChars} chars at a {budget}-char budget recorded Complete={projection.Coverage.Complete} over a text that is {(projection.Text == JsonSerializer.Serialize(results, WorkflowJson.InterpolatedText) ? "" : "NOT ")}the whole serialization");
     }
 
     /// <summary>

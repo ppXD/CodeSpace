@@ -33,7 +33,7 @@ namespace CodeSpace.Core.Services.Workflows.Runtime;
 /// that want more. One pathological branch therefore cannot consume the budget and starve its siblings.</para>
 ///
 /// <para><b>Under budget it is byte-identical to the unbounded binding.</b> The within-budget case returns exactly
-/// <c>JsonSerializer.Serialize(resultsArray)</c> as its text — the same call <c>VariableResolver</c>'s array arm
+/// <c>JsonSerializer.Serialize(resultsArray, WorkflowJson.InterpolatedText)</c> as its text — the same call <c>VariableResolver</c>'s array arm
 /// makes on the same element — so the ordinary small fan-out reaches the model unchanged, character for character,
 /// and its coverage reads complete.</para>
 ///
@@ -53,13 +53,13 @@ public static class MapResultsPrompt
     /// </summary>
     public static MapResultsProjection Project(JsonElement resultsArray, int budgetChars)
     {
-        var whole = JsonSerializer.Serialize(resultsArray);
+        var whole = JsonSerializer.Serialize(resultsArray, WorkflowJson.InterpolatedText);
         var total = resultsArray.ValueKind == JsonValueKind.Array ? resultsArray.GetArrayLength() : 0;
 
         if (budgetChars <= 0 || whole.Length <= budgetChars) return Whole(whole, total);
         if (resultsArray.ValueKind != JsonValueKind.Array) return NothingIncluded(Cut(whole, budgetChars), total);
 
-        var branches = resultsArray.EnumerateArray().Select(element => JsonSerializer.Serialize(element)).ToList();
+        var branches = resultsArray.EnumerateArray().Select(element => JsonSerializer.Serialize(element, WorkflowJson.InterpolatedText)).ToList();
 
         if (branches.Count == 0) return NothingIncluded(Cut(whole, budgetChars), total);
 

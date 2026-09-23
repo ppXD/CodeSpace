@@ -45,6 +45,37 @@ public class VariableResolverTests
     }
 
     [Fact]
+    public void An_object_interpolated_into_text_keeps_its_characters_readable()
+    {
+        // A PR-review goal binds {{nodes.fetch_diff.outputs.files}} into prose. The object branch used to serialize with
+        // the HTML-safe default encoder, so every CJK character and every + < > & ' of the diff reached the model as a
+        // six-character \uXXXX — "修复" became \u4FEE\u590D, every added line began \u002B — at up to twice the size. The
+        // string branch beside it already inserts all of those raw, so the escaping protected nothing. (A character
+        // outside the Basic Multilingual Plane — an emoji — is still escaped: every built-in encoder does that.)
+        var scope = new NodeRunScope { Trigger = ParseDict("""{ "files": [ { "path": "src/a.cs", "patch": "+    // 修复：List<T> & 'x' a+b" } ] }""") };
+
+        var resolved = VariableResolver.Resolve(ParseElement("\"请审查：\\n{{trigger.files}}\""), scope).GetString()!;
+
+        resolved.ShouldContain("修复", customMessage: "the model must read the diff's own text, not escape codes");
+        resolved.ShouldContain("+    // ");
+        resolved.ShouldContain("List<T> & 'x' a+b");
+        resolved.ShouldNotContain("\\u", Case.Insensitive, "no character of the interpolated value may reach the prompt as a \\uXXXX escape");
+    }
+
+    [Fact]
+    public void An_object_interpolated_into_text_is_still_valid_json_that_round_trips()
+    {
+        // The relaxed encoder still escapes what JSON itself requires — the quote, the backslash and control
+        // characters — so a template that embeds a value in a JSON body keeps a parseable body.
+        var scope = new NodeRunScope { Trigger = ParseDict("""{ "value": { "text": "a \"quoted\" \\ path\nsecond line 修复" } }""") };
+
+        var resolved = VariableResolver.Resolve(ParseElement("\"{\\\"wrapped\\\": {{trigger.value}}}\""), scope).GetString()!;
+
+        using var document = JsonDocument.Parse(resolved);
+        document.RootElement.GetProperty("wrapped").GetProperty("text").GetString().ShouldBe("a \"quoted\" \\ path\nsecond line 修复");
+    }
+
+    [Fact]
     public void Multiple_templates_concatenate_into_string()
     {
         var scope = MakeScope();
