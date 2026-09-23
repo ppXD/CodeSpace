@@ -280,6 +280,45 @@ public class SubtaskAwareFakeCliDriftTests
         }
     }
 
+    [Fact]
+    public void The_deploy_compose_fake_codex_folds_the_goal_it_reads_the_way_the_worker_hands_it_over()
+    {
+        // Rule-12.5 drift detector for backend/deploy/e2e/fake-codex, the static twin of FakeCodexCli that the deploy
+        // compose E2E mounts into the REAL worker image. It had none, which is how it kept taking the goal from the
+        // last argv after the goal moved to stdin: the worker handed it `-`, it answered "DONE: -", and the E2E still
+        // passed because it only checked for Success. run.sh now asserts this exact summary, so a fake that cannot fold
+        // it would red the deploy lane for the wrong reason — pin it here, through the real harness, from the real file.
+        if (OperatingSystem.IsWindows()) return;
+
+        const string goal = "Deploy E2E smoke task";
+        var script = Path.Combine(RepositoryRoot(), "backend", "deploy", "e2e", "fake-codex");
+        var dir = Path.Combine(Path.GetTempPath(), "cs-deploy-fake-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        try
+        {
+            var codex = new CodexHarness();
+            var result = codex.BuildResult(RunScript(dir, script, CodexInvocation(goal)).SelectMany(codex.ParseEvents).ToList(), exitCode: 0, "");
+
+            result.Summary.ShouldBe("DONE: " + goal, customMessage: "backend/deploy/e2e/run.sh asserts exactly this summary; the deploy fake must fold to it through the real CodexHarness when the goal arrives on stdin");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>Walk up from the test binary to the repository root (the directory holding .github).</summary>
+    private static string RepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, ".github")))
+            dir = dir.Parent;
+
+        return dir?.FullName ?? throw new DirectoryNotFoundException("no .github directory above the test binary");
+    }
+
     /// <summary>The EXACT invocation Codex would hand the fake for <paramref name="goal"/>.</summary>
     private static SandboxSpec CodexInvocation(string goal) => Invocation(new CodexHarness(), CodexHarness.HarnessKind, goal);
 

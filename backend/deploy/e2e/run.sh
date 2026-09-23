@@ -102,9 +102,17 @@ for _ in $(seq 1 80); do
   STATUS="$(curl -fsS "$API/api/workflows/runs/$RUN_ID" "${AUTH[@]}" | grep -o '"status":"[A-Za-z]*"' | head -1 | sed 's/.*:"\([A-Za-z]*\)"/\1/')"
   echo "    status=$STATUS"
   case "$STATUS" in
-    Success) echo "✅ the API enqueued and the WORKER ran the agent through its real image to Success"; exit 0 ;;
+    Success) break ;;
     Failure|Cancelled) fail "run reached terminal $STATUS (expected Success)" ;;
   esac
   sleep 3
 done
-fail "run never reached a terminal state within the timeout"
+[ "$STATUS" = "Success" ] || fail "run never reached a terminal state within the timeout"
+
+echo "==> the task text reached the CLI (Success alone cannot show it: a CLI handed no prompt can still exit 0)"
+# The fake answers "DONE: <goal>" with whatever it read on stdin, so an empty or wrong carrier folds to "DONE: " or
+# "DONE: -" — a Success that proves nothing. Read the executor's own fold, the same reader the run surfaces from.
+SUMMARY="$($COMPOSE exec -T postgres psql -U codespace -d codespace -tA -c "SELECT result_jsonb->>'summary' FROM agent_run WHERE workflow_run_id = '$RUN_ID'")"
+[ "$SUMMARY" = "DONE: Deploy E2E smoke task" ] || fail "the agent's summary was '$SUMMARY', expected 'DONE: Deploy E2E smoke task' — the goal did not reach the CLI on stdin (check the worker's spooled <spool>/stdin and CSP_IN)"
+echo "✅ the API enqueued and the WORKER ran the agent through its real image to Success, with the goal delivered"
+exit 0
