@@ -56,14 +56,13 @@ public sealed class ConflictThenLyingResolveFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Resolve the goal (Codex's last positional arg). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes
+    /// Resolve the goal (read from stdin, where both harnesses hand the prompt). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes
     /// an alpha-ONLY <see cref="SharedFile"/> (dropping beta) yet STILL ends with the verified token — the lie the
     /// objective grade catches. The two parallel agents write DIFFERENT content (alpha vs beta) so their diffs conflict.
     /// </summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +

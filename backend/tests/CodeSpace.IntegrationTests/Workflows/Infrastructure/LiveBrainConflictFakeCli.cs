@@ -62,14 +62,13 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Resolve the goal (Codex's last positional arg). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes one
+    /// Resolve the goal (read from stdin, where both harnesses hand the prompt). The RESOLVER (goal carries <see cref="ResolverMarker"/>) writes one
     /// reconciled <see cref="SharedFile"/> + ends with the verified token. EVERY other (spawn) agent writes its OWN goal
     /// text into <see cref="SharedFile"/> — two distinct brain-authored subtasks therefore conflict against the base.
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +

@@ -40,11 +40,10 @@ public sealed class FakeCodexCli : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
     }
 
-    /// <summary>Strictly-POSIX emitter (the runner spawns this via its <c>#!/bin/sh</c> shebang — no bashisms): take the LAST positional arg as the goal (Codex puts the prompt last), JSON-escape it, and print a codex 0.142.x THREADED JSONL stream — thread.started, item.completed items (reasoning + the final assistant message <c>"DONE: &lt;goal&gt;"</c> nested under <c>item</c>), and turn.completed — so the executor's real ParseEvents descends into the item envelope exactly as it does for the real binary, and BuildResult folds the summary the run surfaces.</summary>
+    /// <summary>Strictly-POSIX emitter (the runner spawns this via its <c>#!/bin/sh</c> shebang — no bashisms): read the goal from stdin (Codex reads its prompt there, behind <c>-</c>), JSON-escape it, and print a codex 0.142.x THREADED JSONL stream — thread.started, item.completed items (reasoning + the final assistant message <c>"DONE: &lt;goal&gt;"</c> nested under <c>item</c>), and turn.completed — so the executor's real ParseEvents descends into the item envelope exactly as it does for the real binary, and BuildResult folds the summary the run surfaces.</summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "printf '{\"type\":\"thread.started\",\"thread_id\":\"fake-codex-thread\"}\\n'\n" +
         "printf '{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"Planning work for: %s\"}}\\n' \"$esc\"\n" +

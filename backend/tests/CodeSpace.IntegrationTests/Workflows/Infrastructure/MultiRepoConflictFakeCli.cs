@@ -62,15 +62,14 @@ public sealed class MultiRepoConflictFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Resolve the goal (Codex's last positional arg) PER SUBDIRECTORY. The RESOLVER (goal carries
+    /// Resolve the goal (read from stdin, where both harnesses hand the prompt) PER SUBDIRECTORY. The RESOLVER (goal carries
     /// <see cref="ResolverMarker"/>) writes one reconciled <see cref="RelatedAlias"/>/<see cref="SharedFile"/> + ends
     /// with the verified token. Each spawn agent adds a DISJOINT file in <see cref="PrimaryAlias"/>/ (clean axis) and
     /// writes its side to <see cref="RelatedAlias"/>/<see cref="SharedFile"/> (conflicting axis).
     /// </summary>
     private static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +

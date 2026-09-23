@@ -14,7 +14,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// <c>AgentWorkspacePushFlowTests</c> proves. That real patch is what the supervisor's MERGE turn integrates and the
 /// objective acceptance gate grades.
 ///
-/// <para><b>Distinct file per goal.</b> Each spawned agent receives a DIFFERENT goal as Codex's last positional arg
+/// <para><b>Distinct file per goal.</b> Each spawned agent receives a DIFFERENT goal on stdin, where Codex reads its prompt
 /// (<c>"do alpha"</c> / <c>"do beta"</c>). The script derives a filesystem-safe name from that goal
 /// (<c>agent_do_alpha.txt</c> / <c>agent_do_beta.txt</c>), so two agents edit DISJOINT files and their patches
 /// integrate cleanly (no spurious conflict). The same one env-var script serves every branch — the per-branch
@@ -88,7 +88,7 @@ public sealed class FileWritingFakeCli : IDisposable
     }
 
     /// <summary>
-    /// Walk the positional args so <c>$goal</c> ends as the LAST one (BOTH harnesses put the prompt last —
+    /// Read <c>$goal</c> from stdin (BOTH harnesses hand the prompt over stdin —
     /// <c>CodexHarness.BuildInvocation</c> and <c>ClaudeCodeHarness.BuildInvocation</c> alike), derive a
     /// filesystem-safe filename from it (non-alphanumerics → <c>_</c>), WRITE that file into the cwd (the workspace
     /// clone) — the WORK half is dialect-free. Only the STREAM half branches, on the one discriminator that is a
@@ -102,8 +102,7 @@ public sealed class FileWritingFakeCli : IDisposable
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "printf 'work by the agent for: %s\\n' \"$goal\" > \"" + FilePrefix + "${fname}.txt\" || exit 90\n" +

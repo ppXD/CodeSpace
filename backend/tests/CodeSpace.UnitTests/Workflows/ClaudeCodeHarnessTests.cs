@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -334,12 +335,47 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void The_goal_rides_stdin_and_never_the_argv()
+    {
+        // The prompt used to be the trailing positional argument. Linux caps ONE argv string at MAX_ARG_STRLEN
+        // (131071 content bytes on a 4 KiB page), so a PR-review goal carrying a ~156 KB diff could never launch.
+        // `claude -p` reads the prompt from stdin when no positional is given — verified against the CLI: empty stdin
+        // says "Input must be provided either through stdin or as a prompt argument", a 160 KB stdin starts a session.
+        var spec = Harness.BuildInvocation(Task());
+
+        spec.StandardInput.ShouldBe("Fix the failing billing tests");
+        spec.Args.ShouldNotContain("Fix the failing billing tests");
+        spec.Args.TakeLast(2).ShouldBe(new[] { "--permission-mode", "bypassPermissions" }, "nothing follows the last flag: a stray positional would BECOME the prompt and demote stdin");
+    }
+
+    [Fact]
+    public void A_continued_session_still_takes_its_prompt_from_stdin()
+    {
+        var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-resume-1" });
+
+        spec.StandardInput.ShouldBe("Fix the failing billing tests");
+        spec.Args.ShouldNotContain("Fix the failing billing tests");
+        spec.Args.ShouldContain("--resume");
+    }
+
+    [Fact]
+    public void A_goal_past_the_argv_ceiling_builds_an_invocation_the_kernel_accepts()
+    {
+        // The point of the whole change, stated as the invariant: the goal's size no longer decides whether the
+        // process can be created at all. The context window is the model's limit to enforce, not execve's.
+        var huge = new string('x', SandboxArgumentLimit.MaxStringBytes * 2);
+
+        SandboxArgumentLimit.Exceeded(Harness.BuildInvocation(Task(goal: huge))).ShouldBeNull();
+    }
+
+    [Fact]
     public void Builds_a_claude_print_stream_json_invocation_from_the_task()
     {
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("claude");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.StandardInput.ShouldBe("Fix the failing billing tests");
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
     }
@@ -359,7 +395,7 @@ public class ClaudeCodeHarnessTests
         // trailing positional and the prompt is never swallowed.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]
@@ -369,7 +405,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("--resume");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Theory]
@@ -381,20 +417,21 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task(model: model));
 
         spec.Args.ShouldNotContain("--model", customMessage: "a blank model must omit --model so the CLI uses its own default (the Model=empty rule)");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]
-    public void Injects_the_operating_contract_as_a_system_prompt_before_the_prompt_positional()
+    public void Injects_the_operating_contract_as_a_system_prompt_keeping_the_goal_on_stdin()
     {
         // B1: the unattended operating contract rides as --append-system-prompt (composing with any persona), and
-        // the goal stays the trailing positional — so the directive never swallows or reorders the prompt.
-        var args = Harness.BuildInvocation(Task()).Args.ToList();
+        // the goal rides stdin — so the directive can never swallow, reorder or be mistaken for the prompt.
+        var spec = Harness.BuildInvocation(Task());
+        var args = spec.Args.ToList();
 
         var at = args.IndexOf("--append-system-prompt");
         at.ShouldBeGreaterThanOrEqualTo(0, "the operating contract is injected as a system prompt");
         args[at + 1].ShouldBe(AgentOperatingContract.SystemDirective, "no persona → the bare contract (byte-identical to pre-B1)");
-        args[^1].ShouldBe("Fix the failing billing tests", "the goal remains the trailing positional argument");
+        spec.StandardInput.ShouldBe("Fix the failing billing tests", customMessage: "the goal is the prompt on stdin, untouched by the directive");
     }
 
     [Fact]
@@ -402,12 +439,13 @@ public class ClaudeCodeHarnessTests
     {
         // B1: a persona rides Claude's NATIVE --append-system-prompt (persona + the always-on contract), NOT prepended
         // to the goal — Anthropic's guidance is a system-prompt persona outweighs the same text in the user message.
-        var args = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer." }).Args.ToList();
+        var spec = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer." });
+        var args = spec.Args.ToList();
 
         var at = args.IndexOf("--append-system-prompt");
         args[at + 1].ShouldBe(AgentOperatingContract.Compose("You are a meticulous reviewer."), "the persona composes before the operating contract on the native channel");
         args[at + 1].ShouldContain("You are a meticulous reviewer.");
-        args[^1].ShouldBe("Fix the failing billing tests", "the goal positional is the clean task — no persona baked in");
+        spec.StandardInput.ShouldBe("Fix the failing billing tests", customMessage: "the goal on stdin is the clean task — no persona baked in");
     }
 
     [Theory]
@@ -423,18 +461,18 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
-    public void Projects_the_tool_allow_list_before_permission_mode_so_the_prompt_is_not_swallowed()
+    public void Projects_the_tool_allow_list_before_permission_mode_so_the_variadic_is_bounded()
     {
         var args = Harness.BuildInvocation(Task(tools: new[] { "Read", "Grep", "Bash" })).Args.ToList();
 
         // --allowed-tools + its values must sit BEFORE --permission-mode (the variadic stops at the next flag),
-        // and the prompt stays the trailing positional argument.
+        // and nothing trails the last flag for it to run into.
         var toolsAt = args.IndexOf("--allowed-tools");
         var modeAt = args.IndexOf("--permission-mode");
         toolsAt.ShouldBeGreaterThanOrEqualTo(0);
         toolsAt.ShouldBeLessThan(modeAt, "the variadic --allowed-tools must be bounded by --permission-mode");
         args.GetRange(toolsAt + 1, 3).ShouldBe(new[] { "Read", "Grep", "Bash" });
-        args[^1].ShouldBe("Fix the failing billing tests", "the prompt remains the trailing positional argument");
+        args[^2].ShouldBe("--permission-mode", "the permission mode is the last flag — no positional trails it for a variadic to swallow");
     }
 
     [Fact]

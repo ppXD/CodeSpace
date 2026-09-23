@@ -13,6 +13,18 @@ public sealed record SandboxSpec
     /// <summary>Arguments passed verbatim (no shell-splitting / globbing). Each element is one argv entry.</summary>
     public IReadOnlyList<string> Args { get; init; } = Array.Empty<string>();
 
+    /// <summary>
+    /// Text handed to the child on stdin, UTF-8 without a BOM, followed by EOF. <c>null</c> → the child reads EOF at
+    /// once and never inherits the runner's own stdin.
+    ///
+    /// <para>The carrier for anything that may be large. The kernel caps EVERY single argv or environment string at
+    /// <c>MAX_ARG_STRLEN</c> (131071 content bytes on a 4 KiB page) no matter how small the total is, so a value that
+    /// can grow with its input — an agent's goal carrying a pull request's diff — cannot ride <see cref="Args"/> at
+    /// all. A pipe has no such ceiling. Part of the invocation's binding identity like every other field: two launches
+    /// that differ only here are different executions.</para>
+    /// </summary>
+    public string? StandardInput { get; init; }
+
     /// <summary>Working directory for the command. <c>null</c> → the runner's default (current directory for the local runner).</summary>
     public string? WorkingDirectory { get; init; }
 

@@ -53,8 +53,7 @@ public sealed class LiveBrainFailingFakeCli : IDisposable
     /// <summary>EVERY invocation fails: emit an error-flavoured message + exit 1 (a real <c>Failed</c> run, no file/patch), regardless of the goal — so a live brain reliably sees a failed subtask to react to. Served in the dialect of whichever harness the reconciler pointed at this script (<see cref="FakeAgentCliDialect"/>); the codex branch is byte-identical to the pre-dual-stub script.</summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         FakeAgentCliDialect.Dialects(
             "printf '{\"type\":\"agent_message\",\"message\":\"" + FailureMessageFormat + "\"}\\n' \"$esc\"\n" +

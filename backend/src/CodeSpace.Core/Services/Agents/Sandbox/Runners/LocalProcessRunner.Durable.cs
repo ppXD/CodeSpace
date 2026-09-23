@@ -28,6 +28,9 @@ public sealed partial class LocalProcessRunner
     private const string TruncationMarkerSuffix = ".truncated";
 
     private const string PidFile = "pid";
+
+    /// <summary>The spooled <see cref="SandboxSpec.StandardInput"/> the supervisor redirects the agent's stdin from. Owner-only: a goal can carry a repository's source.</summary>
+    internal const string StdinFile = "stdin";
     private const string StdoutSourceKey = "stdout";
     private const string StderrSourceKey = "stderr";
     private const int MaximumDurableLogReadBytes = 4 * 1024 * 1024;
@@ -126,11 +129,13 @@ public sealed partial class LocalProcessRunner
     /// the log-seal marker after producer exit, successful copiers and spool quiescence; forced stops use the same host
     /// authority after a bounded whole-tree kill.
     ///
-    /// <para>stdin is redirected from <c>/dev/null</c> so the agent process gets an immediate EOF instead of INHERITING
-    /// the worker's stdin. A harness that reads stdin (<c>codex exec</c> reads "additional input from stdin" even with the
-    /// prompt in argv; the prompt itself always rides argv) would otherwise BLOCK FOREVER when the worker was launched with
-    /// an open, never-closing stdin (e.g. a supervising process's pipe) — a hung run with zero output. Neither harness needs
-    /// stdin, so closing it is always safe. Pinned by a test.</para>
+    /// <para>stdin is NEVER inherited from the worker. It is redirected from the spooled <see cref="SandboxSpec.StandardInput"/>
+    /// file when the spec carries one (<c>CSP_IN</c>, snapshotted and unset like every other host path) and from
+    /// <c>/dev/null</c> otherwise — either way a regular file, so a stdin-reading harness reaches EOF. Inheriting it
+    /// would let a harness that reads stdin (<c>codex exec</c> appends a piped stdin to its prompt) BLOCK FOREVER when
+    /// the worker was launched with an open, never-closing stdin (e.g. a supervising process's pipe) — a hung run with
+    /// zero output. The prompt rides stdin rather than argv because the kernel refuses any single argv string past
+    /// <c>MAX_ARG_STRLEN</c>, which a goal carrying a pull request's diff exceeds. Pinned by a test.</para>
     ///
     /// <para>Each copier is BOUNDED by <c>CSP_MAX_BYTES</c> (<see cref="SpoolCapBytes"/>, from the documented
     /// <see cref="SandboxSpec.MaxFileSizeMb"/> knob), so a chatty or looping agent cannot fill the worker's disk. The
@@ -151,7 +156,7 @@ public sealed partial class LocalProcessRunner
     /// ceiling is the SAME byte count on every host. prlimit cannot do this job at all: it wraps only the agent chain
     /// inside <c>"$@"</c>, never this supervisor, and RLIMIT_FSIZE does not apply to pipe writes.</para>
     /// </summary>
-    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; max_bytes=\"${CSP_MAX_BYTES:-0}\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES; spool_block=512; [ -n \"$BASH_VERSION\" ] && spool_block=1024; copy_spool() { if [ \"$max_bytes\" -le 0 ]; then cat >\"$1\"; return 0; fi; ulimit -c 0; ulimit -f $((max_bytes/spool_block)) 2>/dev/null; { cat >\"$1\"; } 2>/dev/null; copy_status=$?; if [ \"$copy_status\" -eq 153 ]; then : >\"$1.truncated\"; copy_status=0; fi; cat >/dev/null; return \"$copy_status\"; }; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; copy_spool \"$out_path\" <\"$out_pipe\" & out_cat=$!; copy_spool \"$err_path\" <\"$err_pipe\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" </dev/null; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
+    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; max_bytes=\"${CSP_MAX_BYTES:-0}\"; in_path=\"${CSP_IN:-/dev/null}\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES CSP_IN; spool_block=512; [ -n \"$BASH_VERSION\" ] && spool_block=1024; copy_spool() { if [ \"$max_bytes\" -le 0 ]; then cat >\"$1\"; return 0; fi; ulimit -c 0; ulimit -f $((max_bytes/spool_block)) 2>/dev/null; { cat >\"$1\"; } 2>/dev/null; copy_status=$?; if [ \"$copy_status\" -eq 153 ]; then : >\"$1.truncated\"; copy_status=0; fi; cat >/dev/null; return \"$copy_status\"; }; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; copy_spool \"$out_path\" <\"$out_pipe\" & out_cat=$!; copy_spool \"$err_path\" <\"$err_pipe\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" <\"$in_path\"; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
 
     /// <summary>
     /// The per-spool-file byte budget for this run's FIFO copiers: the documented <see cref="SandboxSpec.MaxFileSizeMb"/>
@@ -797,6 +802,25 @@ public sealed partial class LocalProcessRunner
         return newOffset;
     }
 
+    /// <summary>
+    /// Spool <see cref="SandboxSpec.StandardInput"/> as UTF-8 without a BOM and return its path, or <c>null</c> when the
+    /// spec carries none. Created owner-only in one step rather than written then narrowed, so the prompt is never
+    /// readable by anyone else for even the moment between the two.
+    /// </summary>
+    private static string? WriteStandardInput(SandboxSpec spec, string spoolDir)
+    {
+        if (spec.StandardInput is not { } input) return null;
+
+        var path = Path.Combine(spoolDir, StdinFile);
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+        using var stream = new FileStream(path, options);
+        stream.Write(StandardInputEncoding.GetBytes(input));
+
+        return path;
+    }
+
     internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, IReadOnlyList<string>? egressExecPrefix = null, IReadOnlyList<string>? cgroupExecPrefix = null, bool bootstrapSession = false)
     {
         var info = new ProcessStartInfo
@@ -861,6 +885,10 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_LOG_COPY_STATUS"] = Path.Combine(spoolDir, LogCopyStatusFile);
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
         info.Environment["CSP_MAX_BYTES"] = SpoolCapBytes(spec).ToString(CultureInfo.InvariantCulture);
+
+        // Absent → the script falls back to /dev/null. Present → the prompt reaches the agent through a pipe, where no
+        // per-string kernel ceiling applies. Written by the host before launch, like the config-home files above.
+        if (WriteStandardInput(spec, spoolDir) is { } stdinPath) info.Environment["CSP_IN"] = stdinPath;
 
         // Point the config-isolating tool at the per-run home so a shelled-out CLI reads ONLY the credentials we
         // inject — never the operator's personal ~/.claude / ~/.codex. Set AFTER the scrub so the injected value wins.

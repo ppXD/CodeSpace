@@ -48,8 +48,7 @@ public sealed class InvestigateOnlyFakeCli : IDisposable
     /// <summary>EVERY invocation succeeds without writing anything: emit a findings-flavoured message + exit 0 (a real <c>Succeeded</c> run, no file/patch/branch), regardless of the goal.</summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"\"\n" +
-        "for goal in \"$@\"; do :; done\n" +
+        "goal=\"$(cat)\"\n" +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         FakeAgentCliDialect.Dialects(
             "printf '{\"type\":\"agent_reasoning\",\"message\":\"Investigating: %s\"}\\n' \"$esc\"\n" +

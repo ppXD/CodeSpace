@@ -156,7 +156,7 @@ public sealed class SupervisorRealAgentE2ETests : IDisposable
 
         // The supervisor's BuildAgentTask sets each spawned agent's Goal to its planned subtask Instruction
         // ("do alpha" for sa, "do beta" for sb — RealSupervisorActionExecutor.Spawn.BuildAgentTask), which the
-        // harness passes as Codex's LAST positional arg, which the fake CLI stamps into "DONE: <goal>". So the
+        // harness hands Codex on stdin, which the fake CLI stamps into "DONE: <goal>". So the
         // two real summaries are deterministically the fake-CLI transform of those exact goals.
         summaries.ShouldBe(
             new[] { SubtaskAwareFakeCli.ExpectedSummaryFor("do alpha"), SubtaskAwareFakeCli.ExpectedSummaryFor("do beta") },
