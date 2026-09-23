@@ -11,6 +11,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Review;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -1567,20 +1568,34 @@ public sealed partial class SupervisorTurnService
         }
     }
 
-    /// <summary>The heartbeat loop itself: sleeps, logs, repeats — until <paramref name="cancellationToken"/> fires (grading finished). A cancellation mid-sleep is the expected exit, never propagated as a fault. Internal + clock-parameterized so a unit test drives the sleep on a fake <paramref name="timeProvider"/> instead of racing the wall clock; REQUIRED rather than defaulting to the system clock for the reason <see cref="HeartbeatLoop.RunAsync"/> gives — a default is how a call site keeps the wall clock without saying so.</summary>
-    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken, TimeProvider timeProvider, string message = "Supervisor stop acceptance grading is still in progress.")
-    {
-        try
-        {
-            while (true)
-            {
-                await Task.Delay(interval, timeProvider, cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// The heartbeat loop itself: sleeps, pulses, repeats — until <paramref name="cancellationToken"/> fires (grading
+    /// finished). It is <see cref="HeartbeatLoop.RunAsync"/>, so it NEVER completes faulted: a cancellation is the
+    /// expected exit, and a pulse that fails is logged as a warning and retried on the next interval. That is
+    /// load-bearing rather than tidy — every call site awaits this task in the <c>finally</c> around the grade it
+    /// protects, so a fault here would REPLACE the grade with the error of a missed log line.
+    ///
+    /// <para>Internal + clock-parameterized so a unit test drives the sleep on a fake <paramref name="timeProvider"/>
+    /// instead of racing the wall clock; REQUIRED rather than defaulting to the system clock for the reason
+    /// <see cref="HeartbeatLoop.RunAsync"/> gives — a default is how a call site keeps the wall clock without saying so.</para>
+    /// </summary>
+    internal Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken, TimeProvider timeProvider, string message = "Supervisor stop acceptance grading is still in progress.") =>
+        HeartbeatLoop.RunAsync(ct => PulseGradingHeartbeatAsync(supervisorRunId, nodeId, message, ct), interval, exception => _logger.LogWarning(exception, "Supervisor run {SupervisorRunId} node {NodeId}: a grading heartbeat pulse failed; grading continues and the next pulse retries", supervisorRunId, nodeId), cancellationToken, timeProvider);
 
-                await _recordLogger.LogAsync(supervisorRunId, nodeId, Workflows.Lifecycle.LogLevel.Info,
-                    message, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) { }
+    /// <summary>
+    /// One pulse, written through a record logger from a DI scope of its OWN. The pulse runs concurrently with the
+    /// grade, and this service's scope holds the one DbContext the grade is using — its manifest stamps and recorded
+    /// judge calls go through it — so a pulse on this scope's logger that fell due mid-query died on EF's "a second
+    /// operation was started on this context" guard. A scope per pulse rather than one per loop, so an insert that
+    /// failed never waits in a change tracker for the next pulse's save to retry it.
+    /// </summary>
+    private async Task PulseGradingHeartbeatAsync(Guid supervisorRunId, string nodeId, string message, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+
+        var records = scope.ServiceProvider.GetRequiredService<Workflows.Lifecycle.IRunRecordLogger>();
+
+        await records.LogAsync(supervisorRunId, nodeId, Workflows.Lifecycle.LogLevel.Info, message, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

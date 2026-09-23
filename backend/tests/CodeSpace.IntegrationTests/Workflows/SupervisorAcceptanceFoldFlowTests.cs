@@ -729,7 +729,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
                 scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: null), CancellationToken.None);
         }
@@ -773,7 +773,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
                 scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
         }
@@ -821,7 +821,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
                 scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoA, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
         }
@@ -878,7 +878,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 scope.Resolve<IDecisionAnswerService>(),
                 scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
                 scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
             result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
         }
@@ -1217,7 +1217,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
     }
@@ -1244,7 +1244,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<CodeSpace.Core.Services.Plans.IWorkPlanService>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>(), scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Supervisor.ISupervisorPublishedBranchResolver>(), scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(), new AdmitAllBudgetLedger(),
-        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(), scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
     }

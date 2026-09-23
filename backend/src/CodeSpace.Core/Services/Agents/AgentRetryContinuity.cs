@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Agents;
 public static class AgentRetryContinuity
 {
     /// <summary>The honest-redo line: fires ONLY when a resumed conversation exists but the workspace was NOT pinned to a prior pushed branch — never on a genuine cold-start retry (no prior attempt at all), which stays byte-identical.</summary>
-    public const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own) — you must redo any relevant file changes from scratch.";
+    public const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own for this repository) — you must redo any relevant file changes from scratch.";
 
     /// <summary>Append <see cref="HonestNoContinuityHint"/> to a resumed task's goal. One composition, so the two lanes cannot drift on the separator either.</summary>
     public static string WithHonestNoContinuityHint(string goal) => $"{goal}\n\n{HonestNoContinuityHint}";

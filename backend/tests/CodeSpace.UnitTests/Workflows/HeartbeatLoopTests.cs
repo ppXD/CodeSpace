@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 
@@ -20,10 +21,13 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public class HeartbeatLoopTests
 {
+    /// <summary>How far short of a full interval the "not yet" check stands.</summary>
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(1);
+
     [Fact]
     public async Task Pings_once_per_interval_until_cancelled()
     {
-        var time = new FakeTimeProvider();
+        var time = new HeartbeatClock();
         var interval = TimeSpan.FromSeconds(30);
         var pinged = new SemaphoreSlim(0);
         var count = 0;
@@ -40,7 +44,7 @@ public class HeartbeatLoopTests
 
         for (var i = 1; i <= 3; i++)
         {
-            await AdvanceUntilPingedAsync(time, pinged, interval, i);
+            await AdvanceOneIntervalAsync(time, pinged, interval, i);
 
             Volatile.Read(ref count).ShouldBe(i, $"exactly one ping per elapsed interval — after {i} interval(s) there must be {i}, not 'at least' {i}");
         }
@@ -53,31 +57,30 @@ public class HeartbeatLoopTests
     }
 
     /// <summary>
-    /// Advances the fake clock until the loop signals <paramref name="ticked"/>, rather than advancing once and
-    /// assuming it was listening.
+    /// Advances the fake clock across ONE interval in two moves and pins what each must do: a <see cref="Step"/> short of
+    /// the interval the loop must still be asleep, and the step that completes it must produce exactly the beat. A loop
+    /// that sleeps anything but the interval it was handed reds on one side or the other — where nudging in tenths until
+    /// SOMETHING arrived let any sleep between a tenth of the interval and twenty of them pass.
     ///
-    /// <para>The loop arms its next timer inside Task.Delay AFTER the previous ping returns, so a
-    /// single Advance can land in the window before that registration and be missed entirely — the
-    /// clock then never moves again and the wait burns its full timeout. That is the race this test
-    /// kept losing. Nudging in fractions of an interval cannot fire a timer early, and the count
-    /// assertion at the call site is what still proves one ping per interval.</para>
+    /// <para>The loop arms its next timer inside Task.Delay AFTER the previous ping returns, so an Advance issued before
+    /// that registration moves a clock nothing is waiting on yet — the race this test once kept losing. Waiting for the
+    /// timer first closes it without letting any time pass.</para>
     /// </summary>
-    private static async Task AdvanceUntilPingedAsync(FakeTimeProvider time, SemaphoreSlim ticked, TimeSpan interval, int ordinal)
+    private static async Task AdvanceOneIntervalAsync(HeartbeatClock time, SemaphoreSlim ticked, TimeSpan interval, int ordinal)
     {
-        for (var nudge = 0; nudge < 200; nudge++)
-        {
-            if (await ticked.WaitAsync(TimeSpan.FromMilliseconds(10))) return;
+        await time.NextTimerAsync();
 
-            time.Advance(interval / 10);
-        }
+        time.Advance(interval - Step);
+        (await ticked.WaitAsync(TimeSpan.FromMilliseconds(100))).ShouldBeFalse($"beat {ordinal} arrived {Step.TotalSeconds}s before its interval completed — the loop sleeps less than it was handed");
 
-        throw new TimeoutException($"ping {ordinal} never arrived after advancing the fake clock well past its interval");
+        time.Advance(Step);
+        (await ticked.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBeTrue($"beat {ordinal} never arrived once its interval completed — the loop sleeps longer than it was handed, or stopped repeating");
     }
 
     [Fact]
     public async Task A_failing_ping_is_reported_but_does_not_kill_the_loop()
     {
-        var time = new FakeTimeProvider();
+        var time = new HeartbeatClock();
         var interval = TimeSpan.FromSeconds(30);
         var reported = new SemaphoreSlim(0);
         var pings = 0;
@@ -95,7 +98,7 @@ public class HeartbeatLoopTests
 
         for (var i = 1; i <= 3; i++)
         {
-            await AdvanceUntilPingedAsync(time, reported, interval, i);
+            await AdvanceOneIntervalAsync(time, reported, interval, i);
 
             Volatile.Read(ref pings).ShouldBe(i, "a throwing ping must not stop, skip, or double the cadence");
             Volatile.Read(ref errors).ShouldBe(i, "every failed ping is reported exactly once — none aborted the loop");

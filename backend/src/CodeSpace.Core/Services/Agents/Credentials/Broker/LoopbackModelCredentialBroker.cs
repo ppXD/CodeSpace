@@ -499,6 +499,16 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
             // matters more here than it used to — a revoke now closes a listener per FINISHED RUN, where before a
             // listener only ever closed at process teardown — and the only correct response to any of them is to stop
             // serving an address that no longer exists, and to stop CLAIMING it.
+            //
+            // A close can also land between the request above and this re-registration. The managed listener checks
+            // its state and only then queues the wait, and Close() completes-and-clears that queue in between, so the
+            // wait joins a closed listener's queue and this loop never resumes. That strands nothing: every close path
+            // takes the lease out of _byRun (supersede, revoke, sweep and drop before closing, dispose right after),
+            // and what is left is a cycle no root reaches — the closed listener's queue, the wait, this state machine,
+            // the lease, the listener — because Close() has already unhooked the listener from the endpoint manager's
+            // statics. It is collected, decrypted key and all, exactly as a loop that woke and returned would be
+            // (checked on .NET 10 by stranding a loop this way: its lease's weak reference cleared, while a lease a
+            // table still held stayed alive).
             try { context = await lease.Listener.GetContextAsync().ConfigureAwait(false); }
             catch (Exception exception) { DropIfStillServing(lease, exception); return; }
 

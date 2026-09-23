@@ -764,7 +764,7 @@ public class ModelPricingUnderCapFlowTests : IDisposable
             scope.Resolve<Core.Services.Workflows.Artifacts.IArtifactOffloader>(), scope.Resolve<Core.Services.Agents.Publish.IPublishManifestStore>(),
             scope.Resolve<ISupervisorPublishedBranchResolver>(), scope.Resolve<Core.Services.Completion.ICompletionAssessmentComposer>(),
             scope.Resolve<Core.Services.Workflows.Budget.IBudgetLedger>(), scope.Resolve<Core.Services.Learning.ILessonReader>(),
-            scope.Resolve<ILogger<SupervisorTurnService>>());
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private sealed class AlwaysSpawnDecider : ISupervisorDecider
     {

@@ -220,7 +220,7 @@ public sealed class SupervisorPayloadReaskFlowTests
         scope.Resolve<Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<Core.Services.Workflows.Budget.IBudgetLedger>(),
         scope.Resolve<ILessonReader>(),
-        scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     private static LlmSupervisorDecider NewDecider(ILifetimeScope scope, IStructuredLLMClient client) => new(
         new LLMClientRegistry(new ILLMClient[] { (ILLMClient)client }),

@@ -10,6 +10,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Budget;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Plans;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -41,6 +42,9 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly ISupervisorPublishedBranchResolver _publishedBranches;
     private readonly Completion.ICompletionAssessmentComposer _completion;
 
+    /// <summary>Opens the scope each grading-heartbeat pulse writes through — never this service's own, whose DbContext the grade the pulse runs beside is using (see <see cref="PulseGradingHeartbeatAsync"/>).</summary>
+    private readonly IServiceScopeFactory _scopeFactory;
+
     /// <summary>C1 — the rubric judge a BRANCHLESS <c>LlmJudge</c> stop reads its summary with. OPTIONAL so the many hand-built test doubles keep compiling; DI always supplies it, and a null one fails the gate CLOSED rather than passing it silently.</summary>
     private readonly Review.IRubricJudge? _rubricJudge;
 
@@ -49,7 +53,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null, Completion.IModeProfileRegistry? modes = null)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, IServiceScopeFactory scopeFactory, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null, Completion.IModeProfileRegistry? modes = null)
     {
         _ledger = ledger;
         _decider = decider;
@@ -67,6 +71,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _manifests = manifests;
         _publishedBranches = publishedBranches;
         _completion = completion;
+        _scopeFactory = scopeFactory;
         _rubricJudge = rubricJudge;
         _modes = modes;
         _logger = logger;

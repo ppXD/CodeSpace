@@ -572,7 +572,7 @@ public sealed class SupervisorDeliveryGateFlowTests
         scope.Resolve<CodeSpace.Core.Services.Completion.ICompletionAssessmentComposer>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Budget.IBudgetLedger>(),
         scope.Resolve<CodeSpace.Core.Services.Learning.ILessonReader>(),
-        scope.Resolve<ILogger<SupervisorTurnService>>());
+        scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), scope.Resolve<ILogger<SupervisorTurnService>>());
 
     [Fact]
     public async Task A_model_minted_gate_card_cannot_drive_the_adjudication_release()

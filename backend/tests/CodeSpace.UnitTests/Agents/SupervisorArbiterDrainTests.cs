@@ -164,7 +164,7 @@ public class SupervisorArbiterDrainTests
         var queue = new FakeDecisionQueue();
         var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(runId, TeamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
-        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), queue, new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), queue, new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReaderStub(), null!, NullLogger<SupervisorTurnService>.Instance);
 
         var context = await service.RehydrateFromDecisionLogAsync(runId, TeamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
@@ -187,7 +187,7 @@ public class SupervisorArbiterDrainTests
         });
         var ledger = new AdmitAllBudgetLedger();
         var runId = Guid.NewGuid();
-        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), ledger, new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), ledger, new NoLessonsReaderStub(), null!, NullLogger<SupervisorTurnService>.Instance);
 
         var context = new SupervisorTurnContext { SupervisorRunId = runId, TeamId = TeamId, NodeId = "sup", Goal = "ship it", SupervisorModelId = BrainModelId, MaxCostUsd = 7.5m, PendingChildDecisions = new[] { Pending() } };
 
@@ -230,7 +230,7 @@ public class SupervisorArbiterDrainTests
 
     private static SupervisorTurnService Drain(FakeDecisionArbiter arbiter, FakeDecisionAnswerService answer) =>
         new(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), arbiter, answer, new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(),
-        new NoLessonsReaderStub(), NullLogger<SupervisorTurnService>.Instance);
+        new NoLessonsReaderStub(), null!, NullLogger<SupervisorTurnService>.Instance);
 
     private static SupervisorTurnContext Context(params PendingDecision[] pending) => new()
     {
