@@ -80,7 +80,11 @@ public class McpProxyTests
 
         var clientPump = ForwardClientAsync(pair.Client, stdin, stdout);
 
-        await Should.NotThrowAsync(async () => await clientPump.WaitAsync(TimeSpan.FromSeconds(5)));
+        // Recorded, not asserted with Should.NotThrowAsync: that passes a CANCELED task, and a cancellation is exactly
+        // what the closing direction hands the other pump — it has to end inside ForwardAsync, never escape it.
+        var escaped = await Record.ExceptionAsync(() => clientPump.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        escaped.ShouldBeNull("stdin's EOF cancels the socket→stdout pump — a TaskCanceledException means that cancel escaped the proxy, a TimeoutException that it hung instead of exiting");
     }
 
     [Fact]
@@ -99,7 +103,9 @@ public class McpProxyTests
         pair.Server.Shutdown(SocketShutdown.Both);
         pair.Server.Close();
 
-        await Should.NotThrowAsync(async () => await clientPump.WaitAsync(TimeSpan.FromSeconds(5)));
+        var escaped = await Record.ExceptionAsync(() => clientPump.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        escaped.ShouldBeNull("the socket's EOF cancels the blocked stdin pump — a TaskCanceledException means that cancel escaped the proxy, a TimeoutException that it hung instead of exiting");
     }
 
     [Fact]

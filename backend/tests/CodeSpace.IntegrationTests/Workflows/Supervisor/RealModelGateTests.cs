@@ -12,6 +12,10 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// through the gate's PURE seams (the raw-string overload of <see cref="RealModelGate.IsRequired(string,string?)"/> and
 /// <see cref="RealModelGate.ReportInformational"/> with an explicit path), so these tests never mutate process-wide env
 /// — there is no global state to race a concurrent reader.
+///
+/// <para>A clean pass is asserted as <c>Record.ExceptionAsync</c> + <c>ShouldBeNull</c>, never <c>Should.NotThrowAsync</c>:
+/// every <c>AssessLive*</c> call runs its drive under a per-attempt deadline, and <c>NotThrowAsync</c> passes a CANCELED
+/// task without a word — so it could never see that deadline's cancellation escaping the gate.</para>
 /// </summary>
 public sealed class RealModelGateTests
 {
@@ -245,8 +249,10 @@ public sealed class RealModelGateTests
 
             // Under CI the step-summary branch is taken, which used to mean the job LOG said nothing at all about an
             // informational wire's fault — a one-second "pass" with no trace. It must now also print to stdout.
-            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("OpenAI",
+            var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("OpenAI",
                 () => Task.FromResult((false, "OpenAI scored 3/14 golden decisions")), gating: true, stepSummaryPath: path));
+
+            escaped.ShouldBeNull("an informational wire's fault is reported, never thrown — neither as a fault nor as the attempt deadline's cancellation");
         }
         finally
         {
@@ -400,8 +406,10 @@ public sealed class RealModelGateTests
         gated.ShouldBeTrue("a blessed wire's genuine bad verdict must fail the job");
 
         // ok=true passes cleanly.
-        await Should.NotThrowAsync(() =>
+        var escaped = await Record.ExceptionAsync(() =>
             RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((true, "scored 5/5")), gating: true, stepSummaryPath: null));
+
+        escaped.ShouldBeNull("a blessed wire's good verdict passes cleanly — nothing may escape, the attempt deadline's cancellation included");
     }
 
     [Fact]
@@ -412,8 +420,10 @@ public sealed class RealModelGateTests
         {
             // A demoted (informational) lane on the BLESSED wire must NOT fail the job even on a bad verdict — its result
             // is observed (a precondition the blessed decision-eval already measures), not a kill-gate. It is still REPORTED.
-            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
+            var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
                 () => Task.FromResult((false, "whole-loop: no conformant decision")), gating: false, stepSummaryPath: path));
+
+            escaped.ShouldBeNull("a demoted lane's bad verdict is reported, never thrown — neither a fault nor a cancellation may fail the job");
 
             var written = File.ReadAllText(path);
             written.ShouldContain("INFORMATIONAL");
@@ -447,13 +457,19 @@ public sealed class RealModelGateTests
         gated.ShouldBeTrue("a CodeFault on the blessed wire must fail the job — a real code regression");
 
         // CapabilityMiss on the blessed wire is REPORTED, never gates — the gateway model couldn't drive, not a code bug.
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.CapabilityMiss, "no conformant decision")), stepSummaryPath: null));
+        var missEscaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.CapabilityMiss, "no conformant decision")), stepSummaryPath: null));
+
+        missEscaped.ShouldBeNull("a CapabilityMiss on the blessed wire is reported, never thrown — and never a cancellation escaping the attempt deadline");
 
         // Drove passes cleanly.
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.Drove, "plan→spawn→merge→accept")), stepSummaryPath: null));
+        var droveEscaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.Drove, "plan→spawn→merge→accept")), stepSummaryPath: null));
+
+        droveEscaped.ShouldBeNull("a Drove passes cleanly — nothing may escape, the attempt deadline's cancellation included");
 
         // An informational wire never gates — not even on a CodeFault.
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("OpenAI", () => Task.FromResult((RealModelOutcome.CodeFault, "engine threw")), stepSummaryPath: null));
+        var informationalEscaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("OpenAI", () => Task.FromResult((RealModelOutcome.CodeFault, "engine threw")), stepSummaryPath: null));
+
+        informationalEscaped.ShouldBeNull("an informational wire never gates, not even on a CodeFault — nothing may escape, the attempt deadline's cancellation included");
     }
 
     [Fact]
@@ -902,8 +918,9 @@ public sealed class RealModelGateTests
         // best-of-N: a first-attempt capability miss followed by a Drove PASSES — one off-run never reds main.
         var (drive, calls) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("a Drove on the second attempt passes the strict gate — nothing may escape, an attempt deadline's cancellation included");
         calls().ShouldBe(2, "it retried after the miss and stopped on the Drove");
     }
 
@@ -946,8 +963,9 @@ public sealed class RealModelGateTests
         // still PASSES on a 2-attempt budget (the Drove is reached only because the infra attempt did not count).
         var (drive, calls) = Sequence(new TimeoutException("gateway slow"), RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("infra→miss→Drove passes on a 2-attempt budget — nothing may escape, an attempt deadline's cancellation included");
         calls().ShouldBe(3, "the infra attempt did not consume a capability slot, so the later Drove was reached");
     }
 
@@ -971,8 +989,9 @@ public sealed class RealModelGateTests
         // attempt did not burn a capability slot, exactly like a gateway timeout.
         var (drive, calls) = Sequence(new AgentExecutionInfraException("agents=2 (0 succeeded, 2 failed)"), RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("execution-infra→miss→Drove passes on a 2-attempt budget — nothing may escape, an attempt deadline's cancellation included");
         calls().ShouldBe(3, "the execution-infra attempt did not consume a capability slot, so the later Drove was reached");
     }
 
@@ -1042,7 +1061,7 @@ public sealed class RealModelGateTests
         if (gating)
             (await Should.ThrowAsync<SkipException>(act)).Message.ShouldContain("did NOT converge", Case.Insensitive);
         else
-            await Should.NotThrowAsync(act);
+            (await Record.ExceptionAsync(() => act().WaitAsync(TimeSpan.FromSeconds(10)))).ShouldBeNull("a report-only arm's bust is REPORTED, never thrown — a TaskCanceledException is the deadline's own cancel escaping the gate, a TimeoutException a hung drive the deadline no longer bounds");
 
         sw.Stop();
 
@@ -1061,9 +1080,10 @@ public sealed class RealModelGateTests
         };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", hangs, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveAsync("Anthropic", hangs, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)).WaitAsync(TimeSpan.FromSeconds(10)));
         sw.Stop();
 
+        escaped.ShouldBeNull("a bust is reported as a CapabilityMiss, never thrown — a TaskCanceledException is the deadline's own cancel escaping the gate, a TimeoutException a hung drive the deadline no longer bounds");
         sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(10), "the deadline aborted the hung drive — the three-way overload is bounded too");
     }
 
@@ -1080,8 +1100,9 @@ public sealed class RealModelGateTests
             return (true, "attempt " + calls);
         };
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", hangsThenPasses, attempts: 1, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", hangsThenPasses, attempts: 1, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)).WaitAsync(TimeSpan.FromSeconds(10)));
 
+        escaped.ShouldBeNull("the busted attempt routes as infra and the later passing attempt decides — the deadline's own cancel must never escape as the gate's result, and a TimeoutException means the hung drive was no longer bounded");
         calls.ShouldBeGreaterThanOrEqualTo(2, "the busted attempt must not have consumed the single capability slot — the gate had to retry and reach the passing attempt");
     }
 
@@ -1135,7 +1156,9 @@ public sealed class RealModelGateTests
         // An informational wire never reds even on N capability misses — only the blessed wire gates.
         var (drive, _) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.CapabilityMiss);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("OpenAI", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveWholeLoopAsync("OpenAI", drive, attempts: 2, stepSummaryPath: null));
+
+        escaped.ShouldBeNull("an informational wire never reds, even on N capability misses — nothing may escape, an attempt deadline's cancellation included");
     }
 
     [Fact]
@@ -1198,8 +1221,9 @@ public sealed class RealModelGateTests
         // A first-attempt fail followed by an Ok PASSES — a single non-deterministic off-run never reds main.
         var (drive, calls) = BoolSequence(false, true);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("fail→Ok passes the blessed wire — nothing may escape, an attempt deadline's cancellation included");
         calls().ShouldBe(2, "it retried after the fail and stopped on the Ok");
     }
 
@@ -1224,8 +1248,9 @@ public sealed class RealModelGateTests
         // The non-blessed wire never gates → a single reported attempt (best-of-N is a gating-only concern; saves N× cost).
         var (drive, calls) = BoolSequence(false, false);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("OpenAI", drive, attempts: 3, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveBestOfNAsync("OpenAI", drive, attempts: 3, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("an informational wire never gates, even on a fail — nothing may escape, the attempt deadline's cancellation included");
         calls().ShouldBe(1, "an informational wire does NOT spend the best-of-N budget");
     }
 
@@ -1235,8 +1260,9 @@ public sealed class RealModelGateTests
         // infra→fail→Ok still PASSES on a 2-attempt budget — the infra attempt did not burn a capability slot.
         var (drive, calls) = BoolSequence(new TimeoutException("gateway slow"), false, true);
 
-        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+        var escaped = await Record.ExceptionAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
 
+        escaped.ShouldBeNull("infra→fail→Ok passes on a 2-attempt budget — nothing may escape, an attempt deadline's cancellation included");
         calls().ShouldBe(3, "the infra attempt did not consume a slot, so the later Ok was reached");
     }
 

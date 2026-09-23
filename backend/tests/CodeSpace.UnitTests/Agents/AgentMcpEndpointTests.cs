@@ -72,8 +72,8 @@ public class AgentMcpEndpointTests
         }
         await Task.Delay(50);
 
-        await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
-        await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());   // idempotent: a second dispose is a no-op
+        (await RecordDisposeAsync(endpoint)).ShouldBeNull("dispose after a clean connection end must be quiet — a TaskCanceledException is the accept loop's own cancel escaping DisposeAsync, a TimeoutException a pump that never drained");
+        (await RecordDisposeAsync(endpoint)).ShouldBeNull("idempotent: a second dispose is a no-op and must not throw either");
 
         connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "dispose must drop the run from the connect registry");
         scope.Disposed.ShouldBeTrue(customMessage: "dispose must release the dedicated DI scope");
@@ -94,8 +94,8 @@ public class AgentMcpEndpointTests
         // No connection: the accept loop is blocked in AcceptAsync; DisposeAsync cancels + disposes the listener.
         var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "tok", connects, scope, CancellationToken.None, NullLogger.Instance);
 
-        await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
-        await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
+        (await RecordDisposeAsync(endpoint)).ShouldBeNull("dispose cancels the accept loop blocked in AcceptAsync — that cancel must end inside DisposeAsync, never reach the caller as a TaskCanceledException");
+        (await RecordDisposeAsync(endpoint)).ShouldBeNull("idempotent: a second dispose is a no-op and must not throw either");
 
         connects.TryConnect(runId, out _).ShouldBeFalse();
         scope.Disposed.ShouldBeTrue();
@@ -234,7 +234,7 @@ public class AgentMcpEndpointTests
         }
         await Task.Delay(50);
 
-        await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
+        (await RecordDisposeAsync(endpoint)).ShouldBeNull("a connection that closed before its token line must still leave dispose quiet — neither the accept loop's cancel nor a torn socket may escape it");
     }
 
     [Fact]
@@ -256,6 +256,14 @@ public class AgentMcpEndpointTests
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// What escaped one <see cref="AgentMcpEndpoint.DisposeAsync"/>, or null. Recorded rather than asserted with
+    /// <c>Should.NotThrowAsync</c>, which passes a CANCELED task without a word — and dispose cancels its own accept
+    /// loop, so an <see cref="OperationCanceledException"/> leaking out of it is the very escape "never throws" has to
+    /// catch. Bounded, so a dispose that never drains its pumps fails with a TimeoutException instead of hanging the run.
+    /// </summary>
+    private static Task<Exception?> RecordDisposeAsync(AgentMcpEndpoint endpoint) => Record.ExceptionAsync(() => endpoint.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
 
     private static async Task<Socket> ConnectAsync(string socketPath)
     {
