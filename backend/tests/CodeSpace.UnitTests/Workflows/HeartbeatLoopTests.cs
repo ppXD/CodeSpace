@@ -108,6 +108,50 @@ public class HeartbeatLoopTests
         await loop;   // a loop whose every ping threw still returns cleanly on cancel, never surfacing the failure
     }
 
+    /// <summary>
+    /// The reporter is the caller's code, and every caller awaits this loop in the <c>finally</c> around the work it
+    /// protects, so a reporter that throws may end the loop no more than a failing ping may. It did: the report ran outside
+    /// the ping's guard, so a reporter's fault faulted the loop — and the awaiting <c>finally</c> surfaced it IN PLACE of
+    /// the result the loop was keeping alive — while a reporter's <see cref="OperationCanceledException"/> ended the loop
+    /// early and without a word, stopping liveness while the work ran on. Both are a loop that completed by something other
+    /// than its own cancellation, and both red here as a loop that never arms its next beat.
+    /// </summary>
+    [Theory]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(OperationCanceledException))]
+    public async Task A_reporter_that_throws_neither_faults_nor_ends_the_loop(Type faultType)
+    {
+        var time = new HeartbeatClock();
+        var interval = TimeSpan.FromSeconds(30);
+        var reported = new SemaphoreSlim(0);
+        var pings = 0;
+        using var cts = new CancellationTokenSource();
+
+        // Released BEFORE the reporter throws, since nothing after the throw runs — and after the ping has counted, so
+        // each signal reads a settled count.
+        var loop = HeartbeatLoop.RunAsync(
+            _ => { Interlocked.Increment(ref pings); throw new InvalidOperationException("transient db blip"); },
+            interval,
+            _ => { reported.Release(); throw (Exception)Activator.CreateInstance(faultType, "the reporter itself failed")!; },
+            cts.Token,
+            time);
+
+        for (var i = 1; i <= 3; i++)
+        {
+            await AdvanceOneIntervalAsync(time, reported, interval, i);
+
+            Volatile.Read(ref pings).ShouldBe(i, "a reporter that threw must not stop, skip, or double the cadence");
+        }
+
+        cts.Cancel();
+
+        // Recorded rather than asserted with Should.NotThrowAsync, which passes a CANCELED task without a word. Bounded, so
+        // a loop that ignores the cancel fails instead of hanging.
+        var escaped = await Record.ExceptionAsync(() => loop.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        escaped.ShouldBeNull("the loop completes only by its own cancellation, and quietly — whatever escapes it is what the awaiting finally surfaces in place of the result it protects");
+    }
+
     [Fact]
     public async Task Returns_without_pinging_when_already_cancelled()
     {
