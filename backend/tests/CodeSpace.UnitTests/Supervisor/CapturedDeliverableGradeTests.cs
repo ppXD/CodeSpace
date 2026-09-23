@@ -23,10 +23,6 @@ namespace CodeSpace.UnitTests.Supervisor;
 /// resolves, that a unit which captured nothing gets the honest GENUINE <c>no-deliverables-captured</c> verdict (an
 /// agent pass CAN fix "produced nothing"), and that the rebuilt world never outlives the grade.
 /// </summary>
-// The rebuild directory is minted under the process-global WorkspacesRoot (the same root GradePatchAsync uses), and
-// LocalGitWorkspaceProviderTests' cleanup-leak test COUNTS that root's directories. Same collection = serialized, so
-// these transient dirs can never be miscounted as a leak by a test running in parallel.
-[Collection("WorkspaceProvisioning")]
 [Trait("Category", "Unit")]
 public class CapturedDeliverableGradeTests
 {

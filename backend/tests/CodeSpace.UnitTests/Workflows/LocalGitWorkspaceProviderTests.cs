@@ -14,7 +14,6 @@ namespace CodeSpace.UnitTests.Workflows;
 /// process). The clone tests skip where git isn't installed, so cross-host <c>dotnet test</c> stays clean.
 /// </summary>
 [Trait("Category", "Unit")]
-[Collection("WorkspaceProvisioning")]   // the cleanup-leak test counts the process-global WorkspacesRoot — serialize it against parallel workspace-creators
 public sealed class LocalGitWorkspaceProviderTests
 {
     // ─── Pure auth-URL builder ───────────────────────────────────────────────
@@ -977,25 +976,28 @@ public sealed class LocalGitWorkspaceProviderTests
     public async Task A_later_repos_clone_failure_removes_the_whole_partial_workspace()
     {
         // repo[0] clones fine, repo[1]'s origin is missing → the whole workspace tree (incl. the succeeded repo[0])
-        // is removed by the catch, leaking nothing.
+        // is removed by the catch, leaking nothing. Counted under a root this test owns: the default root
+        // (<temp>/codespace-agent-workspaces) is written by every process on the host, so another run's workspace
+        // landing mid-test read here as a leak.
         if (!await GitAvailableAsync()) return;
+
+        using var root = new TempDir();
+        var provider = NewProvider(root.Path);
 
         using var web = new TempDir();
         await SeedOriginAsync(web.Path, "web.txt", "w");
         var missing = Path.Combine(Path.GetTempPath(), "does-not-exist-" + Guid.NewGuid().ToString("N"));
 
+        await using (await provider.PrepareAsync(MultiRepo((alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true)), CancellationToken.None))
+            Directory.GetDirectories(root.Path).ShouldHaveSingleItem("the provider provisions under the root it was given — otherwise the empty root below would hold with no cleanup at all");
+
         var provision = MultiRepo(
             (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
             (alias: "api", path: missing, access: WorkspaceAccess.Write, primary: false));
 
-        var before = Directory.Exists(LocalGitWorkspaceProvider.WorkspacesRoot)
-            ? Directory.GetDirectories(LocalGitWorkspaceProvider.WorkspacesRoot).Length : 0;
+        await Should.ThrowAsync<WorkspaceException>(() => provider.PrepareAsync(provision, CancellationToken.None));
 
-        await Should.ThrowAsync<WorkspaceException>(() => NewProvider().PrepareAsync(provision, CancellationToken.None));
-
-        var after = Directory.Exists(LocalGitWorkspaceProvider.WorkspacesRoot)
-            ? Directory.GetDirectories(LocalGitWorkspaceProvider.WorkspacesRoot).Length : 0;
-        after.ShouldBe(before, "a partial multi-repo clone leaves no workspace dir behind");
+        Directory.GetDirectories(root.Path).ShouldBeEmpty("a partial multi-repo clone leaves no workspace dir behind");
     }
 
     // ─── Workspace janitor (reclaim clones orphaned by a crashed worker) ──────
@@ -1077,6 +1079,9 @@ public sealed class LocalGitWorkspaceProviderTests
 
     private static LocalGitWorkspaceProvider NewProvider() =>
         new(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+    private static LocalGitWorkspaceProvider NewProvider(string workspacesRoot) =>
+        new(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }), NullLogger<LocalGitWorkspaceProvider>.Instance, workspacesRoot);
 
     private static string AsFileUrl(string path) => new Uri(path).AbsoluteUri;
 

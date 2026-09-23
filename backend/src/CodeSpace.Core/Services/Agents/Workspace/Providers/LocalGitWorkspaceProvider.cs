@@ -39,11 +39,16 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
     private readonly ISandboxRunnerRegistry _runners;
     private readonly ILogger<LocalGitWorkspaceProvider> _logger;
+    private readonly string _workspacesRoot;
 
-    public LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger)
+    public LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger) : this(runners, logger, WorkspacesRoot) { }
+
+    /// <summary>Provisions (and sweeps) under <paramref name="workspacesRoot"/> instead of the worker-wide <see cref="WorkspacesRoot"/>, which every process on the host writes — so a test can own every directory it counts.</summary>
+    internal LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger, string workspacesRoot)
     {
         _runners = runners;
         _logger = logger;
+        _workspacesRoot = workspacesRoot;
     }
 
     public string Kind => SandboxKinds.Local;
@@ -53,9 +58,9 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         if (request.Repositories.Count == 0)
             throw new WorkspaceException("Workspace provision has no repositories to clone.");
 
-        Directory.CreateDirectory(WorkspacesRoot);
+        Directory.CreateDirectory(_workspacesRoot);
 
-        var workspaceRoot = Path.Combine(WorkspacesRoot, Guid.NewGuid().ToString("N"));
+        var workspaceRoot = Path.Combine(_workspacesRoot, Guid.NewGuid().ToString("N"));
         var single = request.Repositories.Count == 1;
 
         // Fail loud BEFORE any clone if a multi-repo provision's per-repo mount segments are unsafe or collide.
@@ -247,7 +252,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
     /// <summary>Reclaim local clones older than the staleness threshold. No-op when the root was never created.</summary>
     public Task<int> SweepStaleAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(SweepStale(WorkspacesRoot, ReadStaleThreshold(), DateTime.UtcNow, cancellationToken));
+        Task.FromResult(SweepStale(_workspacesRoot, ReadStaleThreshold(), DateTime.UtcNow, cancellationToken));
 
     /// <summary>The configured staleness threshold, or the 2h default when the env var is absent / unparseable / non-positive. Pure + internal so it's unit-pinned.</summary>
     internal static TimeSpan ReadStaleThreshold()

@@ -48,7 +48,7 @@ public sealed class RealModelPlannerRouteSnapshotFlowTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture, inProcessPool: false);
         using var rootScope = _fixture.BeginScope();
         var jobs = rootScope.Resolve<InMemoryBackgroundJobClient>();
-        jobs.AutoExecute = false;
+        using var manual = jobs.ManualExecution();
         var classifier = new CountingClassifier(new LlmEffortClassifier(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, RealModelLiveWire.Credential(provider, baseUrl, apiKey)), rootScope.Resolve<ITaskRecipeRegistry>(), new HeuristicEffortClassifier()));
         using var scope = _fixture.BeginScope(b => b.RegisterInstance(new EffortClassifierRegistry([new HeuristicEffortClassifier(), classifier])).As<IEffortClassifierRegistry>());
         var input = new TaskLaunchRequest { TeamId = teamId, ActorUserId = userId, SurfaceKind = "chat", TaskText = "Write a concise explanation of how a durable queue recovers an interrupted job", Autonomy = "Confined", AcceptanceCriteria = ["Explain retries and duplicate suppression"] };

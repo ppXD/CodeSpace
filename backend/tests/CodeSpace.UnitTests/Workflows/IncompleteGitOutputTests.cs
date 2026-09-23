@@ -8,7 +8,6 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 [Trait("Category", "Unit")]
-[Collection("WorkspaceProvisioning")]
 public sealed class IncompleteGitOutputTests
 {
     [Fact]
