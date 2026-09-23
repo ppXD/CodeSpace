@@ -4,7 +4,7 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 
 /// <summary>
 /// The invocation cannot be executed as written: one of its argv or environment strings is past the kernel's
-/// per-string ceiling. Its own exit scenario rather than a <see cref="NativeLaunchException"/> reason, because the two
+/// per-string ceiling, or its standard input is past what the launch pipe can carry. Its own exit scenario rather than a <see cref="NativeLaunchException"/> reason, because the two
 /// differ in the one way a caller acts on. A launch-slot refusal is about THIS host — a foreign boot, a binding
 /// conflict, a missing bootstrap — and another worker may well admit it, so it stays retryable. These bytes are
 /// refused by every kernel on every host, so a retry is N identical refusals, each one burning budget and burying the

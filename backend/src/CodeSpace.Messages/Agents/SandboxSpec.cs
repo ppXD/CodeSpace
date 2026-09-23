@@ -14,8 +14,9 @@ public sealed record SandboxSpec
     public IReadOnlyList<string> Args { get; init; } = Array.Empty<string>();
 
     /// <summary>
-    /// Text handed to the child on stdin, UTF-8 without a BOM, followed by EOF. <c>null</c> → the child reads EOF at
-    /// once and never inherits the runner's own stdin.
+    /// Text handed to the child on stdin, UTF-8 without a BOM, followed by EOF. <c>null</c> → on the durable path the
+    /// child reads EOF at once (<c>/dev/null</c>), never the worker's own stdin; the non-durable paths leave stdin
+    /// exactly as they always have.
     ///
     /// <para>The carrier for anything that may be large. The kernel caps EVERY single argv or environment string at
     /// <c>MAX_ARG_STRLEN</c> (131071 content bytes on a 4 KiB page) no matter how small the total is, so a value that

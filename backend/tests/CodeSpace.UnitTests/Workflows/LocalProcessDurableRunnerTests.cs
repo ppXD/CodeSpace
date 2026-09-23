@@ -74,6 +74,29 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_CSP_IN_in_the_spec_environment_cannot_choose_the_agent_stdin()
+    {
+        // The supervisor opens CSP_IN on the HOST, outside bwrap. If a spec's own environment could set it, the agent
+        // would read any host file as its stdin — a confinement bypass the other CSP_* paths never had, because the
+        // runner always overwrites them. So must this one, including when the spec carries no StandardInput.
+        if (OperatingSystem.IsWindows()) return;
+        var planted = Path.Combine(Path.GetTempPath(), "cs-planted-stdin-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(planted, "host-secret\n");
+
+        try
+        {
+            var spec = ContractSpecs.EchoStdin(null) with { Args = ["-c", "cat; printf 'end\\n'"], Environment = new Dictionary<string, string> { ["CSP_IN"] = planted } };
+
+            var (result, lines) = await AttachCollectAsync(await LaunchAsync(spec));
+
+            result.Status.ShouldBe(SandboxStatus.Success);
+            lines.ShouldNotContain("host-secret", customMessage: "a spec-supplied CSP_IN reached the host-side redirect");
+            lines.ShouldHaveSingleItem().ShouldBe("end");
+        }
+        finally { File.Delete(planted); }
+    }
+
+    [Fact]
     public async Task The_spooled_standard_input_is_owner_only_and_never_named_to_the_child()
     {
         if (OperatingSystem.IsWindows()) return;

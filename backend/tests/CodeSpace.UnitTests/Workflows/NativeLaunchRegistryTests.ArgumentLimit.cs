@@ -58,6 +58,25 @@ public sealed partial class NativeLaunchRegistryTests
     }
 
     [Fact]
+    public async Task A_standard_input_the_launch_pipe_cannot_carry_is_refused_before_a_spool_exists()
+    {
+        // The prompt now rides stdin, which the kernel does not cap — but it still crosses the private broker pipe inside
+        // the invocation frame, and that frame is bounded. Past the bound the write used to fail AFTER transmission was
+        // marked started, which skips the netns/cgroup teardown on purpose (an ACK may have been lost) and surfaces as a
+        // generic executor error the node retries. Refusing here keeps it the same early, attributable, terminal
+        // refusal an oversized argument gets.
+        var key = "stdin-limit-" + Guid.NewGuid().ToString("N");
+        var request = new SandboxLaunchRequest(new SandboxSpec { Command = "/bin/cat", StandardInput = new string('x', NativeLaunchProtocol.MaximumFrameBytes / 2 + 1) }, key);
+
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(request, CancellationToken.None));
+
+        ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong);
+        refusal.Message.ShouldContain("standard input", Case.Insensitive);
+        refusal.Message.ShouldNotContain("xxxx", Case.Sensitive, "a refusal is host metadata — never the prompt itself");
+        Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse("refused before anything is created on disk or any commitment is consumed");
+    }
+
+    [Fact]
     public async Task An_oversized_environment_value_is_refused_without_putting_it_in_the_message()
     {
         var key = "argv-limit-" + Guid.NewGuid().ToString("N");
