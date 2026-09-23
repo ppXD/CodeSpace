@@ -299,20 +299,32 @@ public sealed class AgentCodeNode : INodeRuntime
     private static NodeResult MapResult(JsonElement payload, decimal? maxCostUsd)
     {
         var status = ReadString(payload, "status");
+        var succeeded = status == nameof(AgentRunStatus.Succeeded);
+        var unpriced = false;
 
         if (maxCostUsd is { } cap)
         {
-            if (ReadFlag(payload, "costIndeterminate"))
+            var indeterminate = ReadFlag(payload, "costIndeterminate");
+            var spendMissing = !TryReadNonNegativeDecimal(payload, "cumulativeCostUsd", out var cumulative) || cumulative is null;
+
+            // A SUCCEEDED run that cannot be priced fails closed on its price: its output would otherwise escape the
+            // cap unaccounted. A FAILED one has already failed, and its own cause is the sentence the author can act
+            // on — a launch refused for its size started no process, so it never had a spend to read, and the
+            // missing price used to stand in for "shorten the goal". It keeps its cause and is only never retried
+            // (below), which is what the retry's own prior-spend check would decide one attempt later anyway.
+            if (indeterminate && succeeded)
                 return NodeResult.Fail($"Agent run cannot be priced under the monitored ${cap.ToString(CultureInfo.InvariantCulture)} cost cap.", retryable: false);
 
-            if (!TryReadNonNegativeDecimal(payload, "cumulativeCostUsd", out var cumulative) || cumulative is null)
+            if (spendMissing && succeeded)
                 return NodeResult.Fail($"Agent run cannot be priced under the monitored ${cap.ToString(CultureInfo.InvariantCulture)} cost cap because cumulative spend is missing.", retryable: false);
 
-            if (cumulative > cap || (cumulative == cap && status != nameof(AgentRunStatus.Succeeded)))
-                return NodeResult.Fail($"Agent run stopped: {Supervisor.SupervisorStopReasons.CostCapReached} (${cumulative.Value.ToString(CultureInfo.InvariantCulture)} of ${cap.ToString(CultureInfo.InvariantCulture)} observed).", retryable: false);
+            unpriced = indeterminate || spendMissing;
+
+            if (!unpriced && (cumulative > cap || (cumulative == cap && !succeeded)))
+                return NodeResult.Fail($"Agent run stopped: {Supervisor.SupervisorStopReasons.CostCapReached} (${cumulative!.Value.ToString(CultureInfo.InvariantCulture)} of ${cap.ToString(CultureInfo.InvariantCulture)} observed).", retryable: false);
         }
 
-        if (status != nameof(AgentRunStatus.Succeeded))
+        if (!succeeded)
         {
             var error = ReadString(payload, "error");
 
@@ -390,7 +402,7 @@ public sealed class AgentCodeNode : INodeRuntime
                                 && !escalationAvailable)
                                 || mitigationSpent;
 
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}", retryable: !deterministic);
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}{UnpricedRetrySuffix(unpriced && !deterministic, maxCostUsd)}", retryable: !deterministic && !unpriced);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };
@@ -423,6 +435,10 @@ public sealed class AgentCodeNode : INodeRuntime
         Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the model refused the request as larger than its context window, and a respawn would send at least as much — give the agent less, or choose a model with a larger window)",
         _ => "",
     };
+
+    /// <summary>Why a failure a respawn could otherwise change is not respawned: its spend is unknown, so a retry cannot be bought under the cap. Empty whenever that is not the deciding fact, so the cause stays the whole message.</summary>
+    private static string UnpricedRetrySuffix(bool decides, decimal? maxCostUsd) =>
+        decides ? $"; not retried: its spend cannot be priced under the monitored ${maxCostUsd!.Value.ToString(CultureInfo.InvariantCulture)} cost cap" : "";
 
     /// <summary>
     /// P2.3: stamp the retry-resume hint from the RETIRING prior attempt's own resume payload (the same

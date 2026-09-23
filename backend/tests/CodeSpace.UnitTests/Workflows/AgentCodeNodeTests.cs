@@ -565,6 +565,38 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task A_launch_refused_for_its_size_on_a_cost_capped_node_says_why_instead_of_cannot_be_priced()
+    {
+        // Refused before any CLI started, so nothing was spent and there is nothing to price. The cost cap's
+        // "cannot be priced — cumulative spend is missing" used to replace the one sentence that says what to shorten.
+        var config = new Dictionary<string, JsonElement> { ["maxCostUsd"] = Num(5) };
+        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error = "the agent's goal is 1100000 characters; codex accepts at most 1048576", exitReason = FailureCodes.SandboxArgumentTooLong })).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldContain("codex accepts at most 1048576");
+        result.Error.ShouldNotContain("cannot be priced", Case.Insensitive);
+    }
+
+    [Fact]
+    public async Task An_unpriced_failure_on_a_cost_capped_node_keeps_its_cause_and_is_not_retried()
+    {
+        // A crash is ordinarily worth a respawn, but under a cap an unpriced attempt cannot buy one. The node says so
+        // AFTER the cause, rather than instead of it.
+        var config = new Dictionary<string, JsonElement> { ["maxCostUsd"] = Num(5) };
+        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error = "claude exited with code 1", exitReason = "non-zero-exit" })).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldStartWith("Agent run did not succeed: claude exited with code 1");
+        result.Error.ShouldEndWith("; not retried: its spend cannot be priced under the monitored $5 cost cap");
+    }
+
+    [Fact]
     public void The_two_watchdogs_are_classified_alike_because_neither_can_see_why_the_process_went_quiet()
     {
         // The asymmetry this closes, stated as the invariant rather than as two separate rows: the wall-clock
