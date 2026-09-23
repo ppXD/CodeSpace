@@ -1,4 +1,5 @@
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using Xunit;
 
 namespace CodeSpace.E2ETests.Infrastructure;
@@ -27,4 +28,4 @@ namespace CodeSpace.E2ETests.Infrastructure;
 /// <c>FakeAgentCliMarker</c>, which holds regardless of who runs when.</para>
 /// </summary>
 [CollectionDefinition(PostgresCollection.Name)]
-public sealed class PostgresCollectionE2E : ICollectionFixture<PostgresFixture> { }
+public sealed class PostgresCollectionE2E : ICollectionFixture<PostgresFixture>, IClassFixture<PerClassJobClientReset> { }

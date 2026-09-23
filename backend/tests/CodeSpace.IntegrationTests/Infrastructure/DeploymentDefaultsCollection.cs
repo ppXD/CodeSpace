@@ -13,7 +13,7 @@ namespace CodeSpace.IntegrationTests.Infrastructure;
 /// suite.</para>
 /// </summary>
 [CollectionDefinition(Name)]
-public class DeploymentDefaultsCollection : ICollectionFixture<PostgresFixture>
+public class DeploymentDefaultsCollection : ICollectionFixture<PostgresFixture>, IClassFixture<Jobs.PerClassJobClientReset>
 {
     public const string Name = "DeploymentDefaults";
 }

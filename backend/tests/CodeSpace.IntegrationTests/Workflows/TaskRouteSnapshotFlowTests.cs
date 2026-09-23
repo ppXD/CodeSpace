@@ -24,11 +24,20 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class TaskRouteSnapshotFlowTests
+public sealed class TaskRouteSnapshotFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
+    private readonly IDisposable _manualExecution;
 
-    public TaskRouteSnapshotFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+    public TaskRouteSnapshotFlowTests(PostgresFixture fixture)
+    {
+        _fixture = fixture;
+
+        using var scope = _fixture.BeginScope();
+        _manualExecution = scope.Resolve<InMemoryBackgroundJobClient>().ManualExecution();   // every test launches to read the snapshot contract; dispatches are recorded, never executed
+    }
+
+    public void Dispose() => _manualExecution.Dispose();
 
     [Fact]
     public async Task A_creator_scope_with_a_tracked_preview_reads_another_workers_committed_consumption()
@@ -357,8 +366,6 @@ public sealed class TaskRouteSnapshotFlowTests
     private async Task<TaskLaunchRequest> InputAsync()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        using var scope = _fixture.BeginScope();
-        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = false;
         return new TaskLaunchRequest { TeamId = teamId, ActorUserId = userId, SurfaceKind = "chat", TaskText = "Explain the preview consumption contract", RequestedEffort = "quick", Autonomy = "Confined" };
     }
 }

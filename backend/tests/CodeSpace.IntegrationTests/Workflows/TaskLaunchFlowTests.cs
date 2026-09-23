@@ -121,7 +121,7 @@ public class TaskLaunchFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = false;   // route assertion only — don't run the agent
+        using var manual = jobClient.ManualExecution();   // route assertion only — don't run the agent
 
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         var result = await scope.Resolve<IMediator>().Send(new LaunchTaskCommand
@@ -1391,7 +1391,7 @@ public class TaskLaunchFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = false;   // inspect the frozen snapshot; the run itself is pinned by the quick-tier E2E above
+        using var manual = jobClient.ManualExecution();   // inspect the frozen snapshot; the run itself is pinned by the quick-tier E2E above
 
         var auto = new TaskLaunchRequest
         {

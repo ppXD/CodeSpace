@@ -35,7 +35,10 @@ namespace CodeSpace.IntegrationTests.Infrastructure.Jobs;
 ///
 /// <para><b>AutoExecute = false</b> opts out of execution entirely — Enqueue only records.
 /// Use this when the test wants to assert intermediate state (e.g. "row is Enqueued after
-/// dispatch but before worker pickup") or to test the dispatcher CAS in isolation.</para>
+/// dispatch but before worker pickup") or to test the dispatcher CAS in isolation. Take it through
+/// <see cref="ManualExecution"/> so the switch ends with the test that made it: the fixture holds ONE
+/// instance, and a class that leaves it record-only strands every later class that drains.
+/// <see cref="PerClassJobClientReset"/> hands each test class a fresh client either way.</para>
 ///
 /// <para><b>ThrowOnEnqueue</b> — when non-null, the next Enqueue call throws this exception
 /// (then the field clears). Exercises the dispatcher's revert-on-throw path.</para>
@@ -84,6 +87,26 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
             _calls.Clear();
             _pending.Clear();
         }
+    }
+
+    /// <summary>
+    /// Record-only until the returned scope is disposed, which puts <see cref="AutoExecute"/> back to what it was and
+    /// clears what was recorded. Use it as <c>using var manual = jobs.ManualExecution();</c> rather than assigning
+    /// <c>AutoExecute = false</c>, which outlives its test on every exit path that does not restore it.
+    /// </summary>
+    public IDisposable ManualExecution()
+    {
+        var restore = new ExecutionRestore(this, AutoExecute);
+        AutoExecute = false;
+        return restore;
+    }
+
+    /// <summary>Back to the constructed state: executing, nothing armed to throw, nothing recorded or queued.</summary>
+    public void Reset()
+    {
+        AutoExecute = true;
+        ThrowOnEnqueue = null;
+        Clear();
     }
 
     /// <summary>
@@ -240,6 +263,20 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
         }
 
         return (call.Method.Name, runId);
+    }
+
+    private sealed class ExecutionRestore : IDisposable
+    {
+        private readonly InMemoryBackgroundJobClient _client;
+        private readonly bool _autoExecute;
+
+        public ExecutionRestore(InMemoryBackgroundJobClient client, bool autoExecute) { _client = client; _autoExecute = autoExecute; }
+
+        public void Dispose()
+        {
+            _client.AutoExecute = _autoExecute;
+            _client.Clear();
+        }
     }
 }
 

@@ -115,7 +115,7 @@ public class TaskRoutePreviewFlowTests
 
         var jobClient = ResolveJobClient();
         jobClient.Clear();
-        jobClient.AutoExecute = false;   // provenance assertion only — never dispatch the agent
+        using var manual = jobClient.ManualExecution();   // provenance assertion only — never dispatch the agent
 
         var result = await LaunchAsync(new TaskLaunchRequest
         {

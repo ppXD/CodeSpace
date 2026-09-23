@@ -26,11 +26,20 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>Real launch, snapshot, read, and replay contract paths over Postgres. No CLI or model is executed or substituted.</summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class TaskLaunchContractFlowTests
+public class TaskLaunchContractFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
+    private readonly IDisposable _manualExecution;
 
-    public TaskLaunchContractFlowTests(PostgresFixture fixture) => _fixture = fixture;
+    public TaskLaunchContractFlowTests(PostgresFixture fixture)
+    {
+        _fixture = fixture;
+
+        using var scope = _fixture.BeginScope();
+        _manualExecution = scope.Resolve<InMemoryBackgroundJobClient>().ManualExecution();   // launches, starts and replays are recorded, never executed: every test here drives the engine itself or not at all
+    }
+
+    public void Dispose() => _manualExecution.Dispose();
 
     [Theory]
     [InlineData(TaskEffortModes.Quick, TaskProjectionKinds.SingleAgent)]
@@ -40,7 +49,6 @@ public class TaskLaunchContractFlowTests
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         using var scope = _fixture.BeginScope();
-        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = false;
         var request = new TaskLaunchRequest
         {
             TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
@@ -109,7 +117,6 @@ public class TaskLaunchContractFlowTests
         var serverContract = hasRecordedIntent ? Contract(teamId) : null;
         context = context with { LaunchContract = serverContract };
         using var scope = _fixture.BeginScope(b => b.RegisterInstance(new TaskProjectionRegistry([new ProvenanceReplacingBuilder()])).As<ITaskProjectionRegistry>());
-        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = false;
 
         var handle = await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, null, CancellationToken.None);
         var detail = await scope.Resolve<IWorkflowService>().GetRunAsync(handle.RunId, teamId, CancellationToken.None);
@@ -215,7 +222,6 @@ public class TaskLaunchContractFlowTests
     private async Task<Guid> StartAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
         using var scope = _fixture.BeginScope();
-        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = false;
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, "{}", null, null, null, CancellationToken.None);
     }
 
