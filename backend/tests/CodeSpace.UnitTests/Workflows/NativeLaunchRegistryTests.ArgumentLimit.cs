@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Failures;
+using CodeSpace.NativeLaunch;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -74,6 +75,47 @@ public sealed partial class NativeLaunchRegistryTests
         refusal.Message.ShouldContain("standard input", Case.Insensitive);
         refusal.Message.ShouldNotContain("xxxx", Case.Sensitive, "a refusal is host metadata — never the prompt itself");
         Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse("refused before anything is created on disk or any commitment is consumed");
+    }
+
+    [Fact]
+    public async Task A_launch_frame_too_large_for_the_pipe_is_refused_before_transmission_even_when_stdin_is_small()
+    {
+        // The standard-input preflight above is the cheap, early cut for the common carrier. It is not the whole frame:
+        // a CONTINUE carries the restored session transcript in ConfigHomeFiles (captured up to 32 MiB), and the frame
+        // write used to fail only AFTER transmission was marked started — which skips the netns/cgroup teardown on
+        // purpose and surfaces as a generic, retried "Native invocation exceeds its pipe bound." The encoded frame is
+        // now measured before transmission, so the refusal is the same terminal one and the start slot is released.
+        var key = "frame-limit-" + Guid.NewGuid().ToString("N");
+        var transcript = new ConfigHomeFile { RelativePath = "projects/x/restored.jsonl", Content = new string('x', NativeLaunchProtocol.MaximumFrameBytes + 1) };
+        var spec = new SandboxSpec { Command = "/bin/cat", StandardInput = "continue", ConfigHomeFiles = [transcript], TimeoutSeconds = 10 };
+
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, key), CancellationToken.None));
+
+        ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong, customMessage: "a frame no pipe can carry is refused identically on every attempt — it must not be retried as a generic executor error");
+        refusal.Message.ShouldContain("launch pipe", Case.Insensitive);
+        refusal.Message.ShouldNotContain("xxxx", Case.Sensitive, "a refusal is host metadata — never the transcript itself");
+
+        var receipt = await WaitForReceiptStateAsync(NativeLaunchFiles.DirectoryFor(LocalProcessRunner.SpoolDirectoryFor(key)), state => state != "committed");
+        receipt.ShouldBe("rejected", customMessage: "nothing was transmitted, so the start slot must be released cleanly — 'indeterminate' would mean the refusal came after the ACK point");
+    }
+
+    /// <summary>The receipt state once <paramref name="settled"/> holds, bounded (Rule 12.10) — the broker writes it after it reads EOF on the frame it was never sent.</summary>
+    private static async Task<string> WaitForReceiptStateAsync(string directory, Func<string, bool> settled)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        while (true)
+        {
+            try
+            {
+                var state = NativeLaunchFiles.Read<NativeLaunchReceipt>(directory, NativeLaunchProtocol.ReceiptFile).State;
+                if (settled(state)) return state;
+            }
+            catch (Exception error) when (error is FileNotFoundException or System.Text.Json.JsonException or IOException) { }
+
+            if (deadline.IsCancellationRequested) throw new TimeoutException($"the launch receipt under {directory} never left 'committed' within 15s — inspect receipt.json and bootstrap.err there by hand");
+            await Task.Delay(50);
+        }
     }
 
     [Fact]
