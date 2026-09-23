@@ -373,13 +373,15 @@ public sealed class AgentCodeNode : INodeRuntime
             // that ALREADY ran mitigated (`thinkingDisabled`, projected from its own dispatched envelope) and died
             // of the SAME fault has proven the repair does not hold here, so a second identical respawn would only
             // re-bill a broken gateway and bury the one fact the operator needs.
-            var cause = Supervisor.AgentRetryCauses.Classify(error);
+            var cause = Supervisor.AgentRetryCauses.Classify(exitReason, error);
             var formatFault = cause == Supervisor.AgentRetryCauses.GatewayFormatFault;
             var mitigationSpent = formatFault && ReadFlag(payload, "thinkingDisabled");
 
-            // The model refused the request as larger than its context window. A respawn warm-resumes, so it re-sends
-            // the goal inside a LONGER request and is refused again, harder — every attempt after the first is an
-            // identical, billed refusal. Deterministic unless a stronger model is on offer, which may have a larger window.
+            // The model refused the request as larger than its context window — typed by the harness from its CLI's own
+            // fields, never read from the error text. A respawn warm-resumes, so it re-sends the goal inside a LONGER
+            // request, and a fresh one sends the same goal: either way it sends at least as much and is refused the
+            // same way. The escalation escape below never opens for it: the trigger proposes a stronger model only on a
+            // failed grade, and stands down for any classified cause, so an overflowing attempt carries no proposal.
             var contextWindowExceeded = cause == Supervisor.AgentRetryCauses.ContextWindowExceeded;
 
             var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong || contextWindowExceeded)
@@ -418,7 +420,7 @@ public sealed class AgentCodeNode : INodeRuntime
     {
         Supervisor.AgentRetryCauses.GatewayFormatFault when mitigationSpent => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault}: a fresh conversation with extended thinking disabled hit the same fault)",
         Supervisor.AgentRetryCauses.GatewayFormatFault => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault})",
-        Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the goal is larger than this model's context window, so every attempt is refused the same way — shorten the goal, or choose a model with a larger window)",
+        Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the model refused the request as larger than its context window, and a respawn would send at least as much — give the agent less, or choose a model with a larger window)",
         _ => "",
     };
 

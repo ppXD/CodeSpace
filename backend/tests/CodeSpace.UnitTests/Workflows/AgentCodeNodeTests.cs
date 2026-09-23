@@ -555,7 +555,7 @@ public class AgentCodeNodeTests
     {
         // A respawn warm-resumes the conversation, so it re-sends the goal inside a LONGER request — it overflows again,
         // harder. Every attempt after the first is an identical, billed refusal that buries the one fact the author needs.
-        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error, exitReason = "non-zero-exit" })).RootElement;
+        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error, exitReason = AgentTerminalOutcomeReader.ContextWindowExceededExitReason })).RootElement;
 
         var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
 
