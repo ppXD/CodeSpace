@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
@@ -853,9 +854,14 @@ public static class RoomNarrative
 
         if (error.Contains(Agents.Credentials.ModelCredentialLeaseLostException.Explanation, StringComparison.Ordinal)) return false;
 
-        return new[] { "401", "unauthorized", "authentication", "api key", "api-key", "credential", "invalid_api_key" }
+        if (UnauthorizedStatus.IsMatch(error)) return true;
+
+        return new[] { "unauthorized", "authentication", "api key", "api-key", "credential", "invalid_api_key" }
             .Any(m => error.Contains(m, StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>An HTTP 401 as a status on its own — never the digits inside a longer number, such as the length a size refusal reports (a 1401234-character goal is not a rejected key).</summary>
+    private static readonly Regex UnauthorizedStatus = new(@"(?<!\d)401(?!\d)", RegexOptions.CultureInvariant);
 
     private static string FailureText(WorkflowRunStatus status, IReadOnlyList<RunPhase> narrativePhases, string? error)
     {
