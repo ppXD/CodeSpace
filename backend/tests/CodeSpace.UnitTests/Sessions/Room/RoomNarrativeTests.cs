@@ -1,4 +1,6 @@
 using CodeSpace.Core.Services.Agents.Credentials;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Sessions.Journal.FactsSources;
 using CodeSpace.Core.Services.Sessions.Room;
 using CodeSpace.Core.Services.Tasks.Phases;
@@ -234,6 +236,32 @@ public class RoomNarrativeTests
         diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials, "rotating a working key fixes nothing and costs the operator the hour this failure exists to save");
         diag.Text.ShouldContain("worker", Case.Insensitive, "the diagnostic must show what actually happened");
         diag.Text.ShouldContain("Retry", Case.Insensitive, "and what to do about it");
+    }
+
+    [Fact]
+    public void A_size_refusal_whose_count_contains_401_is_not_dressed_up_as_a_rejected_credential()
+    {
+        // The refusal names how long the goal is, and a length such as 1401234 carries "401" inside it. Read as a
+        // substring, that sent the author to rotate a working key for a goal that was simply too long.
+        var refusal = Should.Throw<SandboxArgumentTooLongException>(() => new CodexHarness().BuildInvocation(new AgentTask { Goal = new string('x', 1_401_234), Harness = CodexHarness.HarnessKind, WorkspaceDirectory = "/tmp/ws" }));
+        var facts = new RoomTurnFacts { RawError = $"Agent run did not succeed: {refusal.Message}" };
+
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: facts).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        refusal.Message.ShouldContain("1401234", customMessage: "fixture check: the producer's own text carries the digits");
+        diag.Title.ShouldNotBe("Authentication failed");
+        diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials);
+    }
+
+    [Theory]
+    [InlineData("OpenAI API error: 401 Unauthorized")]
+    [InlineData("API Error: 401 {\"type\":\"error\"}")]
+    [InlineData("request failed with status code 401")]
+    public void A_401_status_still_reads_as_a_rejected_credential(string error)
+    {
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: new RoomTurnFacts { RawError = error }).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.Title.ShouldBe("Authentication failed");
     }
 
     [Fact]
