@@ -12,8 +12,9 @@ public static class HeartbeatLoop
     /// <summary>
     /// Wait <paramref name="interval"/>, then invoke <paramref name="ping"/>; repeat until
     /// <paramref name="cancellationToken"/> fires. A ping that throws (a transient DB blip) is reported to
-    /// <paramref name="onPingError"/> and the loop continues — a missed heartbeat must never kill liveness.
-    /// Returns cleanly when cancelled; never surfaces <see cref="OperationCanceledException"/> to the caller.
+    /// <paramref name="onPingError"/> and the loop continues — a missed heartbeat must never kill liveness, and neither
+    /// may a reporter that throws in turn. So the loop completes only by its own cancellation, and then cleanly: never
+    /// faulted, never surfacing <see cref="OperationCanceledException"/> to the caller.
     /// The first ping is deferred by one interval because the claim already stamped an initial heartbeat.
     ///
     /// <para><paramref name="timeProvider"/> exists so the cadence can be driven deterministically in a test instead
@@ -45,13 +46,31 @@ public static class HeartbeatLoop
                 }
                 catch (Exception ex)
                 {
-                    onPingError(ex);
+                    ReportQuietly(onPingError, ex);
                 }
             }
         }
         catch (OperationCanceledException)
         {
             // Expected: the harness finished or the worker is stopping. Not an error.
+        }
+    }
+
+    /// <summary>
+    /// Hands a failed ping to the caller's reporter and lets nothing the reporter throws escape. Every caller awaits the
+    /// loop in the <c>finally</c> around the work it protects, so a reporter's fault that faulted the loop would replace
+    /// that work's result with the error of a log line, and a reporter's <see cref="OperationCanceledException"/> caught
+    /// by the loop's own cancellation exit would end it early, stopping liveness while the work ran on.
+    /// </summary>
+    private static void ReportQuietly(Action<Exception> onPingError, Exception exception)
+    {
+        try
+        {
+            onPingError(exception);
+        }
+        catch (Exception)
+        {
+            // The reporter was the one place to say the ping failed, and it failed too; there is nowhere left to say it.
         }
     }
 }
