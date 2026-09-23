@@ -134,7 +134,7 @@ public static class VariableResolver
                 JsonValueKind.String => value.GetString() ?? "",
                 JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => value.ToString(),
                 JsonValueKind.Null or JsonValueKind.Undefined => "",
-                _ => JsonSerializer.Serialize(value)
+                _ => JsonSerializer.Serialize(value, WorkflowJson.InterpolatedText)
             };
         });
     }
