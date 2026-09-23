@@ -97,19 +97,24 @@ public sealed partial class LocalProcessRunner
     {
         if (spec.StandardInput is not { } input) return null;
 
-        var encoded = JsonSerializer.SerializeToUtf8Bytes(input, NativeLaunchProtocol.Json).Length;
-        var limit = NativeLaunchProtocol.MaximumFrameBytes / 2;
+        var encoded = NativeLaunchProtocol.EncodedBytes(input);
+        var limit = NativeLaunchProtocol.LargeCarrierBudgetBytes;
 
         return encoded <= limit ? null : $"the agent's standard input is {encoded} bytes once encoded for the launch pipe; a launch carries at most {limit}. This is a size limit of the launch, not a memory limit — no process is created and no memory is allocated. Shorten the text or pass it to the agent as a file.";
     }
 
-    /// <summary>Host metadata for a frame past the pipe bound: its size, the bound, and the two carriers that can grow that large — never their contents.</summary>
+    /// <summary>
+    /// Host metadata for a frame past the pipe bound: its encoded size, the bound, and the raw sizes of the two carriers
+    /// that can grow that large — never their contents. By the time this fires an oversized restored transcript has
+    /// already been dropped for a cold start (<c>AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe</c>), so what
+    /// remains is a goal or a combination the pipe cannot take on any attempt.
+    /// </summary>
     private static string LaunchFrameRefusal(int frameBytes, SandboxSpec spec)
     {
         var stdin = spec.StandardInput is null ? 0 : Encoding.UTF8.GetByteCount(spec.StandardInput);
-        var restored = spec.ConfigHomeFiles.Sum(file => (long)Encoding.UTF8.GetByteCount(file.Content));
+        var configHome = spec.ConfigHomeFiles.Sum(file => (long)Encoding.UTF8.GetByteCount(file.Content));
 
-        return $"this launch is {frameBytes} bytes once encoded for the launch pipe, which carries at most {NativeLaunchProtocol.MaximumFrameBytes}: the agent's standard input is {stdin} bytes and its config-home files (a continued session's restored transcript) {restored}. This is a size limit of the launch, not a memory limit — no process is created. Shorten the goal, or start a fresh session instead of continuing this one.";
+        return $"this launch is {frameBytes} bytes once encoded for the launch pipe, which carries at most {NativeLaunchProtocol.MaximumFrameBytes}; before encoding, the agent's standard input is {stdin} bytes and its config-home files (skills, and a continued session's transcript) {configHome}. This is a size limit of the launch, not a memory limit — no process is created. Shorten the goal.";
     }
 
     private static async Task<NativeLaunchRecord> BindLaunchAsync(SandboxLaunchRequest request, string hash, string directory, CancellationToken cancellationToken)

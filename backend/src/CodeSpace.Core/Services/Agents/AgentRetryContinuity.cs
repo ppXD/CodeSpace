@@ -57,6 +57,17 @@ public static class AgentRetryContinuity
     /// <summary>Replace a resumed goal's promise of a restored conversation with the truth that there is none. Used when the checkpoint ref resolves to nothing at launch, which is the only moment that fact is knowable.</summary>
     public static string WithUnreadableCheckpointHint(string goal) => $"{goal}\n\n{LostHostCheckpointUnreadableHint}";
 
+    /// <summary>
+    /// Said when a restored conversation is too large for the launch pipe to hand back, so the attempt runs as a
+    /// fresh one instead of being refused. Appended after whatever the goal already says, for the same reason as
+    /// <see cref="LostHostCheckpointUnreadableHint"/>: the earlier sentence promised a conversation, and the agent must
+    /// be told it is not getting one. What that sentence said about the git tree still stands.
+    /// </summary>
+    public const string OversizedTranscriptHint = "Your previous conversation is too large to hand back to you, so it was not restored after all — you are starting this task from the beginning.";
+
+    /// <summary>Replace a resumed goal's promise of a restored conversation with the truth that there is none, because the conversation was too large to restore.</summary>
+    public static string WithOversizedTranscriptHint(string goal) => $"{goal}\n\n{OversizedTranscriptHint}";
+
     private static string TreeStateSentence(string? publishedBranch, bool treeOwed) =>
         !treeOwed ? ""
             : string.IsNullOrWhiteSpace(publishedBranch) ? $" {HonestNoContinuityHint}"
