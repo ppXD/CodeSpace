@@ -808,7 +808,7 @@ public class AgentNodeFlowTests
             resumed.ResumedFromCheckpointAt.ShouldNotBeNull("the launch stamps this onto the run's permanent confinement record");
             resumed.ResumedFromAgentRunId.ShouldBe(lostAgent, "which attempt took over from which is a column, not prose");
             retry.ResumedFromAgentRunId.ShouldBe(lostAgent, "and the task's provenance is promoted onto the row, like AgentDefinitionId");
-            resumed.Goal.ShouldContain("machine running your previous attempt was lost", Case.Sensitive,
+            resumed.Goal.ShouldContain("the machine or the process running your previous attempt was lost", Case.Sensitive,
                 "a restored conversation describes a working tree this sandbox does not have, and the agent must be told rather than left to infer it");
         }
         finally
@@ -850,7 +850,7 @@ public class AgentNodeFlowTests
             resumed.ResumedFromCheckpointAt.ShouldBeNull();
             resumed.ResumedFromAgentRunId.ShouldBeNull();
             retry.ResumedFromAgentRunId.ShouldBeNull();
-            resumed.Goal.ShouldNotContain("machine running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
+            resumed.Goal.ShouldNotContain("the machine or the process running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
         }
         finally
         {

@@ -777,7 +777,8 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // 3c: a deliberate cancel is a CLEAN landing, so it releases the mid-run session checkpoint exactly as
         // completion does. Nobody owes this run a continuation, and a kept reference would pin the artifact
         // Referenced (terminal in the retention ledger) for good — and make a later retry of the same subtask read
-        // the cancel as a host loss. Only the reconciler's abandon keeps these columns.
+        // the cancel as a host loss. Only an abandon-class ending keeps these columns: the reconciler's abandon, or
+        // its spool recovery.
         var cancelled = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running && r.FenceEpoch == snapshot.FenceEpoch)
             .ExecuteUpdateAsync(s => s
@@ -976,8 +977,8 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             // 3c: a prior attempt whose HOST died has no result at all — the reconciler's abandon writes none — so
             // the captured-transcript read above finds nothing for exactly the population a warm retry helps most.
             // Its mid-run checkpoint is what survives, and a TERMINAL row still naming one is the signature of an
-            // abandon: every clean landing — completion or cancel — releases these two columns in its own terminal
-            // write; only an abandon keeps them.
+            // abandon-class ending: every clean landing — completion or cancel — releases these two columns in its own
+            // terminal write; only the reconciler's abandon, or its spool recovery, keeps them.
             if (TryResumableFromCheckpoint(candidate.Id, candidate.Status, candidate.SessionId, candidate.SessionTranscriptCheckpointArtifactId, candidate.SessionTranscriptCheckpointAt) is { } continued) return continued;
         }
 

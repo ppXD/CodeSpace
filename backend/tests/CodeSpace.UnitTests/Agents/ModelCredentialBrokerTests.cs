@@ -520,11 +520,17 @@ public class ModelCredentialBrokerTests
 
         broker.HasLease(runId).ShouldBeTrue("precondition: the lease is live and its listener is accepting");
 
+        while (logger.Warned.Wait(0)) { }   // whatever the open itself warned about is not the signal awaited below
+
         // The platform failed the accept — a listener closed under us, an error nobody enumerated. The lease is still
         // in the table and still inside its window, so nothing about TIME will correct it.
         broker.BreakListenerForTest(runId);
 
-        await WaitUntilAsync(() => !broker.HasLease(runId), TimeSpan.FromSeconds(10),
+        // Woken by the drop's LAST effect rather than by polling HasLease: the warning is written only after the lease
+        // has left the table, so once it lands both assertions below read a finished drop instead of racing one.
+        (await logger.Warned.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBeTrue("the accept loop never reported its dead listener within 10s — the close never reached a loop still registering its first wait, or the failure was swallowed without a word");
+
+        broker.HasLease(runId).ShouldBeFalse(
             "a lease whose accept loop has stopped went on reporting itself live. That is the worst answer this class can give: the child's connections sit unaccepted in a backlog instead of being refused, and a re-attach reading HasLease true concludes the run still has model access — so it lands no verdict and leaves the run Running, with no model and no explanation, for as long as the worker lives");
 
         logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal),
@@ -575,7 +581,7 @@ public class ModelCredentialBrokerTests
     }
 
     /// <summary>Stands in for this worker's own host identity inside <c>[InlineData]</c>, which cannot carry a runtime value.</summary>
-    private const string ThisHost = " this-host";
+    private const string ThisHost = "\0this-host";
 
     /// <summary>The re-bind a later worker would build from what a run's durable handle carries — the point being that every value comes from <paramref name="brokered"/>, because a re-bind restores an address and never mints one.</summary>
     private static ModelCredentialRebindRequest RebindOf(BrokeredModelCredential brokered, Guid runId, long epoch) => new()
@@ -654,12 +660,18 @@ public class ModelCredentialBrokerTests
     {
         public List<string> Warnings { get; } = [];
 
+        /// <summary>Released AFTER each warning is recorded, so a waiter that acquires it reads a <see cref="Warnings"/> that already holds that line.</summary>
+        public SemaphoreSlim Warned { get; } = new(0);
+
         public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
         public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
 
         public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel >= Microsoft.Extensions.Logging.LogLevel.Warning) Warnings.Add(formatter(state, exception));
+            if (logLevel < Microsoft.Extensions.Logging.LogLevel.Warning) return;
+
+            Warnings.Add(formatter(state, exception));
+            Warned.Release();
         }
 
         private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
