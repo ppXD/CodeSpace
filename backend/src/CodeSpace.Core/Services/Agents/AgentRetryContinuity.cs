@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Agents;
 public static class AgentRetryContinuity
 {
     /// <summary>The honest-redo line: fires ONLY when a resumed conversation exists but the workspace was NOT pinned to a prior pushed branch — never on a genuine cold-start retry (no prior attempt at all), which stays byte-identical.</summary>
-    public const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (no pushed branch was found to continue from) — you must redo any relevant file changes from scratch.";
+    public const string HonestNoContinuityHint = "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own) — you must redo any relevant file changes from scratch.";
 
     /// <summary>Append <see cref="HonestNoContinuityHint"/> to a resumed task's goal. One composition, so the two lanes cannot drift on the separator either.</summary>
     public static string WithHonestNoContinuityHint(string goal) => $"{goal}\n\n{HonestNoContinuityHint}";
@@ -19,17 +19,17 @@ public static class AgentRetryContinuity
     /// <summary>
     /// 3c: what a CROSS-HOST continuation is told, and the reason it needs its own sentence. The two lanes above
     /// retry an attempt that FINISHED on a live host, so their only open question is whether a branch was pushed.
-    /// This lane continues an attempt whose machine was lost mid-run: the conversation comes from a checkpoint taken
-    /// some time before the loss, and the working tree is simply gone. Both halves have to be said, because the
-    /// restored transcript will describe edits — possibly edits made after the checkpoint — that the new workspace
-    /// does not contain, and an agent that is not told will read its own transcript as evidence about files it cannot
-    /// see.
+    /// This lane continues an attempt whose machine or process was lost mid-run: the conversation comes from a
+    /// checkpoint taken some time before the loss, and the working tree is simply gone. Both halves have to be said,
+    /// because the restored transcript will describe edits — possibly edits made after the checkpoint — that the new
+    /// workspace does not contain, and an agent that is not told will read its own transcript as evidence about files
+    /// it cannot see.
     /// </summary>
-    public const string LostHostPreamble = "Note: the machine running your previous attempt was lost mid-run. Your conversation is restored from a checkpoint taken before that, so it may describe work you did after the checkpoint, and it may be missing your last few turns.";
+    public const string LostHostPreamble = "Note: the machine or the process running your previous attempt was lost mid-run. Your conversation is restored from a checkpoint taken before that, so it may describe work you did after the checkpoint, and it may be missing your last few turns.";
 
     /// <summary>Said when the lost attempt HAD published a branch: the workspace is checked out at it, so the published work is present and only the unpublished remainder is gone. Takes the branch name so the agent can verify rather than take the claim on trust.</summary>
     public static string LostHostPublishedBranchHint(string branch) =>
-        $"Your previous attempt published branch `{branch}`, and this workspace is checked out AT that branch — that work is here. Anything you had NOT published to it died with the machine, so check the files before continuing and redo whatever is missing.";
+        $"Your previous attempt published branch `{branch}`, and this workspace is checked out AT that branch — that work is here. Anything you had NOT published to it was lost with that attempt, so check the files before continuing and redo whatever is missing.";
 
     /// <summary>
     /// Append the cross-host continuation's honesty block to a resumed task's goal: the preamble always, then what
@@ -49,8 +49,8 @@ public static class AgentRetryContinuity
     /// <summary>
     /// 3c: said when the lost host's checkpoint could not be READ — reaped, or its storage unreachable. The attempt
     /// still runs (failing it would spend the retry this whole path exists to improve), but it runs COLD, and an
-    /// agent that was going to be handed a conversation must be told it is not getting one. Appended to the
-    /// lost-host block rather than replacing it: the machine really was lost, which is still the reason.
+    /// agent that was going to be handed a conversation must be told it is not getting one. Appended to the lost-host
+    /// block rather than replacing it: the machine or the process really was lost, which is still the reason.
     /// </summary>
     public const string LostHostCheckpointUnreadableHint = "Your previous conversation could not be recovered either — the checkpoint it was stored in is no longer readable — so you are starting this task from the beginning.";
 

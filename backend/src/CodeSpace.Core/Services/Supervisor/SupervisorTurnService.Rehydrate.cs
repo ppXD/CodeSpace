@@ -642,7 +642,7 @@ public sealed partial class SupervisorTurnService
         // without a pulse the reconciler reads a genuinely-alive resolve grade as abandoned and re-dispatches
         // the run mid-grade. Starts only when a real grade fires (every early return above skips it).
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, "Supervisor resolve acceptance grading is still in progress.");
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, TimeProvider.System, "Supervisor resolve acceptance grading is still in progress.");
 
         BenchmarkGrade grade;
         try
@@ -762,7 +762,7 @@ public sealed partial class SupervisorTurnService
         // reconciler reads this genuinely-alive fold as abandoned and re-dispatches the run mid-grade (the S3
         // adversarial scan's M4: the baseline roughly doubled the silent window).
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, "Supervisor per-unit acceptance grading is still in progress.");
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, TimeProvider.System, "Supervisor per-unit acceptance grading is still in progress.");
 
         try
         {
@@ -1552,7 +1552,7 @@ public sealed partial class SupervisorTurnService
     private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, CancellationToken cancellationToken)
     {
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token);
+        var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, TimeProvider.System);
 
         try
         {
@@ -1567,14 +1567,14 @@ public sealed partial class SupervisorTurnService
         }
     }
 
-    /// <summary>The heartbeat loop itself: sleeps, logs, repeats — until <paramref name="cancellationToken"/> fires (grading finished). A cancellation mid-sleep is the expected exit, never propagated as a fault. Internal + interval-parameterized so a unit test can pin the cancellation contract with a millisecond-scale interval instead of waiting out the real 90s production value.</summary>
-    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken, string message = "Supervisor stop acceptance grading is still in progress.")
+    /// <summary>The heartbeat loop itself: sleeps, logs, repeats — until <paramref name="cancellationToken"/> fires (grading finished). A cancellation mid-sleep is the expected exit, never propagated as a fault. Internal + clock-parameterized so a unit test drives the sleep on a fake <paramref name="timeProvider"/> instead of racing the wall clock; REQUIRED rather than defaulting to the system clock for the reason <see cref="HeartbeatLoop.RunAsync"/> gives — a default is how a call site keeps the wall clock without saying so.</summary>
+    internal async Task RunGradingHeartbeatLoopAsync(Guid supervisorRunId, string nodeId, TimeSpan interval, CancellationToken cancellationToken, TimeProvider timeProvider, string message = "Supervisor stop acceptance grading is still in progress.")
     {
         try
         {
             while (true)
             {
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(interval, timeProvider, cancellationToken).ConfigureAwait(false);
 
                 await _recordLogger.LogAsync(supervisorRunId, nodeId, Workflows.Lifecycle.LogLevel.Info,
                     message, cancellationToken).ConfigureAwait(false);

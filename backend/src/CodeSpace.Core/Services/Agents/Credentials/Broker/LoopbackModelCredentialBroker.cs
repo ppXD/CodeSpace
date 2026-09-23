@@ -267,7 +267,11 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         if (superseded is not null) CloseQuietly(superseded.Listener);
 
-        _ = Task.Run(() => AcceptAsync(lease), CancellationToken.None);
+        // CALLED, not handed to Task.Run: an async method runs synchronously up to its first await, so the loop's first
+        // wait is registered on the listener before this returns. The managed HttpListener fails only the waits it
+        // already holds when it closes; a close that lands while a pool thread is still registering the first one is
+        // never delivered, and that loop then waits for the life of the worker on a listener that no longer exists.
+        _ = AcceptAsync(lease);
 
         return lease;
     }

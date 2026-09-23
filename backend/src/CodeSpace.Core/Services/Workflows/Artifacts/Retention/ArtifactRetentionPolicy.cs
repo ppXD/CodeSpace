@@ -42,9 +42,10 @@ public static class ArtifactRetentionPolicy
     /// A mid-run session-transcript checkpoint. TWO HOURS, not seven days, and the short floor is the whole reason
     /// the class exists: a run writes one of these per minute, each supersedes the last, and a clean landing
     /// (completion or a deliberate cancel) clears the column that references the survivor — so on the seven-day floor
-    /// a single long run would hold every superseded copy of a growing transcript for over a week. An abandon keeps
-    /// the column on purpose, and that survivor is then Referenced for good; this floor does not collect it. Two hours still sits far outside the window in which
-    /// the reference lands (the stamp is the next statement after the write) and far outside the window in which a
+    /// a single long run would hold every superseded copy of a growing transcript for over a week. An abandon-class
+    /// ending (the reconciler's abandon, or its spool recovery) keeps the column on purpose, and that survivor is then
+    /// Referenced for good; this floor does not collect it. Two hours still sits far outside the window in which the
+    /// reference lands (the stamp is the next statement after the write) and far outside the window in which a
     /// continuation reads it (an abandon follows the host's death within one liveness window), so the floor costs
     /// nothing it protects. The quarantine stays the standard 24 h: the second, independent wait is unchanged.
     /// </summary>

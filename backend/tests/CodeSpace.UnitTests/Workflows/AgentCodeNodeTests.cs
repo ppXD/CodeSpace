@@ -941,7 +941,7 @@ public class AgentCodeNodeTests
         task.RestoredTranscript.ShouldBeNull("an abandoned attempt left no inline transcript, and inventing one would be a claim about bytes nobody has");
         task.ResumedFromCheckpointAt.ShouldBe(new DateTimeOffset(2026, 9, 19, 10, 11, 12, TimeSpan.Zero), "the launch stamps this onto the run's permanent confinement record");
         task.ResumedFromAgentRunId.ShouldBe(priorRunId, "which attempt took over from which is a column, not prose");
-        task.Goal.ShouldContain("machine running your previous attempt was lost", Case.Sensitive, "a restored conversation describes a working tree this sandbox does not have, and the agent must be told");
+        task.Goal.ShouldContain("the machine or the process running your previous attempt was lost", Case.Sensitive, "a restored conversation describes a working tree this sandbox does not have, and the agent must be told");
     }
 
     [Fact]
@@ -962,7 +962,7 @@ public class AgentCodeNodeTests
         task.RestoredTranscriptArtifactId.ShouldBeNull("no checkpoint was taken, so there is no conversation to restore");
         task.ResumedFromCheckpointAt.ShouldBeNull();
         task.ResumedFromAgentRunId.ShouldBeNull();
-        task.Goal.ShouldNotContain("machine running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
+        task.Goal.ShouldNotContain("the machine or the process running your previous attempt was lost", Case.Sensitive, "nothing may assert a restored conversation this attempt does not have");
     }
 
     [Theory]
@@ -1244,7 +1244,7 @@ public class AgentCodeNodeTests
         // agent the same thing about a tree that does not carry its prior work. The literal is pinned because the
         // supervisor's own behaviour test asserts this exact wording — a reword must be a visible decision.
         AgentRetryContinuity.HonestNoContinuityHint.ShouldBe(
-            "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (no pushed branch was found to continue from) — you must redo any relevant file changes from scratch.");
+            "Note: your prior attempt's conversation is restored, but its git changes were NOT preserved in this workspace (your prior attempt pushed no branch of its own) — you must redo any relevant file changes from scratch.");
     }
 
     [Fact]
