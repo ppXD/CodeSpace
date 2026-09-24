@@ -389,10 +389,10 @@ public sealed class AgentCodeNode : INodeRuntime
             var formatFault = cause == Supervisor.AgentRetryCauses.GatewayFormatFault;
             var mitigationSpent = formatFault && ReadFlag(payload, "thinkingDisabled");
 
-            // The model refused the request as larger than its context window — typed by the harness from its CLI's own
-            // fields, never read from the error text. A respawn warm-resumes, so it re-sends the goal inside a LONGER
-            // request, and a fresh one sends the same goal: either way it sends at least as much and is refused the
-            // same way. The escalation escape below never opens for it: the trigger proposes a stronger model only on a
+            // The request is larger than the context window — the model refused it, or the CLI did before sending it —
+            // typed by the harness from its CLI's own fields, never read from the error text. A respawn warm-resumes,
+            // so it re-sends the goal inside a LONGER request, and a fresh one sends the same goal: either way it
+            // sends at least as much and is refused the same way. The escalation escape below never opens for it: the trigger proposes a stronger model only on a
             // failed grade, and stands down for any classified cause, so an overflowing attempt carries no proposal.
             var contextWindowExceeded = cause == Supervisor.AgentRetryCauses.ContextWindowExceeded;
 
@@ -432,7 +432,7 @@ public sealed class AgentCodeNode : INodeRuntime
     {
         Supervisor.AgentRetryCauses.GatewayFormatFault when mitigationSpent => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault}: a fresh conversation with extended thinking disabled hit the same fault)",
         Supervisor.AgentRetryCauses.GatewayFormatFault => $" ({Supervisor.AgentRetryCauses.GatewayFormatFault})",
-        Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the model refused the request as larger than its context window, and a respawn would send at least as much — give the agent less, or choose a model with a larger window)",
+        Supervisor.AgentRetryCauses.ContextWindowExceeded => $" ({Supervisor.AgentRetryCauses.ContextWindowExceeded}: the request is larger than the context window the CLI or the model allows, and a respawn would send at least as much — give the agent less, or choose a model with a larger window)",
         _ => "",
     };
 
