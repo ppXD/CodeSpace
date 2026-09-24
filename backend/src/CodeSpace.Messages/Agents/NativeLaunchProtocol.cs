@@ -12,11 +12,18 @@ public static class NativeLaunchProtocol
     /// <summary>The share of <see cref="MaximumFrameBytes"/> an agent's standard input may take, checked before a spool exists so a goal no attempt can carry is refused before any work. Half the frame, leaving the rest room for everything else a launch carries — a continued session's restored transcript included. Measured as encoded for the pipe (<see cref="EncodedBytes"/>).</summary>
     public const int LargeCarrierBudgetBytes = MaximumFrameBytes / 2;
 
-    /// <summary>What the frame keeps free beyond a spec for what wraps it — the child's command, environment and paths, a few kilobytes in practice — so a spec that fits by <see cref="FitsTheFrame"/> fits the frame it is sent in.</summary>
-    public const int InvocationAllowanceBytes = 1024 * 1024;
+    /// <summary>What the frame keeps free for the parts of an invocation that are not the spec and do not grow with it — the supervisor script, the isolation prefixes, the scrubbed allow-list of the worker's own variables, the spool paths: a few kilobytes in practice.</summary>
+    public const int InvocationAllowanceBytes = 64 * 1024;
 
-    /// <summary>Whether a built spec, once encoded for the pipe, leaves the frame room for what wraps it. Measures everything the spec carries at once — goal, restored transcript, the persona's files — so a continuation is judged on what it actually sends, not on any one part of it.</summary>
-    public static bool FitsTheFrame(SandboxSpec spec) => JsonSerializer.SerializeToUtf8Bytes(spec, Json).LongLength <= MaximumFrameBytes - InvocationAllowanceBytes;
+    /// <summary>
+    /// Whether a built spec fits the frame it will be sent in. The invocation carries the spec and, a second time, the
+    /// child's argv (which appends the spec's arguments — a persona on <c>--append-system-prompt</c>, say) and its
+    /// environment (which copies the spec's), so both are counted twice; everything else is held in
+    /// <see cref="InvocationAllowanceBytes"/>. Measures everything the spec carries at once — goal, restored
+    /// transcript, the persona's files — so a continuation is judged on what it actually sends.
+    /// </summary>
+    public static bool FitsTheFrame(SandboxSpec spec) =>
+        JsonSerializer.SerializeToUtf8Bytes(spec, Json).LongLength + JsonSerializer.SerializeToUtf8Bytes(spec.Args, Json).LongLength + JsonSerializer.SerializeToUtf8Bytes(spec.Environment, Json).LongLength <= MaximumFrameBytes - InvocationAllowanceBytes;
 
     /// <summary>The bytes <paramref name="value"/> occupies once encoded for the frame. The web JSON defaults escape every non-ASCII character, so CJK text roughly doubles and emoji triple.</summary>
     public static int EncodedBytes(string value) => JsonSerializer.SerializeToUtf8Bytes(value, Json).Length;
