@@ -71,8 +71,10 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
     /// <summary>
     /// Whether Codex's own terminal <c>turn.failed</c> says the model refused the request as larger than its window:
-    /// the provider's typed error code it relays, or its own sentence for the streamed refusal. Only that event — the
-    /// turn's verdict, which the agent cannot author — is read, so an agent message about context windows never is.
+    /// the provider refusal body Codex relays verbatim — OpenAI's typed <c>context_length_exceeded</c> code, or a
+    /// gateway's overflow message (<see cref="AgentTerminalOutcomeReader.NamesAContextOverflow"/>) — or Codex's own
+    /// sentence for a streamed refusal. Only that event, the turn's verdict, is read, so an agent message about context
+    /// windows never is; and a body whose code is a 5xx is the gateway failing, which stays retryable.
     /// </summary>
     private static bool RefusedAsOverContextWindow(JsonElement? line)
     {
@@ -82,18 +84,24 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
         var text = message.GetString() ?? "";
 
-        return ProviderErrorCode(text) == "context_length_exceeded" || text.Contains(StreamedOverflowSentence, StringComparison.Ordinal);
+        if (text.Contains(StreamedOverflowSentence, StringComparison.Ordinal)) return true;
+
+        return ProviderRefusal(text) is { } refusal && !refusal.ServerError && (refusal.Code == "context_length_exceeded" || AgentTerminalOutcomeReader.NamesAContextOverflow(refusal.Message));
     }
 
-    /// <summary>The <c>error.code</c> of a provider error body Codex relays as its message verbatim, or null when the message is not one.</summary>
-    private static string? ProviderErrorCode(string message)
+    /// <summary>The <c>error</c> of a provider body Codex relays as its message verbatim — its code (a string, or a number as text) and message — or null when the message is not one.</summary>
+    private static (string? Code, string Message, bool ServerError)? ProviderRefusal(string message)
     {
         try
         {
             using var body = JsonDocument.Parse(message);
 
-            return body.RootElement.ValueKind == JsonValueKind.Object && body.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object
-                   && error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String ? code.GetString() : null;
+            if (body.RootElement.ValueKind != JsonValueKind.Object || !body.RootElement.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return null;
+
+            var code = error.TryGetProperty("code", out var c) ? c.ValueKind switch { JsonValueKind.String => c.GetString(), JsonValueKind.Number => c.GetRawText(), _ => null } : null;
+            var text = error.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : "";
+
+            return (code, text, int.TryParse(code, out var status) && status >= 500);
         }
         catch (JsonException)
         {

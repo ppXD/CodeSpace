@@ -33,6 +33,8 @@ public sealed class AgentContextWindowRetryTests
         """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"prompt_too_long","api_error_status":400,"session_id":"58110d54-f8b2-43f3-9153-dcd32a2d58dc","result":"Prompt is too long · this conversation is a single exchange and cannot be compacted — the request size comes mostly from system prompt, tool definitions, or attachments."}""",
         // An OpenAI-compatible gateway (vLLM/LiteLLM) body the CLI passes through verbatim as terminal_reason=api_error.
         """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":400,"session_id":"6406b570-40de-4274-a586-ab044dbf5d48","result":"API Error: 400 This model's maximum context length is 131072 tokens. However, you requested 161234 tokens. Please reduce the length of the messages."}""",
+        // The CLI's own local refusal: its token estimate is past the window, so it sent no request at all (pinned 2.1.263, a 1.2 MB goal).
+        """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"blocking_limit","api_error_status":null,"session_id":"ff8b4b95-8351-4462-ada3-c302b4f526d8","result":"Prompt is too long"}""",
     };
 
     public static TheoryData<string, string> ClaudeConnectionFailureLines => new()
@@ -48,6 +50,10 @@ public sealed class AgentContextWindowRetryTests
         """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"Your input exceeds the context window of this model. Please adjust your input and try again.\", \"type\": \"invalid_request_error\", \"param\": \"input\", \"code\": \"context_length_exceeded\"}}"}}""",
         // The same refusal delivered as a streaming response.failed, which Codex rewords.
         """{"type":"turn.failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."}}""",
+        // A vLLM gateway's refusal, relayed verbatim by the pinned 0.142.2: the code is the number 400, the reason only in the message.
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"This model's maximum context length is 131072 tokens. However, you requested 161234 tokens (161234 in the messages, 0 in the completion). Please reduce the length of the messages or completion.\", \"type\": \"BadRequestError\", \"param\": null, \"code\": 400}}"}}""",
+        // A LiteLLM proxy's refusal, relayed verbatim by the pinned 0.142.2: the code is the string "400".
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Error code: 400 - {'error': {'message': \\\"This model's maximum context length is 128000 tokens. However, your messages resulted in 161234 tokens.\\\", 'type': 'invalid_request_error', 'param': 'messages', 'code': 'context_length_exceeded'}}\", \"type\": null, \"param\": null, \"code\": \"400\"}}"}}""",
     };
 
     [Theory]
@@ -90,6 +96,18 @@ public sealed class AgentContextWindowRetryTests
         result.ExitReason.ShouldBe("non-zero-exit");
         result.Error.ShouldBe(cliError);
         result.SessionId.ShouldNotBeNullOrEmpty(customMessage: "the fold completed, so the session a retry resumes is still there");
+    }
+
+    [Fact]
+    public void A_codex_gateway_error_whose_body_mentions_context_length_is_not_an_overflow()
+    {
+        // The same rule as Claude's: a 5xx is the gateway failing, and it is worth a retry.
+        var harness = new CodexHarness();
+        var line = """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"upstream timed out after prefilling; maximum context length is 131072 tokens\", \"type\": \"ServiceUnavailableError\", \"code\": 503}}"}}""";
+
+        var result = harness.BuildResult(harness.ParseEvents(line), exitCode: 1, diagnostics: "");
+
+        result.ExitReason.ShouldBe("non-zero-exit");
     }
 
     [Fact]

@@ -13,13 +13,6 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// </summary>
 internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
 {
-    /// <summary>
-    /// What an OpenAI-compatible gateway (vLLM, LiteLLM) answers an over-long request with, which the CLI passes
-    /// through verbatim as <c>terminal_reason: api_error</c> — the one overflow shape it does not stamp as its own.
-    /// Observed from Claude Code 2.1.226 answered with each body; read only off a 400 refusal on the result line.
-    /// </summary>
-    private static readonly string[] GatewayOverflowMarkers = { "maximum context length is", "context_length_exceeded" };
-
     private readonly AgentResultFold _fold = new();
     private JsonElement? _lastErrorLine;
 
@@ -73,11 +66,16 @@ internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
     }
 
     /// <summary>
-    /// Whether the CLI's own terminal result line says the model refused the request as larger than its context
-    /// window. Read off fields the CLI writes (<c>terminal_reason</c>, <c>api_error_status</c>) and, for the gateway
-    /// shape, off the refusal body it relays — never off the agent's prose, which is how a crash's last message or a
-    /// rubric's wording would otherwise pass for a diagnosis. A 5xx is the gateway failing, not the model refusing,
-    /// so it stays an ordinary, retryable failure whatever its body says.
+    /// Whether the CLI's own terminal result line says the request is larger than the model's context window. Read off
+    /// fields the CLI writes and, for the gateway shape, off the refusal body it relays — never off the agent's prose,
+    /// which is how a crash's last message or a rubric's wording would otherwise pass for a diagnosis.
+    ///
+    /// <para>Two verdicts are the CLI's own: <c>prompt_too_long</c>, the provider refused the request; and
+    /// <c>blocking_limit</c>, the CLI's own token estimate is past the window so it refused locally and sent nothing
+    /// (observed from 2.1.226 and the pinned 2.1.263 for a goal past roughly 760 KB on a 200K-token model). Either way a
+    /// respawn sends at least as much. The third shape is a gateway's 400 relayed as <c>api_error</c>. A 5xx is the
+    /// gateway failing, not the model refusing, and a connection-level failure carries <c>api_error_status: null</c>
+    /// — both stay ordinary, retryable failures whatever their text says.</para>
     /// </summary>
     private static bool RefusedAsOverContextWindow(JsonElement? line)
     {
@@ -85,14 +83,14 @@ internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
 
         var terminalReason = ReadString(result, "terminal_reason");
 
-        if (terminalReason == "prompt_too_long") return true;
+        if (terminalReason is "prompt_too_long" or "blocking_limit") return true;
 
-        if (terminalReason != "api_error" || !result.TryGetProperty("api_error_status", out var status) || status.ValueKind != JsonValueKind.Number || !status.TryGetInt32(out var code) || code != 400) return false;
-
-        var body = ReadString(result, "result");
-
-        return GatewayOverflowMarkers.Any(marker => body.Contains(marker, StringComparison.OrdinalIgnoreCase));
+        return terminalReason == "api_error" && IsClientRefusal(result) && AgentTerminalOutcomeReader.NamesAContextOverflow(ReadString(result, "result"));
     }
+
+    /// <summary>The result line's <c>api_error_status</c> is a 400. Null (a connection that never got an answer), absent, or any other kind is not.</summary>
+    private static bool IsClientRefusal(JsonElement result) =>
+        result.TryGetProperty("api_error_status", out var status) && status.ValueKind == JsonValueKind.Number && status.TryGetInt32(out var code) && code == 400;
 
     private static string ReadString(JsonElement root, string key) =>
         root.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
