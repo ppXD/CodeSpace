@@ -91,9 +91,7 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
     /// <summary>
     /// The <c>error</c> of a provider body Codex relays as its message verbatim — its code (a string, or a number as
-    /// text) and message — or null when the message is not one. A body is the gateway's own text, so it can be
-    /// well-formed JSON that is not valid text: an unpaired surrogate escape (<c>\ud83d</c>) parses, then throws on
-    /// read. That is "not a refusal we can read", never a reason for the fold to throw and drop the run's work.
+    /// text) and message — or null when the message is not one.
     /// </summary>
     private static (string? Code, string Message, bool ServerError)? ProviderRefusal(string message)
     {
@@ -103,14 +101,34 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
             if (body.RootElement.ValueKind != JsonValueKind.Object || !body.RootElement.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return null;
 
-            var code = error.TryGetProperty("code", out var c) ? c.ValueKind switch { JsonValueKind.String => c.GetString(), JsonValueKind.Number => c.GetRawText(), _ => null } : null;
-            var text = error.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : "";
+            var code = error.TryGetProperty("code", out var c) ? c.ValueKind switch { JsonValueKind.String => TextOf(c), JsonValueKind.Number => c.GetRawText(), _ => null } : null;
+            var text = error.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String ? TextOf(m) : "";
 
             return (code, text, int.TryParse(code, out var status) && status >= 500);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
+            // Unparseable, or a gateway-authored key that is not valid text (a lookup unescapes keys): not a refusal
+            // this fold can read, and never a reason to throw.
             return null;
+        }
+    }
+
+    /// <summary>
+    /// A string of the relayed body. A body is the gateway's own text, so it can be well-formed JSON that is not valid
+    /// text: an unpaired surrogate escape (<c>\ud83d</c>) parses, then throws on read. Then the escaped text stands in —
+    /// every word the fold looks for is ASCII, which an escape cannot split — so one bad character neither throws out of
+    /// the fold (dropping the run's work) nor hides a refusal the rest of the body states plainly.
+    /// </summary>
+    private static string TextOf(JsonElement value)
+    {
+        try
+        {
+            return value.GetString() ?? "";
+        }
+        catch (InvalidOperationException)
+        {
+            return value.GetRawText();
         }
     }
 }
