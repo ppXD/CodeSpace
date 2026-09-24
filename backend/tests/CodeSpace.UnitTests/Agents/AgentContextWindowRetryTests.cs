@@ -52,6 +52,9 @@ public sealed class AgentContextWindowRetryTests
         """{"type":"turn.failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."}}""",
         // A vLLM gateway's refusal, relayed verbatim by the pinned 0.142.2: the code is the number 400, the reason only in the message.
         """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"This model's maximum context length is 131072 tokens. However, you requested 161234 tokens (161234 in the messages, 0 in the completion). Please reduce the length of the messages or completion.\", \"type\": \"BadRequestError\", \"param\": null, \"code\": 400}}"}}""",
+        // A LiteLLM proxy in front of a Claude model: its class name and Anthropic's own words, neither OpenAI-shaped.
+        // Representative of LiteLLM's exception mapping (not byte-captured from a live proxy), relayed the way 0.142.2 relays any 400 body.
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"litellm.ContextWindowExceededError: litellm.BadRequestError: AnthropicException - {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"prompt is too long: 215000 tokens > 200000 maximum\\\"}}\", \"type\": null, \"param\": null, \"code\": \"400\"}}"}}""",
         // A LiteLLM proxy's refusal, relayed verbatim by the pinned 0.142.2: the code is the string "400".
         """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - Error code: 400 - {'error': {'message': \\\"This model's maximum context length is 128000 tokens. However, your messages resulted in 161234 tokens.\\\", 'type': 'invalid_request_error', 'param': 'messages', 'code': 'context_length_exceeded'}}\", \"type\": null, \"param\": null, \"code\": \"400\"}}"}}""",
     };
@@ -98,12 +101,22 @@ public sealed class AgentContextWindowRetryTests
         result.SessionId.ShouldNotBeNullOrEmpty(customMessage: "the fold completed, so the session a retry resumes is still there");
     }
 
-    [Fact]
-    public void A_codex_gateway_error_whose_body_mentions_context_length_is_not_an_overflow()
+    public static TheoryData<string> CodexNonRefusalLines => new()
     {
-        // The same rule as Claude's: a 5xx is the gateway failing, and it is worth a retry.
+        // What the pinned 0.142.2 really prints for a status it does not relay verbatim: a 503, 413 and 422 whose bodies
+        // name the window. It rewraps them as prose, so they are not a relayed refusal, and a 5xx is worth a retry.
+        """{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable: upstream prefill timed out; maximum context length is 131072 tokens, url: http://127.0.0.1:19703/v1/responses"}}""",
+        """{"type":"turn.failed","error":{"message":"unexpected status 413 Payload Too Large: This model's maximum context length is 131072 tokens. However, you requested 161234 tokens., url: http://127.0.0.1:19719/v1/responses"}}""",
+        """{"type":"turn.failed","error":{"message":"unexpected status 422 Unprocessable Entity: This model's maximum context length is 131072 tokens. However, you requested 161234 tokens., url: http://127.0.0.1:19891/v1/responses"}}""",
+        // Belt and braces for the 5xx guard: a JSON body with a 5xx code, which the pin does not print today.
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"upstream timed out after prefilling; maximum context length is 131072 tokens\", \"type\": \"ServiceUnavailableError\", \"code\": 503}}"}}""",
+    };
+
+    [Theory]
+    [MemberData(nameof(CodexNonRefusalLines))]
+    public void A_codex_failure_that_is_not_a_relayed_refusal_is_not_an_overflow_whatever_it_mentions(string line)
+    {
         var harness = new CodexHarness();
-        var line = """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"upstream timed out after prefilling; maximum context length is 131072 tokens\", \"type\": \"ServiceUnavailableError\", \"code\": 503}}"}}""";
 
         var result = harness.BuildResult(harness.ParseEvents(line), exitCode: 1, diagnostics: "");
 

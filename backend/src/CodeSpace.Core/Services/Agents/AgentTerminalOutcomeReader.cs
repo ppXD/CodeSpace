@@ -33,7 +33,14 @@ public static class AgentTerminalOutcomeReader
     public static bool NamesAContextOverflow(string providerMessage) =>
         GatewayOverflowMarkers.Any(marker => providerMessage.Contains(marker, StringComparison.OrdinalIgnoreCase));
 
-    private static readonly string[] GatewayOverflowMarkers = { "maximum context length is", "context_length_exceeded" };
+    private static readonly string[] GatewayOverflowMarkers =
+    {
+        "maximum context length is",   // vLLM, and OpenAI's own wording that gateways pass through
+        "context_length_exceeded",     // OpenAI's error code, embedded in a gateway's message
+        "ContextWindowExceededError",  // LiteLLM's class name, stamped only on a window refusal whatever the upstream
+        "prompt is too long",          // Anthropic's refusal, relayed by a gateway in front of a Claude model
+        "exceed context limit",        // Anthropic's other refusal (input length and max_tokens)
+    };
 
     /// <summary>
     /// True when the last Completed-or-Error event in the stream is an Error — i.e. the harness itself reported
