@@ -19,6 +19,7 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
@@ -622,17 +623,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     }
                 }
 
-                var reviseSpec = BuildSpec(reviseTask);
+                // A revise goal restates the contract, so it can cross a harness's own input cap the original goal fit under
+                // (Codex's 1,048,576 characters) — warm, or once rebuilt cold below. That refusal is about this round, not
+                // the run: the last round ran and was graded, and its result stands — the loop stops the way a spend
+                // refusal stops it, with nothing to settle.
+                SandboxSpec reviseSpec;
+                bool roundRanCold;
 
-                // The same verdict for the round's own session: warm only when the pipe can carry it. Only the
-                // conversation and the goal change — a model escalation already applied to this round stands.
-                var roundRanCold = ContinuationOverflowsTheFrame(reviseTask, reviseSpec);
-
-                if (roundRanCold)
+                try
                 {
-                    var cold = BuildReviseTask(effectiveTask, result, reason, mayResume: false);
-                    reviseTask = reviseTask with { Goal = cold.Goal, ResumeFromSessionId = null, RestoredTranscript = null };
                     reviseSpec = BuildSpec(reviseTask);
+
+                    // The same verdict for the round's own session: warm only when the pipe can carry it. Only the
+                    // conversation and the goal change — a model escalation already applied to this round stands.
+                    roundRanCold = ContinuationOverflowsTheFrame(reviseTask, reviseSpec);
+
+                    if (roundRanCold)
+                    {
+                        var cold = BuildReviseTask(effectiveTask, result, reason, mayResume: false);
+                        reviseTask = reviseTask with { Goal = cold.Goal, ResumeFromSessionId = null, RestoredTranscript = null };
+                        reviseSpec = BuildSpec(reviseTask);
+                    }
+                }
+                catch (SandboxArgumentTooLongException refusal)
+                {
+                    await AppendReviseStopEventAsync(owner, ReviseSizeStoppedPrefix, refusal.Message, cancellationToken).ConfigureAwait(false);
+                    break;
                 }
 
                 var priorUsage = result.TokenUsage;
@@ -648,7 +664,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 if (spendClaim is { RefusedDetail: { } roundRefusal })
                 {
                     spendClaim = null;
-                    await AppendReviseBudgetStopEventAsync(owner, roundRefusal, cancellationToken).ConfigureAwait(false);
+                    await AppendReviseStopEventAsync(owner, ReviseBudgetStoppedPrefix, roundRefusal, cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -2794,17 +2810,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>The budget-stopped-revision announcement's pinned prefix — the operator-visible marker that a round was never bought, not that it ran and failed.</summary>
     internal const string ReviseBudgetStoppedPrefix = "Revision stopped — the run's cost cap had no headroom for another attempt";
 
-    /// <summary>Announce that the revise loop stopped because the ledger refused the NEXT invocation's claim. The round that already succeeded keeps its result: throwing away finished work because the following attempt cannot be afforded would lose what the operator already paid for. Best-effort, exactly like the stalled announcement above.</summary>
-    private async Task AppendReviseBudgetStopEventAsync(AgentRunOwnerToken owner, string detail, CancellationToken cancellationToken)
+    /// <summary>The timeline's account of a revision the harness refused to build for its size: the last graded round's result stands.</summary>
+    internal const string ReviseSizeStoppedPrefix = "Revision stopped — the revised instruction is past what this agent can be handed, so the last round's result stands";
+
+    /// <summary>Announce that the revise loop stopped before the NEXT round was bought — the ledger refused its claim, or the harness refused to build it for its size. The round that already ran keeps its result: throwing away finished work because the following attempt cannot be run would lose what the operator already paid for. Best-effort, exactly like the stalled announcement above.</summary>
+    private async Task AppendReviseStopEventAsync(AgentRunOwnerToken owner, string reason, string detail, CancellationToken cancellationToken)
     {
         var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{ReviseBudgetStoppedPrefix}. {detail}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"{reason}. {detail}" }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-budget-stop event", runId);
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the revise-stop event", runId);
         }
     }
 
