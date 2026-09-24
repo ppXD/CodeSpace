@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -128,6 +129,38 @@ public sealed class AgentRunReviseLoopFlowTests
         events.ShouldContain(t => t.StartsWith(AgentRunExecutor.ReviseBudgetStoppedPrefix, StringComparison.Ordinal), "fixture check: round 1 was refused for spend");
         result.ReviseRounds.ShouldBe(0, "fixture check: no revision ran");
         events.ShouldNotContain(AgentRunExecutor.ReviseRanColdNote, "no round ran, so no round continued as a fresh conversation");
+    }
+
+    [Fact]
+    public async Task A_revision_whose_restated_goal_crosses_codexs_input_cap_stops_revising_and_keeps_the_verified_round()
+    {
+        // A cold revise goal restates the whole contract, so it is longer than the goal round 0 ran under. When the
+        // goal sits just under Codex's own input cap, the revision crosses it and the harness refuses it at build.
+        // That refusal is about the revision, not the run: round 0 ran, pushed and was graded, and its verdict stands.
+        // Thrown out of the loop instead, it replaced round 0's whole result — diff, summary, verdict — with a bare
+        // size refusal, and marked the run as if nothing had run.
+        if (OperatingSystem.IsWindows()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var goal = new string('x', CodexHarness.MaxInputCharacters - 500);
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { Goal = goal, MaxReviseRounds = 1 });
+        var harness = new CodexSpecHarness();
+
+        await ExecuteAsync(runId, harness);
+
+        var (run, result) = await LoadAsync(runId);
+        var events = await LoadEventsAsync(runId);
+
+        harness.Goals.Count.ShouldBe(2, "fixture check: round 0 was built, and so was the revision the cap refused");
+        harness.Goals[1].Length.ShouldBeGreaterThan(CodexHarness.MaxInputCharacters, "fixture check: the restated goal really crosses the cap");
+        result.ExitReason.ShouldBe(AgentAcceptanceContract.FailClosedExitReason, $"round 0's verdict stands — the run ended {result.ExitReason}: {run.Error}");
+        result.ChangedFiles.ShouldContain("feature.txt", "round 0's work is still the run's result");
+        result.ReviseRounds.ShouldBe(0);
+        events.ShouldContain(e => e.StartsWith(AgentRunExecutor.ReviseSizeStoppedPrefix, StringComparison.Ordinal), "the timeline says why the revision stopped");
+        (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt")).ShouldNotBeNull("and round 0's branch is still there");
     }
 
     [Fact]
@@ -798,6 +831,33 @@ public sealed class AgentRunReviseLoopFlowTests
         public IAgentEventFolder CreateFolder() => _real.CreateFolder();
 
         public string? SessionTranscriptRelativePath(string configHome, string? workspaceDirectory, string? sessionId) => _real.SessionTranscriptRelativePath(configHome, workspaceDirectory, sessionId);
+    }
+
+    /// <summary>A "scripted" harness whose spec is the REAL Codex adapter's — its own input cap included — with only the executable swapped; round 0 writes draft work, a revision the fixed work.</summary>
+    private sealed class CodexSpecHarness : IAgentHarness
+    {
+        private readonly CodexHarness _real = new();
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+        public List<string> Goals { get; } = new();
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            Goals.Add(task.Goal);
+            var real = _real.BuildInvocation(task);
+            var revising = task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal);
+            return real with { Command = "/bin/sh", Args = new[] { "-c", "cat >/dev/null; " + (revising ? RevisedScript : DraftScript) } };
+        }
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
+
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            exitCode == 0
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
     private sealed class ReviseAwareHarness : IAgentHarness
