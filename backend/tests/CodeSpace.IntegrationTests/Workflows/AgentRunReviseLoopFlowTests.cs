@@ -92,7 +92,7 @@ public sealed class AgentRunReviseLoopFlowTests
         launched.Task.Goal.ShouldContain("Original goal", customMessage: "a cold revision restates the contract no conversation carries");
 
         using var scope = _fixture.BeginScope();
-        (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, run.TeamId, afterSequence: 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.RunColdNote);
+        (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, run.TeamId, afterSequence: 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.ReviseRanColdNote);
     }
 
     [Fact]

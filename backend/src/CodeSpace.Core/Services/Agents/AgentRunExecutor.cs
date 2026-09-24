@@ -468,21 +468,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // for a retry whose work can simply go on in a fresh conversation. Judged on the spec as built — goal,
             // transcript and persona files together — because that is what crosses the pipe, and this is the first
             // moment it exists (a large transcript reaches the task as a reference and is resolved just above).
-            if (ContinuationOverflowsTheFrame(effectiveTask, spec))
+            //
+            // The hint that tells the agent rides the DISPATCHED spec only. The run's own task keeps the goal the
+            // persisted envelope holds, because verification hashes that goal against it (the acceptance contract);
+            // a hinted goal would read as a different contract and fail a locally graded run before it launched.
+            var ranCold = ContinuationOverflowsTheFrame(effectiveTask, spec);
+
+            if (ranCold)
             {
                 task = WithoutContinuity(task);
-                effectiveTask = RunCold(effectiveTask);
-                await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, cancellationToken).ConfigureAwait(false);
-                spec = BuildSpec(effectiveTask);
+                effectiveTask = WithoutContinuity(effectiveTask);
+                spec = BuildSpec(RunCold(effectiveTask));
             }
 
+            // Verification is judged against the contract the envelope persisted — never a goal amended for the
+            // dispatch alone (this cold hint, or an unreadable checkpoint's) — or the contract hash cannot match.
+            var contract = effectiveTask with { Goal = task.Goal };
+
             using var localAcceptance = effectiveTask.Acceptance is not null && RepositoryWorkspaceResolver.CanonicalWorkspace(effectiveTask) is null
-                ? await PrepareLocalAcceptanceAsync(new(owner, run.TeamId, effectiveTask, runnerKind, spec.WorkingDirectory ?? ""), cancellationToken).ConfigureAwait(false)
+                ? await PrepareLocalAcceptanceAsync(new(owner, run.TeamId, contract, runnerKind, spec.WorkingDirectory ?? ""), cancellationToken).ConfigureAwait(false)
                 : null;
             if (localAcceptance is not null)
             {
                 using var acceptanceScope = _scopeFactory.CreateScope();
-                var prepared = await acceptanceScope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().ObserveAsync(new(owner, run.TeamId, effectiveTask, localAcceptance), cancellationToken).ConfigureAwait(false);
+                var prepared = await acceptanceScope.ServiceProvider.GetRequiredService<LocalAcceptanceVerifier>().ObserveAsync(new(owner, run.TeamId, contract, localAcceptance), cancellationToken).ConfigureAwait(false);
                 if (prepared.Failure is { } unavailable)
                 {
                     // Known invalid or unavailable verification cannot be repaired by billing an agent invocation.
@@ -492,6 +501,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     return;
                 }
             }
+
+            // Recorded once the attempt is sure to launch, so the trace never says a conversation was set aside for an
+            // attempt that did not run.
+            if (ranCold)
+                await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, LaunchRanColdNote, cancellationToken).ConfigureAwait(false);
 
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
@@ -547,7 +561,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
             await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, CaptureExpectationsOf(effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            result = await VerifyProducedWorkAsync(new(owner, run, harness, effectiveTask, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
+            result = await VerifyProducedWorkAsync(new(owner, run, harness, contract, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
 
             // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
             // Improve-mode critic flagged the output, feed the failure detail back to the SAME agent (same workspace;
@@ -617,7 +631,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     var cold = BuildReviseTask(effectiveTask, result, reason, mayResume: false);
                     reviseTask = reviseTask with { Goal = cold.Goal, ResumeFromSessionId = null, RestoredTranscript = null };
                     reviseSpec = BuildSpec(reviseTask);
-                    await RecordRunColdAsync(owner, null, cancellationToken).ConfigureAwait(false);
+                    await RecordRunColdAsync(owner, null, ReviseRanColdNote, cancellationToken).ConfigureAwait(false);
                 }
 
                 var priorUsage = result.TokenUsage;
@@ -645,7 +659,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
                 // wrapper (which quotes the failure and could bias or blind the reviewer).
-                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = effectiveTask.Goal }, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
+                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = contract.Goal }, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
 
                 priorReason = reason;
             }
@@ -1684,7 +1698,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         ResumeFromSessionId = null, ResumedFromCheckpointAt = null, ResumedFromAgentRunId = null,
     };
 
-    /// <summary>The attempt as it is dispatched cold: without continuity, and with the goal told the conversation it was promised is not there. Mirrors the unreadable-checkpoint degrade.</summary>
+    /// <summary>The task a cold attempt's spec is built from: without continuity, and with the goal told the conversation it was promised is not there. The dispatch's alone — the run's own task keeps its contract goal.</summary>
     internal static AgentTask RunCold(AgentTask task) => WithoutContinuity(task) with { Goal = AgentRetryContinuity.WithOversizedTranscriptHint(task.Goal) };
 
     /// <summary>
@@ -1692,7 +1706,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// with its continuity claims cleared, which is what the Room's "resumed" mark reads. Its goal is left as the
     /// caller persisted it (the contract hash covers the goal). Best-effort like the other timeline notes.
     /// </summary>
-    private async Task RecordRunColdAsync(AgentRunOwnerToken owner, AgentTask? envelope, CancellationToken cancellationToken)
+    private async Task RecordRunColdAsync(AgentRunOwnerToken owner, AgentTask? envelope, string note, CancellationToken cancellationToken)
     {
         _logger.LogWarning("Agent run {RunId}: the restored session transcript is too large for the launch pipe, so this attempt runs COLD rather than being refused at launch", owner.RunId);
 
@@ -1700,7 +1714,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = RunColdNote }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = note }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -1708,8 +1722,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>The timeline's account of a cold degrade — what happened and why, never the transcript itself.</summary>
-    internal const string RunColdNote = "The restored conversation was too large to hand to the agent in one launch, so this attempt continued without it (a fresh conversation in the same workspace).";
+    /// <summary>The timeline's account of a cold launch — what happened and why, never the transcript itself. It claims nothing about the workspace: a respawn gets its own, holding only what it was checked out with.</summary>
+    internal const string LaunchRanColdNote = "The restored conversation was too large to hand to the agent in one launch, so this attempt started a fresh conversation instead.";
+
+    /// <summary>The timeline's account of a cold revise round: the same run, so the same workspace.</summary>
+    internal const string ReviseRanColdNote = "This round's conversation was too large to hand back to the agent in one launch, so the revision continued as a fresh conversation in the same workspace.";
 
     /// <summary>
     /// 3c: resolve a mid-run CHECKPOINT ref under the opposite policy to a captured one — unreadable degrades to a

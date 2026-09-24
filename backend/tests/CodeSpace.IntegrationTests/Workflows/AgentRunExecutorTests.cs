@@ -203,11 +203,12 @@ public partial class AgentRunExecutorTests
         using var verify = _fixture.BeginScope();
         var service = verify.Resolve<IAgentRunService>();
         var run = await service.GetAsync(runId, CancellationToken.None);
-        harness.Specs.ShouldNotBeEmpty();
-        var launched = harness.Specs[^1];
+        harness.Specs.Count.ShouldBe(2, "the warm spec the executor judged, then the cold one it launched");
+        var (warm, launched) = (harness.Specs[0], harness.Specs[1]);
 
         run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the continuation must run cold, not be refused at launch — it failed with: {run.Error}");
-        harness.Specs.ShouldContain(spec => spec.ConfigHomeFiles.Any(file => file.Content.Length == transcript.Length), "fixture check: the warm spec the executor judged did carry the transcript");
+        warm.ConfigHomeFiles.ShouldContain(file => file.Content.Length == transcript.Length, "fixture check: the warm spec the executor judged did carry the transcript");
+        warm.Args.ShouldContain("--resume", customMessage: "fixture check: and would have resumed it");
         launched.ConfigHomeFiles.ShouldNotContain(file => file.Content.Length == transcript.Length, "the launched spec restores nothing");
         launched.Args.ShouldNotContain("--resume");
         launched.StandardInput.ShouldNotBeNull().ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
@@ -217,7 +218,54 @@ public partial class AgentRunExecutorTests
         persisted.RestoredTranscriptArtifactId.ShouldBeNull();
         persisted.Goal.ShouldBe("resume the prior work", "the persisted goal is the contract the hash covers — the hint is the dispatch's alone");
 
-        (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.RunColdNote, "the timeline says the attempt ran cold, and why");
+        (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.LaunchRanColdNote, "the timeline says the attempt ran cold, and why");
+    }
+
+    [Fact]
+    public async Task A_locally_graded_continuation_that_overflows_the_frame_runs_cold_and_is_graded_on_its_contract()
+    {
+        // The cold hint is the dispatch's alone. Local acceptance hashes the run's goal against the persisted envelope
+        // before launch, so a hinted goal read as a different contract and failed the run as a grader fault
+        // (local-context-mismatch) before any process started — the degrade turned into the refusal it replaces.
+        if (OperatingSystem.IsWindows()) return;
+
+        var workspace = Directory.CreateTempSubdirectory("cs-cold-graded-").FullName;
+        var transcript = new string('x', NativeLaunchProtocol.MaximumFrameBytes + 1);
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+
+        try
+        {
+            using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
+            {
+                var artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "text/plain", CancellationToken.None);
+                var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+                    new AgentTask
+                    {
+                        Goal = "write the report", Harness = "scripted", Model = "test-model", WorkspaceDirectory = workspace,
+                        Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "/bin/sh", "-c", "test \"$(cat report.txt)\" = accepted" }, Description = "the report says accepted" },
+                        ResumeFromSessionId = "session-too-large-to-restore", RestoredTranscriptArtifactId = artifactId,
+                    },
+                    teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+                runId = created.Id;
+            }
+
+            var harness = new ClaudeSpecScriptedHarness("cat >/dev/null; printf accepted > report.txt; printf 'produced\\n'");
+
+            await ExecuteAsync(runId, harness);
+
+            using var verify = _fixture.BeginScope();
+            var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, $"a cold continuation must launch and be graded on its contract — it ended {result.ExitReason}: {result.AcceptanceDetail ?? run.Error}");
+            result.AcceptancePassed.ShouldBe(true);
+            harness.Specs[^1].StandardInput.ShouldNotBeNull().ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the agent is still told");
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
     }
 
     [Fact]
@@ -2011,7 +2059,7 @@ public partial class AgentRunExecutorTests
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
     }
 
-    /// <summary>A scripted harness (kind "scripted") whose spec is the REAL Claude adapter's — the transcript restore file, the goal on stdin, every config-home file — with only the executable swapped for a shell, so the frame the runner measures is the frame production sends.</summary>
+    /// <summary>A scripted harness (kind "scripted") whose spec is the REAL Claude adapter's — the transcript restore file, the goal on stdin, every config-home file — with only the executable swapped for a shell, so the frame the runner measures is the frame production sends. <see cref="Specs"/> records the real spec, argv included, before the swap.</summary>
     private sealed class ClaudeSpecScriptedHarness : IAgentHarness
     {
         private readonly ClaudeCodeHarness _real = new();
@@ -2027,9 +2075,9 @@ public partial class AgentRunExecutorTests
 
         public SandboxSpec BuildInvocation(AgentTask task)
         {
-            var spec = _real.BuildInvocation(task) with { Command = "/bin/sh", Args = new[] { "-c", _script } };
-            Specs.Add(spec);
-            return spec;
+            var real = _real.BuildInvocation(task);
+            Specs.Add(real);
+            return real with { Command = "/bin/sh", Args = new[] { "-c", _script } };
         }
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
