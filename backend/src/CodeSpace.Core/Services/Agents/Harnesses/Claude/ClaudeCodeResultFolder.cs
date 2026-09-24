@@ -87,7 +87,7 @@ internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
 
         if (terminalReason == "prompt_too_long") return true;
 
-        if (terminalReason != "api_error" || !result.TryGetProperty("api_error_status", out var status) || !status.TryGetInt32(out var code) || code != 400) return false;
+        if (terminalReason != "api_error" || !result.TryGetProperty("api_error_status", out var status) || status.ValueKind != JsonValueKind.Number || !status.TryGetInt32(out var code) || code != 400) return false;
 
         var body = ReadString(result, "result");
 
