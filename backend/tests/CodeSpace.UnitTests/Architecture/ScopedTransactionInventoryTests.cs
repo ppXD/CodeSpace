@@ -75,7 +75,7 @@ public class ScopedTransactionInventoryTests
         ["Workflows/Artifacts/Runtime/LegacyPlacementAdopter.cs"] = (8, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Workflows/Artifacts/StorageProfileHeadLock.cs"] = (1, "already joins, and hands the caller back the transaction it had to open so the advisory lock outlives the call."),
         ["Workflows/Budget/BudgetLedger.PhysicalLlm.cs"] = (2, "both physical-POST sites: the receipt authorizing a POST, and the receipt recording what that POST actually cost, must be committed independently of a caller that may roll back."),
-        ["Workflows/Engine/WorkflowEngine.cs"] = (4, "three terminal writes that must land whatever their caller decides (two under CancellationToken.None), plus a redaction fallback whose fresh-scope retry depends on this transaction's discard."),
+        ["Workflows/Engine/WorkflowEngine.cs"] = (5, "three terminal writes that must land whatever their caller decides (two under CancellationToken.None), a redaction fallback whose fresh-scope retry depends on this transaction's discard, and a step's park, whose share lock on the run row is what a Continue's bump waits on and so must end at the park's own commit."),
         ["Workflows/ModelCalls/WorkflowRunModelCallBodyMaterializer.cs"] = (2, "the same private CreateDb() context; nothing ambient can reach it."),
     };
 

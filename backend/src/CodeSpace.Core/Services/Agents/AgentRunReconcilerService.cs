@@ -325,9 +325,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
     /// <summary>
     /// The Queued-orphan backstop — the symmetric partner of <see cref="SweepRunningUnderTerminalParentAsync"/>: cancel
-    /// any branch <see cref="AgentRunStatus.Queued"/> run whose parent workflow run is TERMINAL and which NO AgentRun
-    /// wait references. That is the one uncollectable leak <see cref="ReconcilePendingWaitsAsync"/> can't see (it only
-    /// inspects wait-referenced runs) and <see cref="SweepStaleRunningAsync"/> can't see (it's Running-only): an
+    /// any branch <see cref="AgentRunStatus.Queued"/> run whose parent workflow run is TERMINAL and which no live AgentRun
+    /// wait references (<see cref="OrphanIdsWithoutWaitAsync"/>). That is the one uncollectable leak
+    /// <see cref="ReconcilePendingWaitsAsync"/> can't see (it only inspects wait-referenced runs) and
+    /// <see cref="SweepStaleRunningAsync"/> can't see (it's Running-only): an
     /// <c>agent.run</c> / supervisor suspension commits the Queued run (CreateAsync) but crashes BEFORE its
     /// <c>workflow_run_wait</c> commits, so the row has no wait — the staged executor never launches, and the run sits
     /// Queued forever, permanently counted against the <see cref="AdmissionController"/> in-flight cap. A still-Queued
@@ -399,13 +400,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         return cancelled;
     }
 
-    /// <summary>Of the candidate Queued run ids, those NO AgentRun wait references — the genuine split orphans (the wait commit was lost). A run WITH a wait is the wait-referenced case <see cref="ReconcilePendingWaitsAsync"/> already owns, so it's excluded here to avoid a double-collect. (A Queued run can't carry a Resolved wait — it never ran — so this is the complete "no wait at all" set.)</summary>
+    /// <summary>Of the candidate Queued run ids, those no LIVE AgentRun wait references — the genuine orphans. A run a Pending wait references is the wait-referenced case <see cref="ReconcilePendingWaitsAsync"/> already owns, so it's excluded here to avoid a double-collect; a Resolved reference is excluded too, as consumed. A Discarded reference counts as none: a stop's teardown closed that wait unanswered, nobody waits on it, and <see cref="ReconcilePendingWaitsAsync"/> reads Pending waits only — so an agent staged after the kill-wave's snapshot would otherwise sit Queued against the admission cap forever.</summary>
     private async Task<List<Guid>> OrphanIdsWithoutWaitAsync(IReadOnlyList<Guid> candidateIds, CancellationToken cancellationToken)
     {
         var tokens = candidateIds.Select(id => id.ToString()).ToList();
 
         var referenced = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.WaitKind == WorkflowWaitKinds.AgentRun && tokens.Contains(w.Token))
+            .Where(w => w.WaitKind == WorkflowWaitKinds.AgentRun && tokens.Contains(w.Token) && (w.Status == WorkflowWaitStatuses.Pending || w.Status == WorkflowWaitStatuses.Resolved))
             .Select(w => w.Token)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -713,6 +714,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             : 0;
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;
+
+        // Nobody will answer for this run now: its unanswered decisions close with it, out of the queue and the Room.
+        await StoppedRunDecisions.ExpireQuietlyAsync(_db, runId, _logger, cancellationToken).ConfigureAwait(false);
 
         // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own
         // fencing is what makes a call here safe even if that read were ever stale.

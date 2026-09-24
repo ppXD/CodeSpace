@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -73,7 +74,7 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
 
         if (agent is not null)
         {
-            if (agent.Status != ToolCallLedgerStatus.AwaitingApproval) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved);
+            if (agent.Status != ToolCallLedgerStatus.AwaitingApproval) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved, RefusalReason(agent.Status));
 
             return await AnswerAgentAsync(decisionId, agent.EnvelopeJson, selectedOptions, freeText, author, teamId, cancellationToken).ConfigureAwait(false);
         }
@@ -82,7 +83,8 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
 
         if (node is not null)
         {
-            if (node.Status != WorkflowWaitStatuses.Pending) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved);
+            // Discarded = the run's end (a stop, or a failure) closed the wait unanswered; nobody answered it, and Continue asks it again.
+            if (node.Status != WorkflowWaitStatuses.Pending) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved, node.Status == WorkflowWaitStatuses.Discarded ? WorkflowService.EndedRunQuestionMessage : null);
 
             return await AnswerNodeAsync(decisionId, node.RunId, node.NodeId, node.EnvelopeJson, selectedOptions, freeText, author, cancellationToken).ConfigureAwait(false);
         }
@@ -101,7 +103,7 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
 
         var won = await _ledger.TryAnswerDecisionAsync(ledgerId, teamId, json, cancellationToken).ConfigureAwait(false);
 
-        if (!won) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved);   // a concurrent answer / the deadline won the CAS
+        if (!won) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved, await LostAnswerReasonAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false));   // a concurrent answer / the deadline / the run's stop won the CAS
 
         _waiters.TrySignal(ledgerId, ToolApprovalOutcome.Approved);   // wake the blocked mid-run call (in-process fast-path; the durable row is the authority)
 
@@ -146,6 +148,13 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
 
         return env is null || DecisionPolicyFloor.Effective(env) == DecisionPolicies.HumanRequired;
     }
+
+    /// <summary>What an answer refused on an agent decision is told. Expired is the one no-answer terminal a decision row reaches — its agent run's stop closed it — so it is named; any other winner (a concurrent answer, the deadline's default) is not.</summary>
+    private static string? RefusalReason(ToolCallLedgerStatus status) => status == ToolCallLedgerStatus.Expired ? StoppedRunDecisions.ExpiredError : null;
+
+    /// <summary>Why an answer lost the row's CAS, read after the loss: a stop that expired the decision between this answer's read and its write is named like one that landed before the read.</summary>
+    private async Task<string?> LostAnswerReasonAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
+        await ReadAgentAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false) is { } agent ? RefusalReason(agent.Status) : null;
 
     private async Task<AgentDecision?> ReadAgentAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()

@@ -107,6 +107,26 @@ public class AgentRunOrphanSweepFlowTests
     }
 
     [Fact]
+    public async Task Queued_run_whose_only_wait_a_stop_discarded_is_cancelled_as_an_orphan()
+    {
+        // A stop's teardown closes the run's pending waits as Discarded. An agent staged after the kill-wave's snapshot
+        // keeps its wait row, but nobody waits on a Discarded wait — ReconcilePendingWaits reads Pending waits only, so
+        // unless this sweep treats the Discarded reference as no reference, the agent sits Queued against the cap forever.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var parentRunId = await SeedWorkflowRunAsync(teamId, WorkflowRunStatus.Cancelled);
+        var runId = await SeedQueuedAgentRunAsync(teamId, parentRunId);
+        await SeedAgentRunWaitAsync(parentRunId, runId, WorkflowWaitStatuses.Discarded);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(AgentRunStatus.Cancelled, "a Discarded wait means nobody is waiting — the agent is an orphan under a terminal parent");
+        run.Error.ShouldBe(AgentRunReconcilerService.OrphanedParentTerminalError, "the orphan sweep collected it, not the wait-referenced path");
+    }
+
+    [Fact]
     public async Task Fresh_parentless_queued_run_within_the_liveness_window_is_left_alone()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -203,7 +223,9 @@ public class AgentRunOrphanSweepFlowTests
     }
 
     /// <summary>Seed the pending AgentRun wait the suspension would have committed — Token = the agent-run id, RunId = the parent workflow run.</summary>
-    private async Task SeedPendingAgentRunWaitAsync(Guid parentRunId, Guid agentRunId)
+    private Task SeedPendingAgentRunWaitAsync(Guid parentRunId, Guid agentRunId) => SeedAgentRunWaitAsync(parentRunId, agentRunId, WorkflowWaitStatuses.Pending);
+
+    private async Task SeedAgentRunWaitAsync(Guid parentRunId, Guid agentRunId, string status)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -212,7 +234,8 @@ public class AgentRunOrphanSweepFlowTests
         {
             Id = Guid.NewGuid(), RunId = parentRunId, NodeId = "agent", IterationKey = "",
             WaitKind = WorkflowWaitKinds.AgentRun, Token = agentRunId.ToString(),
-            Status = WorkflowWaitStatuses.Pending, CreatedAt = DateTimeOffset.UtcNow,
+            Status = status, CreatedAt = DateTimeOffset.UtcNow,
+            ResolvedAt = status == WorkflowWaitStatuses.Pending ? null : DateTimeOffset.UtcNow,
         });
 
         await db.SaveChangesAsync();

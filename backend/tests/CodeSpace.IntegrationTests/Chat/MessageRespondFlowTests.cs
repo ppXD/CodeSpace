@@ -2,13 +2,17 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Chat;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -508,6 +512,64 @@ public class MessageRespondFlowTests
         interaction.Resolution.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task A_click_on_a_stopped_runs_card_says_the_run_was_stopped_and_does_not_stamp_the_card()
+    {
+        // The stop's teardown closed the parked wait unanswered. The click is still rejected — the card must not claim a
+        // decision the run never took — but "already resolved" would tell the person someone answered it. Nobody did:
+        // the run was stopped, and Continue re-runs the step, which asks again.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None))!.Cancelled.ShouldBeTrue();
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = token },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        var rejected = await Should.ThrowAsync<InvalidOperationException>(() => RespondViaMediatorAsync(ownerId, teamId, cardId, "approve"));
+        rejected.Message.ShouldBe(WorkflowService.EndedRunQuestionMessage, "the person is told the run was stopped and that Continue asks again");
+
+        using var verify = _fixture.BeginScope();
+        var interaction = MessageInteractionJson.Deserialize(
+            (await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+        interaction.State.ShouldBe(InteractionState.Open, "the click is still rejected — the card is not stamped with a decision the run never took");
+    }
+
+    [Fact]
+    public async Task A_click_on_a_stopped_agents_decision_card_says_the_agent_was_stopped()
+    {
+        // The agent's cancel closed its unanswered decision (Expired). The card still offers the question, so the click is
+        // rejected — but with why: the agent run that asked was stopped, not answered by someone else.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (agentId, token) = await SeedAgentDecisionAsync(teamId);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().CancelRunningAsync(agentId, "stopped by the operator", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue();
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "a", Label = "Ship" } } },
+            Target = new DecisionRequestTarget { Token = token },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Ship the migration?", card, default)).Id;
+
+        var rejected = await Should.ThrowAsync<InvalidOperationException>(() => RespondViaMediatorAsync(ownerId, teamId, cardId, "a"));
+        rejected.Message.ShouldBe(StoppedRunDecisions.ExpiredError, "the person is told the asking agent was stopped");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId)
@@ -586,6 +648,30 @@ public class MessageRespondFlowTests
         db.User.Add(new User { Id = userId, Email = $"resp-{userId:N}@test.local", Name = $"resp-{userId:N}" });
         await db.SaveChangesAsync();
         return userId;
+    }
+
+    /// <summary>A Running agent run with a parked agent-grain decision.request row whose approval token a decision card targets.</summary>
+    private async Task<(Guid AgentId, string Token)> SeedAgentDecisionAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var agentId = Guid.NewGuid();
+        db.AgentRun.Add(new AgentRun { Id = agentId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+
+        var ledgerId = Guid.NewGuid();
+        var token = "dec-" + Guid.NewGuid().ToString("N")[..8];
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = ledgerId, TeamId = teamId, AgentRunId = agentId, ToolKind = DecisionToolKinds.DecisionRequest,
+            IdempotencyKey = $"decision.request:{ledgerId:N}", InputHash = new string('0', 64),
+            Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = token, ApprovalDeadlineAt = DateTimeOffset.UtcNow.AddHours(1),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+
+        return (agentId, token);
     }
 
     /// <summary>Seed a manual run, park it on an Action wait keyed by a fresh token, and return both (mirrors what a parked flow.wait_action writes) — so a respond can resolve a real wait without driving the engine.</summary>

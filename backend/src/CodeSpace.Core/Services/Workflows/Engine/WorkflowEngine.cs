@@ -73,6 +73,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly int _maxParallelism;
 
     /// <summary>
+    /// The run generation this walk claimed (<see cref="WorkflowRun.Generation"/>). Every wave check — top-level, loop
+    /// and try bodies, map branches — the park of a suspending step, and every run-row write the walk makes outside its
+    /// tracked saves (landing the run Cancelled, a bootstrap failure, the arbitrated terminal stamp) compare against it,
+    /// so a walk a Continue overtook loses to the revived one. Child-scope engines inherit it
+    /// (<see cref="ResolveChildEngine"/>). 0 on an engine that never claimed: the generation of a run no Continue has revived.
+    /// </summary>
+    private int _generation;
+
+    /// <summary>
     /// Max nodes from one ready frontier run concurrently (each in its own DI scope). Env-overridable
     /// (Rule 8) so an operator can tune throughput, or pin to <c>1</c> to force fully-sequential
     /// execution; parsed once at construction, clamped to [1, <see cref="MaxParallelismCeiling"/>],
@@ -135,9 +144,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         //
         // We don't distinguish these cases here; the caller (Hangfire worker) treats
         // "engine returned" as the contract regardless.
+        //
+        // The claim is also pinned to the generation read just before it, so this walk owns exactly that revival: a
+        // Continue that re-dispatches the run in between bumps it, and the worker of THAT dispatch claims instead.
         var startedAt = DateTimeOffset.UtcNow;
+        var generation = await ReadGenerationAsync(runId, cancellationToken).ConfigureAwait(false);
         var claimed = await _db.WorkflowRun
-            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Enqueued)
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Enqueued && r.Generation == generation)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Running)
                 .SetProperty(r => r.StartedAt, startedAt), cancellationToken)
@@ -155,6 +168,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 runId, currentStatus);
             return;
         }
+
+        _generation = generation;
 
         // Post-claim work is wrapped in a try/catch so that ANY failure between claim and
         // walk (run load throwing, definition deserialisation throwing, hash mismatch,
@@ -268,6 +283,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _logger.LogError("Run {RunId} failed: a settled cell's redacted outputs are unrecoverable. {Message}", run.Id, persistedError);
             await CompleteAndRecordAsync(run, new TerminalCompletionRequest(WorkflowRunStatus.Failure, persistedError, run.OutputsJson, DateTimeOffset.UtcNow - engineStartedAt, false), cancellationToken).ConfigureAwait(false);
         }
+        catch (RunSupersededException superseded)
+        {
+            // A Continue revived the run under a newer generation while this walk was mid-wave (a stop that never
+            // reached this host, or reached it too late). The run — Running again under the revived walk's claim — is
+            // no longer this walk's to advance or to end, so it stands down writing nothing.
+            _logger.LogInformation("Run {RunId} was continued past this walk (claimed generation {Claimed}); standing down", run.Id, superseded.Claimed);
+        }
         catch (OperationCanceledException)
         {
             // Operator-initiated cancel (the registry token tripped, or the wave-boundary re-read saw a
@@ -277,6 +299,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // flip already owns the row (no duplicate status write, no duplicate ledger), and lands Cancelled +
             // the ledger once for any other-sourced cancel that left the row Running.
             await EnsureRunCancelledAsync(run.Id, engineStartedAt).ConfigureAwait(false);
+
+            // A Continue that revived the run while this walk wound down owns it now: the run is not cancelled, and
+            // waking a parent with this walk's cancel would tell it that a child it still waits on has ended.
+            if (await IsSupersededAsync(run.Id, CancellationToken.None).ConfigureAwait(false))
+                throw;
 
             // If this cancelled run is a sub-workflow CHILD, wake the parent parked on it — exactly as the normal
             // CompleteRunAsync path does. Resolves only this child's own wait, with status=Cancelled, so the parent's
@@ -315,7 +342,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// for the cooperative-cancel path. 0 rows = the operator's own flip already owns the terminal (then it also
     /// emitted the run.cancelled ledger + tore down children), so this is a clean no-op. 1 row = a cancel from
     /// another source left the row Running; we land it Cancelled and emit the ledger once. Uses CancellationToken.None
-    /// so the write lands even though the walk's token is tripped.
+    /// so the write lands even though the walk's token is tripped. Fenced on the generation this walk claimed: a walk
+    /// a Continue overtook finds the revived run Running again under a newer claim, and must not cancel it.
     /// </summary>
     private async Task EnsureRunCancelledAsync(Guid runId, DateTimeOffset engineStartedAt)
     {
@@ -323,7 +351,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // write must land whatever happened to the walk's token, and a joined write only lands if its caller commits.
         await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
-            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running && r.Generation == _generation)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), CancellationToken.None)
@@ -344,17 +372,47 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// everywhere. This DB re-read additionally catches a cancel that landed on ANOTHER replica (whose token this
     /// host doesn't hold); a cancel of a long inner map/loop body on another replica is honoured when control
     /// returns to this top-level boundary, not mid-body. One indexed PK lookup per top-level wave — negligible.
+    ///
+    /// <para>The status alone cannot catch a stop that a Continue already followed: by this check the run may read
+    /// Running again — the revived walk's claim. So the generation is read with it, and a walk whose claimed
+    /// generation the row has moved past throws <see cref="RunSupersededException"/> and stands down; the steps it
+    /// already started finish, but it starts no more.</para>
     /// </summary>
     private async Task ThrowIfRunCancelledAsync(Guid runId, CancellationToken cancellationToken)
     {
-        var status = await _db.WorkflowRun.AsNoTracking()
+        var fence = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => (WorkflowRunStatus?)r.Status)
+            .Select(r => new { r.Status, r.Generation })
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (status == WorkflowRunStatus.Cancelled)
+        if (fence is not null && fence.Generation != _generation)
+            throw new RunSupersededException(_generation);
+
+        if (fence?.Status == WorkflowRunStatus.Cancelled)
             throw new OperationCanceledException($"Run {runId} was cancelled by an operator.");
+    }
+
+    /// <summary>The run's current generation, read just before the claim so the claim can pin it. A missing row reads 0, and its claim then matches nothing.</summary>
+    private async Task<int> ReadGenerationAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.Generation).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Whether a Continue has revived the run past the generation this walk claimed.</summary>
+    private async Task<bool> IsSupersededAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking().AnyAsync(r => r.Id == runId && r.Generation != _generation, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// The one-row check behind every wave inside a container — a loop or try body, a map branch — and behind a step's
+    /// park: throw <see cref="RunSupersededException"/> once a Continue has revived the run past this walk's generation.
+    /// A stop that lands on another host (the API pod, in the api/worker split) never trips this walk's in-process token,
+    /// so without it an overtaken walk ran its container to the end under the revived run while the revived walk re-ran
+    /// the same container, and every body step ran twice. The exception propagates through the loop / try / map error
+    /// policies (none of them catches it) up to <see cref="RunAfterClaimAsync"/>, which stands the walk down writing nothing.
+    /// </summary>
+    private async Task ThrowIfSupersededAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (await IsSupersededAsync(runId, cancellationToken).ConfigureAwait(false))
+            throw new RunSupersededException(_generation);
     }
 
     /// <summary>
@@ -363,7 +421,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// failure, or a snapshot-persist conflict). We mark the run Failed via a CAS UPDATE
     /// (Running → Failure) AND emit a <c>run.failed</c> ledger record so the timeline
     /// surfaces the cause. CancellationToken.None is used everywhere — the original token
-    /// may already be tripped, but we want this write to land regardless.
+    /// may already be tripped, but we want this write to land regardless. Fenced on the generation this walk claimed,
+    /// like <see cref="EnsureRunCancelledAsync"/>: an overtaken walk's failure — its tracked save losing to the
+    /// revived run's newer row — must not fail the revived run.
     /// </summary>
     private async Task MarkBootstrapFailureAsync(Guid runId, DateTimeOffset engineStartedAt, Exception failure)
     {
@@ -376,7 +436,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // own, not at the discretion of a caller that may itself be failing.
         await using var transaction = await _db.Database.BeginTransactionAsync(CancellationToken.None).ConfigureAwait(false);
         var flipped = await _db.WorkflowRun
-            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running && r.Generation == _generation)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Failure)
                 .SetProperty(r => r.Error, message)
@@ -987,7 +1047,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// Both predicates are compared INSIDE the statement that writes — never read-then-write — so a fact landing
     /// after the app-level verify can fail the stamp but can never be terminalized over. Returns false on zero
     /// rows (the caller parks). Internal for direct pinning: the verify→stamp window has no seam a test could
-    /// inject into, so the CAS is proven at its own boundary instead.
+    /// inject into, so the CAS is proven at its own boundary instead. The statement is also fenced on the generation
+    /// this walk claimed, so a walk a Continue overtook cannot stamp the revived run terminal.
     ///
     /// <para>The statement writes the terminal row COMPLETE — the whole <paramref name="terminal"/> included. An
     /// <c>ExecuteUpdate</c> never flushes tracked state, so outputs left on the tracked entity reached the row
@@ -999,7 +1060,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var now = DateTimeOffset.UtcNow;
 
         var updated = await _db.WorkflowRun
-            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running && r.Generation == _generation
                 && _db.CompletionLedgerHead.Where(h => h.WorkflowRunId == runId).Select(h => h.Version).FirstOrDefault() == ledgerVersionRead)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, terminal.Status)
@@ -1071,6 +1132,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (!await TryStampArbitratedTerminalAsync(run.Id, terminal, watermarks.LedgerVersion, cancellationToken).ConfigureAwait(false))
             {
+                // Refused because a Continue revived the run past this walk, not because the ledger moved: stand down
+                // rather than park a run that is no longer this walk's to end.
+                await ThrowIfSupersededAsync(run.Id, cancellationToken).ConfigureAwait(false);
+
                 _logger.LogWarning("Terminal CAS refused for run {RunId} — the ledger moved at the stamp itself; parking", run.Id);
 
                 run.Status = WorkflowRunStatus.Suspended;
@@ -1161,7 +1226,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (pending.Count == 0) return;
 
             foreach (var wait in pending)
-                await CancelStagedChildAsync(wait.WaitKind, wait.Token, cancellationToken).ConfigureAwait(false);
+                await CancelStagedChildAsync(wait.WaitKind, wait.Token, "Parent workflow run reached a terminal state before this branch launched.", cancellationToken).ConfigureAwait(false);
 
             await _db.WorkflowRunWait
                 .Where(w => w.RunId == run.Id && w.Status == WorkflowWaitStatuses.Pending)
@@ -1177,12 +1242,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>Cancel the staged child a pending wait parked on: a Queued AgentRun (its Token is the agent-run id) or a non-terminal Subworkflow child run (its Token is the child run id). Other wait kinds (timer / approval / callback / action / supervisor-decision) have no staged child to cancel — a SupervisorDecision wait's self-advance is gated on the wait still being Pending, so the caller's resolve of the wait (in <see cref="CancelPendingWaitsAndChildrenAsync"/>) already neutralises any in-flight or reconciler-re-fired advance once the run is terminal.</summary>
-    private async Task CancelStagedChildAsync(string waitKind, string token, CancellationToken cancellationToken)
+    private async Task CancelStagedChildAsync(string waitKind, string token, string agentReason, CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(token, out var childId)) return;
 
         if (waitKind == WorkflowWaitKinds.AgentRun)
-            await _agentRunService.CancelQueuedAsync(childId, "Parent workflow run reached a terminal state before this branch launched.", cancellationToken).ConfigureAwait(false);
+            await _agentRunService.CancelQueuedAsync(childId, agentReason, cancellationToken).ConfigureAwait(false);
         else if (waitKind == WorkflowWaitKinds.Subworkflow)
             await _db.WorkflowRun
                 .Where(r => r.Id == childId && (r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued))
@@ -1465,13 +1530,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             await using var childScope = _lifetimeScope.BeginLifetimeScope();
-            var nodeEngine = childScope.Resolve<WorkflowEngine>();
+            var nodeEngine = ResolveChildEngine(childScope);
             return await nodeEngine.ExecuteNodeAsync(run, node, scope, state, cancellationToken, iterationKey).ConfigureAwait(false);
         }
         finally
         {
             gate.Release();
         }
+    }
+
+    /// <summary>The engine a parallel node or a map branch runs on, in its own child scope — carrying this walk's claimed generation, so the checks and the park it makes compare against the walk's claim rather than a fresh engine's 0.</summary>
+    private WorkflowEngine ResolveChildEngine(ILifetimeScope childScope)
+    {
+        var child = childScope.Resolve<WorkflowEngine>();
+        child._generation = _generation;
+        return child;
     }
 
     /// <summary>
@@ -1798,7 +1871,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             await using var childScope = _lifetimeScope.BeginLifetimeScope();
-            var branchEngine = childScope.Resolve<WorkflowEngine>();
+            var branchEngine = ResolveChildEngine(childScope);
             return await branchEngine.RunMapBranchOnceAsync(run, definition, mapNode, body, terminal, scope, element, index, plan, nodeIterationKey, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -1865,6 +1938,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             while (bodyState.Ready.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                await ThrowIfSupersededAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
                 var wave = DrainReadyWave(bodyState);
 
@@ -2517,6 +2591,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         while (bodyState.Ready.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            await ThrowIfSupersededAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
             var wave = DrainReadyWave(bodyState);
 
@@ -2924,6 +2999,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var waitKind = ValidateWaitKind(node.Id, token.Kind);
 
+        // A walk a Continue overtook while this step ran must not park it: the revived walk re-runs the step and parks
+        // the cell itself, so staging here would put a second agent / child under the revived run. Checked before the
+        // staging below, under CancellationToken.None like the staging (a cancel is honoured at the next wave boundary).
+        await ThrowIfSupersededAsync(run.Id, CancellationToken.None).ConfigureAwait(false);
+
         // SupervisorAgentWaits is a SUSPEND MARKER, not a wait the engine stages: a spawn/retry turn's executor
         // ALREADY staged the K real AgentRun waits (keyed <nodeId>#turn{N}#{k}). We record node.suspended (the
         // run-detail surface) but stage NO extra wait + schedule NO self-advance — the agents' completion +
@@ -2962,17 +3042,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
         };
 
-        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, stagingCt).ConfigureAwait(false);
-
-        // One outstanding wait per (run, node, iteration). Drop any prior (resolved) wait for
-        // this node+iteration so a re-suspend can't trip the unique index.
-        var existing = await _db.WorkflowRunWait
-            .Where(w => w.RunId == run.Id && w.NodeId == node.Id && w.IterationKey == iterationKey)
-            .ToListAsync(stagingCt).ConfigureAwait(false);
-        if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
-
         var waitId = Guid.NewGuid();
-        _db.WorkflowRunWait.Add(new WorkflowRunWait
+        var wait = new WorkflowRunWait
         {
             Id = waitId,
             RunId = run.Id,
@@ -2987,8 +3058,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // resolve — the engine only reads Resolved waits, so there's no conflict.
             PayloadJson = token.Payload.ValueKind == JsonValueKind.Undefined ? null : token.Payload.GetRawText(),
             CreatedAt = DateTimeOffset.UtcNow,
-        });
-        await _db.SaveChangesAsync(stagingCt).ConfigureAwait(false);
+        };
+
+        // The check above can be overtaken while the child is staged. The park itself is refused once a Continue has
+        // moved the run's generation — the revived walk may already own this cell's wait — so undo the staging and
+        // stand down rather than replace the revived walk's wait with this step's.
+        if (!await TryParkAsync(wait, stagingCt).ConfigureAwait(false))
+        {
+            await CancelStagedChildAsync(waitKind, correlationToken, OvertakenParkAgentReason, CancellationToken.None).ConfigureAwait(false);
+            throw new RunSupersededException(_generation);
+        }
 
         // Timer waits self-wake: schedule the resume at wake_at. Approval / Callback waits are
         // woken by an external signal, so nothing is scheduled there. A BOUNDED wait (DeadlineAt +
@@ -2999,6 +3078,46 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeWaitAsync(run.Id, waitId, null, CancellationToken.None), wakeAt.Value);
         else if (token.DeadlineAt.HasValue && token.TimeoutPayload is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } timeoutPayload)
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeByDeadlineAsync(waitId, timeoutPayload.GetRawText(), CancellationToken.None), token.DeadlineAt.Value);
+    }
+
+    /// <summary>The error a staged agent is cancelled with when its step's park was refused because a Continue overtook the step.</summary>
+    private const string OvertakenParkAgentReason = "The workflow run was continued while this step was parking; the continued run stages its own agent.";
+
+    /// <summary>
+    /// Park a suspending step — its node.suspended record and its cell's wait row, replacing any earlier wait for the
+    /// cell — in one transaction that first share-locks the run row AT the generation this walk claimed. A Continue's
+    /// bump then either waits for the park to commit (and the revived walk parks the cell over it) or has already
+    /// landed (the lock finds no row, nothing is written, and this returns false). Without the fence an overtaken step
+    /// that parked after the revived walk replaced the revived wait with its own.
+    /// </summary>
+    private async Task<bool> TryParkAsync(WorkflowRunWait wait, CancellationToken cancellationToken)
+    {
+        // Owns its transaction deliberately (not ScopedTransaction.OwnOrJoinAsync): the share lock below is what a
+        // Continue's bump waits on, so it must end at this park's own commit — joined, a Continue would wait out a
+        // caller's whole unit of work. The engine walks on its own scope, so nothing is ambient here.
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!await LockRunAtGenerationAsync(wait.RunId, cancellationToken).ConfigureAwait(false)) return false;
+
+        await _recordLogger.NodeSuspendedAsync(wait.RunId, wait.NodeId, wait.IterationKey, wait.WaitKind, wait.WakeAt, cancellationToken).ConfigureAwait(false);
+        await ReplaceCellWaitAsync(wait, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>Share-lock the run row while it still stands at this walk's generation; false once a Continue has moved it. Held to the end of the caller's transaction, so a Continue's bump waits for it.</summary>
+    private async Task<bool> LockRunAtGenerationAsync(Guid runId, CancellationToken cancellationToken) =>
+        (await _db.Database.SqlQuery<int>($"SELECT 1 AS \"Value\" FROM workflow_run WHERE id = {runId} AND generation = {_generation} FOR SHARE").ToListAsync(cancellationToken).ConfigureAwait(false)).Count > 0;
+
+    /// <summary>One outstanding wait per (run, node, iteration): drop any prior (resolved) wait for the cell so a re-suspend can't trip the unique index, then add this one.</summary>
+    private async Task ReplaceCellWaitAsync(WorkflowRunWait wait, CancellationToken cancellationToken)
+    {
+        var existing = await _db.WorkflowRunWait.Where(w => w.RunId == wait.RunId && w.NodeId == wait.NodeId && w.IterationKey == wait.IterationKey).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
+
+        _db.WorkflowRunWait.Add(wait);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal static string ValidateWaitKind(string nodeId, string kind)
@@ -3767,6 +3886,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private sealed class RunSuspendedException : Exception
     {
         public RunSuspendedException(string nodeId) : base($"Run suspended on node '{nodeId}'.") { }
+    }
+
+    /// <summary>Thrown at a wave check, or at a step's park, once a Continue has revived the run past the generation this walk claimed. Caught in RunAfterClaimAsync, which stands the walk down without writing — the run belongs to the revived walk.</summary>
+    private sealed class RunSupersededException : Exception
+    {
+        public RunSupersededException(int claimed) : base($"Run was continued past this walk (claimed generation {claimed}).") { Claimed = claimed; }
+
+        public int Claimed { get; }
     }
 
     /// <summary>

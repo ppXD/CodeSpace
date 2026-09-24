@@ -23,6 +23,9 @@ public interface IDecisionQueueService
 
     /// <summary>The pending AGENT-grain decisions raised by a specific set of agent runs (the supervisor arbiter's children, D4) — team-scoped, soonest-deadline first. Node-grain decisions don't apply (a supervisor's children are agent.run runs). Empty input → empty result.</summary>
     Task<IReadOnlyList<PendingDecision>> ListPendingForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>The pending decisions ONE workflow run is parked on, both grains — its own <c>flow.decision</c> waits and the <c>decision.request</c> rows its own agent runs raised (through <see cref="ListPendingForAgentRunsAsync"/>) — team-scoped, soonest-deadline first. The Room's read: one run's questions, never the whole team's queue filtered down.</summary>
+    Task<IReadOnlyList<PendingDecision>> ListPendingForRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class DecisionQueueService : IDecisionQueueService, IScopedDependency
@@ -66,6 +69,34 @@ public sealed class DecisionQueueService : IDecisionQueueService, IScopedDepende
 
         return pending.OrderBy(p => p.DeadlineAt ?? DateTimeOffset.MaxValue).ThenBy(p => p.CreatedAt).ToList();
     }
+
+    public async Task<IReadOnlyList<PendingDecision>> ListPendingForRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var agentRunIds = await RunAgentIdsAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+        var agentGrain = await ListPendingForAgentRunsAsync(agentRunIds, teamId, cancellationToken).ConfigureAwait(false);
+        var nodeRows = await ReadRunNodeGrainAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var pending = agentGrain.ToList();
+
+        foreach (var r in nodeRows) Append(pending, Project(r.Id, r.CreatedAt, answerMessageId: null, r.PayloadJson));
+
+        return pending.OrderBy(p => p.DeadlineAt ?? DateTimeOffset.MaxValue).ThenBy(p => p.CreatedAt).ToList();
+    }
+
+    /// <summary>The run's own agent runs — an agent-grain envelope carries no workflow run id, so the run's decisions are reached through them.</summary>
+    private async Task<List<Guid>> RunAgentIdsAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.AgentRun.AsNoTracking()
+            .Where(a => a.WorkflowRunId == runId && a.TeamId == teamId)
+            .Select(a => a.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>One run's Pending <c>flow.decision</c> waits — the node grain of <see cref="ReadNodeGrainAsync"/>, narrowed to that run.</summary>
+    private async Task<List<NodeDecisionRow>> ReadRunNodeGrainAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Decision && w.Status == WorkflowWaitStatuses.Pending
+                && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.TeamId == teamId))
+            .Select(w => new NodeDecisionRow(w.Id, w.CreatedAt, w.PayloadJson))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>Agent-grain: parked <c>decision.request</c> ledger rows (AwaitingApproval, never approved — a decision has no Running hop), the envelope stashed at park.</summary>
     private async Task<List<AgentDecisionRow>> ReadAgentGrainAsync(Guid teamId, CancellationToken cancellationToken) =>

@@ -631,7 +631,9 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// Recover one candidate: append the durable recovery marker FIRST (the bound counter — counted before the next
     /// pass even if the dispatch then fails), CAS Running→Pending (0 rows = a racing live worker re-claimed it →
     /// skip, never touch), then re-dispatch via the same path the resume uses. The dispatcher's own Pending→Enqueued
-    /// CAS is the final guard against a racing dispatch; the engine re-walk replays the in-flight decision.
+    /// CAS is the final guard against a racing dispatch; the engine re-walk replays the in-flight decision. The flip
+    /// starts a new generation, as Continue's revive does: the walk judged abandoned may only be slow, and on its next
+    /// check it then stands down instead of walking beside the re-dispatched one.
     /// </summary>
     private async Task<bool> TryRecoverSupervisorRunAsync(Guid runId, CancellationToken cancellationToken)
     {
@@ -642,7 +644,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
             var flipped = await _db.WorkflowRun
                 .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
-                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending).SetProperty(r => r.Generation, r => r.Generation + 1), cancellationToken)
                 .ConfigureAwait(false);
 
             if (flipped == 0) return false;

@@ -81,6 +81,7 @@ public class SupervisorPreClaimCrashRecoveryFlowTests
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
             "re-dispatched, waiting for a worker — Enqueued rather than Failure also proves the abandoned-Running sweep did NOT get this row");
         (await CountRecoveryMarkersAsync(runId)).ShouldBe(1);
+        (await ReadGenerationAsync(runId)).ShouldBe(1, "the recovery revives the run as a new generation, so the walk it gave up on — should it still be alive — is fenced out of the revived run");
 
         // The re-walk re-enters "sup" fresh: rehydrate finds an EMPTY ledger (nothing to replay), the real
         // (non-crashing) decider is resolved this time, turn 0 plans normally.
@@ -166,6 +167,12 @@ public class SupervisorPreClaimCrashRecoveryFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.Status).SingleAsync();
+    }
+
+    private async Task<int> ReadGenerationAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.Generation).SingleAsync();
     }
 
     private async Task<int> CountRecoveryMarkersAsync(Guid runId)
