@@ -134,7 +134,7 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!TryReadCostCap(context.Config, out var maxCostUsd)) return Fail("Config 'maxCostUsd' must be a positive USD amount when set.");
 
         // Resumed: the agent run finished. ResumePayload = { status, summary, changedFiles, branch, error }.
-        if (context.ResumePayload.HasValue) return Task.FromResult(MapResult(context.ResumePayload.Value, maxCostUsd));
+        if (context.ResumePayload.HasValue) return Task.FromResult(MapResult(context.ResumePayload.Value, maxCostUsd, context.RetriesOnFailure));
 
         if (!TryReadPriorSpend(context.PriorAttemptPayload, maxCostUsd, out var budgetSpentUsd, out var budgetError)) return Fail(budgetError!);
 
@@ -296,7 +296,7 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     /// <summary>Map the resumed agent-run outcome onto this node's result. Succeeded → outputs; anything else → a clean node failure, marked retryable only when a fresh respawn could change the outcome.</summary>
-    private static NodeResult MapResult(JsonElement payload, decimal? maxCostUsd)
+    private static NodeResult MapResult(JsonElement payload, decimal? maxCostUsd, bool retriesOnFailure)
     {
         var status = ReadString(payload, "status");
         var succeeded = status == nameof(AgentRunStatus.Succeeded);
@@ -402,7 +402,7 @@ public sealed class AgentCodeNode : INodeRuntime
                                 && !escalationAvailable)
                                 || mitigationSpent;
 
-            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}{UnpricedRetrySuffix(unpriced && !deterministic, maxCostUsd)}", retryable: !deterministic && !unpriced);
+            return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}{UnpricedRetrySuffix(unpriced && !deterministic && retriesOnFailure, maxCostUsd)}", retryable: !deterministic && !unpriced);
         }
 
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };
@@ -436,7 +436,7 @@ public sealed class AgentCodeNode : INodeRuntime
         _ => "",
     };
 
-    /// <summary>Why a failure a respawn could otherwise change is not respawned: its spend is unknown, so a retry cannot be bought under the cap. Empty whenever that is not the deciding fact, so the cause stays the whole message.</summary>
+    /// <summary>Why a failure a respawn could otherwise change is not respawned: its spend is unknown, so a retry cannot be bought under the cap. Empty whenever that is not the deciding fact — including on a node whose own policy never retries — so the cause stays the whole message.</summary>
     private static string UnpricedRetrySuffix(bool decides, decimal? maxCostUsd) =>
         decides ? $"; not retried: its spend cannot be priced under the monitored ${maxCostUsd!.Value.ToString(CultureInfo.InvariantCulture)} cost cap" : "";
 
