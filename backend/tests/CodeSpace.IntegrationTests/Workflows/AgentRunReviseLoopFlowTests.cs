@@ -96,6 +96,41 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
+    public async Task A_cold_revision_refused_for_spend_leaves_no_note_that_it_continued()
+    {
+        // The revise twin of the launch-path case: the round's cold decision comes before its spend admission, so a
+        // round refused there never ran and its note must not say it "continued as a fresh conversation". The quick
+        // lane's $5 cap is held whole by round 0's unpriced settle, so round 1's admission is refused.
+        if (OperatingSystem.IsWindows()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        Guid workflowId;
+        using (var seed = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
+            workflowId = await seed.Resolve<MediatR.IMediator>().Send(new CodeSpace.Messages.Commands.Workflows.CreateWorkflowCommand { Name = $"quick-lane-{Guid.NewGuid():N}", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = Array.Empty<CodeSpace.Messages.Commands.Workflows.WorkflowActivationInput>(), Enabled = true });
+        var workflowRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, routePlanJson: WorkflowsTestSeed.RouteJsonWithCostCap(5m));
+
+        Guid runId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId))
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(TaskWith(repoId) with { MaxReviseRounds = 1 }, teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        var harness = new OversizedSessionHarness(NativeLaunchProtocol.MaximumFrameBytes + 1);
+
+        await ExecuteAsync(runId, harness);
+
+        var (_, result) = await LoadAsync(runId);
+        var events = await LoadEventsAsync(runId);
+
+        harness.Built.Count.ShouldBe(3, "fixture check: round 1 was built warm, then rebuilt cold");
+        events.ShouldContain(t => t.StartsWith(AgentRunExecutor.ReviseBudgetStoppedPrefix, StringComparison.Ordinal), "fixture check: round 1 was refused for spend");
+        result.ReviseRounds.ShouldBe(0, "fixture check: no revision ran");
+        events.ShouldNotContain(AgentRunExecutor.ReviseRanColdNote, "no round ran, so no round continued as a fresh conversation");
+    }
+
+    [Fact]
     public async Task A_revision_receives_the_real_oracle_diagnosis_instead_of_only_its_exit_code()
     {
         var (teamId, userId) = await SeedTeamAsync();
