@@ -597,6 +597,20 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task An_unpriced_failure_on_a_single_attempt_node_does_not_blame_the_cost_cap()
+    {
+        // With no retry policy there was never a retry to refuse, so naming the cap as the reason would send the
+        // operator after pricing for a retry that could not have happened either way. Still not retryable.
+        var config = new Dictionary<string, JsonElement> { ["maxCostUsd"] = Num(5) };
+        var resume = JsonDocument.Parse(JsonSerializer.Serialize(new { status = "Failed", error = "claude exited with code 1", exitReason = "non-zero-exit" })).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume, retriesOnFailure: false), CancellationToken.None);
+
+        result.Retryable.ShouldBeFalse();
+        result.Error.ShouldBe("Agent run did not succeed: claude exited with code 1");
+    }
+
+    [Fact]
     public void The_two_watchdogs_are_classified_alike_because_neither_can_see_why_the_process_went_quiet()
     {
         // The asymmetry this closes, stated as the invariant rather than as two separate rows: the wall-clock
