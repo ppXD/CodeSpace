@@ -61,9 +61,11 @@ public static class AgentRetryContinuity
     /// Said when a restored conversation is too large for the launch pipe to hand back, so the attempt runs as a
     /// fresh one instead of being refused. Appended after whatever the goal already says, for the same reason as
     /// <see cref="LostHostCheckpointUnreadableHint"/>: the earlier sentence promised a conversation, and the agent must
-    /// be told it is not getting one. What that sentence said about the git tree still stands.
+    /// be told it is not getting one. It says nothing about the tree beyond what holds on every path: a respawn may be
+    /// checked out at the branch the earlier attempt pushed, with no other sentence saying so, and "start from the
+    /// beginning" there would have the agent redo or overwrite its own half-finished work.
     /// </summary>
-    public const string OversizedTranscriptHint = "Your previous conversation is too large to hand back to you, so it was not restored after all — you are starting this task from the beginning.";
+    public const string OversizedTranscriptHint = "Your previous conversation is too large to hand back to you, so it was not restored — you are continuing without it. Look at the workspace before you change anything: whatever it already holds beyond the base is your own earlier work on this task.";
 
     /// <summary>Replace a resumed goal's promise of a restored conversation with the truth that there is none, because the conversation was too large to restore.</summary>
     public static string WithOversizedTranscriptHint(string goal) => $"{goal}\n\n{OversizedTranscriptHint}";

@@ -218,6 +218,14 @@ public sealed class AgentRunExecutorReviseTests
     }
 
     [Fact]
+    public void The_cold_hint_never_tells_an_agent_to_start_over_in_a_tree_that_holds_its_work()
+    {
+        // A respawn can be checked out at the branch its earlier attempt pushed, with no other sentence saying so.
+        AgentRetryContinuity.OversizedTranscriptHint.ShouldNotContain("beginning", Case.Insensitive);
+        AgentRetryContinuity.OversizedTranscriptHint.ShouldContain("your own earlier work");
+    }
+
+    [Fact]
     public void A_task_that_restores_nothing_is_never_judged_an_overflow()
     {
         var task = TaskWith() with { Goal = new string('x', NativeLaunchProtocol.MaximumFrameBytes) };
