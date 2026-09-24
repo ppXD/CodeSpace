@@ -35,6 +35,13 @@ public sealed class AgentContextWindowRetryTests
         """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":400,"session_id":"6406b570-40de-4274-a586-ab044dbf5d48","result":"API Error: 400 This model's maximum context length is 131072 tokens. However, you requested 161234 tokens. Please reduce the length of the messages."}""",
     };
 
+    public static TheoryData<string, string> ClaudeConnectionFailureLines => new()
+    {
+        // Pinned 2.1.263 against a dead port and a peer that resets: the status is null because no answer ever came.
+        { """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":null,"session_id":"54818d4e-66e4-4f1b-b3ee-73de94f3b9cc","result":"API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)"}""", "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)" },
+        { """{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":null,"session_id":"f01a6528-1c83-4400-af5d-4ac6d322c7f9","result":"API Error: Connection dropped (ECONNRESET)"}""", "API Error: Connection dropped (ECONNRESET)" },
+    };
+
     public static TheoryData<string> CodexOverflowLines => new()
     {
         // OpenAI Responses API 400 context_length_exceeded.
@@ -67,6 +74,22 @@ public sealed class AgentContextWindowRetryTests
         result.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe(AgentTerminalOutcomeReader.ContextWindowExceededExitReason);
         AgentRetryCauses.Classify(result.ExitReason, result.Error).ShouldBe(AgentRetryCauses.ContextWindowExceeded, customMessage: $"the folded error was: {result.Error}");
+    }
+
+    [Theory]
+    [MemberData(nameof(ClaudeConnectionFailureLines))]
+    public void A_claude_connection_failure_folds_to_its_own_cause(string terminalLine, string cliError)
+    {
+        // The status is null when no answer came. Reading it as a number threw out of the fold, so the run landed as
+        // executor-error with a .NET message, and its diff, transcript and session were never captured.
+        var harness = new ClaudeCodeHarness();
+
+        var result = harness.BuildResult(harness.ParseEvents(terminalLine), exitCode: 1, diagnostics: "");
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe("non-zero-exit");
+        result.Error.ShouldBe(cliError);
+        result.SessionId.ShouldNotBeNullOrEmpty(customMessage: "the fold completed, so the session a retry resumes is still there");
     }
 
     [Fact]
