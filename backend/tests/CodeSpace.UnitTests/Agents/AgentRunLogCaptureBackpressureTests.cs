@@ -154,6 +154,16 @@ public sealed class AgentRunLogCaptureBackpressureTests
         clock.Advance(TimeSpan.FromMinutes(advanceMinutes));
         await WaitAsync(() => logs.AppendAttempts > 1, "the bridge never retried after the clock crossed the backoff, so no ceiling was evaluated at all");
 
+        // The fake counts that retry when it REFUSES it — before the bridge has read the clock to time its next offer
+        // or weighed the refusal against either ceiling. A hold sends stdout's pump straight back to stdout's spool, so
+        // that next stdout read is the first moment both are settled and the clock may move again. Only stdout's reads
+        // count: they are sequential with stdout's own append, while a stderr read is ordered after it only by the loop
+        // pumping the two streams one after the other. Advanced any earlier, the next offer is timed from the ADVANCED
+        // clock, due past the only instant this test ever reaches, and the held span waits for a moment that never
+        // comes (the "never drained" red a loaded runner produced).
+        var stdoutReadsAtRefusal = source.Reads("stdout");
+        await WaitAsync(() => source.Reads("stdout") > stdoutReadsAtRefusal, "the bridge never went back to stdout's spool after its second refusal — it parked instead of holding, or never finished deciding which");
+
         var stdout = logs.Head(AgentRunLogKinds.StandardOutput).Metadata;
         stdout.State.ShouldBe(AgentRunLogStreamState.Open, "one unit under a ceiling is still a wait, not a loss");
         stdout.ErrorCode.ShouldBeNull();
@@ -342,12 +352,16 @@ public sealed class AgentRunLogCaptureBackpressureTests
         source.Set("stdout", Payload(null, 300 * 1024));
         source.Set("stderr", []);
         var bridge = Bridge(logs, clock, stalls, gaps);
-        var watch = Stopwatch.StartNew();
 
-        var observed = await (await bridge.OpenAsync(Request(source), CancellationToken.None)).ObserveAsync((_, _) => Task.FromResult(Result()), CancellationToken.None);
+        var capture = await bridge.OpenAsync(Request(source), CancellationToken.None);
+        var observing = capture.ObserveAsync((_, _) => Task.FromResult(Result()), CancellationToken.None);
 
-        observed.Status.ShouldBe(SandboxStatus.Success);
-        watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5));
+        // "Immediately" on the clock the ceilings live on, not the wall's: the park window, the backoff and the
+        // finalization budget are all waits on this virtual clock, and nothing here advances it — so returning at all
+        // proves none of them was taken. A stopwatch bound measured how busy the runner was instead.
+        await AwaitWithinAsync(observing, "the capture never returned on a clock nobody advances, so it is waiting the permanent refusal out instead of terminalizing");
+
+        (await observing).Status.ShouldBe(SandboxStatus.Success);
         logs.Head(AgentRunLogKinds.StandardOutput).Metadata.ErrorCode.ShouldBe("capture-access-denied", "the durable cause names the real fault, never the backpressure ceiling");
         stalls.Held.ShouldBeEmpty("a permanent verdict is not a stall, and a stall marker over one would tell the Room to expect a recovery");
         gaps.Gaps.ShouldBeEmpty("the existing terminal path already names this loss on the stream; a second reason vocabulary would double-count it");
@@ -537,9 +551,15 @@ public sealed class AgentRunLogCaptureBackpressureTests
 
         private readonly ConcurrentDictionary<string, int> _finalReadsAtEnd = new(StringComparer.Ordinal);
 
+        private readonly ConcurrentDictionary<string, int> _reads = new(StringComparer.Ordinal);
+
+        /// <summary>Reads of one log so far — what a test waits on to know that log's pump came BACK to its spool, which it does only once it has settled what to do about its own append before. Per log, because a stream's reads are ordered only against that stream's appends.</summary>
+        public int Reads(string sourceKey) => _reads.TryGetValue(sourceKey, out var count) ? count : 0;
+
         /// <summary>Does NOT observe the token, because production's does not: the local spool's read answers "nothing new" out of a length comparison, with no I/O and no cancellation check. A fake that threw here is what kept a capture-loop cancellation bug out of reach of this suite.</summary>
         public Task<SandboxDurableLogReadResult> ReadAsync(SandboxDurableLogReadRequest request, CancellationToken cancellationToken)
         {
+            _reads.AddOrUpdate(request.SourceKey, 1, (_, seen) => seen + 1);
             var bytes = _sources[request.SourceKey];
             var available = bytes.LongLength - request.OffsetBytes;
             if (available == 0 && request.FinalDrain && EmitEndOfSource && _finalReadsAtEnd.AddOrUpdate(request.SourceKey, 1, (_, seen) => seen + 1) > SealAfterFinalReads)
@@ -593,7 +613,11 @@ public sealed class AgentRunLogCaptureBackpressureTests
         public long CurrentFence { get; set; }
         public volatile bool RemoteUnavailable;
         public AgentRunLogProblem? RejectAppendWith { get; init; }
-        public int AppendAttempts { get; private set; }
+
+        /// <summary>Read under the lock the count is taken in, so a waiter that sees an attempt also sees everything the bridge did before making it — the spool reads a test snapshots next included.</summary>
+        public int AppendAttempts { get { lock (_gate) return _appendAttempts; } }
+
+        private int _appendAttempts;
 
         public AgentRunLogCaptureHead Head(string kind) { lock (_gate) return _streams[kind].Head; }
         public byte[] Bytes(string kind) { lock (_gate) return _streams[kind].Bytes.ToArray(); }
@@ -619,7 +643,7 @@ public sealed class AgentRunLogCaptureBackpressureTests
         {
             lock (_gate)
             {
-                AppendAttempts++;
+                _appendAttempts++;
                 if (RejectAppendWith is { } permanent) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(permanent));
                 if (RemoteUnavailable) return Task.FromResult<AgentRunLogAppendResult>(new AgentRunLogAppendResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable, true)));
                 var stream = Find(request.StreamId);

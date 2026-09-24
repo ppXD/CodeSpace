@@ -180,6 +180,7 @@ public class ModelCredentialBrokerTests
         // Both say the same thing, and the sweep arriving FIRST is the stronger of the two.
         (await RefusedAsync(brokered, brokered.RunToken)).ShouldBeTrue(
             "an unrenewed lease must lapse — a CLI outliving its worker is exactly the case where nobody is left to kill it");
+        upstream.Calls.ShouldBe(1, "only the call made inside the renewed window may reach the provider — a lapsed lease that still relayed would go on spending the tenant's key for a worker that stopped owning the run");
     }
 
     [Fact]
@@ -202,6 +203,7 @@ public class ModelCredentialBrokerTests
         second.RebindPort.ShouldNotBe(first.RebindPort, "a superseding attempt takes its OWN address; reusing the old one would race the close that withdraws it");
         (await RefusedAsync(first, first.RunToken)).ShouldBeTrue(
             "the superseded attempt's bearer must stop working the moment the run is re-claimed");
+        upstream.Calls.ShouldBe(0, "the superseded attempt's refused call must never reach the provider, or the tenant pays for an attempt the run already replaced");
         (await CallAsync(second, "/v1/messages", second.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
@@ -887,12 +889,21 @@ public class ModelCredentialBrokerTests
     /// depending on timing: a 401 while something is still bound to the address, and no answer at all once the listener
     /// is closed. Both say the identical thing — this bearer buys no model spend — and pinning only the 401 would make
     /// the STRONGER withdrawal (the address ceasing to exist) read as a regression. What never varies, and what every
-    /// caller asserts beside this, is that the provider saw nothing.
+    /// caller holding its provider stub asserts beside this, is that the provider saw nothing.
+    ///
+    /// <para><b>"No answer" arrives as more than one exception.</b> Under a loaded suite a connect to a withdrawn port
+    /// can still COMPLETE and then be reset before anything answers — about once per ten thousand withdrawals in a full
+    /// run, never in isolation, and never with the withdrawn lease serving it. SocketsHttpHandler wraps a reset that
+    /// lands mid-request in an <see cref="HttpRequestException"/>, but one that lands before it has read the peer's
+    /// address escapes raw, as the <see cref="SocketException"/> that read throws (EINVAL on macOS). Both are the dead
+    /// address, so both count. A call that HANGS is deliberately not counted: a port still bound with nothing
+    /// accepting is the defect this class guards against, not a refusal.</para>
     /// </summary>
     private static async Task<bool> RefusedAsync(BrokeredModelCredential brokered, string token)
     {
         try { return (await CallAsync(brokered, "/v1/messages", token)).StatusCode == HttpStatusCode.Unauthorized; }
         catch (HttpRequestException) { return true; }   // nothing is bound there any more
+        catch (SocketException) { return true; }        // connected, then reset before a byte came back — see the remarks
     }
 
     /// <summary>
