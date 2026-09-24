@@ -10,6 +10,8 @@ import {
   type WorkspaceReposEmit,
 } from "@/lib/nodeRepoWorkspace";
 
+import type { ScopeSuggestion } from "../scope-introspection";
+import { VariablePickerInput } from "../VariablePickerInput";
 import { SearchSelect } from "./SearchSelect";
 
 /**
@@ -31,10 +33,11 @@ interface RepositoryWorkspacePickerProps {
   relatedRepositories: unknown;
   /** In-progress rows (blank ids) the persisted shape cannot hold — see {@link writeWorkspaceRepos}. */
   drafts: unknown;
+  suggestions?: ScopeSuggestion[];
   onChange: (next: WorkspaceReposEmit) => void;
 }
 
-export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, drafts, onChange }: RepositoryWorkspacePickerProps) {
+export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, drafts, suggestions, onChange }: RepositoryWorkspacePickerProps) {
   const rows = useMemo(
     () => readWorkspaceRepos(repositoryId, relatedRepositories, drafts),
     [repositoryId, relatedRepositories, drafts],
@@ -47,6 +50,12 @@ export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, d
 
   // Per-row project narrowing — UI aid only, never persisted. Keyed by row index; reset on reorder.
   const [draftProjectByIndex, setDraftProjectByIndex] = useState<Map<number, string>>(new Map());
+  const [mode, setMode] = useState<"pick" | "expr">(() => repositoryId.includes("{{") ? "expr" : "pick");
+  const [seenRepositoryId, setSeenRepositoryId] = useState(repositoryId);
+  if (repositoryId !== seenRepositoryId) {
+    setSeenRepositoryId(repositoryId);
+    setMode(repositoryId.includes("{{") ? "expr" : "pick");
+  }
 
   const projectForRow = (idx: number, row: WorkspaceRepoRow): string => {
     const draft = draftProjectByIndex.get(idx);
@@ -56,6 +65,18 @@ export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, d
   };
 
   const emit = (next: WorkspaceRepoRow[]) => onChange(writeWorkspaceRepos(next));
+  const emitRepositoryId = (next: string) => {
+    const related = rows.slice(1).map((row) => ({
+      repositoryId: row.repositoryId,
+      access: row.access,
+      ...(row.alias.trim() !== "" ? { alias: row.alias.trim() } : {}),
+    }));
+    onChange({
+      repositoryId: next || undefined,
+      relatedRepositories: related.length > 0 ? related : undefined,
+      workspaceRepoDrafts: rows.some((row) => row.repositoryId === "") ? rows : undefined,
+    });
+  };
 
   const addRow = () => emit([...rows, { repositoryId: "", alias: "", access: "read" }]);
 
@@ -94,29 +115,48 @@ export function RepositoryWorkspacePicker({ repositoryId, relatedRepositories, d
 
   return (
     <div className="wf-relrepo" data-testid="repository-workspace-picker">
-      {rows.map((row, idx) => (
-        <RepoRow
-          key={idx}
-          row={row}
-          isPrimary={idx === 0}
-          projectId={projectForRow(idx, row)}
-          projects={projectRows}
-          repositories={repoRows}
-          onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
-          onPickRepo={(id) => updateRow(idx, { repositoryId: id })}
-          onChangeAlias={(alias) => updateRow(idx, { alias })}
-          onChangeAccess={(access) => updateRow(idx, { access })}
-          onMakePrimary={() => makePrimary(idx)}
-          onRemove={() => removeRow(idx)}
-        />
-      ))}
+      {suggestions && suggestions.length > 0 && (
+        <div className="wf-dualmode">
+          <div className="wf-dualmode-head" role="group" aria-label="Value mode">
+            <button type="button" className="wf-dualmode-toggle" data-active={mode === "pick"} onClick={() => setMode("pick")}>Pick</button>
+            <button type="button" className="wf-dualmode-toggle" data-active={mode === "expr"} onClick={() => setMode("expr")}>Expression</button>
+          </div>
+          {mode === "expr" && (
+            <VariablePickerInput
+              value={repositoryId}
+              onChange={emitRepositoryId}
+              suggestions={suggestions}
+              placeholder="Type @ to reference an input or step output"
+            />
+          )}
+        </div>
+      )}
+      {rows.map((row, idx) => {
+        if (idx === 0 && suggestions && suggestions.length > 0 && mode === "expr") return null;
+        return (
+          <RepoRow
+            key={idx}
+            row={row}
+            isPrimary={idx === 0}
+            projectId={projectForRow(idx, row)}
+            projects={projectRows}
+            repositories={repoRows}
+            onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
+            onPickRepo={(id) => updateRow(idx, { repositoryId: id })}
+            onChangeAlias={(alias) => updateRow(idx, { alias })}
+            onChangeAccess={(access) => updateRow(idx, { access })}
+            onMakePrimary={() => makePrimary(idx)}
+            onRemove={() => removeRow(idx)}
+          />
+        );
+      })}
 
-      <button type="button" className="wf-relrepo-add" onClick={addRow}>
+      {(mode === "pick" || !suggestions || suggestions.length === 0) && <button type="button" className="wf-relrepo-add" onClick={addRow}>
         <Ic.Plus size={11} />
         <span>{rows.length === 0 ? "Add a repository" : "Add another repository"}</span>
-      </button>
+      </button>}
 
-      {rows.length === 0 && (
+      {rows.length === 0 && mode === "pick" && (
         <div className="wf-relrepo-hint">
           <span aria-hidden="true">ⓘ</span>
           <span>No repository — an analysis-only run.</span>
