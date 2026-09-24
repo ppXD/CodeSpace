@@ -77,6 +77,25 @@ describe("SuspendedPanel", () => {
     expect(screen.getByText(/Resumes around/)).toBeTruthy();
   });
 
+  it("says what is needed for an ActorIdentityLink wait, using the park's own prompt", () => {
+    // The regression: an unknown wait kind rendered NOTHING here, so a run parked waiting for someone to connect
+    // their account read as a bare "Suspended" and quietly gave up when its window ran out.
+    const wait: WorkflowRunWaitInfo = { nodeId: "review", kind: "ActorIdentityLink", token: "tok-3", payload: { prompt: "This step acts as one person's own Git identity, and they haven't connected one yet." } };
+    render(<SuspendedPanel runId="run-1" wait={wait} />);
+
+    expect(screen.getByText("Waiting for an account to be connected")).toBeTruthy();
+    expect(screen.getByText(/haven't connected one yet/)).toBeTruthy();
+    expect(screen.queryByText("Approve")).toBeNull();
+  });
+
+  it("falls back to its own copy for an ActorIdentityLink wait whose prompt is missing", () => {
+    // An older parked row (or a truncated/invalid prompt) must still say why the run is waiting — never render blank.
+    const wait: WorkflowRunWaitInfo = { nodeId: "review", kind: "ActorIdentityLink", token: "tok-4", payload: {} };
+    render(<SuspendedPanel runId="run-1" wait={wait} />);
+
+    expect(screen.getByText(/resumes on its own once they do/)).toBeTruthy();
+  });
+
   it("shows the tokened callback URL for a Callback wait — no approval buttons", () => {
     const wait: WorkflowRunWaitInfo = { nodeId: "cb", kind: "Callback", token: "abc123", payload: {} };
     render(<SuspendedPanel runId="run-1" wait={wait} />);
