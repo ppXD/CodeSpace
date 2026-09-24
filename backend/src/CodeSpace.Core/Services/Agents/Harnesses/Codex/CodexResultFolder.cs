@@ -89,7 +89,12 @@ internal sealed class CodexResultFolder : IAgentEventFolder
         return ProviderRefusal(text) is { } refusal && !refusal.ServerError && (refusal.Code == "context_length_exceeded" || AgentTerminalOutcomeReader.NamesAContextOverflow(refusal.Message));
     }
 
-    /// <summary>The <c>error</c> of a provider body Codex relays as its message verbatim — its code (a string, or a number as text) and message — or null when the message is not one.</summary>
+    /// <summary>
+    /// The <c>error</c> of a provider body Codex relays as its message verbatim — its code (a string, or a number as
+    /// text) and message — or null when the message is not one. A body is the gateway's own text, so it can be
+    /// well-formed JSON that is not valid text: an unpaired surrogate escape (<c>\ud83d</c>) parses, then throws on
+    /// read. That is "not a refusal we can read", never a reason for the fold to throw and drop the run's work.
+    /// </summary>
     private static (string? Code, string Message, bool ServerError)? ProviderRefusal(string message)
     {
         try
@@ -103,7 +108,7 @@ internal sealed class CodexResultFolder : IAgentEventFolder
 
             return (code, text, int.TryParse(code, out var status) && status >= 500);
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             return null;
         }

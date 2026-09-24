@@ -110,6 +110,29 @@ public sealed class AgentContextWindowRetryTests
         result.ExitReason.ShouldBe("non-zero-exit");
     }
 
+    public static TheoryData<string> CodexUnreadableBodyLines => new()
+    {
+        // The pinned 0.142.2 relaying a gateway 400 whose message holds an unpaired surrogate escape (a preview cut in
+        // the middle of an emoji) — once a non-overflow, once an overflow. The body parses and then throws on read.
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"Invalid value for input[0]: preview \\ud83d ... (truncated)\", \"type\": \"BadRequestError\", \"param\": null, \"code\": 400}}"}}""",
+        """{"type":"turn.failed","error":{"message":"{\"error\": {\"message\": \"This model's maximum context length is 131072 tokens. However, you requested 161234 tokens. Prompt starts: \\ud83d\", \"type\": \"BadRequestError\", \"param\": null, \"code\": 400}}"}}""",
+    };
+
+    [Theory]
+    [MemberData(nameof(CodexUnreadableBodyLines))]
+    public void A_relayed_body_that_is_not_valid_text_never_throws_out_of_the_fold(string failedLine)
+    {
+        // A throw here lands the run as executor-error and drops its session, diff and transcript — the fold is never
+        // the place that happens. The body is unreadable, so it is not a refusal this fold can type.
+        var harness = new CodexHarness();
+        var events = harness.ParseEvents("""{"type":"thread.started","thread_id":"01a0d18d-0000-7000-8000-000000000001"}""").Concat(harness.ParseEvents(failedLine)).ToList();
+
+        var result = harness.BuildResult(events, exitCode: 1, diagnostics: "");
+
+        result.ExitReason.ShouldBe("non-zero-exit");
+        result.SessionId.ShouldNotBeNullOrEmpty(customMessage: "the fold completed, so the thread a retry resumes is kept");
+    }
+
     [Fact]
     public void Codex_refusing_an_input_past_its_own_character_cap_is_that_refusal_not_a_context_overflow()
     {

@@ -92,6 +92,18 @@ internal sealed class ClaudeCodeResultFolder : IAgentEventFolder
     private static bool IsClientRefusal(JsonElement result) =>
         result.TryGetProperty("api_error_status", out var status) && status.ValueKind == JsonValueKind.Number && status.TryGetInt32(out var code) && code == 400;
 
-    private static string ReadString(JsonElement root, string key) =>
-        root.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+    /// <summary>A string field of the CLI's line, or "" when it is absent, another kind, or not valid text (an unpaired surrogate escape a relayed gateway body can carry parses, then throws on read) — the fold must never be where a run's work is dropped.</summary>
+    private static string ReadString(JsonElement root, string key)
+    {
+        if (!root.TryGetProperty(key, out var value) || value.ValueKind != JsonValueKind.String) return "";
+
+        try
+        {
+            return value.GetString() ?? "";
+        }
+        catch (InvalidOperationException)
+        {
+            return "";
+        }
+    }
 }
