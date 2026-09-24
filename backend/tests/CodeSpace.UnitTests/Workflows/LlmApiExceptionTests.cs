@@ -31,6 +31,8 @@ public class LlmApiExceptionTests
     [InlineData(400, "This model's maximum context length is 8192 tokens")]
     [InlineData(413, "input is too long for the context window")]
     [InlineData(422, "reduce the length of the messages")]
+    [InlineData(400, """{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215000 tokens > 200000 maximum"}}""")]
+    [InlineData(400, """{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 197000 + 32000 > 200000, decrease input length or `max_tokens` and try again"}}""")]
     public void Classify_refines_a_4xx_to_context_length_on_a_matching_body(int status, string body)
     {
         LlmApiException.Classify(status, body).ShouldBe(LlmErrorCategory.ContextLengthExceeded);

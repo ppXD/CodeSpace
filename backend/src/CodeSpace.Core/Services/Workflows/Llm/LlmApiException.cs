@@ -98,7 +98,7 @@ public sealed class LlmApiException : Exception, IRetryClassifiedException
     // The category is only a refined LABEL on a 400/422 anyway (the degrade decision is status-based), so a miss merely
     // leaves the generic BadRequest — it can never disable the progressive fallback.
     private static bool MentionsContextLength(string? body) =>
-        ContainsAny(body, "context length", "context_length", "context window", "maximum context", "maximum_tokens", "reduce the length", "string too long", "too many tokens", "exceeds the maximum");
+        ContainsAny(body, "context length", "context_length", "context window", "maximum context", "maximum_tokens", "reduce the length", "string too long", "too many tokens", "exceeds the maximum", "prompt is too long", "exceed context limit");
 
     private static bool MentionsContentFilter(string? body) =>
         ContainsAny(body, "content filter", "content_filter", "content policy", "content_policy", "content was blocked", "blocked by safety", "safety policy", "flagged");
