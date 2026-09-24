@@ -37,6 +37,17 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
     public int ThrowOnAppendEventsCall { get; set; }
     public Func<AgentRunOwnerToken, Task>? BeforeOwnedAppendAsync { get; set; }
 
+    /// <summary>Consulted on every OWNED batched append before the database is reached: a non-null exception is thrown instead, so that offer provably never landed.</summary>
+    public Func<Exception?>? FaultBeforeOwnedAppend { get; set; }
+
+    /// <summary>Consulted after an OWNED batched append LANDED: a non-null exception is thrown as though the acknowledgement were lost on the way back — the one fault whose retry must not duplicate what already committed.</summary>
+    public Func<Exception?>? FaultAfterOwnedAppend { get; set; }
+
+    /// <summary>Every exception the REAL service raised from an owned batched append — the evidence that a fault a test staged in the database actually reached the observer's write.</summary>
+    public IReadOnlyCollection<Exception> OwnedAppendFaults => _ownedAppendFaults;
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<Exception> _ownedAppendFaults = new();
+
     /// <summary>How many times the BATCHED append path was invoked (one per flush — checkpoint, cap, or final).</summary>
     public int BatchedCalls => Volatile.Read(ref _batchedCalls);
 
@@ -87,13 +98,18 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
         Interlocked.Increment(ref _perEventCalls);
         return _inner.AppendEventAsync(owner, @event, cancellationToken);
     }
-    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
+    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken)
     {
         if (BeforeOwnedAppendAsync is not null) await BeforeOwnedAppendAsync(owner);
         var call = Interlocked.Increment(ref _batchedCalls);
         if (ThrowOnAppendEventsCall > 0 && call == ThrowOnAppendEventsCall) throw new InvalidOperationException(AppendEventsFaultMessage);
+        if (FaultBeforeOwnedAppend?.Invoke() is { } before) throw before;
         Interlocked.Add(ref _totalEvents, events.Count);
-        await _inner.AppendEventsAsync(owner, events, cancellationToken);
+
+        try { await _inner.AppendEventsAsync(owner, events, cancellationToken); }
+        catch (Exception fault) { _ownedAppendFaults.Enqueue(fault); throw; }
+
+        if (FaultAfterOwnedAppend?.Invoke() is { } after) throw after;
     }
     public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => _inner.AppendSystemEventAsync(runId, @event, cancellationToken);
     public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => _inner.CompleteAsync(owner, result, cancellationToken);

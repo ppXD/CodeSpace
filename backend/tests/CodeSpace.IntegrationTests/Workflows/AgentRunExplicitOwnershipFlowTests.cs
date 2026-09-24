@@ -151,6 +151,25 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         actual.SpoolCleanupLastErrorCode.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task An_owned_batch_offered_again_after_it_landed_is_kept_once_and_the_re_offer_succeeds()
+    {
+        // The observer re-offers a batch after a fault the database may have committed before the client heard it. Its
+        // rows carry the writer's ids, so the second offer must neither duplicate them nor read as a lost fence.
+        var runId = await CreateQueuedAsync();
+        using var scope = _fixture.BeginScope();
+        var service = scope.Resolve<IAgentRunService>();
+        var owner = (await service.ClaimOwnershipAsync(runId, CancellationToken.None))!;
+        PendingAgentEvent[] batch = [new(Guid.NewGuid(), new() { Kind = AgentEventKind.AssistantMessage, Text = "one" }), new(Guid.NewGuid(), new() { Kind = AgentEventKind.AssistantMessage, Text = "two" })];
+
+        await service.AppendEventsAsync(owner, batch, CancellationToken.None);
+        var reoffer = await Record.ExceptionAsync(() => service.AppendEventsAsync(owner, batch, CancellationToken.None));
+
+        reoffer.ShouldBeNull("a batch that already landed whole is a success, not a refusal");
+        var rows = await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId).OrderBy(e => e.Sequence).ToListAsync();
+        rows.Select(e => (e.Id, e.Text)).ShouldBe(batch.Select(pending => (pending.Id, pending.Event.Text)), "each event exactly once, under the id its writer minted, in the order it was offered");
+    }
+
     [Theory]
     [InlineData("heartbeat")]
     [InlineData("handle")]
@@ -175,7 +194,7 @@ public sealed class AgentRunExplicitOwnershipFlowTests
                 "handle" => service.SetRunnerHandleAsync(stale, "{\"stale\":true}", CancellationToken.None),
                 "posture" => service.SetSandboxConfinementAsync(stale, "{\"stale\":true}", CancellationToken.None),
                 "terminal" => service.CompleteAsync(stale, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None),
-                _ => service.AppendEventsAsync(stale, [new() { Kind = AgentEventKind.AssistantMessage, Text = "stale" }], CancellationToken.None),
+                _ => service.AppendEventsAsync(stale, [new(Guid.NewGuid(), new() { Kind = AgentEventKind.AssistantMessage, Text = "stale" })], CancellationToken.None),
             });
         }
         var after = await service.GetAsync(runId, CancellationToken.None);
@@ -184,7 +203,7 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         after.RunnerHandleJson.ShouldBe(before.RunnerHandleJson);
         after.SandboxConfinementJson.ShouldBe(before.SandboxConfinementJson);
         (await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.CountAsync(e => e.AgentRunId == runId)).ShouldBe(0);
-        await service.AppendEventsAsync(current, [new() { Kind = AgentEventKind.AssistantMessage, Text = "current" }], CancellationToken.None);
+        await service.AppendEventsAsync(current, [new(Guid.NewGuid(), new() { Kind = AgentEventKind.AssistantMessage, Text = "current" })], CancellationToken.None);
         await service.AppendSystemEventAsync(runId, new() { Kind = AgentEventKind.Warning, Text = "system audit" }, CancellationToken.None);
         var events = await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId).OrderBy(e => e.Sequence).ToListAsync();
         events.Count.ShouldBe(2);

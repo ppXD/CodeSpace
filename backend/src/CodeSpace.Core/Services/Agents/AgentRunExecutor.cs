@@ -207,6 +207,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // one may already be running in the clone. A value left from an earlier run on a reused instance names that run's
     // own spool, so it can never agree with another run's row.
     private SandboxHandle? _acknowledgedLaunch;
+    // Raised the moment a launch begins and lowered once its observation RETURNS, which the runner's attach does only
+    // when the process has exited or the runner killed it. While raised, a process this pass started may still be working
+    // in the clone, so the executor-error arm asks the runner before the clone may go (AgentMayStillRunInCloneAsync).
+    private bool _launchUnobserved;
     private readonly ILogger<AgentRunExecutor> _logger;
 
     public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, Recovery.IAgentSessionTranscriptCheckpointer? sessionCheckpointer = null, TimeProvider? clock = null)
@@ -294,6 +298,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Set by a tear-down arm that found the run CANCELLED at this attempt and confirmed its agent dead (see
         // StopCancelledAttemptAsync): the clone is then nobody's, even though the terminal is not this pass's own write.
         var cancelledAgentStopped = false;
+
+        // Set by the executor-error arm when a process this pass launched may still be running in the clone (see
+        // AgentMayStillRunInCloneAsync): the run is landed Failed, and the clone is left for the workspace janitor.
+        var agentMayStandInClone = false;
+
+        // A reused executor must not answer this pass's question with an earlier run's launch.
+        _launchUnobserved = false;
 
         // Hoisted for the tear-down arm exactly as `redactor` is for the catch-all. A run whose model credential THIS
         // worker BROKERED cannot outlive this process: the lease is held in its memory, behind a listener that dies
@@ -709,6 +720,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
 
+            // A failure raised while an agent was being observed says nothing about that agent: it may still be working
+            // in the clone, and deleting the clone would pull the directory out from under it. Asked BEFORE the terminal
+            // write, because nothing after that write may skip the question — the completion's own later steps (the
+            // notifier's read, a worker shutdown) can throw once the run is terminal, and the ownership check alone
+            // would then hand the clone to the cleanup. The probe only asks, so asking first costs nothing.
+            agentMayStandInClone = await AgentMayStillRunInCloneAsync(agentRunId, cancellationToken).ConfigureAwait(false);
+
             // A launch that got as far as reserving may already have billed a provider, so this terminal settles the
             // claim PESSIMISTICALLY (no observed cost ⇒ Indeterminate at the reserved amount) rather than leaving it
             // live. A failure is not evidence that nothing was spent.
@@ -729,11 +747,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // before landing, so nothing is standing in the clone — and it needs a token of its own, because the one
             // this pass was cancelled on would make the ownership check below decline without ever asking. A cancel
             // this pass stopped the agent of owns it too, but its terminal is the canceller's write, not this pass's,
-            // so the ownership check cannot vouch for it — the confirmed stop is the proof instead.
+            // so the ownership check cannot vouch for it — the confirmed stop is the proof instead. A failure the
+            // executor-error arm landed owns it only once no agent this pass launched can still be working in it.
             using var cleanupBudget = cancellationToken.IsCancellationRequested && !leaveWorkspaceForReattach ? new CancellationTokenSource(ShutdownLeaseLandingBudget) : null;
             var cleanupToken = cleanupBudget?.Token ?? cancellationToken;
 
-            if (workspace is not null && !leaveWorkspaceForReattach && (cancelledAgentStopped || await CanCleanOwnedWorkspaceAsync(owner, cleanupToken).ConfigureAwait(false)))
+            if (workspace is not null && !leaveWorkspaceForReattach && !agentMayStandInClone && (cancelledAgentStopped || await CanCleanOwnedWorkspaceAsync(owner, cleanupToken).ConfigureAwait(false)))
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -972,7 +991,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var folder = context.Harness.CreateFolder();   // BOUNDED, exactly as the live tail folds — a re-attached run must not be able to exhaust the heap either
         var facts = AgentRunFacts.For(context.Harness);   // driven alongside the folder, exactly as the live tail does, so both paths reach MapSandboxResult with the same inputs
         await using var transcript = new AgentTranscriptSpool(TranscriptSpillDirectory(context.RunId));   // D3/G0: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run), bounded exactly as the live tail's is and spilled into the SAME run-owned, reaper-swept spool directory
-        var writer = new BufferedEventWriter(_runs, context.Owner);   // same batched-append + flush-at-checkpoint path as the live tail
+        var writer = NewEventWriter(context.Owner, context.TeamId);   // same batched-append + flush-at-checkpoint path as the live tail
         var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
         var applicationSourceHead = context.Handle.StdoutOffset;
 
@@ -3969,7 +3988,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await _runs.AssertOwnershipAsync(context.Owner, cancellationToken).ConfigureAwait(false);
         var folder = context.Harness.CreateFolder();   // BOUNDED: the harness's OWN reductions, not the run's events — a long run must not be able to exhaust the heap here
         var facts = AgentRunFacts.For(context.Harness);   // the three facts a forced terminal reports without folding, read with THIS harness's declared spellings (or the fallback union when it declares none)
-        var writer = new BufferedEventWriter(_runs, context.Owner);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
+        var writer = NewEventWriter(context.Owner, context.TeamId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
         var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
 
         async Task PersistAsync(string line, SandboxOutputFrame? output)
@@ -4986,6 +5005,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // From the call below a process may exist that the row does not name yet — whatever it names is now a round behind.
         _acknowledgedLaunch = null;
+        _launchUnobserved = true;
 
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
@@ -5005,6 +5025,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
         var result = await capture.ObserveAsync((capturedHandle, token) => durable.AttachAsync(capturedHandle, (frame, _) => persistFrame(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, sinks)), cancellationToken).ConfigureAwait(false);
+
+        // The attach returned a terminal result, which it does only once the process has exited or it killed it.
+        _launchUnobserved = false;
 
         // The stdout stream's terminal-drain frames and the checkpoint they complete must be durable BEFORE the
         // diagnostics fold resumes from that checkpoint — two openings of one execution advance one reduction, and
@@ -5224,6 +5247,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// poll's lines, THEN persist the advanced spool offset onto the handle. The flush-before-offset ordering is the
     /// durability invariant — the persisted offset must never run ahead of flushed events, so a re-attach at worst
     /// re-emits the last batch (never loses a line). A pure jsonb UPDATE for the offset; never blocks completion.
+    /// Both writes ride out a transient database fault (<see cref="ObserverWriteRetry"/>); the one exception to "never
+    /// loses a line" is a batch the database never took within that bound, and it is named as a capture gap before the
+    /// offset passes it.
     ///
     /// <para>3c rides this same tick to make the run's resumable CONVERSATION durable
     /// (<see cref="CheckpointSessionTranscriptQuietlyAsync"/>). It goes LAST, after the two flushes and the offset,
@@ -5235,10 +5261,64 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             await sinks.Events.FlushAsync(ct).ConfigureAwait(false);
             await sinks.Frames.FlushAsync(ct).ConfigureAwait(false);   // the frame plane rides the same checkpoint — best-effort, so a refused frame flush stops capture for the round rather than holding the offset back
-            await _runs.SetRunnerHandleAsync(owner, JsonSerializer.Serialize(handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, AgentJson.Options), ct).ConfigureAwait(false);
+            await CheckpointOffsetAsync(owner, handle with { StdoutOffset = Math.Max(handle.StdoutOffset, offset) }, ct).ConfigureAwait(false);
 
             StartSessionTranscriptCheckpoint(owner, handle, sinks.SessionCheckpoint);
         };
+
+    /// <summary>
+    /// Persist the advanced spool offset through a TRANSIENT database fault (<see cref="ObserverWriteRetry"/>). Past the
+    /// bound the checkpoint is skipped rather than failing the run: the events it covers are already durable, so a
+    /// lagging offset costs only a re-attach re-delivering from the previous one, and the next poll writes a newer one.
+    /// Any other fault — a lost fence above all — surfaces exactly as before.
+    /// </summary>
+    internal async Task CheckpointOffsetAsync(AgentRunOwnerToken owner, SandboxHandle checkpointed, CancellationToken cancellationToken)
+    {
+        var handleJson = JsonSerializer.Serialize(checkpointed, AgentJson.Options);
+        var outcome = await ObserverWriteRetry.TryAsync(token => _runs.SetRunnerHandleAsync(owner, handleJson, token), _clock, cancellationToken).ConfigureAwait(false);
+
+        if (!outcome.Landed)
+            _logger.LogWarning(outcome.Fault, "Agent run {RunId}: spool offset {Offset} could not be checkpointed — the database stayed unavailable through {Attempts} attempt(s) across {Elapsed}; observation continues, and a re-attach would re-deliver from the previous checkpoint", owner.RunId, checkpointed.StdoutOffset, outcome.Attempts, outcome.Elapsed);
+    }
+
+    /// <summary>The event writer one harness round streams into: batched appends retried on this executor's clock, with a batch the database never took named as a capture gap of this run's events.</summary>
+    internal BufferedEventWriter NewEventWriter(AgentRunOwnerToken owner, Guid teamId) =>
+        new(_runs, owner, _clock, (lost, outcome) => NoticeEventLossAsync(owner.RunId, teamId, lost, outcome));
+
+    /// <summary>
+    /// Name a batch of normalized events the database never took — one structured warning, and a capture gap of the
+    /// run's <see cref="Messages.Contracts.WorkflowRunDataOwnerKinds.SemanticEvent"/> plane over the window the writes
+    /// were refused in, so the completeness plane never reports an event log this run does not have. The blessed
+    /// producer shape (<see cref="NoticeDeliverableLossAsync"/>): the gap lands on its own transaction, and a gap that
+    /// cannot land is loud. <see cref="Persistence.Entities.CaptureGapReason.RemoteUnavailable"/> because nothing refused
+    /// the write — the database never answered it.
+    /// </summary>
+    private async Task NoticeEventLossAsync(Guid runId, Guid teamId, int lostEvents, ObserverWriteRetry.Outcome outcome)
+    {
+        var detail = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{lostEvents} normalized event(s) were not persisted: the database stayed unavailable through {outcome.Attempts} attempt(s) across {outcome.Elapsed.TotalSeconds:0.#}s ({outcome.Fault!.GetType().Name})");
+
+        _logger.LogWarning(outcome.Fault, "Agent run {RunId}: {LostEvents} normalized event(s) were given up after {Attempts} attempt(s) across {Elapsed} of database unavailability; recorded as a capture gap, and observation continues", runId, lostEvents, outcome.Attempts, outcome.Elapsed);
+
+        if (_completeness is null) return;   // optional capture plane (test construction) — production DI always supplies it
+
+        var now = _clock.GetUtcNow();
+
+        try
+        {
+            await _completeness.NoticeAsync(new Persistence.Entities.WorkflowRunCaptureGap
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, AgentRunId = runId,
+                SubjectKind = Messages.Contracts.WorkflowRunDataOwnerKinds.SemanticEvent,
+                RangeKind = Persistence.Entities.CaptureGapRangeKind.Time, RangeStartedAt = outcome.StartedAt, RangeEndedAt = now,
+                Reason = Persistence.Entities.CaptureGapReason.RemoteUnavailable, ReasonDetail = detail, CaptureSource = "in-process",
+                NoticedAt = now, CreatedAt = now,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: {LostEvents} normalized event(s) were lost to a database outage AND their capture-gap record could not be written — this run may report an event log it does not have", runId, lostEvents);
+        }
+    }
 
     /// <summary>
     /// 3c: START a durable checkpoint of this tick's live session transcript, so an attempt whose host dies leaves a
@@ -5461,6 +5541,48 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception exception) { _logger.LogWarning(exception, "Agent run {RunId}: the brokered model credential could not be revoked; it lapses on its own TTL instead", owner.RunId); }
     }
 
+    /// <summary>
+    /// Whether a process this pass launched may still be running in the clone when the executor-error arm lands the run
+    /// Failed — the question that decides whether its finally may delete the clone, asked before the terminal write so
+    /// no later completion step can skip it.
+    ///
+    /// <para>A launch whose observation RETURNED is over: the runner's attach returns only once the process has exited
+    /// or the runner killed it. A launch whose observation did not return is asked with the runner's identity-checked
+    /// probe (pid, kernel birth key and boot for a native handle), the oracle the reconciler already trusts: only
+    /// Exited or Gone release the clone. Running, Indeterminate, a probe that throws, and a launch whose handle never
+    /// reached the row — there is nothing to ask — all keep it for the workspace janitor, whose age threshold exceeds
+    /// the longest run, because deleting a live agent's working directory is the one outcome nothing can undo.</para>
+    ///
+    /// <para>It asks and does not kill. Whether the agent of a Failed run should be stopped is a separate policy — the
+    /// cancel and the deadline own it today — and this arm decided nothing about the agent, only that its observer
+    /// could not go on.</para>
+    /// </summary>
+    private async Task<bool> AgentMayStillRunInCloneAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (!_launchUnobserved) return false;
+
+        if (_acknowledgedLaunch is not { } launch || _runners.All.FirstOrDefault(r => r.Kind == launch.Kind) is not ISandboxDurableRunner durable)
+        {
+            _logger.LogWarning("Agent run {RunId} failed before its launch could be asked about; the clone is left for the workspace janitor rather than deleted under a process that may be running in it", runId);
+            return true;
+        }
+
+        try
+        {
+            var probe = await durable.ProbeAsync(launch, cancellationToken).ConfigureAwait(false);
+
+            if (probe.State is SandboxRunState.Exited or SandboxRunState.Gone) return false;
+
+            _logger.LogWarning("Agent run {RunId} failed while its agent (pid {Pid}) is {State}; the clone is left for the workspace janitor rather than deleted under it", runId, launch.ProcessId, probe.State);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId} failed and its agent (pid {Pid}) could not be probed; the clone is left for the workspace janitor", runId, launch.ProcessId);
+            return true;
+        }
+    }
+
     private async Task<bool> CanCleanOwnedWorkspaceAsync(AgentRunOwnerToken owner, CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested) return false;
@@ -5600,24 +5722,35 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// size cap bounds memory and gives the non-durable / checkpoint-less path a periodic flush. Single-threaded by
     /// construction: the durable tail loop awaits each <c>onLine</c> then <c>onCheckpoint</c> sequentially, and the
     /// final flush runs after the attach returns — so no buffer lock is needed.
+    ///
+    /// <para>A flush survives a TRANSIENT database fault. Every event gets its row id when it is buffered, the batch
+    /// stays in the buffer until a write of it LANDS, and the write is offered again under
+    /// <see cref="ObserverWriteRetry"/> — so a failed attempt loses nothing, and an attempt that committed before its
+    /// acknowledgement was lost is not duplicated by the next (the append keeps a row whose id already exists). Past the
+    /// bound the batch is given up honestly: named as a capture gap, dropped, and the observation goes on, because an
+    /// unanswered write is not the agent's verdict. Any other fault still surfaces unchanged.</para>
     /// </summary>
-    private sealed class BufferedEventWriter
+    internal sealed class BufferedEventWriter
     {
         private const int MaxBuffered = 256;   // memory cap; the per-poll checkpoint is the normal flush trigger
 
         private readonly IAgentRunService _runs;
         private readonly AgentRunOwnerToken _owner;
-        private readonly List<AgentEvent> _pending = new();
+        private readonly TimeProvider _clock;
+        private readonly Func<int, ObserverWriteRetry.Outcome, Task> _noticeLoss;
+        private readonly List<PendingAgentEvent> _pending = new();
 
-        public BufferedEventWriter(IAgentRunService runs, AgentRunOwnerToken owner)
+        public BufferedEventWriter(IAgentRunService runs, AgentRunOwnerToken owner, TimeProvider clock, Func<int, ObserverWriteRetry.Outcome, Task> noticeLoss)
         {
             _runs = runs;
             _owner = owner;
+            _clock = clock;
+            _noticeLoss = noticeLoss;
         }
 
         public async Task BufferAsync(AgentEvent @event, CancellationToken cancellationToken)
         {
-            _pending.Add(@event);
+            _pending.Add(new PendingAgentEvent(Guid.NewGuid(), @event));
 
             if (_pending.Count >= MaxBuffered) await FlushAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -5626,10 +5759,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             if (_pending.Count == 0) return;
 
-            var batch = _pending.ToList();
-            _pending.Clear();
+            var outcome = await ObserverWriteRetry.TryAsync(AppendPendingAsync, _clock, cancellationToken).ConfigureAwait(false);
 
-            await _runs.AppendEventsAsync(_owner, batch, cancellationToken).ConfigureAwait(false);
+            if (outcome.Landed) return;
+
+            await _noticeLoss(_pending.Count, outcome).ConfigureAwait(false);
+            _pending.Clear();
+        }
+
+        /// <summary>One offer of the buffered batch. It leaves the buffer only once the write has LANDED, so an attempt that failed is offered again whole.</summary>
+        private async Task AppendPendingAsync(CancellationToken cancellationToken)
+        {
+            await _runs.AppendEventsAsync(_owner, _pending.ToList(), cancellationToken).ConfigureAwait(false);
+            _pending.Clear();
         }
     }
 
