@@ -38,6 +38,9 @@
          the same answer about a pid, and the drift detector that keeps it honest against NativeProcess.IsAlive can
          only guard one mirror. A second copy here would be a second thing to keep in step, silently. -->
     <Compile Include="..\CodeSpace.IntegrationTests\Infrastructure\ProcessLiveness.cs" Link="Infrastructure\ProcessLiveness.cs" />
+    <!-- And for the loopback provider API: the unit suite drives the real GitHub / GitLab provider classes over the SAME
+         stub the registration flows use, so what "the provider answered" means cannot drift between the two tiers. -->
+    <Compile Include="..\CodeSpace.IntegrationTests\Webhooks\StubProviderHost.cs" Link="Providers\StubProviderHost.cs" />
   </ItemGroup>
 
 </Project>

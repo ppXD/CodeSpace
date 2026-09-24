@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Diagnostics;
+using CodeSpace.Core.Services.Providers.Markdown;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
@@ -130,23 +131,26 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken)
+    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, string targetBranch, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), async _ =>
-        {
-            // GitHub's own head filter (owner:branch). OPEN only — a bind-or-create check that found an
-            // already-MERGED/CLOSED PR and returned it as if freshly "Opened" would misreport a done or
-            // rejected change as still pending review. Naming why create failed against an inactive PR is a
-            // different, diagnostic concern this method does not serve.
-            var request = new PullRequestRequest { State = ItemStateFilter.Open, Head = $"{repository.NamespacePath}:{sourceBranch}" };
-            var options = new ApiOptions { PageCount = 1, PageSize = 1, StartPage = 1 };
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), _ => FindOpenPullRequestAsync(client, repository, sourceBranch, targetBranch), cancellationToken).ConfigureAwait(false);
+    }
 
-            var prs = await client.PullRequest.GetAllForRepository(repository.NamespacePath, repository.Name, request, options).ConfigureAwait(false);
+    private static async Task<RemotePullRequest?> FindOpenPullRequestAsync(GitHubClient client, RemoteRepository repository, string sourceBranch, string targetBranch)
+    {
+        // GitHub's own head filter (owner:branch). OPEN only — a bind-or-create check that found an
+        // already-MERGED/CLOSED PR and returned it as if freshly "Opened" would misreport a done or
+        // rejected change as still pending review. Naming why create failed against an inactive PR is a
+        // different, diagnostic concern this method does not serve. The base filter too: one head can be
+        // open into several bases, and a one-item page filtered by head alone can hand back another's.
+        var request = new PullRequestRequest { State = ItemStateFilter.Open, Head = $"{repository.NamespacePath}:{sourceBranch}", Base = targetBranch };
+        var options = new ApiOptions { PageCount = 1, PageSize = 1, StartPage = 1 };
 
-            return prs.Select(ToRemotePullRequest).FirstOrDefault();
-        }, cancellationToken).ConfigureAwait(false);
+        var prs = await client.PullRequest.GetAllForRepository(repository.NamespacePath, repository.Name, request, options).ConfigureAwait(false);
+
+        return prs.Select(ToRemotePullRequest).FirstOrDefault();
     }
 
     public async Task<RemotePullRequest> GetPullRequestAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
@@ -250,58 +254,76 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemotePullRequestComment> PostCommentAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(PostCommentAsync), async _ =>
+        // PR comments on GitHub are issue comments under the hood (the conversation tab
+        // shares its identity with the PR's issue). Issue.Comment.Create works for both
+        // PR and Issue numbers transparently.
+        var created = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(PostCommentAsync),
+            _ => client.Issue.Comment.Create(repository.NamespacePath, repository.Name, number, IdempotencyMarker.Append(body, marker)),
+            _ => FindMarkedCommentAsync(client, repository, number, marker),
+            cancellationToken).ConfigureAwait(false);
+
+        return new RemotePullRequestComment
         {
-            // PR comments on GitHub are issue comments under the hood (the conversation tab
-            // shares its identity with the PR's issue). Issue.Comment.Create works for both
-            // PR and Issue numbers transparently.
-            var created = await client.Issue.Comment.Create(repository.NamespacePath, repository.Name, number, body).ConfigureAwait(false);
+            ExternalId = created.Id.ToString(),
+            Body = IdempotencyMarker.Strip(created.Body),
+            AuthorName = created.User?.Login ?? "unknown",
+            CreatedAt = created.CreatedAt,
+            WebUrl = created.HtmlUrl
+        };
+    }
 
-            return new RemotePullRequestComment
-            {
-                ExternalId = created.Id.ToString(),
-                Body = created.Body,
-                AuthorName = created.User?.Login ?? "unknown",
-                CreatedAt = created.CreatedAt,
-                WebUrl = created.HtmlUrl
-            };
-        }, cancellationToken).ConfigureAwait(false);
+    /// <summary>The comment an earlier attempt of this call posted — found by the marker only this call's body carries.</summary>
+    private static async Task<IssueComment?> FindMarkedCommentAsync(GitHubClient client, RemoteRepository repository, int number, string marker)
+    {
+        var comments = await client.Issue.Comment.GetAllForIssue(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+
+        return comments.FirstOrDefault(c => IdempotencyMarker.IsIn(c.Body, marker));
     }
 
     public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), async _ =>
+        // GitHub has a native review verdict — one call submits approve / request-changes / comment.
+        var review = new PullRequestReviewCreate { Body = IdempotencyMarker.Append(body, marker), Event = GitHubReviewMapping.ToEvent(verdict) };
+
+        var created = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(SubmitReviewAsync),
+            _ => client.PullRequest.Review.Create(repository.NamespacePath, repository.Name, number, review),
+            _ => FindMarkedReviewAsync(client, repository, number, marker),
+            cancellationToken).ConfigureAwait(false);
+
+        return new RemotePullRequestReview
         {
-            // GitHub has a native review verdict — one call submits approve / request-changes / comment.
-            var review = new PullRequestReviewCreate { Body = body ?? "", Event = GitHubReviewMapping.ToEvent(verdict) };
-            var created = await client.PullRequest.Review.Create(repository.NamespacePath, repository.Name, number, review).ConfigureAwait(false);
+            Verdict = verdict,
+            ExternalId = created.Id.ToString(),
+            WebUrl = created.HtmlUrl
+        };
+    }
 
-            return new RemotePullRequestReview
-            {
-                Verdict = verdict,
-                ExternalId = created.Id.ToString(),
-                WebUrl = created.HtmlUrl
-            };
-        }, cancellationToken).ConfigureAwait(false);
+    /// <summary>The review an earlier attempt of this call submitted — found by the marker only this call's body carries.</summary>
+    private static async Task<PullRequestReview?> FindMarkedReviewAsync(GitHubClient client, RemoteRepository repository, int number, string marker)
+    {
+        var reviews = await client.PullRequest.Review.GetAll(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+
+        return reviews.FirstOrDefault(r => IdempotencyMarker.IsIn(r.Body, marker));
     }
 
     public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
+        // GitHub: head = source branch, base = target branch. Draft is honoured when the repo plan allows it.
+        var newPr = new NewPullRequest(input.Title, input.SourceBranch, input.TargetBranch) { Body = input.Body, Draft = input.Draft };
+
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), async _ =>
-            {
-                // GitHub: head = source branch, base = target branch. Draft is honoured when the repo plan allows it.
-                var newPr = new NewPullRequest(input.Title, input.SourceBranch, input.TargetBranch) { Body = input.Body, Draft = input.Draft };
-                var created = await client.PullRequest.Create(repository.NamespacePath, repository.Name, newPr).ConfigureAwait(false);
-
-                return ToRemotePullRequestDetail(created);
-            }, cancellationToken).ConfigureAwait(false);
+            return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(OpenPullRequestAsync),
+                async _ => ToRemotePullRequestDetail(await client.PullRequest.Create(repository.NamespacePath, repository.Name, newPr).ConfigureAwait(false)),
+                _ => FindOpenedPullRequestAsync(client, repository, input),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (ProviderApiException ex) when (ex.StatusCode is >= 400 and < 500)
         {
@@ -315,7 +337,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             // target mismatch → the 422 was a real validation failure → rethrow it untouched. Scoped to 4xx —
             // a 5xx that exhausted retries is an infra outage, not a duplicate-branch signal; binding on that
             // could fabricate a false success out of an unrelated PR for the same branch.
-            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, cancellationToken).ConfigureAwait(false);
+            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, input.TargetBranch, cancellationToken).ConfigureAwait(false);
 
             if (existing is not null && existing.TargetBranch == input.TargetBranch) return existing;
 
@@ -323,38 +345,70 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         }
     }
 
+    /// <summary>
+    /// The pull request an earlier attempt of this call opened. GitHub allows one OPEN pull request per head → base,
+    /// so that pair identifies it without a body marker — the same rule the DC-2c bind above adopts by. An open one
+    /// from this head to a DIFFERENT base is a different request and is never adopted.
+    /// </summary>
+    private static async Task<RemotePullRequest?> FindOpenedPullRequestAsync(GitHubClient client, RemoteRepository repository, OpenPullRequestInput input)
+    {
+        var open = await FindOpenPullRequestAsync(client, repository, input.SourceBranch, input.TargetBranch).ConfigureAwait(false);
+
+        return open?.TargetBranch == input.TargetBranch ? open : null;
+    }
+
     public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync), async _ =>
+        var merge = new MergePullRequest
         {
-            var merge = new MergePullRequest
+            MergeMethod = input.Method switch
             {
-                MergeMethod = input.Method switch
-                {
-                    CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Squash => Octokit.PullRequestMergeMethod.Squash,
-                    CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Rebase => Octokit.PullRequestMergeMethod.Rebase,
-                    _ => Octokit.PullRequestMergeMethod.Merge,
-                },
-                CommitTitle = input.CommitTitle,
-                CommitMessage = input.CommitMessage,
-            };
+                CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Squash => Octokit.PullRequestMergeMethod.Squash,
+                CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Rebase => Octokit.PullRequestMergeMethod.Rebase,
+                _ => Octokit.PullRequestMergeMethod.Merge,
+            },
+            CommitTitle = input.CommitTitle,
+            CommitMessage = input.CommitMessage,
+        };
 
-            var result = await client.PullRequest.Merge(repository.NamespacePath, repository.Name, number, merge).ConfigureAwait(false);
+        // A merge is one-way: re-sent after it landed, GitHub answers 405 "not mergeable" and fails a merge that
+        // succeeded. So a retry first re-reads the pull request and takes an existing merge as the answer.
+        var result = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(MergePullRequestAsync),
+            async _ => ToMergeResult(await client.PullRequest.Merge(repository.NamespacePath, repository.Name, number, merge).ConfigureAwait(false)),
+            _ => FindMergedAsync(client, repository, number),
+            cancellationToken).ConfigureAwait(false);
 
-            // GitHub doesn't delete the head branch on merge — do it as a follow-up when asked. Need the PR's
-            // head ref, so fetch it; a delete failure (already gone / protected) is swallowed so it never fails
-            // an otherwise-successful merge.
-            if (input.DeleteSourceBranch && result.Merged)
-            {
-                var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
-                if (!string.IsNullOrEmpty(pr.Head?.Ref))
-                    try { await client.Git.Reference.Delete(repository.NamespacePath, repository.Name, $"heads/{pr.Head.Ref}").ConfigureAwait(false); }
-                    catch (ApiException) { /* branch already deleted / protected — the merge still succeeded */ }
-            }
+        // GitHub doesn't delete the head branch on merge — do it as a follow-up when asked, whether this attempt
+        // merged or an earlier one did.
+        if (input.DeleteSourceBranch && result.Merged)
+            await DeleteSourceBranchAsync(context, client, repository, number, cancellationToken).ConfigureAwait(false);
 
-            return new RemotePullRequestMergeResult { Merged = result.Merged, Sha = result.Sha, Message = result.Message };
+        return result;
+    }
+
+    private static RemotePullRequestMergeResult ToMergeResult(PullRequestMerge merge) => new() { Merged = merge.Merged, Sha = merge.Sha, Message = merge.Message };
+
+    /// <summary>The merge an earlier attempt landed, read back from the pull request. GitHub gives no merge message for a pull request it is only asked about, so none is invented.</summary>
+    private static async Task<RemotePullRequestMergeResult?> FindMergedAsync(GitHubClient client, RemoteRepository repository, int number)
+    {
+        var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+
+        return pr.Merged ? new RemotePullRequestMergeResult { Merged = true, Sha = pr.MergeCommitSha } : null;
+    }
+
+    /// <summary>Its own retried step, so a blip here re-runs the cleanup — never the merge. Needs the PR's head ref, so fetch it; a delete failure (already gone / protected) is swallowed so it never fails an otherwise-successful merge.</summary>
+    private async Task DeleteSourceBranchAsync(ProviderContext context, GitHubClient client, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync) + "/delete-source-branch", async _ =>
+        {
+            var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(pr.Head?.Ref)) return;
+
+            try { await client.Git.Reference.Delete(repository.NamespacePath, repository.Name, $"heads/{pr.Head.Ref}").ConfigureAwait(false); }
+            catch (ApiException) { /* branch already deleted / protected — the merge still succeeded */ }
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -426,15 +480,30 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CreateIssueAsync), async _ =>
-        {
-            var newIssue = new NewIssue(input.Title) { Body = input.Body };
-            foreach (var label in input.Labels) newIssue.Labels.Add(label);
+        var newIssue = new NewIssue(input.Title) { Body = IdempotencyMarker.Append(input.Body, marker) };
+        foreach (var label in input.Labels) newIssue.Labels.Add(label);
 
-            var created = await client.Issue.Create(repository.NamespacePath, repository.Name, newIssue).ConfigureAwait(false);
-            return ToRemoteIssue(created);
-        }, cancellationToken).ConfigureAwait(false);
+        var created = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CreateIssueAsync),
+            _ => client.Issue.Create(repository.NamespacePath, repository.Name, newIssue),
+            _ => FindMarkedIssueAsync(client, repository, marker),
+            cancellationToken).ConfigureAwait(false);
+
+        return ToRemoteIssue(created);
+    }
+
+    /// <summary>
+    /// The issue an earlier attempt of this call opened: among the repository's newest, the one carrying this call's
+    /// marker. The REST list rather than Search — Search is indexed asynchronously and can miss an issue made
+    /// seconds ago, which is exactly the one being looked for.
+    /// </summary>
+    private static async Task<Issue?> FindMarkedIssueAsync(GitHubClient client, RemoteRepository repository, string marker)
+    {
+        var newestFirst = new RepositoryIssueRequest { State = ItemStateFilter.All, SortProperty = IssueSort.Created, SortDirection = SortDirection.Descending };
+        var issues = await client.Issue.GetAllForRepository(repository.NamespacePath, repository.Name, newestFirst, new ApiOptions { PageCount = 1, PageSize = 100, StartPage = 1 }).ConfigureAwait(false);
+
+        return issues.FirstOrDefault(i => IdempotencyMarker.IsIn(i.Body, marker));
     }
 
     private static RemoteIssue ToRemoteIssue(Issue issue) => new()
@@ -443,7 +512,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         Number = issue.Number,
         Title = issue.Title,
         State = issue.State.Value == ItemState.Closed ? IssueState.Closed : IssueState.Open,
-        Body = issue.Body,
+        Body = IdempotencyMarker.Strip(issue.Body),
         AuthorLogin = issue.User?.Login,
         Labels = ToLabelRefs(issue.Labels),
         Assignees = issue.Assignees?.Select(a => a.Login).ToList() ?? new List<string>(),
@@ -475,7 +544,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             return (IReadOnlyList<RemoteIssueComment>)comments.Select(c => new RemoteIssueComment
             {
                 ExternalId = c.Id.ToString(),
-                Body = c.Body,
+                Body = IdempotencyMarker.Strip(c.Body),
                 AuthorName = c.User?.Login ?? "unknown",
                 CreatedAt = c.CreatedAt,
                 WebUrl = c.HtmlUrl
@@ -538,21 +607,22 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CommentIssueAsync), async _ =>
+        // GitHub issue comments and PR comments share one API (Issue.Comment) — an issue number works here.
+        var created = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CommentIssueAsync),
+            _ => client.Issue.Comment.Create(repository.NamespacePath, repository.Name, number, IdempotencyMarker.Append(body, marker)),
+            _ => FindMarkedCommentAsync(client, repository, number, marker),
+            cancellationToken).ConfigureAwait(false);
+
+        return new RemoteIssueComment
         {
-            // GitHub issue comments and PR comments share one API (Issue.Comment) — an issue number works here.
-            var created = await client.Issue.Comment.Create(repository.NamespacePath, repository.Name, number, body).ConfigureAwait(false);
-
-            return new RemoteIssueComment
-            {
-                ExternalId = created.Id.ToString(),
-                Body = created.Body,
-                AuthorName = created.User?.Login ?? "unknown",
-                CreatedAt = created.CreatedAt,
-                WebUrl = created.HtmlUrl
-            };
-        }, cancellationToken).ConfigureAwait(false);
+            ExternalId = created.Id.ToString(),
+            Body = IdempotencyMarker.Strip(created.Body),
+            AuthorName = created.User?.Login ?? "unknown",
+            CreatedAt = created.CreatedAt,
+            WebUrl = created.HtmlUrl
+        };
     }
 
     public async Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
