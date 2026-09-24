@@ -139,6 +139,15 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public WorkflowRunStatus Status { get; set; } = WorkflowRunStatus.Pending;
     public string? Error { get; set; }
 
+    /// <summary>
+    /// Which revival of this run is current: 0 at creation, bumped by each in-place Continue of a terminal run in the
+    /// same statement that revives it. A walk claims the generation it read and stops at its next wave check once the
+    /// row has moved past it, and its terminal writes are fenced on it, so a walk the Continue overtook — still on
+    /// another host, or still unwinding — never walks or ends the revived run. A cancel's post-commit teardown carries
+    /// the generation it cancelled and touches nothing once a Continue has moved it.
+    /// </summary>
+    public int Generation { get; set; }
+
     /// <summary>P2a (Lock Clause 1): the completion-protocol version this execution runs under — stamped IMMUTABLY at creation in the same transaction as the row; null = a pre-protocol Legacy run. A replay/rerun is a new execution stamped with the policy current at ITS creation.</summary>
     public int? CompletionPolicyVersion { get; set; }
 

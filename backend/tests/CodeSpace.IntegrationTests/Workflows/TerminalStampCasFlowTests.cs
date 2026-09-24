@@ -92,6 +92,26 @@ public sealed class TerminalStampCasFlowTests
             .ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task A_run_a_continue_revived_past_the_walks_generation_refuses_the_stamp()
+    {
+        // A Continue revived the run under a newer generation while an older walk was still going. That walk's
+        // terminal must not land on the revived run: the stamp is fenced on the generation its walk claimed — 0 for this
+        // engine, which claimed nothing newer.
+        var (runId, _) = await SeedRunningRunAsync();
+        using var scope = _fixture.BeginScope();
+        var engine = (WorkflowEngine)scope.Resolve<IWorkflowEngine>();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await db.WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.Generation, 1));
+
+        (await engine.TryStampArbitratedTerminalAsync(runId, Terminal(WorkflowRunStatus.Success, null, "completed", Declared), ledgerVersionRead: 0, CancellationToken.None))
+            .ShouldBeFalse("the run belongs to a newer generation — the older walk's terminal loses");
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Running, "a refused stamp leaves the revived run untouched");
+    }
+
     /// <summary>The outputs a Terminal declared — what the run produced, and what the terminal row owes its readers.</summary>
     private const string Declared = """{"answer":"42"}""";
 

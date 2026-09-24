@@ -168,9 +168,11 @@ public sealed class HumanTouchReader : IHumanTouchReader, IScopedDependency
         return toolKind != DecisionToolKinds.DecisionRequest || IsHumanAnswered(resultJson);
     }
 
-    /// <summary><c>flow.wait_approval</c> is unconditionally human once resolved (no auto path exists); a still-Pending row (not expected on a terminal run, but handled fail-safe as counted) and <c>flow.decision</c> defer to <see cref="IsHumanAnswered"/>.</summary>
+    /// <summary><c>flow.wait_approval</c> is unconditionally human once resolved (no auto path exists) and <c>flow.decision</c> defers to <see cref="IsHumanAnswered"/>; a Discarded row is never a touch — the run's end (its stop, or the engine's cleanup when it failed) closed it unanswered, still holding its question; a still-Pending row (not expected on a terminal run) is counted, fail-safe.</summary>
     private static bool IsGenuineHumanNodeWait(string waitKind, string status, string? payloadJson)
     {
+        if (status == WorkflowWaitStatuses.Discarded) return false;
+
         if (status != WorkflowWaitStatuses.Resolved) return true;
 
         return waitKind == WorkflowWaitKinds.Approval || IsHumanAnswered(payloadJson);

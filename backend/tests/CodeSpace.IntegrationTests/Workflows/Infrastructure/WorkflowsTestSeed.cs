@@ -292,4 +292,27 @@ public static class WorkflowsTestSeed
 
         return runId;
     }
+
+    /// <summary>
+    /// Stop a run inside a command transaction and commit it WITHOUT draining: the stop's teardown stays queued on the
+    /// returned scope's post-commit actions until the caller runs them (<c>IPostCommitActions.RunAllAsync</c>), standing
+    /// in for a teardown still in flight when the next operator action lands. The caller disposes the scope.
+    /// </summary>
+    public static async Task<ILifetimeScope> StopWithTeardownHeldAsync(PostgresFixture fixture, Guid runId, Guid teamId)
+    {
+        var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await using (var transaction = await db.Database.BeginTransactionAsync().ConfigureAwait(false))
+        {
+            var outcome = await scope.Resolve<CodeSpace.Core.Services.Workflows.IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None).ConfigureAwait(false);
+
+            if (outcome is not { Cancelled: true })
+                throw new InvalidOperationException($"Run {runId} was not stopped (status {outcome?.Status}).");
+
+            await transaction.CommitAsync().ConfigureAwait(false);
+        }
+
+        return scope;
+    }
 }

@@ -2,9 +2,14 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Chat.Interactions;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using Microsoft.EntityFrameworkCore;
 
@@ -103,16 +108,18 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         //   • NoWait          — no parked wait (a post-and-continue card, or a run that already ended): the
         //                       card is a living thread decoupled from any run, so still record it — NOT an
         //                       error and NOT an expiry.
-        //   • AlreadyResolved — a deadline timed out, or another responder already decided. The workflow's
-        //                       decision is set; stamping this (late) one would make the card contradict the
-        //                       workflow, so reject the click. (Concurrent humans are already serialized by
+        //   • AlreadyResolved — a deadline timed out, another responder already decided, or the run's stop closed
+        //                       the question unanswered. The workflow's decision is set (or the run is stopped);
+        //                       stamping this (late) one would make the card contradict the workflow, so reject
+        //                       the click — saying which it was. (Concurrent humans are already serialized by
         //                       the FOR UPDATE lock in LoadMessageAsync + EnsureOpen, so this is the deadline /
         //                       cross-path case.)
         // (The identity gate inside the resume still throws 428/403 when a downstream node would act as the
         // responder — unchanged.)
         var outcome = await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
 
-        if (outcome == ActionResumeResult.AlreadyResolved) throw new InvalidOperationException("This interaction was already resolved.");
+        if (outcome == ActionResumeResult.AlreadyResolved)
+            throw new InvalidOperationException(await AlreadyResolvedMessageAsync(interaction.Target, teamId, cancellationToken).ConfigureAwait(false));
 
         message.InteractionJson = MessageInteractionJson.Serialize(withVote with
         {
@@ -122,6 +129,28 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Why a click on a card whose question is no longer open is rejected. One its run's end closed unanswered — a workflow wait Discarded by a stop or a failure, an agent's decision Expired by its stop — was decided by nobody, so "already resolved" would tell the person someone answered it.</summary>
+    private async Task<string> AlreadyResolvedMessageAsync(InteractionTarget target, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (target is WorkflowWaitTarget wait && await IsEndedRunWaitAsync(wait.Token, teamId, cancellationToken).ConfigureAwait(false)) return WorkflowService.EndedRunQuestionMessage;
+
+        if (target is DecisionRequestTarget decision && await IsStoppedRunDecisionAsync(decision.Token, teamId, cancellationToken).ConfigureAwait(false)) return StoppedRunDecisions.ExpiredError;
+
+        return "This interaction was already resolved.";
+    }
+
+    /// <summary>Whether the card's Action wait — located by token, team-scoped, exactly as the resume located it — was closed by its run's end.</summary>
+    private async Task<bool> IsEndedRunWaitAsync(string token, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunWait.AsNoTracking()
+            .AnyAsync(w => w.Token == token && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Discarded && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.TeamId == teamId), cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>Whether the card's <c>decision.request</c> row — located by token, team-scoped, exactly as the resolver located it — was closed by its agent run's stop: Expired is the one no-answer terminal a decision row reaches.</summary>
+    private async Task<bool> IsStoppedRunDecisionAsync(string token, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.ToolCallLedger.AsNoTracking()
+            .AnyAsync(l => l.ApprovalToken == token && l.TeamId == teamId && l.ToolKind == DecisionToolKinds.DecisionRequest && l.Status == ToolCallLedgerStatus.Expired, cancellationToken)
+            .ConfigureAwait(false);
 
     // ─── Comment (non-terminal): append to the log, stay Open ───────────────────────
 

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -24,7 +26,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// (a verdict every later Continue replayed, so the run could never be continued), and an approval read
 /// <c>approved=false</c> with no approver and took the rejection path. One test per replay reader (the top-level walk,
 /// a map branch, a loop pass) through the operator stop's teardown, and one through the engine's own teardown when a
-/// run lands Failure beside a parked step.
+/// run lands Failure beside a parked step — plus one where the stop's teardown lands only after the Continue has
+/// re-parked every step, and must leave the revived run's fresh waits, agent and child alone, and one where it lands
+/// before the continued walk starts, and the agent it kills must not answer the continued step.
 ///
 /// <para>Fidelity (Rule 12) 🟢 high for everything under test: the REAL <c>WorkflowService</c> cancel (terminal flip plus
 /// its post-commit teardown) and the REAL engine terminal cleanup, which are what close the waits; the REAL Continue for
@@ -237,7 +241,105 @@ public class ContinueParkedRunFlowTests
         approvalWait.Id.ShouldNotBe(firstWait.Id, "the approval parked a fresh wait");
     }
 
+    [Fact]
+    public async Task A_stop_teardown_landing_after_a_continue_ends_the_stopped_attempts_work_and_leaves_the_revived_runs_alone()
+    {
+        // Stop then an immediate Continue. The stop's teardown runs after its commit, so it can still be in flight — here
+        // it is held and lands only once the continued walk has re-parked every step on a fresh wait, staged a fresh
+        // agent and a fresh child run. The revived run's work is not its to end; the stopped attempt's agent and child
+        // still are — they were live when the stop committed, and nothing else would stop them under a live parent.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var childWorkflowId = await CreateWorkflowAsync(teamId, userId, ChildDefinition());
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentApprovalAndChildDefinition(childWorkflowId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var manual = ResolveJobClient().ManualExecution();   // record the executor + child dispatches; nothing runs
+
+        await RunEngineAsync(runId);
+        var stoppedParks = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
+        stoppedParks.Count.ShouldBe(3, "precondition: all three steps parked");
+        var stoppedAgentId = Guid.Parse(stoppedParks.Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun).Token);
+        var stoppedChildId = Guid.Parse(stoppedParks.Single(w => w.WaitKind == WorkflowWaitKinds.Subworkflow).Token);
+
+        using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId);
+        await ContinueAsync(runId, teamId);
+        await RunEngineAsync(runId);
+
+        var fresh = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
+        fresh.Count.ShouldBe(3, "precondition: the continued walk re-parked every step on a fresh wait");
+
+        await stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);   // the stop's teardown lands only now
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var freshIds = fresh.Select(w => w.Id).ToList();
+        (await db.WorkflowRunWait.AsNoTracking().Where(w => freshIds.Contains(w.Id)).Select(w => w.Status).ToListAsync())
+            .ShouldAllBe(status => status == WorkflowWaitStatuses.Pending, "the late teardown left every fresh wait of the revived run open");
+
+        var agentId = Guid.Parse(fresh.Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun).Token);
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentId)).Status
+            .ShouldBe(AgentRunStatus.Queued, "the stopped generation's kill-wave did not cancel the revived run's agent");
+
+        var childRunId = Guid.Parse(fresh.Single(w => w.WaitKind == WorkflowWaitKinds.Subworkflow).Token);
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == childRunId)).Status
+            .ShouldNotBe(WorkflowRunStatus.Cancelled, "nor did it cancel the revived run's child run");
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Suspended, "the revived run is still parked on its fresh waits");
+
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == stoppedAgentId)).Status
+            .ShouldBe(AgentRunStatus.Cancelled, "the stopped attempt's agent was live when the stop committed — the late teardown still ends it");
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == stoppedChildId)).Status
+            .ShouldBe(WorkflowRunStatus.Cancelled, "and cancels the stopped attempt's staged child run");
+    }
+
+    [Fact]
+    public async Task A_stopped_attempts_agent_killed_after_a_continue_never_answers_the_continued_step()
+    {
+        // Stop, then a Continue before the stop's teardown ran. The teardown still kills the stopped attempt's agent, and
+        // the kill ends the agent Cancelled — a result its completion hands back through the step's wait. That wait is
+        // still open here: the continued walk has not re-parked the step yet, and the run-wide close of the stop's waits
+        // stands down once a Continue has followed it. Answered by the kill, it is the answer the continued walk replays,
+        // and the step fails "Agent run did not succeed" the moment the operator continues it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CappedAgentBesideApprovalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedAgentWait = (await WaitsAsync(runId)).Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending);
+        var stoppedAgentId = Guid.Parse(stoppedAgentWait.Token);
+
+        using (var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId))
+        {
+            await ContinueAsync(runId, teamId);
+            await stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);   // the teardown lands before the continued walk starts
+        }
+
+        await NotifyAgentEndedAsync(stoppedAgentId);   // the killed agent's completion, as its executor or the agent reconciler delivers it
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == stoppedAgentId)).Status.ShouldBe(AgentRunStatus.Cancelled, "precondition: the late teardown killed the stopped attempt's agent");
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Suspended, customMessage: $"the continued step parked again — a Failure means it took the killed agent's end as its answer. Records: {await StepVerdictsAsync(db, runId)}");
+
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)).Token
+            .ShouldNotBe(stoppedAgentWait.Token, "the continued step staged a fresh agent");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    private async Task NotifyAgentEndedAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentRunCompletionNotifier>().NotifyCompletedAsync(agentRunId, CancellationToken.None);
+    }
 
     private async Task CancelAsync(Guid runId, Guid teamId)
     {
@@ -335,6 +437,42 @@ public class ContinueParkedRunFlowTests
             new() { From = "agent", To = "end" },
             new() { From = "approval", To = "end" },
         },
+    };
+
+    // manual → { agent (agent.run, $1 cap) , approval (flow.wait_approval) , sub (flow.subworkflow) } → terminal. All three park in one wave:
+    // an AgentRun wait with a staged agent, an Approval wait, and a Subworkflow wait with a staged child run.
+    private static WorkflowDefinition AgentApprovalAndChildDefinition(Guid childWorkflowId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "agent", TypeKey = "agent.run", Config = WorkflowsTestSeed.Json(CappedAgentConfig), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "approval", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.Json("""{ "prompt": "ship it?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sub", TypeKey = "flow.subworkflow", Config = WorkflowsTestSeed.Json($$"""{"workflowId":"{{childWorkflowId}}"}"""), Inputs = WorkflowsTestSeed.Json("""{"inputs":{"x":"v"}}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "agent" },
+            new() { From = "start", To = "approval" },
+            new() { From = "start", To = "sub" },
+            new() { From = "agent", To = "end" },
+            new() { From = "approval", To = "end" },
+            new() { From = "sub", To = "end" },
+        },
+    };
+
+    // manual → terminal: the child a flow.subworkflow step stages.
+    private static WorkflowDefinition ChildDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "end" } },
     };
 
     // manual → { boom (fails once, no error edge) , approval (flow.wait_approval) } → terminal. Both run in one wave, which settles in

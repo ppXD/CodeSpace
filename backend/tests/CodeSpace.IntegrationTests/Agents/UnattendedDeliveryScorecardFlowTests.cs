@@ -541,6 +541,21 @@ public class UnattendedDeliveryScorecardFlowTests
         run.HumanTouches.ShouldBe(expectedTouches, $"a flow.decision node answered by {answeredBy} must map to {expectedTouches} touch(es)");
     }
 
+    [Theory]
+    [InlineData(WorkflowWaitKinds.Approval)]
+    [InlineData(WorkflowWaitKinds.Decision)]
+    public async Task A_node_wait_a_stop_closed_unanswered_is_not_a_human_touch(string waitKind)
+    {
+        // A stop's teardown closes the run's pending waits Discarded, still holding the question they were parked on.
+        // Nobody answered them, so counting one as "a person touched this run" overstates the attended share.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedTerminalRunAsync(teamId, WorkflowRunStatus.Cancelled);
+        await SeedNodeWaitAsync(teamId, runId, waitKind, payloadJson: """{"prompt":"ship it?"}""", status: WorkflowWaitStatuses.Discarded);
+
+        var run = (await ComputeAsync(teamId)).Runs.Single(r => r.WorkflowRunId == runId);
+        run.HumanTouches.ShouldBe(0, "a wait the stop closed unanswered never reached a decision by anyone");
+    }
+
     [Fact]
     public async Task A_run_with_no_manifest_rows_is_neither_solved_nor_delivered_but_still_counted()
     {
@@ -847,8 +862,8 @@ public class UnattendedDeliveryScorecardFlowTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>A node-grain <c>WorkflowRunWait</c> row (flow.wait_approval / flow.decision), Resolved with the given payload.</summary>
-    private async Task SeedNodeWaitAsync(Guid teamId, Guid runId, string waitKind, string payloadJson)
+    /// <summary>A node-grain <c>WorkflowRunWait</c> row (flow.wait_approval / flow.decision) with the given payload — Resolved unless <paramref name="status"/> says otherwise.</summary>
+    private async Task SeedNodeWaitAsync(Guid teamId, Guid runId, string waitKind, string payloadJson, string status = WorkflowWaitStatuses.Resolved)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -860,7 +875,7 @@ public class UnattendedDeliveryScorecardFlowTests
             NodeId = "node-1",
             WaitKind = waitKind,
             Token = Guid.NewGuid().ToString("N"),
-            Status = WorkflowWaitStatuses.Resolved,
+            Status = status,
             PayloadJson = payloadJson,
             CreatedAt = DateTimeOffset.UtcNow,
             ResolvedAt = DateTimeOffset.UtcNow,

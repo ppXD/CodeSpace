@@ -27,6 +27,9 @@ public sealed class FakeDecisionQueue : IDecisionQueueService
 
         return Task.FromResult(_pendingForAgents);
     }
+
+    public Task<IReadOnlyList<PendingDecision>> ListPendingForRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PendingDecision>>(Array.Empty<PendingDecision>());
 }
 
 /// <summary>A scripted <see cref="IDecisionArbiter"/> — returns a configured verdict (default escalate, the fail-closed steady state) and records each decision it judged + the inputs it was given. Honours cancellation (throws), mirroring the real arbiter's one propagating exception.</summary>

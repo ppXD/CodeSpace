@@ -814,6 +814,9 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         if (cancelled == 0) return false;
 
+        // The run's unanswered decisions close with it, so its question leaves the queue and the Room the moment it stops.
+        await StoppedRunDecisions.ExpireQuietlyAsync(_db, runId, _logger, cancellationToken).ConfigureAwait(false);
+
         // AFTER the CAS, never before: a cancel that lost the race leaves the claim to whoever lands the run.
         await SettleSpendClaimsQuietlyAsync(runId, snapshot.TeamId, snapshot.ResultJson, cancellationToken).ConfigureAwait(false);
 

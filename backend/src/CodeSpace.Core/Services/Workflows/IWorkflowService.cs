@@ -159,12 +159,21 @@ public interface IWorkflowService
     Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Continue a STRANDED Suspended run (Suspended with NO pending wait) on demand — the user-triggered, single-run
-    /// twin of the reconciler's stranded-Suspended re-dispatch. CAS Suspended → Pending then post-commit dispatch,
-    /// driving the SAME continuation the ≤2-min sweep would. TEAM-SCOPED: a foreign run throws
-    /// <see cref="KeyNotFoundException"/> (404). Returns <c>true</c> if this call drove it; <c>false</c> when the run
-    /// is terminal / Running, still parked on a pending wait (use <c>/resume</c>), or the CAS lost to a concurrent
-    /// continue. Idempotent + race-safe (the dispatcher's Pending → Enqueued CAS is the double-dispatch guard).
+    /// Continue a run IN PLACE (same run id, never a fork): a STRANDED Suspended run (Suspended with NO pending wait) —
+    /// the user-triggered, single-run twin of the reconciler's stranded-Suspended re-dispatch — or a terminal Failure /
+    /// Cancelled run, whose halting / interrupted steps re-run where they stopped. CAS → Pending then post-commit
+    /// dispatch. TEAM-SCOPED: a foreign run throws <see cref="KeyNotFoundException"/> (404). Returns <c>true</c> if this
+    /// call drove it; <c>false</c> when the run is Success / Running, still parked on a pending wait (use
+    /// <c>/resume</c>), has nothing to re-run in place, or the CAS lost to a concurrent continue. Idempotent + race-safe
+    /// (the dispatcher's Pending → Enqueued CAS is the double-dispatch guard).
+    ///
+    /// <para>Reviving a terminal run starts a new run generation: a walk still winding down from the stop or failure,
+    /// and a stop's teardown still in flight, carry the old one and touch nothing of the revived run.</para>
+    ///
+    /// <para>A step the continue re-runs starts over, because a wait the stop or failure closed carries no answer. So a
+    /// <c>flow.sleep</c> parks a fresh timer for its FULL delay — the time it already slept is not credited — and a
+    /// supervisor parked on a model outage restarts its retry ladder at the first rung, with a fresh 24-hour window (the
+    /// ladder position lived on the closed wait); so does any node on the same outage ladder.</para>
     /// </summary>
     Task<bool> ContinueRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 

@@ -310,6 +310,12 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
 
+        // Test-only node that holds on a gate and then parks on an AgentRun wait — a step still in flight when its run
+        // is stopped and continued, parking only after the revived walk parked the same cell. Same registration rationale.
+        builder.RegisterType<Workflows.Infrastructure.GatedAgentParkNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
+
         // Deterministic structured-output LLM client for the headline-flow E2E's planner half. Registered as
         // BOTH ILLMClient + IStructuredLLMClient under its OWN provider tag (DeterministicPlannerLlmClient.
         // ProviderTag), so the LLMClientRegistry holds it ALONGSIDE the real Anthropic client (no duplicate-

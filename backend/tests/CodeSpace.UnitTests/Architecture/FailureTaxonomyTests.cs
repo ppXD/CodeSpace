@@ -33,7 +33,8 @@ public class FailureTaxonomyTests
 
     /// <summary>
     /// Throws that are a jump, not a fault. Each is caught by the code that threw it — a suspended run
-    /// is the SUCCESS path for a wait node, a stalled sandbox is selected as a status sixty lines from
+    /// is the SUCCESS path for a wait node, a walk a Continue overtook stands down without writing (the run is
+    /// fine: it belongs to the revived walk), a stalled sandbox is selected as a status sixty lines from
     /// where it is raised, a halted materialization carries one of a closed set of outcomes out of a pipeline that
     /// then RETURNS it, and a provider rejection crosses nested generic adapters into one typed adoption summary.
     /// Classifying them would invite someone to render a parked run, or a team that simply already had its own
@@ -42,6 +43,7 @@ public class FailureTaxonomyTests
     private static readonly IReadOnlySet<string> ControlFlowNotFailure = new HashSet<string>
     {
         "RunSuspendedException",
+        "RunSupersededException",
         "AgentStalledException",
         "MaterializationHaltException",
         "LegacyProviderRejectedException",

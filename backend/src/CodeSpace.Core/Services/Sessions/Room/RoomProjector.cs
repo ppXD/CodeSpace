@@ -2005,24 +2005,16 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         await _db.WorkflowRunRecord.AsNoTracking().Where(r => r.RunId == runId).MaxAsync(r => (long?)r.Sequence, cancellationToken).ConfigureAwait(false) ?? 0;
 
     /// <summary>
-    /// The pending decisions parked on this run — node-grain (matched by the run id) or agent-grain (matched by one of
-    /// the run's own agent runs; an agent-grain envelope carries no run id, so we resolve the run's agents directly
-    /// rather than via the phase tree, which catches a decision even when its agent isn't phase-surfaced). Only reached
-    /// when the turn skeleton already reported a pending decision, so the team-wide pending read fires for that case only.
+    /// The pending decisions parked on this run — node-grain (its own waits) or agent-grain (raised by one of its own
+    /// agent runs, resolved directly rather than via the phase tree, which catches a decision even when its agent isn't
+    /// phase-surfaced) — read for this run alone, never as the whole team's queue filtered down on every render. Only
+    /// reached when the turn skeleton already reported a pending decision.
     /// </summary>
     private async Task<IReadOnlyList<DecisionBlock>> DecisionBlocksAsync(Guid runId, Guid teamId, long seq, CancellationToken cancellationToken)
     {
-        var agentIds = (await _db.AgentRun.AsNoTracking()
-            .Where(a => a.WorkflowRunId == runId && a.TeamId == teamId)
-            .Select(a => a.Id)
-            .ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        var pending = await _decisions.ListPendingForRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var pending = await _decisions.ListPendingAsync(teamId, cancellationToken).ConfigureAwait(false);
-
-        return pending
-            .Where(d => d.WorkflowRunId == runId || (d.AgentRunId is { } a && agentIds.Contains(a)))
-            .Select(d => ToDecisionBlock(d, seq))
-            .ToList();
+        return pending.Select(d => ToDecisionBlock(d, seq)).ToList();
     }
 
     private static DecisionBlock ToDecisionBlock(PendingDecision d, long seq) => new()

@@ -494,6 +494,28 @@ public class RoomProjectorFlowTests
     }
 
     [Fact]
+    public async Task A_stopped_turn_offers_none_of_the_questions_it_was_asking()
+    {
+        // Stopping a run closes its questions — the node-grain wait Discarded by the teardown, the agent-grain decision
+        // Expired with its cancelled agent — so the Room must stop offering either as open.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Stopped");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Decide things", resultSummary: null, status: WorkflowRunStatus.Running);
+
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
+        await SeedNodeDecisionAsync(teamId, run, "Pick a path", deadline, Array.Empty<DecisionOption>());
+        await SeedAgentDecisionAsync(teamId, run, "Approve the deploy?", deadline);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<Core.Services.Workflows.IWorkflowService>().CancelRunAsync(run, teamId, CancellationToken.None))!.Cancelled.ShouldBeTrue();
+
+        var room = await ProjectByRunAsync(run, teamId);
+
+        room!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<DecisionBlock>()
+            .ShouldBeEmpty("a stopped run's questions closed with it — the Room offers none of them as open");
+    }
+
+    [Fact]
     public async Task The_two_suspended_shapes_project_differently()
     {
         // Both parks are Suspended, and before this both rendered identically — "Waiting", no reason, Continue
