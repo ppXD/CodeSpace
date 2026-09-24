@@ -481,11 +481,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 }
             }
 
-            // Recorded once the attempt is sure to launch, so the trace never says a conversation was set aside for an
-            // attempt that did not run.
-            if (ranCold)
-                await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, LaunchRanColdNote, cancellationToken).ConfigureAwait(false);
-
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
             // points at it. Null when no endpoint → nothing to re-open.
@@ -529,6 +524,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 await RefuseLaunchForSpendAsync(owner, run.TeamId, effectiveTask, refusedDetail, cancellationToken).ConfigureAwait(false);
                 return;
             }
+
+            // Recorded only once the attempt has passed every check this executor makes before launching it — local
+            // acceptance, spend — so the trace never says a conversation was set aside for an attempt that did not run.
+            if (ranCold)
+                await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, LaunchRanColdNote, cancellationToken).ConfigureAwait(false);
 
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
             result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
@@ -605,12 +605,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 // The same verdict for the round's own session: warm only when the pipe can carry it. Only the
                 // conversation and the goal change — a model escalation already applied to this round stands.
-                if (ContinuationOverflowsTheFrame(reviseTask, reviseSpec))
+                var roundRanCold = ContinuationOverflowsTheFrame(reviseTask, reviseSpec);
+
+                if (roundRanCold)
                 {
                     var cold = BuildReviseTask(effectiveTask, result, reason, mayResume: false);
                     reviseTask = reviseTask with { Goal = cold.Goal, ResumeFromSessionId = null, RestoredTranscript = null };
                     reviseSpec = BuildSpec(reviseTask);
-                    await RecordRunColdAsync(owner, null, ReviseRanColdNote, cancellationToken).ConfigureAwait(false);
                 }
 
                 var priorUsage = result.TokenUsage;
@@ -629,6 +630,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     await AppendReviseBudgetStopEventAsync(owner, roundRefusal, cancellationToken).ConfigureAwait(false);
                     break;
                 }
+
+                if (roundRanCold)
+                    await RecordRunColdAsync(owner, null, ReviseRanColdNote, cancellationToken).ConfigureAwait(false);
 
                 var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, Task = reviseTask, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
