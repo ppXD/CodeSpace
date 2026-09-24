@@ -45,7 +45,15 @@ public interface IAgentRunService
     Task<bool> StampSessionTranscriptCheckpointAsync(AgentRunOwnerToken owner, SessionTranscriptCheckpoint checkpoint, string? sessionId, CancellationToken cancellationToken);
 
     Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken);
-    Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Append an observer's batch under <paramref name="owner"/>. Every row takes the id its writer minted
+    /// (<see cref="PendingAgentEvent.Id"/>), and a row that already exists is kept rather than inserted again — so a
+    /// writer that re-offers the same batch after a fault the database may have committed before the client heard it
+    /// lands each event exactly once, and the re-offer succeeds instead of reading as a lost fence.
+    /// </summary>
+    Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken);
+
     Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
     Task RejectQueuedAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
     /// <summary>Complete under an active matching owner and lease. A repeated terminal call fails closed; claim ACK recovery does not imply terminal notification recovery.</summary>
@@ -367,21 +375,25 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
     public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(runId, null, "legacy"), @event, cancellationToken);
     public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(owner.RunId, owner, "worker"), @event, cancellationToken);
     public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendOneEventAsync(new(runId, null, "system"), @event, cancellationToken);
-    public async Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(runId, null, "legacy"), events, cancellationToken).ConfigureAwait(false);
-    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(owner.RunId, owner, "worker"), events, cancellationToken).ConfigureAwait(false);
+    public async Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(runId, null, "legacy"), Minted(events), cancellationToken).ConfigureAwait(false);
+    public async Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken) => await AppendEventsCoreAsync(new(owner.RunId, owner, "worker"), events, cancellationToken).ConfigureAwait(false);
 
     private async Task<AgentRunEvent> AppendOneEventAsync(AgentEventWriter writer, AgentEvent @event, CancellationToken cancellationToken)
     {
-        var ids = await AppendEventsCoreAsync(writer, [@event], cancellationToken).ConfigureAwait(false);
-        return await _db.AgentRunEvent.AsNoTracking().SingleAsync(e => e.Id == ids[0], cancellationToken).ConfigureAwait(false);
+        var pending = new PendingAgentEvent(Guid.NewGuid(), @event);
+        await AppendEventsCoreAsync(writer, [pending], cancellationToken).ConfigureAwait(false);
+        return await _db.AgentRunEvent.AsNoTracking().SingleAsync(e => e.Id == pending.Id, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<IReadOnlyList<Guid>> AppendEventsCoreAsync(AgentEventWriter writer, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
+    /// <summary>Row ids for a batch whose writer never offers it twice, minted here exactly where they always were.</summary>
+    private static IReadOnlyList<PendingAgentEvent> Minted(IReadOnlyList<AgentEvent> events) => events.Select(@event => new PendingAgentEvent(Guid.NewGuid(), @event)).ToList();
+
+    private async Task AppendEventsCoreAsync(AgentEventWriter writer, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken)
     {
         var runId = writer.RunId;
         if (writer.Owner is { } owner) await AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
         else if (writer.Kind == "legacy") await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
-        if (events.Count == 0) return [];
+        if (events.Count == 0) return;
 
         // ONE round-trip, ONE statement, with the per-run BIGSERIAL `sequence` assigned in STRICT emission order.
         // EF's batched AddRange does NOT preserve insert order for same-type rows — it sorts the modification
@@ -393,9 +405,11 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // side of a single INSERT … SELECT — the ModifyTable node consumes the sorted stream row-by-row and calls
         // nextval() in that order; the ordering tests (single batch, cross-batch monotonicity, 300-row) guard it.
         // The parameter count is fixed regardless of batch size (one array per column plus the owner receipt — never
-        // string-concatenated), so a 256-event flush is one bind, not hundreds of placeholders. `id` + `occurred_at`
-        // are respectively pre-minted before offload and DB-stamped with NOW(); append-only INSERT — the
-        // immutability trigger (UPDATE/DELETE-only) is unaffected.
+        // string-concatenated), so a 256-event flush is one bind, not hundreds of placeholders. `id` is the writer's
+        // (see PendingAgentEvent) and `occurred_at` is DB-stamped with NOW(); append-only INSERT — the immutability
+        // trigger (UPDATE/DELETE-only) is unaffected. ON CONFLICT (id) DO NOTHING is what makes a re-offered batch land
+        // once: its rows keep the sequence the first offer gave them, and the re-offer's nextval() calls only leave a
+        // gap in a serial nothing reads as dense.
         var ids = new Guid[events.Count];
         var kinds = new string[events.Count];
         var texts = new string[events.Count];
@@ -404,15 +418,15 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
         for (var i = 0; i < events.Count; i++)
         {
-            ids[i] = Guid.NewGuid();
-            kinds[i] = events[i].Kind.ToString();   // matches the entity's HasConversion<string>() (enum member name)
+            ids[i] = events[i].Id;
+            kinds[i] = events[i].Event.Kind.ToString();   // matches the entity's HasConversion<string>() (enum member name)
 
             // A harness line can carry a stray U+0000 (a subprocess pipe, a model completion), and Postgres holds
             // it in NEITHER column type: `text` refuses the raw byte, `jsonb` refuses the escape a JSON writer
             // makes of it. Unsanitized, one such byte fails this INSERT with 22021, and because the flush carries
             // the whole batch it takes the run down over a character that renders as nothing. See PersistedText.
-            texts[i] = PersistedText.Sanitize(events[i].Text)!;
-            data[i] = PersistedText.SanitizeJson(events[i].Data?.GetRawText());
+            texts[i] = PersistedText.Sanitize(events[i].Event.Text)!;
+            data[i] = PersistedText.SanitizeJson(events[i].Event.Data?.GetRawText());
         }
 
         await OffloadLargeDataPayloadsAsync(runId, ids, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
@@ -422,12 +436,20 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             "INSERT INTO agent_run_event (id, agent_run_id, kind, text, data_json, data_artifact_id, writer_kind, writer_owner_id, writer_epoch) " +
             "SELECT e.id, {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id, {6}, CASE WHEN {6} = 'worker' THEN {7}::uuid ELSE NULL END, CASE WHEN {6} = 'worker' THEN {8}::bigint ELSE NULL END " +
             "FROM unnest({1}::uuid[], {2}::text[], {3}::text[], {4}::text[], {5}::uuid[]) WITH ORDINALITY AS e(id, kind, text, data, data_artifact_id, ord) CROSS JOIN locked " +
-            "WHERE {6} = 'system' OR ({6} = 'legacy' AND locked.owner_id IS NULL AND locked.reattach_reservation_id IS NULL) OR ({6} = 'worker' AND locked.owner_id = {7} AND locked.fence_epoch = {8} AND locked.status = 'Running' AND locked.lease_expires_at > clock_timestamp()) ORDER BY e.ord";
+            "WHERE {6} = 'system' OR ({6} = 'legacy' AND locked.owner_id IS NULL AND locked.reattach_reservation_id IS NULL) OR ({6} = 'worker' AND locked.owner_id = {7} AND locked.fence_epoch = {8} AND locked.status = 'Running' AND locked.lease_expires_at > clock_timestamp()) ORDER BY e.ord " +
+            "ON CONFLICT (id) DO NOTHING";
 
         var inserted = await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, ids, kinds, texts, data, dataArtifactIds, writer.Kind, writer.Owner?.OwnerId ?? Guid.Empty, writer.Owner?.Epoch ?? 0 }, cancellationToken).ConfigureAwait(false);
-        if (inserted != events.Count) throw new AgentRunOwnershipLostException(runId);
-        return ids;
+        if (inserted != events.Count && !await AlreadyAppendedAsync(runId, ids, cancellationToken).ConfigureAwait(false)) throw new AgentRunOwnershipLostException(runId);
     }
+
+    /// <summary>
+    /// Whether every row of a batch the INSERT did not take is already this run's — the one legitimate short count
+    /// once rows carry their writer's ids: an earlier offer of the SAME batch committed before its acknowledgement was
+    /// lost. Anything less than the whole batch is the refusal the count has always meant.
+    /// </summary>
+    private async Task<bool> AlreadyAppendedAsync(Guid runId, Guid[] ids, CancellationToken cancellationToken) =>
+        await _db.AgentRunEvent.AsNoTracking().CountAsync(e => e.AgentRunId == runId && ids.Contains(e.Id), cancellationToken).ConfigureAwait(false) == ids.Length;
 
     /// <summary>
     /// D2 #1: offload any oversize structured payload (data_json) to the content-addressed artifact

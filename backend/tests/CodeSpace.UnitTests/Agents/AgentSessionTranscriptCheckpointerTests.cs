@@ -353,7 +353,7 @@ public sealed class AgentSessionTranscriptCheckpointerTests : IDisposable
         public Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken) => throw new NotSupportedException();

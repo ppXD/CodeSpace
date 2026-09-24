@@ -793,7 +793,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         public Task SetRunnerHandleAsync(AgentRunOwnerToken owner, string handleJson, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task SetSandboxConfinementAsync(AgentRunOwnerToken owner, string confinementJson, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<AgentRunEvent> AppendEventAsync(AgentRunOwnerToken owner, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(owner.RunId, @event, cancellationToken);
-        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => AppendEventsAsync(owner.RunId, events, cancellationToken);
+        public Task AppendEventsAsync(AgentRunOwnerToken owner, IReadOnlyList<PendingAgentEvent> events, CancellationToken cancellationToken) => AppendEventsAsync(owner.RunId, events.Select(pending => pending.Event).ToList(), cancellationToken);
         public Task<AgentRunEvent> AppendSystemEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => AppendEventAsync(runId, @event, cancellationToken);
         public Task CompleteAsync(AgentRunOwnerToken owner, AgentRunResult result, CancellationToken cancellationToken) => throw new NotSupportedException();
 

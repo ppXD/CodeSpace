@@ -386,21 +386,29 @@ public partial class AgentRunExecutorTests
         var teamId = await SeedTeamAsync();
         var runId = await CreateScriptedRunAsync(teamId);
 
-        // Two polls' worth of lines so a real checkpoint flush fires (>=2 lines in the first poll → one batched call).
-        var instrumented = await ExecuteInstrumentedAsync(runId,
-            new ScriptedHarness("printf 'l1\\nl2\\n'; sleep 0.6; printf 'l3\\nl4\\n'; sleep 0.6"),
-            throwOnAppendEventsCall: 1);
+        try
+        {
+            // Two polls' worth of lines so a real checkpoint flush fires (>=2 lines in the first poll → one batched call).
+            var instrumented = await ExecuteInstrumentedAsync(runId,
+                new ScriptedHarness("printf 'l1\\nl2\\n'; sleep 0.6; printf 'l3\\nl4\\n'; sleep 0.6"),
+                throwOnAppendEventsCall: 1);
 
-        instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(1, "the first checkpoint flush was attempted (and faulted)");
+            instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(1, "the first checkpoint flush was attempted (and faulted)");
 
-        using var scope = _fixture.BeginScope();
-        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
 
-        run.Status.ShouldBe(AgentRunStatus.Failed, "a DB-layer flush failure is a clean Failed, not a stranded Running");
-        (run.Error ?? "").ShouldContain(InstrumentedAgentRunService.AppendEventsFaultMessage, customMessage: "the run carries the redacted flush-fault cause");
+            run.Status.ShouldBe(AgentRunStatus.Failed, "a DB-layer flush failure is a clean Failed, not a stranded Running");
+            (run.Error ?? "").ShouldContain(InstrumentedAgentRunService.AppendEventsFaultMessage, customMessage: "the run carries the redacted flush-fault cause");
 
-        JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
-            .ShouldBe(0, "the throw in FlushAsync short-circuited BEFORE SetRunnerHandleAsync — the durable offset never advanced past unflushed events");
+            JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
+                .ShouldBe(0, "the throw in FlushAsync short-circuited BEFORE SetRunnerHandleAsync — the durable offset never advanced past unflushed events");
+        }
+        finally
+        {
+            // The fault lands while the agent is still sleeping, so the run keeps its clone for the workspace janitor.
+            if (Directory.Exists(ScratchOf(runId))) Directory.Delete(ScratchOf(runId), recursive: true);
+        }
     }
 
     [Fact]
@@ -449,28 +457,36 @@ public partial class AgentRunExecutorTests
         var teamId = await SeedTeamAsync();
         var runId = await CreateScriptedRunAsync(teamId);
 
-        // Lead with a sleep so the first spool poll(s) read an EMPTY file (the child is still sleeping → no
-        // checkpoint), then the whole 400-line burst is written in one shot (≈10ms) and lands in a single LATER
-        // poll's read — deterministically tripping the 256 cap on flush call #1, regardless of CI scheduling
-        // jitter (the burst can't be bisected by a poll because it's written entirely within one inter-poll gap).
-        var instrumented = await ExecuteInstrumentedAsync(runId,
-            new ScriptedHarness("sleep 0.4; for i in $(seq 1 400); do printf 'line-%04d\\n' $i; done; sleep 0.8"),
-            throwOnAppendEventsCall: 2);
+        try
+        {
+            // Lead with a sleep so the first spool poll(s) read an EMPTY file (the child is still sleeping → no
+            // checkpoint), then the whole 400-line burst is written in one shot (≈10ms) and lands in a single LATER
+            // poll's read — deterministically tripping the 256 cap on flush call #1, regardless of CI scheduling
+            // jitter (the burst can't be bisected by a poll because it's written entirely within one inter-poll gap).
+            var instrumented = await ExecuteInstrumentedAsync(runId,
+                new ScriptedHarness("sleep 0.4; for i in $(seq 1 400); do printf 'line-%04d\\n' $i; done; sleep 0.8"),
+                throwOnAppendEventsCall: 2);
 
-        instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(2, "the cap auto-flush (call 1) then the faulting checkpoint flush (call 2) both fired");
+            instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(2, "the cap auto-flush (call 1) then the faulting checkpoint flush (call 2) both fired");
 
-        using var scope = _fixture.BeginScope();
-        var svc = scope.Resolve<IAgentRunService>();
+            using var scope = _fixture.BeginScope();
+            var svc = scope.Resolve<IAgentRunService>();
 
-        var run = await svc.GetAsync(runId, CancellationToken.None);
-        run.Status.ShouldBe(AgentRunStatus.Failed, "the checkpoint flush after the cap flush faulted");
+            var run = await svc.GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Failed, "the checkpoint flush after the cap flush faulted");
 
-        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
-        events.Count.ShouldBe(256, "the cap auto-flush committed exactly its 256-event batch — durable despite the later flush failing");
-        events.Select(e => e.Text).ShouldBe(Enumerable.Range(1, 256).Select(i => $"line-{i:D4}"), "the cap-flushed prefix is in order");
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+            events.Count.ShouldBe(256, "the cap auto-flush committed exactly its 256-event batch — durable despite the later flush failing");
+            events.Select(e => e.Text).ShouldBe(Enumerable.Range(1, 256).Select(i => $"line-{i:D4}"), "the cap-flushed prefix is in order");
 
-        JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
-            .ShouldBe(0, "the cap flush did NOT advance the durable offset — only a checkpoint does, and that one faulted before SetRunnerHandleAsync");
+            JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
+                .ShouldBe(0, "the cap flush did NOT advance the durable offset — only a checkpoint does, and that one faulted before SetRunnerHandleAsync");
+        }
+        finally
+        {
+            // The fault lands while the agent is still sleeping, so the run keeps its clone for the workspace janitor.
+            if (Directory.Exists(ScratchOf(runId))) Directory.Delete(ScratchOf(runId), recursive: true);
+        }
     }
 
     [Fact]
@@ -1697,10 +1713,10 @@ public partial class AgentRunExecutorTests
         await NewExecutor(scope, harness, credentialBroker: credentialBroker).ReattachAsync(reservation, cancellationToken);
     }
 
-    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false)
+    private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false, IAgentRunService? runs = null, CodeSpace.Core.Services.RunData.IRunDataCompletenessWriter? completeness = null, TimeProvider? clock = null)
     {
         var executor = new AgentRunExecutor(
-            scope.Resolve<IAgentRunService>(),
+            runs ?? scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
             runners ?? scope.Resolve<ISandboxRunnerRegistry>(),
@@ -1720,9 +1736,11 @@ public partial class AgentRunExecutorTests
             // The native record plane is DI-registered in production (NativeRecordPlane : IScopedDependency), so a
             // test that leaves it null is not running the shape production runs.
             nativeRecords: productionCapturePlanes ? scope.Resolve<CodeSpace.Core.Services.Agents.Capture.INativeRecordPlane>() : null,
+            completeness: completeness,
             credentialBroker: credentialBroker,
             logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
-            lifetime: lifetime);
+            lifetime: lifetime,
+            clock: clock);
 
         return executor;
     }
