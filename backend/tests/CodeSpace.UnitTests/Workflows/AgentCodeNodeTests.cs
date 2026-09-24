@@ -168,6 +168,21 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Base_ref_input_trims_accidental_surrounding_whitespace()
+    {
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(Guid.NewGuid().ToString()),
+            ["baseRef"] = Str("  release/2.x "),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace!.Repositories.Single().Ref.ShouldBe("release/2.x");
+    }
+
+    [Fact]
     public async Task A_session_base_ref_marks_the_primary_soft_so_a_pruned_branch_falls_back()
     {
         // Correction-4: when the launch projection set baseRef from the SESSION base-refs map, it also sets

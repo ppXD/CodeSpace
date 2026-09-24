@@ -661,7 +661,7 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <summary>Read the optional <c>baseRef</c> input — the branch/ref to clone the primary repo at (session branch continuity). Absent / blank / non-string → null (the repo default).</summary>
     private static string? ReadBaseRef(NodeRunContext context) =>
         context.Inputs.TryGetValue("baseRef", out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
-            ? v.GetString()
+            ? v.GetString()!.Trim()
             : null;
 
     /// <summary>Read the optional <c>baseRefFromSession</c> input — true ONLY when the launch projection set <c>baseRef</c> from a SESSION-inherited prior branch (a transient branch a merged PR can delete). Marks the primary ref SOFT so the clone falls back to the default branch if it was pruned. An author-pinned baseRef never carries this ⇒ stays HARD (fail loud if gone). Absent / non-true → false.</summary>

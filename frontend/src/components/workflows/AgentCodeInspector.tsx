@@ -174,6 +174,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
             repositoryId={repositoryId}
             relatedRepositories={inputs.relatedRepositories}
             drafts={inputs.workspaceRepoDrafts}
+            suggestions={suggestions}
             onChange={(next) => onInputsChange({
               ...inputs,
               repositoryId: next.repositoryId,
