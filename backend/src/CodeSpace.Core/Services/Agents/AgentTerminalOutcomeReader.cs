@@ -15,8 +15,8 @@ public static class AgentTerminalOutcomeReader
 {
     /// <summary>
     /// The <see cref="AgentRunResult.ExitReason"/> a harness's folder stamps when its CLI's OWN terminal event says the
-    /// model refused the request as larger than its context window — a field or status the CLI wrote, never a phrase in
-    /// the agent's prose. Harness-agnostic, like the rest of this reader: each folder knows its CLI's shape, and every
+    /// request is larger than the model's context window — the provider refused it, or the CLI did before sending it:
+    /// a field or status the CLI wrote, never a phrase in the agent's prose. Harness-agnostic, like the rest of this reader: each folder knows its CLI's shape, and every
     /// consumer (the retry-cause classifier, and through it the agent.run node's retry verdict) keys on this one code.
     /// Pinned by a unit test (Rule 8) so the producers and the verdict cannot drift apart.
     /// </summary>

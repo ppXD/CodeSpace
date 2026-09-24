@@ -32,10 +32,10 @@ public static class AgentRetryCauses
     public const string ModelAccessLost = "model-access-lost";
 
     /// <summary>
-    /// The model refused the request as larger than its context window
-    /// (<see cref="Agents.AgentTerminalOutcomeReader.ContextWindowExceededExitReason"/>) — deterministic on replay. A retry
-    /// warm-resumes the conversation, so its request carries the goal AGAIN and is longer still; a fresh one carries
-    /// the same goal. Either way the same refusal comes back, billed, and buries the one fact the author needs: the
+    /// The request is larger than the model's context window — the provider refused it, or the CLI did before sending
+    /// it (<see cref="Agents.AgentTerminalOutcomeReader.ContextWindowExceededExitReason"/>) — deterministic on replay. A
+    /// retry warm-resumes the conversation, so its request carries the goal AGAIN and is longer still; a fresh one
+    /// carries the same goal. Either way the same refusal comes back and buries the one fact the author needs: the
     /// agent is being given more than this model can read. No mitigation, like <see cref="ModelAccessLost"/> — its
     /// only consumer that matters is <c>AgentCodeNode</c>, which stops respawning it.
     ///
