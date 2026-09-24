@@ -21,16 +21,16 @@ public interface IPullRequestCatalogCapability : IProviderCapability
     Task<IReadOnlyList<RemotePullRequest>> ListPullRequestsAsync(ProviderContext context, RemoteRepository repository, PullRequestState? stateFilter, int page, int perPage, CancellationToken cancellationToken);
 
     /// <summary>
-    /// DC-2c — the OPEN PR/MR whose source (head) branch is <paramref name="sourceBranch"/>, or null when none
-    /// exists. Uses the provider's OWN native branch filter (GitHub's <c>PullRequestRequest.Head</c>, GitLab's
-    /// <c>MergeRequestQuery.SourceBranch</c>) rather than paging through <see cref="ListPullRequestsAsync"/> and
-    /// filtering client-side — a repo with many open PRs would otherwise need an unbounded scan for the ONE we
-    /// actually care about. <see cref="IPullRequestWriteCapability.OpenPullRequestAsync"/>'s own bind-or-create
-    /// idempotency check calls this as its fallback on a duplicate-branch create failure — the caller ALSO
-    /// verifies the found PR's target branch matches the create request's before binding to it, since this
-    /// method itself filters only on the source branch.
+    /// DC-2c — the OPEN PR/MR from source (head) branch <paramref name="sourceBranch"/> into target (base) branch
+    /// <paramref name="targetBranch"/>, or null when none exists. Uses the provider's OWN native branch filters
+    /// (GitHub's <c>PullRequestRequest.Head</c> + <c>Base</c>, GitLab's <c>MergeRequestQuery.SourceBranch</c> +
+    /// <c>TargetBranch</c>) rather than paging through <see cref="ListPullRequestsAsync"/> and filtering
+    /// client-side — a repo with many open PRs would otherwise need an unbounded scan for the ONE we actually care
+    /// about. Both filters, because one head can be open into several bases: filtered by head alone, the single
+    /// result can be another base's PR. <see cref="IPullRequestWriteCapability.OpenPullRequestAsync"/>'s own
+    /// bind-or-create idempotency check calls this as its fallback on a duplicate-branch create failure.
     /// </summary>
-    Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken);
+    Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, string targetBranch, CancellationToken cancellationToken);
 
     /// <summary>
     /// Fetch a single PR with its full body + diff stats. <paramref name="number"/> is the

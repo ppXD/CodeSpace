@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Diagnostics;
+using CodeSpace.Core.Services.Providers.Markdown;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
@@ -225,26 +226,27 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             .ToList();
     }
 
-    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, CancellationToken cancellationToken)
+    public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, string targetBranch, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), _ =>
-        {
-            var projectId = int.Parse(repository.ExternalId);
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindPullRequestByBranchAsync), _ => Task.FromResult(FindOpenMergeRequest(client, int.Parse(repository.ExternalId), sourceBranch, targetBranch)), cancellationToken).ConfigureAwait(false);
+    }
 
-            // GitLab's own source_branch filter. OPEN only — a bind-or-create check that found an
-            // already-MERGED/CLOSED MR and returned it as if freshly "Opened" would misreport a done or
-            // rejected change as still pending review. Naming why create failed against an inactive MR is a
-            // different, diagnostic concern this method does not serve.
-            var query = new MergeRequestQuery { SourceBranch = sourceBranch, State = GitLabMergeRequestState.opened, PerPage = 1 };
-            var mr = client.GetMergeRequest(projectId).Get(query).FirstOrDefault();
+    private static RemotePullRequest? FindOpenMergeRequest(GitLabClient client, int projectId, string sourceBranch, string targetBranch)
+    {
+        // GitLab's own source_branch filter. OPEN only — a bind-or-create check that found an
+        // already-MERGED/CLOSED MR and returned it as if freshly "Opened" would misreport a done or
+        // rejected change as still pending review. Naming why create failed against an inactive MR is a
+        // different, diagnostic concern this method does not serve. The target_branch filter too: one source
+        // can be open into several targets, and a one-item page filtered by source alone can hand back another's.
+        var query = new MergeRequestQuery { SourceBranch = sourceBranch, TargetBranch = targetBranch, State = GitLabMergeRequestState.opened, PerPage = 1 };
+        var mr = client.GetMergeRequest(projectId).Get(query).FirstOrDefault();
 
-            if (mr is null) return Task.FromResult<RemotePullRequest?>(null);
+        if (mr is null) return null;
 
-            var labelColors = TryFetchProjectLabelColors(client, projectId);
-            return Task.FromResult<RemotePullRequest?>(ToRemotePullRequest(mr, labelColors));
-        }, cancellationToken).ConfigureAwait(false);
+        var labelColors = TryFetchProjectLabelColors(client, projectId);
+        return ToRemotePullRequest(mr, labelColors);
     }
 
     public async Task<RemotePullRequest> GetPullRequestAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
@@ -263,26 +265,25 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+
+        // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
+        // the event normalizer maps that back to PullRequestState.Draft on read.
+        var create = new MergeRequestCreate
+        {
+            SourceBranch = input.SourceBranch,
+            TargetBranch = input.TargetBranch,
+            Title = input.Draft ? $"Draft: {input.Title}" : input.Title,
+            Description = input.Body,
+        };
 
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), _ =>
-            {
-                var projectId = int.Parse(repository.ExternalId);
-
-                // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
-                // the event normalizer maps that back to PullRequestState.Draft on read.
-                var mr = client.GetMergeRequest(projectId).Create(new MergeRequestCreate
-                {
-                    SourceBranch = input.SourceBranch,
-                    TargetBranch = input.TargetBranch,
-                    Title = input.Draft ? $"Draft: {input.Title}" : input.Title,
-                    Description = input.Body,
-                });
-
-                // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
-                return Task.FromResult(ToRemotePullRequestDetail(mr, EmptyLabelColors));
-            }, cancellationToken).ConfigureAwait(false);
+            // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
+            return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(OpenPullRequestAsync),
+                _ => Task.FromResult(ToRemotePullRequestDetail(client.GetMergeRequest(projectId).Create(create), EmptyLabelColors)),
+                _ => Task.FromResult(FindOpenedMergeRequest(client, projectId, input)),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (ProviderApiException ex) when (ex.StatusCode is >= 400 and < 500)
         {
@@ -295,7 +296,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // the same request — never silently bind to the wrong base. Found nothing, or a target mismatch →
             // the failure was real → rethrow it untouched. Scoped to 4xx — a 5xx that exhausted retries is an
             // infra outage, not a duplicate-branch signal.
-            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, cancellationToken).ConfigureAwait(false);
+            var existing = await FindPullRequestByBranchAsync(context, repository, input.SourceBranch, input.TargetBranch, cancellationToken).ConfigureAwait(false);
 
             if (existing is not null && existing.TargetBranch == input.TargetBranch) return existing;
 
@@ -303,26 +304,49 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         }
     }
 
+    /// <summary>
+    /// The merge request an earlier attempt of this call opened. GitLab allows one open merge request per source →
+    /// target pair (a second is refused with 409), so that pair identifies it without a description marker — the same
+    /// rule the DC-2c bind above adopts by.
+    /// </summary>
+    private static RemotePullRequest? FindOpenedMergeRequest(GitLabClient client, int projectId, OpenPullRequestInput input)
+    {
+        var open = FindOpenMergeRequest(client, projectId, input.SourceBranch, input.TargetBranch);
+
+        return open?.TargetBranch == input.TargetBranch ? open : null;
+    }
+
     public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var mergeRequests = client.GetMergeRequest(int.Parse(repository.ExternalId));
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync), _ =>
+        // GitLab's Accept covers merge + squash + remove-source-branch in one call. Rebase-merge isn't a
+        // single Accept option, so it maps to a regular merge for the neutral model (Squash only when asked).
+        var merge = new MergeRequestMerge
         {
-            var projectId = int.Parse(repository.ExternalId);
+            Squash = input.Method == PullRequestMergeMethod.Squash,
+            ShouldRemoveSourceBranch = input.DeleteSourceBranch,
+            MergeCommitMessage = input.CommitMessage,
+        };
 
-            // GitLab's Accept covers merge + squash + remove-source-branch in one call. Rebase-merge isn't a
-            // single Accept option, so it maps to a regular merge for the neutral model (Squash only when asked).
-            var accepted = client.GetMergeRequest(projectId).Accept(number, new MergeRequestMerge
-            {
-                Squash = input.Method == PullRequestMergeMethod.Squash,
-                ShouldRemoveSourceBranch = input.DeleteSourceBranch,
-                MergeCommitMessage = input.CommitMessage,
-            });
+        // A merge is one-way: re-sent after it landed, GitLab answers 405 and fails a merge that succeeded. So a
+        // retry first re-reads the merge request and takes an existing merge as the answer.
+        var accepted = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(MergePullRequestAsync),
+            _ => Task.FromResult(mergeRequests.Accept(number, merge)),
+            ct => FindMergedAsync(mergeRequests, number, ct),
+            cancellationToken).ConfigureAwait(false);
 
-            var merged = string.Equals(accepted.State, "merged", StringComparison.OrdinalIgnoreCase) || accepted.MergeCommitSha != null;
-            return Task.FromResult(new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha });
-        }, cancellationToken).ConfigureAwait(false);
+        var merged = string.Equals(accepted.State, "merged", StringComparison.OrdinalIgnoreCase) || accepted.MergeCommitSha != null;
+        return new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha };
+    }
+
+    /// <summary>The merge an earlier attempt landed, read back from the merge request.</summary>
+    private static async Task<MergeRequest?> FindMergedAsync(IMergeRequestClient mergeRequests, int iid, CancellationToken cancellationToken)
+    {
+        var mr = await mergeRequests.GetByIidAsync(iid, new SingleMergeRequestQuery(), cancellationToken).ConfigureAwait(false);
+
+        return string.Equals(mr.State, "merged", StringComparison.OrdinalIgnoreCase) ? mr : null;
     }
 
     public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
@@ -416,23 +440,33 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CreateIssueAsync), _ =>
+        // NGitLab's IssueCreate.Labels is a single comma-separated string (Octokit takes a list) — the
+        // neutral CreateIssueInput.Labels is a list precisely to bridge that difference.
+        var create = new IssueCreate
         {
-            var projectId = int.Parse(repository.ExternalId);
+            ProjectId = projectId,
+            Title = input.Title,
+            Description = IdempotencyMarker.Append(input.Body, marker),
+            Labels = input.Labels.Count > 0 ? string.Join(",", input.Labels) : null,
+        };
 
-            // NGitLab's IssueCreate.Labels is a single comma-separated string (Octokit takes a list) — the
-            // neutral CreateIssueInput.Labels is a list precisely to bridge that difference.
-            var issue = client.Issues.Create(new IssueCreate
-            {
-                ProjectId = projectId,
-                Title = input.Title,
-                Description = input.Body,
-                Labels = input.Labels.Count > 0 ? string.Join(",", input.Labels) : null,
-            });
+        var issue = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CreateIssueAsync),
+            _ => Task.FromResult(client.Issues.Create(create)),
+            _ => Task.FromResult(FindMarkedIssue(client, projectId, marker)),
+            cancellationToken).ConfigureAwait(false);
 
-            return Task.FromResult(ToRemoteIssue(issue));
-        }, cancellationToken).ConfigureAwait(false);
+        return ToRemoteIssue(issue);
+    }
+
+    /// <summary>The issue an earlier attempt of this call opened: among the project's newest, the one carrying this call's marker.</summary>
+    private static Issue? FindMarkedIssue(GitLabClient client, int projectId, string marker)
+    {
+        var newestFirst = new IssueQuery { OrderBy = "created_at", Sort = "desc", PerPage = 100 };
+
+        return client.Issues.Get(projectId, newestFirst).Take(100).FirstOrDefault(i => IdempotencyMarker.IsIn(i.Description, marker));
     }
 
     // GitLab's issue list returns label NAMES only (no colour, unlike the MR-detail project-label lookup),
@@ -445,7 +479,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         State = string.Equals(issue.State, "closed", StringComparison.OrdinalIgnoreCase)
             ? CodeSpace.Messages.Enums.IssueState.Closed
             : CodeSpace.Messages.Enums.IssueState.Open,
-        Body = issue.Description,
+        Body = IdempotencyMarker.Strip(issue.Description),
         AuthorLogin = issue.Author?.Username,
         Labels = (issue.Labels ?? Array.Empty<string>()).Select(n => new LabelRef { Name = n, Color = null }).ToList(),
         Assignees = (issue.Assignees ?? Array.Empty<Assignee>()).Select(a => a.Username).Where(u => !string.IsNullOrEmpty(u)).ToList(),
@@ -486,7 +520,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             return Task.FromResult((IReadOnlyList<RemoteIssueComment>)notes.Select(n => new RemoteIssueComment
             {
                 ExternalId = n.NoteId.ToString(),
-                Body = n.Body,
+                Body = IdempotencyMarker.Strip(n.Body),
                 AuthorName = n.Author?.Username ?? "unknown",
                 CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(n.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
                 WebUrl = null
@@ -536,23 +570,24 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CommentIssueAsync), _ =>
+        // GitLab issue comments are "notes" on a separate client; IssueId here is the iid (the `number`).
+        var notes = client.GetProjectIssueNoteClient(int.Parse(repository.ExternalId));
+
+        var note = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CommentIssueAsync),
+            _ => Task.FromResult(notes.Create(new ProjectIssueNoteCreate { IssueId = number, Body = IdempotencyMarker.Append(body, marker) })),
+            _ => Task.FromResult(notes.ForIssue(number).FirstOrDefault(n => IdempotencyMarker.IsIn(n.Body, marker))),
+            cancellationToken).ConfigureAwait(false);
+
+        return new RemoteIssueComment
         {
-            var projectId = int.Parse(repository.ExternalId);
-
-            // GitLab issue comments are "notes" on a separate client; IssueId here is the iid (the `number`).
-            var note = client.GetProjectIssueNoteClient(projectId).Create(new ProjectIssueNoteCreate { IssueId = number, Body = body });
-
-            return Task.FromResult(new RemoteIssueComment
-            {
-                ExternalId = note.NoteId.ToString(),
-                Body = note.Body,
-                AuthorName = note.Author?.Username ?? "unknown",
-                CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(note.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
-                WebUrl = null   // GitLab issue notes carry no web URL
-            });
-        }, cancellationToken).ConfigureAwait(false);
+            ExternalId = note.NoteId.ToString(),
+            Body = IdempotencyMarker.Strip(note.Body),
+            AuthorName = note.Author?.Username ?? "unknown",
+            CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(note.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+            WebUrl = null   // GitLab issue notes carry no web URL
+        };
     }
 
     public async Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
@@ -814,25 +849,26 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<RemotePullRequestComment> PostCommentAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var marker = IdempotencyMarker.New();
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(PostCommentAsync), _ =>
+        // NGitLab v11: IMergeRequestClient.Comments(iid) returns IMergeRequestCommentClient.
+        // Add(MergeRequestCommentCreate) returns the persisted comment. The mrClient
+        // is keyed by projectId; the comments client is then keyed by mrIid.
+        var commentsClient = client.GetMergeRequest(int.Parse(repository.ExternalId)).Comments(number);
+
+        var comment = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(PostCommentAsync),
+            _ => Task.FromResult(commentsClient.Add(new NGitLab.Models.MergeRequestCommentCreate { Body = IdempotencyMarker.Append(body, marker) })),
+            _ => Task.FromResult(commentsClient.All.FirstOrDefault(c => IdempotencyMarker.IsIn(c.Body, marker))),
+            cancellationToken).ConfigureAwait(false);
+
+        return new RemotePullRequestComment
         {
-            // NGitLab v11: IMergeRequestClient.Comments(iid) returns IMergeRequestCommentClient.
-            // Add(MergeRequestCommentCreate) returns the persisted comment. The mrClient
-            // is keyed by projectId; the comments client is then keyed by mrIid.
-            var projectId = int.Parse(repository.ExternalId);
-            var commentsClient = client.GetMergeRequest(projectId).Comments(number);
-            var comment = commentsClient.Add(new NGitLab.Models.MergeRequestCommentCreate { Body = body });
-
-            return Task.FromResult(new RemotePullRequestComment
-            {
-                ExternalId = comment.Id.ToString(),
-                Body = comment.Body,
-                AuthorName = comment.Author?.Username ?? "unknown",
-                CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(comment.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
-                WebUrl = null
-            });
-        }, cancellationToken).ConfigureAwait(false);
+            ExternalId = comment.Id.ToString(),
+            Body = IdempotencyMarker.Strip(comment.Body),
+            AuthorName = comment.Author?.Username ?? "unknown",
+            CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(comment.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+            WebUrl = null
+        };
     }
 
     public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
@@ -857,14 +893,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         if (approveDecision == GitLabApproveDecision.CannotApprove)
             throw new ProviderApiException(ProviderKind.GitLab, 403, nameof(SubmitReviewAsync), $"You can't approve merge request !{number} — you may be its author, or your role is below Developer.", new InvalidOperationException("UserCanApprove=false"));
 
+        // approve → native GitLab approval (green badge, counts toward required approvals). Skipped
+        // when already approved — re-running the node is then an idempotent no-op, not a 401.
+        if (approveDecision == GitLabApproveDecision.Approve)
+            await ApproveOnceAsync(context.Instance, client.GetMergeRequest(projectId), number, cancellationToken).ConfigureAwait(false);
+
         return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), _ =>
         {
             var mergeRequest = client.GetMergeRequest(projectId);
-
-            // approve → native GitLab approval (green badge, counts toward required approvals). Skipped
-            // when already approved — re-running the node is then an idempotent no-op, not a 401.
-            if (approveDecision == GitLabApproveDecision.Approve)
-                mergeRequest.Approve(number, new MergeRequestApprove());
 
             // Post the verdict note as an UPSERT — one living review note per MR. Find our prior
             // (marker-carrying) note and edit it in place; only create on the first run. The note
@@ -879,6 +915,20 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = comment.Id.ToString(), WebUrl = null });
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The approve, retried on its own and never sent twice: GitLab refuses a second approve by the same user with a
+    /// bare 401, so a retry after a lost answer first re-reads the approvals and takes an approval already in place
+    /// as done. A step of its own, so a retry of the review note can never re-send it. The approve's answer is not
+    /// read — only that exactly one approve is in place — hence the untyped result.
+    /// </summary>
+    private async Task ApproveOnceAsync(ProviderInstance instance, IMergeRequestClient mergeRequest, int iid, CancellationToken cancellationToken)
+    {
+        await _resilience.ExecuteNonIdempotentAsync<object>(instance, nameof(SubmitReviewAsync) + "/approve",
+            _ => Task.FromResult<object>(mergeRequest.Approve(iid, new MergeRequestApprove())),
+            _ => Task.FromResult<object?>(mergeRequest.ApprovalClient(iid).Approvals is { UserHasApproved: true } approvals ? approvals : null),
+            cancellationToken).ConfigureAwait(false);
     }
 
     // Read the actor's current approval standing on the MR and decide whether to approve. The read is

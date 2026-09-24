@@ -177,6 +177,173 @@ public class ExternalCallResilienceTests
         b.ShouldBe(2);
     }
 
+    // ── Non-idempotent writes: never re-send a write that may already have landed ──
+    // A timeout, a dropped connection or a 5xx can arrive AFTER the provider applied the write. The blind
+    // retry above would apply it again; ExecuteNonIdempotentAsync asks the provider before re-sending.
+
+    [Theory]
+    [InlineData("timeout")]   // TaskCanceledException — the request went out, no answer arrived in time
+    [InlineData("reset")]     // HttpRequestException — the connection dropped mid-response
+    [InlineData("5xx")]       // a gateway answered 502 after the backend committed
+    public async Task ExecuteNonIdempotentAsync_adopts_a_write_that_landed_before_its_attempt_failed(string failure)
+    {
+        var target = new FakeWriteTarget();
+
+        var result = await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((true, AmbiguousFailure(failure)), (true, null)), target.FindAsync, CancellationToken.None);
+
+        result.ShouldBe("effect-1");
+        target.Effects.Count.ShouldBe(1, "the write landed on the first attempt — re-sending it would have applied it a second time");
+        target.WritesSent.ShouldBe(1);
+        target.Probes.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_resends_when_the_failed_attempt_left_no_effect()
+    {
+        // Connection refused: the write never reached the provider. The probe finds nothing, so the write goes out again.
+        var target = new FakeWriteTarget();
+
+        var result = await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((false, new HttpRequestException("Connection refused")), (true, null)), target.FindAsync, CancellationToken.None);
+
+        result.ShouldBe("effect-1");
+        target.Effects.Count.ShouldBe(1);
+        target.WritesSent.ShouldBe(2);
+        target.Probes.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_applies_once_when_the_write_first_lands_on_the_second_attempt()
+    {
+        var target = new FakeWriteTarget();
+
+        var result = await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((false, new FakeSdkException(503)), (true, new TaskCanceledException("timeout")), (true, null)), target.FindAsync, CancellationToken.None);
+
+        result.ShouldBe("effect-1");
+        target.Effects.Count.ShouldBe(1, "attempt 1 left nothing, attempt 2 landed and timed out — attempt 3 must adopt it, not send a third write");
+        target.WritesSent.ShouldBe(2);
+        target.Probes.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_does_not_probe_when_the_first_attempt_answers()
+    {
+        var target = new FakeWriteTarget();
+
+        var result = await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((true, null)), target.FindAsync, CancellationToken.None);
+
+        result.ShouldBe("effect-1");
+        target.WritesSent.ShouldBe(1);
+        target.Probes.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_neither_probes_nor_retries_a_non_transient_failure()
+    {
+        var target = new FakeWriteTarget();
+
+        var act = async () => await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((false, new InvalidOperationException("rejected"))), target.FindAsync, CancellationToken.None);
+
+        await act.ShouldThrowAsync<InvalidOperationException>();
+        target.WritesSent.ShouldBe(1);
+        target.Probes.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_keeps_the_attempt_budget()
+    {
+        var target = new FakeWriteTarget();
+
+        var act = async () => await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((false, new HttpRequestException("failure #1")), (false, new HttpRequestException("failure #2")), (false, new HttpRequestException("failure #3"))), target.FindAsync, CancellationToken.None);
+
+        var ex = await act.ShouldThrowAsync<HttpRequestException>();
+        ex.Message.ShouldContain($"#{ExternalCallResilience.MaxAttempts}");
+        target.WritesSent.ShouldBe(ExternalCallResilience.MaxAttempts);
+        target.Probes.ShouldBe(ExternalCallResilience.MaxAttempts - 1);
+        target.Effects.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_retries_a_probe_that_fails_transiently_instead_of_resending()
+    {
+        var target = new FakeWriteTarget();
+        target.ProbeFailures.Enqueue(new HttpRequestException("probe flake"));
+
+        var result = await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((true, new TaskCanceledException("timeout")), (true, null)), target.FindAsync, CancellationToken.None);
+
+        result.ShouldBe("effect-1");
+        target.Effects.Count.ShouldBe(1, "a probe that could not answer is no evidence the write is absent — it must be asked again, not skipped");
+        target.WritesSent.ShouldBe(1);
+        target.Probes.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task ExecuteNonIdempotentAsync_surfaces_a_probe_that_fails_permanently_instead_of_resending()
+    {
+        var target = new FakeWriteTarget();
+        target.ProbeFailures.Enqueue(new InvalidOperationException("cannot list"));
+
+        var act = async () => await BuildPolicy().ExecuteNonIdempotentAsync(Instance, "test", target.Scripted((true, new TaskCanceledException("timeout")), (true, null)), target.FindAsync, CancellationToken.None);
+
+        await act.ShouldThrowAsync<InvalidOperationException>();
+        target.WritesSent.ShouldBe(1);
+        target.Effects.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void DescribeEffect_names_the_adopted_write_whatever_SDK_made_it()
+    {
+        ExternalCallResilienceExtensions.DescribeEffect(new SdkComment(42, "https://github.test/acme/api/issues/7#issuecomment-42")).ShouldBe(("42", "https://github.test/acme/api/issues/7#issuecomment-42"));
+        ExternalCallResilienceExtensions.DescribeEffect(new SdkIssue(9001, 5, "https://github.test/acme/api/issues/5")).ShouldBe(("5", "https://github.test/acme/api/issues/5"), "the number people use beats the database id");
+        ExternalCallResilienceExtensions.DescribeEffect(new CodeSpace.Messages.Dtos.Providers.RemotePullRequestMergeResult { Merged = true, Sha = "9f8e7d" }).ShouldBe(("9f8e7d", (string?)null));
+        ExternalCallResilienceExtensions.DescribeEffect(new object()).ShouldBe(((string?)null, (string?)null));
+    }
+
+    private sealed record SdkComment(long Id, string HtmlUrl);
+
+    private sealed record SdkIssue(long Id, int Number, string HtmlUrl);
+
+    private static Exception AmbiguousFailure(string kind) => kind switch
+    {
+        "timeout" => new TaskCanceledException("the request went out; no answer before the timeout"),
+        "reset" => new HttpRequestException("the connection dropped mid-response"),
+        "5xx" => new FakeSdkException(502),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
+    };
+
+    /// <summary>
+    /// Stands in for the provider behind a write: counts every write sent and every effect applied, and answers
+    /// the probe from what it applied. Each scripted attempt says whether the write lands and how the attempt
+    /// ends — null means the provider answered.
+    /// </summary>
+    private sealed class FakeWriteTarget
+    {
+        private readonly List<string> _effects = new();
+
+        public int WritesSent { get; private set; }
+        public int Probes { get; private set; }
+        public IReadOnlyList<string> Effects => _effects;
+        public Queue<Exception> ProbeFailures { get; } = new();
+
+        public Func<CancellationToken, Task<string>> Scripted(params (bool Lands, Exception? Failure)[] attempts) => _ =>
+        {
+            var (lands, failure) = attempts[WritesSent++];
+
+            if (lands) _effects.Add($"effect-{_effects.Count + 1}");
+            if (failure != null) throw failure;
+
+            return Task.FromResult(_effects[^1]);
+        };
+
+        public Task<string?> FindAsync(CancellationToken _)
+        {
+            Probes++;
+
+            if (ProbeFailures.TryDequeue(out var failure)) throw failure;
+
+            return Task.FromResult(_effects.LastOrDefault());
+        }
+    }
+
     private static ExternalCallResilience BuildPolicy() => new(new NoopErrorMapperRegistry(), NullLogger<ExternalCallResilience>.Instance);
 
     /// <summary>
