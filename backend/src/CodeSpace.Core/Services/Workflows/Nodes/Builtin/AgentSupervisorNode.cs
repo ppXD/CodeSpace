@@ -148,6 +148,10 @@ public sealed class AgentSupervisorNode : INodeRuntime
         // Read it from agentProfile so the output echoes the configured primary repo (agent-spawn binding is separate).
         var repositoryId = goalConfig?.AgentProfile?.RepositoryId;
 
+        // A stop closes the question this node was parked on WITHOUT an answer. Re-open it before the guards below read
+        // the park state, so a Continue re-parks on that same question instead of the next turn running past it.
+        await ReopenDiscardedAskAsync(context, supervisorRunId, cancellationToken).ConfigureAwait(false);
+
         // Durable re-entry guard (the spawn/retry async barrier): a PRIOR turn may have staged K AgentRun waits
         // that are still in flight. The spawn decision is already a SETTLED ledger row, so a naive rehydrate
         // would advance past it and run the NEXT turn — abandoning the running agents. If THIS node still has
@@ -291,6 +295,16 @@ public sealed class AgentSupervisorNode : INodeRuntime
         var turns = scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>();
 
         return await turns.RunTurnAsync(supervisorRunId, teamId, nodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Resolve the scoped turn service in its own DI scope (the node is a singleton) and re-open the question a stop closed unanswered, so the park-state read that follows finds it pending.</summary>
+    private async Task ReopenDiscardedAskAsync(NodeRunContext context, Guid supervisorRunId, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+
+        var reopened = await scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>().ReopenDiscardedAskAsync(supervisorRunId, context.NodeId, cancellationToken).ConfigureAwait(false);
+
+        if (reopened) context.Logger.LogInformation("agent.supervisor re-opened the question a stop closed unanswered; re-parking on it (the card already posted answers it)");
     }
 
     /// <summary>Read the run's pending-park state for this node (the durable re-entry guards): the count of still-pending AgentRun waits a prior spawn/retry staged, and the token of a still-pending ask_human Action wait. Read FIRST on re-entry so a restart re-parks on the existing wait rather than advancing past the (already-terminal) decision.</summary>

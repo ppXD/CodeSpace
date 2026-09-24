@@ -49,6 +49,14 @@ public interface ISupervisorTurnService
     Task<string?> PendingHumanWaitTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Re-open the question a stop closed unanswered: when this node's LATEST ask_human <c>Action</c> wait is
+    /// <c>Discarded</c>, flip that same row back to Pending. Run FIRST on re-entry, before
+    /// <see cref="PendingHumanWaitTokenAsync"/>, so a Continue re-parks on the question the stop found open. Returns
+    /// whether a question was re-opened.
+    /// </summary>
+    Task<bool> ReopenDiscardedAskAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Force a terminal <c>stop</c> with <paramref name="reason"/> through the SAME exactly-once claim/execute/record
     /// path a bound trip takes — the P1.1 infra-park's honest ending: the model plane stayed unavailable past the
     /// whole park window, so the run ends as a DEGRADED stop (the reason rides the payload → the node reports

@@ -71,6 +71,35 @@ public class SupervisorTurnServiceTests
         context.InFlight.ShouldBeNull();
     }
 
+    [Theory]
+    [InlineData(CodeSpace.Messages.Constants.WorkflowWaitStatuses.Discarded, null, null)]                                            // a stop closed it unanswered → no answer, not even a blank one
+    [InlineData(CodeSpace.Messages.Constants.WorkflowWaitStatuses.Resolved, null, "")]                                               // what the teardown used to write → read as a blank reply
+    [InlineData(CodeSpace.Messages.Constants.WorkflowWaitStatuses.Resolved, """{"action":"answer","comment":"patch it"}""", "patch it")]   // the human's real answer
+    public async Task Rehydrate_folds_an_ask_answer_only_from_a_resolved_wait(string status, string? waitPayloadJson, string? expectedAnswer)
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.AskHuman, """{"question":"which approach?"}""", SupervisorOutcome.FoldAnswer("which approach?", "ask-token", answer: null));
+
+        var db = Infrastructure.EmptyTestDb.New();
+        db.WorkflowRunWait.Add(new CodeSpace.Core.Persistence.Entities.WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = _runId,
+            NodeId = "sup",
+            IterationKey = SupervisorOutcome.HumanWaitKey("sup", 0),
+            WaitKind = CodeSpace.Messages.Constants.WorkflowWaitKinds.Action,
+            Token = "ask-token",
+            Status = status,
+            PayloadJson = waitPayloadJson,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        var context = await Service(ledger, db).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
+
+        SupervisorOutcome.ReadAskHumanAnswer(context.PriorDecisions.Single().OutcomeJson).ShouldBe(expectedAnswer);
+    }
+
     [Fact]
     public async Task Rehydrate_identifies_the_one_in_flight_decision()
     {
@@ -830,8 +859,8 @@ public class SupervisorTurnServiceTests
         ledger.Rows[0].Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the crashed A row reached terminal on recovery — no strand");
     }
 
-    private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
-        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReader(), null!, NullLogger<SupervisorTurnService>.Instance);
+    private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger, CodeSpace.Core.Persistence.Db.CodeSpaceDbContext? db = null) =>
+        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: db ?? Infrastructure.EmptyTestDb.New(), new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), new FakeWorkPlanStore(), null!, null!, new FakePublishManifestStore(), new FakeSupervisorPublishedBranchResolver(), new NullCompletionComposer(), new AdmitAllBudgetLedger(), new NoLessonsReader(), null!, NullLogger<SupervisorTurnService>.Instance);
 
     // ── L4 P1 stop-acceptance test helpers ──────────────────────────────────────────
 

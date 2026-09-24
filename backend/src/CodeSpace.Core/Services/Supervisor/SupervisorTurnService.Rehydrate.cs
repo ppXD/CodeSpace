@@ -1838,6 +1838,36 @@ public sealed partial class SupervisorTurnService
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
+    /// <summary>
+    /// The supervisor keeps one invariant about its questions: an unanswered card that reached a human has a PENDING
+    /// wait. A stop breaks it — the teardown closes the parked ask wait as <c>Discarded</c> while the ask_human decision
+    /// stays settled with its token and no answer — and a Continue that ran on from there would tell the next turn the
+    /// run is parked on a question nothing parks on, and let the plan-confirmation gate count an unconfirmed card as
+    /// surfaced. So the re-entry re-opens it: the SAME row flips back to Pending (same token, so the card already posted
+    /// answers it) and the human re-entry guard re-parks on it. Only the node's LATEST ask qualifies — asks are
+    /// sequential (a new one is posted only after the last was answered) and a stop only closes the open one, so an
+    /// older Discarded ask is never the open question. A no-op for every re-entry without one.
+    /// </summary>
+    public async Task<bool> ReopenDiscardedAskAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken)
+    {
+        var latestAsk = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == supervisorRunId && w.NodeId == nodeId && w.WaitKind == WorkflowWaitKinds.Action && w.IterationKey.EndsWith("#ask"))
+            .OrderByDescending(w => w.CreatedAt)
+            .Select(w => new { w.Id, w.Status })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (latestAsk?.Status != WorkflowWaitStatuses.Discarded) return false;
+
+        var reopened = await _db.WorkflowRunWait
+            .Where(w => w.Id == latestAsk.Id && w.Status == WorkflowWaitStatuses.Discarded)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Pending)
+                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)null), cancellationToken)
+            .ConfigureAwait(false);
+
+        return reopened > 0;
+    }
+
     private static SupervisorPriorDecision ToPriorDecision(Persistence.Entities.SupervisorDecisionRecord row) => new()
     {
         Id = row.Id,

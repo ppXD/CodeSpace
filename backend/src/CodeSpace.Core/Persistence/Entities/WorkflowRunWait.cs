@@ -31,10 +31,10 @@ public class WorkflowRunWait
     /// <summary>For <c>Timer</c> waits — the instant the scheduled resume fires. Null for approval/callback.</summary>
     public DateTimeOffset? WakeAt { get; set; }
 
-    /// <summary><c>Pending</c> until a resume signal arrives, then <c>Resolved</c>. See <see cref="WorkflowWaitStatuses"/>.</summary>
+    /// <summary><c>Pending</c> until a resume signal answers it (<c>Resolved</c>) or the run's terminal teardown closes it unanswered (<c>Discarded</c>). See <see cref="WorkflowWaitStatuses"/>.</summary>
     public string Status { get; set; } = WorkflowWaitStatuses.Pending;
 
-    /// <summary>The resume payload, set when resolved. Injected as the node's ResumePayload on re-run.</summary>
+    /// <summary>The node's suspend payload while parked, overwritten with the resume payload when resolved. Only a <c>Resolved</c> row's payload is injected as the node's ResumePayload on re-run — a <c>Discarded</c> row still holds the request.</summary>
     public string? PayloadJson { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }

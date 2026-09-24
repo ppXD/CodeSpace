@@ -96,9 +96,20 @@ public static class WorkflowWaitKinds
     public static bool IsOperatorReissuable(string waitKind) => waitKind is Timer or Callback;
 }
 
-/// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>
+/// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer. A wait leaves <see cref="Pending"/> one of two ways, and only <see cref="Resolved"/> carries an answer.</summary>
 public static class WorkflowWaitStatuses
 {
     public const string Pending = "Pending";
+
+    /// <summary>A resume signal answered the wait: its payload now holds the ANSWER, which the durable walker replays into the node as its <c>ResumePayload</c>.</summary>
     public const string Resolved = "Resolved";
+
+    /// <summary>
+    /// Closed WITHOUT an answer by the run's terminal teardown — an operator cancel, or the engine landing the run
+    /// Failure/Cancelled. The payload still holds the node's own REQUEST (the approval prompt, the agent task, the
+    /// timer's wake_at), so no replay reader hands it back as an answer: on Continue the node finds none and parks again
+    /// exactly as a first run would. Until then the row records that the wait existed and closed unanswered; a re-park
+    /// takes its cell back, and the immutable ledger (<c>node.suspended</c>, <c>run.cancelled</c>) keeps the history.
+    /// </summary>
+    public const string Discarded = "Discarded";
 }

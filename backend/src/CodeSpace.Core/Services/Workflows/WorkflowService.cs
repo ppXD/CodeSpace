@@ -964,15 +964,17 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// for a run the operator STOPPED mid-flight. A stop trips the walk at its next safe checkpoint and
     /// <c>EnsureRunCancelledAsync</c> flips ONLY the run row, so the node(s) the walk was driving are left FIRED-but-not-
     /// terminal — the one mid-execution stays <c>Running</c> (its agent was torn down), a node parked on a wait stays
-    /// <c>Suspended</c> (its wait was cancelled). The walk's own dedup ("a node that already fired in any state is
-    /// skipped") means a plain re-dispatch would SKIP them, so we RESET each interrupted node with a fresh
-    /// <c>node.started</c> (the latest-record-wins view projects it to <c>Running</c> — exactly the crash-recovery
-    /// "Running → re-run" state the engine's rehydrate re-executes), CAS Cancelled → Pending, and re-dispatch. The run
-    /// resumes exactly where the stop hit: every succeeded upstream cell stays settled + reused (never re-run), the
-    /// interrupted node re-runs (a manual retry — it never completed, so its side effect never fully committed; where the
-    /// harness captured a resumable session the re-run CONTINUES that agent's conversation, P3), and never-run downstream
-    /// runs after. Returns false (→ the caller falls back to replay / rerun-from-node) when nothing fired-but-incomplete
-    /// remains — e.g. a stop that landed exactly on a wave boundary with no node in flight.
+    /// <c>Suspended</c> (the stop's teardown closed its wait <c>Discarded</c>, unanswered). The walk's own dedup ("a node
+    /// that already fired in any state is skipped") means a plain re-dispatch would SKIP them, so we RESET each interrupted
+    /// node with a fresh <c>node.started</c> (the latest-record-wins view projects it to <c>Running</c> — exactly the
+    /// crash-recovery "Running → re-run" state the engine's rehydrate re-executes), CAS Cancelled → Pending, and
+    /// re-dispatch. The run resumes where the stop hit: every succeeded upstream cell stays settled + reused (never re-run),
+    /// each interrupted node re-runs FROM THE START as a manual retry (it never completed, so its side effect never fully
+    /// committed), and never-run downstream runs after. An agent step stages a NEW agent run on a fresh conversation — the
+    /// interrupted agent's conversation is not continued: the stop cleared its session checkpoint, and the resume lookup
+    /// reads only this run's ANCESTORS, never the run itself. A parked step finds no answer on its Discarded wait and parks
+    /// again, exactly as a first run would. Returns false (→ the caller falls back to replay / rerun-from-node) when
+    /// nothing fired-but-incomplete remains — e.g. a stop that landed exactly on a wave boundary with no node in flight.
     /// </summary>
     private async Task<bool> ContinueCancelledRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {
@@ -1109,7 +1111,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary>
     /// Tear down a just-cancelled run, best-effort: KILL-WAVE its branch agent runs (Queued + Running), cancel its
-    /// staged non-terminal sub-workflow children, and resolve its still-pending waits so none dangle. Best-effort end
+    /// staged non-terminal sub-workflow children, and close its still-pending waits so none dangle. Best-effort end
     /// to end — one failed kill never aborts the cancel (the run is already Cancelled; the reconciler's parent-run-
     /// terminal guard re-cleans anything missed). Returns how many branch agent runs the kill-wave flipped.
     /// </summary>
@@ -1204,17 +1206,18 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// Resolve the cancelled run's still-pending waits so none dangle (the wait state is now moot — the run is
-    /// terminal). Flips them <c>Resolved</c> with <c>ResolvedAt</c>, mirroring the engine's own terminal-cleanup
-    /// (<c>CancelPendingWaitsAndChildrenAsync</c>) — the DB wait-status domain is Pending/Resolved (no Cancelled
-    /// value), and a Resolved wait drops out of every reconciler sweep + the run-detail's resume affordance.
+    /// Close the cancelled run's still-pending waits so none dangle (the wait state is now moot — the run is
+    /// terminal). Flips them <c>Discarded</c> with <c>ResolvedAt</c>, mirroring the engine's own terminal-cleanup
+    /// (<c>CancelPendingWaitsAndChildrenAsync</c>): a closed wait drops out of every reconciler sweep + the run-detail's
+    /// resume affordance, and — unlike <c>Resolved</c>, which a real answer writes — is never replayed as an answer, so
+    /// a later Continue re-parks the step instead of feeding it the request its payload still holds.
     /// </summary>
     private async Task CancelPendingWaitsAsync(Guid runId, CancellationToken cancellationToken)
     {
         await _db.WorkflowRunWait
             .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded)
                 .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
     }

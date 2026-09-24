@@ -26,7 +26,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// PR-D4b operator cancel + kill-wave, driving the REAL WorkflowService through DI against real Postgres.
 /// The headline target: a SUSPENDED flow.map fan-out (K parked branch AgentRuns) cancels cleanly — run →
-/// Cancelled, every pending wait → Resolved, every Queued branch agent → Cancelled, a <c>run.cancelled</c>
+/// Cancelled, every pending wait → Discarded, every Queued branch agent → Cancelled, a <c>run.cancelled</c>
 /// ledger record emitted, and (critical) the reconciler does NOT subsequently re-launch any of them (the D1
 /// parent-run-terminal guard holds). Plus: a Running-agent kill path with a real durable runner (TerminateAsync
 /// reaps the process tree + status Cancelled), cross-team cancel REJECTED (fail-closed), and an already-terminal
@@ -173,8 +173,8 @@ public class OperatorCancelFlowTests : IDisposable
         if (OperatingSystem.IsWindows()) return;
 
         // The kill-wave's snapshot-vs-claim residue: a branch agent was claimed Queued → Running with a REAL durable
-        // process AFTER the cancel resolved its wait + flipped the parent run Cancelled. The orphan is now invisible
-        // to BOTH existing guards — its wait is Resolved (so PendingAgentRunWaitIdsAsync skips it) and it's a freshly-
+        // process AFTER the cancel closed its wait + flipped the parent run Cancelled. The orphan is now invisible
+        // to BOTH existing guards — its wait is Discarded (so PendingAgentRunWaitIdsAsync skips it) and it's a freshly-
         // claimed live agent (fresh lease, no stale-window, so SweepStaleRunningAsync skips it). The new parent-terminal
         // Running sweep is the backstop: it must CANCEL the orphan (not Failed) and reap its process tree.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -195,9 +195,9 @@ public class OperatorCancelFlowTests : IDisposable
             ProcessAlive(pid).ShouldBeTrue($"precondition: the orphaned branch agent's durable process is running — {ProcessLiveness.Describe(pid)}");
 
             // Reproduce the residue end-state: the parent run is terminal (Cancelled) and the orphan's AgentRun wait
-            // is already Resolved (so it is invisible to the Pending-wait guard) — exactly what the kill-wave leaves
-            // behind when a claim lands after the cancel resolved waits but before the per-agent CAS.
-            await CancelRunAndResolveWaitsAsync(runId);
+            // is already Discarded (so it is invisible to the Pending-wait guard) — exactly what the kill-wave leaves
+            // behind when a claim lands after the cancel closed waits but before the per-agent CAS.
+            await CancelRunAndCloseWaitsAsync(runId);
 
             using (var scope = _fixture.BeginScope())
                 await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
@@ -347,8 +347,8 @@ public class OperatorCancelFlowTests : IDisposable
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, status));
     }
 
-    /// <summary>Reproduce the kill-wave residue WITHOUT routing through CancelRunAsync (which would itself kill the agent): flip the run Cancelled and resolve all its pending waits in place. Leaves a live Running branch agent orphaned under a terminal parent with NO pending wait pointing at it — the exact end-state the reconciler backstop must catch.</summary>
-    private async Task CancelRunAndResolveWaitsAsync(Guid runId)
+    /// <summary>Reproduce the kill-wave residue WITHOUT routing through CancelRunAsync (which would itself kill the agent): flip the run Cancelled and close all its pending waits in place (Discarded, as the cancel's teardown does). Leaves a live Running branch agent orphaned under a terminal parent with NO pending wait pointing at it — the exact end-state the reconciler backstop must catch.</summary>
+    private async Task CancelRunAndCloseWaitsAsync(Guid runId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -362,7 +362,7 @@ public class OperatorCancelFlowTests : IDisposable
         await db.WorkflowRunWait
             .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded)
                 .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow));
     }
 
