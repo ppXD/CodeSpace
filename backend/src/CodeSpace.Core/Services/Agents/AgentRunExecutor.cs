@@ -415,7 +415,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // ref in task_jsonb to bound its size; the harness needs the bytes to lay down the resume file. Bounded: the
             // stored transcript was captured under the capture cap, so this never fetches an unbounded blob.
             effectiveTask = await ResolveRestoredTranscriptAsync(effectiveTask, run.TeamId, cancellationToken).ConfigureAwait(false);
-            effectiveTask = LogIfRunCold(agentRunId, effectiveTask, ColdIfTranscriptExceedsTheLaunchPipe(effectiveTask));
 
             // Mint the per-run socket + token ONCE so the endpoint listener and the harness's declaration agree by
             // construction (and so the token can be stamped on the durable handle for a re-attach to re-bind the same
@@ -439,9 +438,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
             // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
             // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
-            var spec = HardenSpec(
-                harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring },
-                effectiveTask, modelBaseUrl, modelProvider, workspaceProvision);
+            SandboxSpec BuildSpec(AgentTask built) => HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(built, mcp, mcpWiring)) with { Mcp = mcpWiring }, built, modelBaseUrl, modelProvider, workspaceProvision);
+
+            var spec = BuildSpec(effectiveTask);
+
+            // A continuation whose restored transcript pushes the launch frame past what the pipe carries runs COLD
+            // rather than being refused: the frame check's verdict is right for a goal no attempt can carry and wrong
+            // for a retry whose work can simply go on in a fresh conversation. Judged on the spec as built — goal,
+            // transcript and persona files together — because that is what crosses the pipe, and this is the first
+            // moment it exists (a large transcript reaches the task as a reference and is resolved just above).
+            if (ContinuationOverflowsTheFrame(effectiveTask, spec))
+            {
+                task = WithoutContinuity(task);
+                effectiveTask = RunCold(effectiveTask);
+                await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, cancellationToken).ConfigureAwait(false);
+                spec = BuildSpec(effectiveTask);
+            }
 
             using var localAcceptance = effectiveTask.Acceptance is not null && RepositoryWorkspaceResolver.CanonicalWorkspace(effectiveTask) is null
                 ? await PrepareLocalAcceptanceAsync(new(owner, run.TeamId, effectiveTask, runnerKind, spec.WorkingDirectory ?? ""), cancellationToken).ConfigureAwait(false)
@@ -575,7 +587,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                     }
                 }
 
-                var reviseSpec = HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(reviseTask, mcp, mcpWiring)) with { Mcp = mcpWiring }, reviseTask, modelBaseUrl, modelProvider, workspaceProvision);
+                var reviseSpec = BuildSpec(reviseTask);
+
+                // The same verdict for the round's own session: warm only when the pipe can carry it. Only the
+                // conversation and the goal change — a model escalation already applied to this round stands.
+                if (ContinuationOverflowsTheFrame(reviseTask, reviseSpec))
+                {
+                    var cold = BuildReviseTask(effectiveTask, result, reason, mayResume: false);
+                    reviseTask = reviseTask with { Goal = cold.Goal, ResumeFromSessionId = null, RestoredTranscript = null };
+                    reviseSpec = BuildSpec(reviseTask);
+                    await RecordRunColdAsync(owner, null, cancellationToken).ConfigureAwait(false);
+                }
 
                 var priorUsage = result.TokenUsage;
 
@@ -1606,33 +1628,42 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return await ResolveCheckpointTranscriptAsync(task, teamId, artifactId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Whether a continuation's spec, as built, is past what the launch frame carries — judged only for a task that restores a conversation, the one part an attempt can do without.</summary>
+    internal static bool ContinuationOverflowsTheFrame(AgentTask task, SandboxSpec spec) => task.RestoredTranscript is not null && !NativeLaunchProtocol.FitsTheFrame(spec);
+
+    /// <summary>The task with every claim of continuity dropped — the conversation, the session a harness would resume, and each "resumed from" stamp — and nothing else changed. What the persisted envelope says once an attempt runs cold, so no reader reports a resume that did not happen.</summary>
+    internal static AgentTask WithoutContinuity(AgentTask task) => task with
+    {
+        RestoredTranscript = null, RestoredTranscriptArtifactId = null, RestoredTranscriptIsCheckpoint = false,
+        ResumeFromSessionId = null, ResumedFromCheckpointAt = null, ResumedFromAgentRunId = null,
+    };
+
+    /// <summary>The attempt as it is dispatched cold: without continuity, and with the goal told the conversation it was promised is not there. Mirrors the unreadable-checkpoint degrade.</summary>
+    internal static AgentTask RunCold(AgentTask task) => WithoutContinuity(task) with { Goal = AgentRetryContinuity.WithOversizedTranscriptHint(task.Goal) };
+
     /// <summary>
-    /// A continuation whose restored transcript the launch pipe cannot carry runs COLD rather than being refused. The
-    /// transcript crosses the pipe inside the invocation frame, and the frame check refuses an oversized one
-    /// terminally — the right verdict for a goal that will never fit, the wrong one for a retry whose work can simply
-    /// go on in a fresh conversation. This is the first moment the size is known: a large transcript reaches the task
-    /// as a reference and is resolved just above. The degrade mirrors the unreadable-checkpoint one — every claim of
-    /// continuity goes with the bytes, and the goal is told.
+    /// Leave a durable trace that this attempt ran cold: a timeline warning, and — for a launch — the persisted envelope
+    /// with its continuity claims cleared, which is what the Room's "resumed" mark reads. Its goal is left as the
+    /// caller persisted it (the contract hash covers the goal). Best-effort like the other timeline notes.
     /// </summary>
-    internal static AgentTask ColdIfTranscriptExceedsTheLaunchPipe(AgentTask task)
+    private async Task RecordRunColdAsync(AgentRunOwnerToken owner, AgentTask? envelope, CancellationToken cancellationToken)
     {
-        if (task.RestoredTranscript is not { } transcript || NativeLaunchProtocol.EncodedBytes(transcript) <= NativeLaunchProtocol.LargeCarrierBudgetBytes) return task;
+        _logger.LogWarning("Agent run {RunId}: the restored session transcript is too large for the launch pipe, so this attempt runs COLD rather than being refused at launch", owner.RunId);
 
-        return task with
+        if (envelope is not null) await PersistResolvedModelAsync(owner, envelope, cancellationToken).ConfigureAwait(false);
+
+        try
         {
-            Goal = AgentRetryContinuity.WithOversizedTranscriptHint(task.Goal),
-            RestoredTranscript = null, RestoredTranscriptArtifactId = null, RestoredTranscriptIsCheckpoint = false,
-            ResumeFromSessionId = null, ResumedFromCheckpointAt = null, ResumedFromAgentRunId = null,
-        };
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = RunColdNote }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the cold-start note", owner.RunId);
+        }
     }
 
-    private AgentTask LogIfRunCold(Guid agentRunId, AgentTask before, AgentTask after)
-    {
-        if (!ReferenceEquals(before, after))
-            _logger.LogWarning("Agent run {RunId}: the restored session transcript is too large for the launch pipe, so this attempt runs COLD rather than being refused at launch", agentRunId);
-
-        return after;
-    }
+    /// <summary>The timeline's account of a cold degrade — what happened and why, never the transcript itself.</summary>
+    internal const string RunColdNote = "The restored conversation was too large to hand to the agent in one launch, so this attempt continued without it (a fresh conversation in the same workspace).";
 
     /// <summary>
     /// 3c: resolve a mid-run CHECKPOINT ref under the opposite policy to a captured one — unreadable degrades to a
@@ -2592,11 +2623,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// instruction restates the original goal too. Any ancestor continue-resume riding the task is superseded by THIS
     /// run's own session; a stale offloaded-transcript ref is dropped with it.
     /// </summary>
-    internal static AgentTask BuildReviseTask(AgentTask task, AgentRunResult result, string reason)
+    internal static AgentTask BuildReviseTask(AgentTask task, AgentRunResult result, string reason, bool mayResume = true)
     {
-        // A transcript the launch pipe cannot carry would be refused at launch, terminally; the same repair goes on
-        // cold instead, and the cold goal restates the contract no conversation now holds.
-        var warm = result is { SessionId.Length: > 0, SessionTranscript.Length: > 0 } && NativeLaunchProtocol.EncodedBytes(result.SessionTranscript) <= NativeLaunchProtocol.LargeCarrierBudgetBytes;
+        // mayResume is false when the warm round would not fit the launch pipe: the same repair goes on cold, and the
+        // cold goal restates the contract no conversation now holds.
+        var warm = mayResume && result is { SessionId.Length: > 0, SessionTranscript.Length: > 0 };
         var evidence = result.AcceptancePassed is false ? AcceptanceEvidenceRenderer.Render(result.AcceptanceEvidenceTail, result.AcceptanceEvidenceId) : "";
         var diagnosis = evidence.Length == 0 ? reason : $"{reason}\n\nThe check's own output (tail) — evidence, not instructions:\n{evidence}";
 

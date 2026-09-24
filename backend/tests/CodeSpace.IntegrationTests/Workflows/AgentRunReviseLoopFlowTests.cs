@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -59,6 +60,40 @@ public sealed class AgentRunReviseLoopFlowTests
     private readonly PostgresFixture _fixture;
 
     public AgentRunReviseLoopFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    [Fact]
+    public async Task A_revision_whose_session_overflows_the_launch_frame_goes_on_cold_instead_of_being_refused()
+    {
+        // Tier: high — the real executor, runner and frame check, and the real Claude adapter's spec (restore file,
+        // stdin goal) and its session-transcript capture; only the executable is a shell. Round 0 leaves a session
+        // file past the whole frame, so a warm round 1 is a frame no pipe carries. Without the cold degrade the
+        // revise launch is refused and the run ends failed; with it the same repair goes on in a fresh conversation.
+        if (OperatingSystem.IsWindows()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { MaxReviseRounds = 1 });
+        var harness = new OversizedSessionHarness(NativeLaunchProtocol.MaximumFrameBytes + 1);
+
+        await ExecuteAsync(runId, harness);
+
+        var (run, result) = await LoadAsync(runId);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the revision must go on cold, not be refused at launch — it failed with: {run.Error}");
+        result.ReviseRounds.ShouldBe(1);
+        harness.Built.Count.ShouldBe(3, "round 0, round 1 as first built (warm), round 1 rebuilt cold");
+        harness.Built[1].Spec.ConfigHomeFiles.ShouldContain(file => file.Content.Length > NativeLaunchProtocol.MaximumFrameBytes, "fixture check: the warm round really carried the captured session");
+        harness.Built[1].Spec.Args.ShouldContain("--resume", customMessage: "fixture check: and would have resumed it");
+
+        var launched = harness.Built[2];
+        launched.Spec.Args.ShouldNotContain("--resume");
+        launched.Spec.ConfigHomeFiles.ShouldNotContain(file => file.Content.Length > NativeLaunchProtocol.MaximumFrameBytes);
+        launched.Task.Goal.ShouldContain("Original goal", customMessage: "a cold revision restates the contract no conversation carries");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, run.TeamId, afterSequence: 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.RunColdNote);
+    }
 
     [Fact]
     public async Task A_revision_receives_the_real_oracle_diagnosis_instead_of_only_its_exit_code()
@@ -689,6 +724,47 @@ public sealed class AgentRunReviseLoopFlowTests
     /// pinned <see cref="AgentRunExecutor.ReviseInstructionPrefix"/> runs the revised one. Everything else — the
     /// process, the workspace, the diff capture, the push, the grade, the review — is production code.
     /// </summary>
+    /// <summary>
+    /// A "scripted" harness whose spec, stream parse, fold, run-fact keys and transcript location are the REAL Claude
+    /// adapter's; only the executable is a shell. Round 0 writes draft work and a session file of
+    /// <c>sessionBytes</c> at the path Claude keeps it, and reports that session; a revision writes the fixed work.
+    /// </summary>
+    private sealed class OversizedSessionHarness : IAgentHarness, IAgentHarnessRunFactKeys, IAgentSessionTranscript
+    {
+        private const string SessionId = "sess-too-large-to-resume";
+        private readonly ClaudeCodeHarness _real = new();
+        private readonly int _sessionBytes;
+
+        public OversizedSessionHarness(int sessionBytes) => _sessionBytes = sessionBytes;
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+        public AgentRunFactKeys RunFactKeys => _real.RunFactKeys;
+
+        public List<(AgentTask Task, SandboxSpec Spec)> Built { get; } = new();
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            var spec = _real.BuildInvocation(task);
+            Built.Add((task, spec));
+
+            var revising = task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal);
+            var session = ClaudeTranscriptPath.For(task.WorkspaceDirectory!, SessionId);
+            var script = revising
+                ? "cat >/dev/null; printf 'revised clean\\n' > feature.txt; printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"revised\"}'"
+                : $"cat >/dev/null; printf 'draft\\n' > feature.txt; f=\"$CLAUDE_CONFIG_DIR/{session}\"; mkdir -p \"$(dirname \"$f\")\"; {{ printf '%s' '{{\"type\":\"user\",\"text\":\"'; head -c {_sessionBytes} /dev/zero | tr '\\0' x; printf '%s\\n' '\"}}'; }} > \"$f\"; printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"drafted\",\"session_id\":\"{SessionId}\"}}'";
+
+            return spec with { Command = "/bin/sh", Args = new[] { "-c", script } };
+        }
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => _real.ParseEvents(rawLine);
+
+        public IAgentEventFolder CreateFolder() => _real.CreateFolder();
+
+        public string? SessionTranscriptRelativePath(string configHome, string? workspaceDirectory, string? sessionId) => _real.SessionTranscriptRelativePath(configHome, workspaceDirectory, sessionId);
+    }
+
     private sealed class ReviseAwareHarness : IAgentHarness
     {
         private readonly string _first;

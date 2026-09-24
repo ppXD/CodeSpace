@@ -175,6 +175,52 @@ public partial class AgentRunExecutorTests
 
 
     [Fact]
+    public async Task A_continuation_whose_transcript_overflows_the_launch_frame_runs_cold_instead_of_being_refused()
+    {
+        // Tier: high — the real executor, the real LocalProcessRunner and its real frame check, and the real Claude
+        // adapter's spec (which is what puts the transcript and the goal into the frame); only the executable is a
+        // shell. Without the cold degrade this launch is refused terminally as sandbox_argument_too_long, so a retry
+        // whose work could simply go on in a fresh conversation would end the task.
+        if (OperatingSystem.IsWindows()) return;
+
+        var transcript = new string('x', NativeLaunchProtocol.MaximumFrameBytes + 1);
+        var teamId = await SeedTeamAsync();
+        Guid runId;
+
+        using (var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
+        {
+            var artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "text/plain", CancellationToken.None);
+            var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+                new AgentTask { Goal = "resume the prior work", Harness = "scripted", Model = "test-model", ResumeFromSessionId = "session-too-large-to-restore", RestoredTranscriptArtifactId = artifactId },
+                teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            runId = created.Id;
+        }
+
+        var harness = new ClaudeSpecScriptedHarness("cat >/dev/null; printf 'resumed\\n'");
+
+        await ExecuteAsync(runId, harness);
+
+        using var verify = _fixture.BeginScope();
+        var service = verify.Resolve<IAgentRunService>();
+        var run = await service.GetAsync(runId, CancellationToken.None);
+        harness.Specs.ShouldNotBeEmpty();
+        var launched = harness.Specs[^1];
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the continuation must run cold, not be refused at launch — it failed with: {run.Error}");
+        harness.Specs.ShouldContain(spec => spec.ConfigHomeFiles.Any(file => file.Content.Length == transcript.Length), "fixture check: the warm spec the executor judged did carry the transcript");
+        launched.ConfigHomeFiles.ShouldNotContain(file => file.Content.Length == transcript.Length, "the launched spec restores nothing");
+        launched.Args.ShouldNotContain("--resume");
+        launched.StandardInput.ShouldNotBeNull().ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
+
+        var persisted = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options).ShouldNotBeNull();
+        persisted.ResumeFromSessionId.ShouldBeNull("the Room's 'resumed' mark reads the persisted envelope, and this attempt resumed nothing");
+        persisted.RestoredTranscriptArtifactId.ShouldBeNull();
+        persisted.Goal.ShouldBe("resume the prior work", "the persisted goal is the contract the hash covers — the hint is the dispatch's alone");
+
+        (await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.RunColdNote, "the timeline says the attempt ran cold, and why");
+    }
+
+    [Fact]
     public async Task A_resume_transcript_that_lives_at_a_provider_reaches_the_harness_byte_for_byte()
     {
         // The sibling above uses a 38-byte transcript, which stays INLINE — so the executor's only artifact read has
@@ -1936,6 +1982,36 @@ public partial class AgentRunExecutorTests
         {
             BuiltTask = task;
             return new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+        }
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
+
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) =>
+            exitCode == 0
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
+    }
+
+    /// <summary>A scripted harness (kind "scripted") whose spec is the REAL Claude adapter's — the transcript restore file, the goal on stdin, every config-home file — with only the executable swapped for a shell, so the frame the runner measures is the frame production sends.</summary>
+    private sealed class ClaudeSpecScriptedHarness : IAgentHarness
+    {
+        private readonly ClaudeCodeHarness _real = new();
+        private readonly string _script;
+
+        public ClaudeSpecScriptedHarness(string script) => _script = script;
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public List<SandboxSpec> Specs { get; } = new();
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            var spec = _real.BuildInvocation(task) with { Command = "/bin/sh", Args = new[] { "-c", _script } };
+            Specs.Add(spec);
+            return spec;
         }
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>

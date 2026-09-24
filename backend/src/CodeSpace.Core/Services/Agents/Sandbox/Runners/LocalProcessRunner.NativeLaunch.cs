@@ -105,9 +105,9 @@ public sealed partial class LocalProcessRunner
 
     /// <summary>
     /// Host metadata for a frame past the pipe bound: its encoded size, the bound, and the raw sizes of the two carriers
-    /// that can grow that large — never their contents. By the time this fires an oversized restored transcript has
-    /// already been dropped for a cold start (<c>AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe</c>), so what
-    /// remains is a goal or a combination the pipe cannot take on any attempt.
+    /// that can grow that large — never their contents. By the time this fires a continuation whose restored
+    /// transcript pushed its spec past the frame has already been run cold (<c>AgentRunExecutor.ContinuationOverflowsTheFrame</c>),
+    /// so what remains is a goal, or persona files, the pipe cannot take on any attempt.
     /// </summary>
     private static string LaunchFrameRefusal(int frameBytes, SandboxSpec spec)
     {
