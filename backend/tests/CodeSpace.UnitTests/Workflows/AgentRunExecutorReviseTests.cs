@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -151,15 +152,13 @@ public sealed class AgentRunExecutorReviseTests
     }
 
     [Fact]
-    public void A_session_too_large_for_the_launch_pipe_makes_the_revision_cold()
+    public void A_revision_the_launch_pipe_cannot_carry_warm_is_built_cold_with_the_whole_contract()
     {
-        // The transcript crosses the launch pipe inside the invocation frame. A warm revise with one the pipe cannot
-        // carry is refused at launch, terminally — although the same repair can go on in a fresh conversation. So it
-        // goes cold, and the goal restates the whole contract because no conversation carries it.
-        var huge = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes + 1);
-        var result = AcceptanceFailed("exit 1") with { SessionId = "sess-1", SessionTranscript = huge };
+        // The executor passes mayResume: false when the warm round's spec would not fit the frame. The same repair
+        // goes on in a fresh conversation, so the goal restates the whole contract no conversation carries.
+        var result = AcceptanceFailed("exit 1") with { SessionId = "sess-1", SessionTranscript = "{\"line\":1}" };
 
-        var revise = AgentRunExecutor.BuildReviseTask(TaskWith(), result, "the check failed");
+        var revise = AgentRunExecutor.BuildReviseTask(TaskWith(), result, "the check failed", mayResume: false);
 
         revise.ResumeFromSessionId.ShouldBeNull("a transcript the pipe cannot carry is never handed to --resume");
         revise.RestoredTranscript.ShouldBeNull();
@@ -168,31 +167,62 @@ public sealed class AgentRunExecutorReviseTests
     }
 
     [Fact]
-    public void A_restored_continuation_too_large_for_the_launch_pipe_runs_cold_and_says_so()
+    public void A_session_past_half_the_frame_still_revises_warm()
     {
-        // A node retry or a continue hands the executor a transcript it resolves only just before launch — the first
-        // moment its size is known. Past the pipe it would be refused terminally; it runs cold instead, dropping every
-        // claim of continuity, and the goal is told the conversation it was promised is not there.
-        var task = TaskWith() with
-        {
-            ResumeFromSessionId = "sess-1", RestoredTranscript = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes + 1),
-            ResumedFromAgentRunId = Guid.NewGuid(), Goal = AgentRetryContinuity.WithHonestNoContinuityHint("fix the flaky test"),
-        };
+        // The regression a fixed half-frame share made: a revise goal is a short delta, so nearly the whole frame is
+        // the transcript's. It warm-resumed before the frame was measured and must still.
+        var transcript = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes + 1);
+        var result = AcceptanceFailed("exit 1") with { SessionId = "sess-1", SessionTranscript = transcript };
+        var revise = AgentRunExecutor.BuildReviseTask(TaskWith() with { WorkspaceDirectory = "/tmp/ws" }, result, "the check failed");
+        var spec = new ClaudeCodeHarness().BuildInvocation(revise);
 
-        var launched = AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe(task);
-
-        launched.ResumeFromSessionId.ShouldBeNull();
-        launched.RestoredTranscript.ShouldBeNull();
-        launched.ResumedFromAgentRunId.ShouldBeNull("'resumed from run X' would be false for an attempt that restored nothing from X");
-        launched.Goal.ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
+        spec.ConfigHomeFiles.ShouldContain(file => file.Content == transcript, "fixture check: the spec must carry the transcript, or the fit below proves nothing");
+        revise.ResumeFromSessionId.ShouldBe("sess-1");
+        AgentRunExecutor.ContinuationOverflowsTheFrame(revise, spec).ShouldBeFalse(customMessage: "an 8 MiB transcript and a delta goal fit a 16 MiB frame");
     }
 
     [Fact]
-    public void A_restored_continuation_the_pipe_can_carry_is_left_alone()
+    public void A_continuation_is_judged_on_everything_its_spec_carries()
     {
-        var task = TaskWith() with { ResumeFromSessionId = "sess-1", RestoredTranscript = "{\"line\":1}" };
+        // Neither part alone is past half the frame; together they are past the whole of it. A cold attempt fits.
+        var half = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes - 1024);
+        var task = TaskWith() with { Goal = half, ResumeFromSessionId = "sess-1", RestoredTranscript = half, WorkspaceDirectory = "/tmp/ws" };
+        var harness = new ClaudeCodeHarness();
+        var warm = harness.BuildInvocation(task);
 
-        AgentRunExecutor.ColdIfTranscriptExceedsTheLaunchPipe(task).ShouldBeSameAs(task);
+        warm.ConfigHomeFiles.ShouldContain(file => file.Content == half, "fixture check: the spec must carry the transcript");
+        warm.StandardInput.ShouldBe(half, "fixture check: and the goal");
+        AgentRunExecutor.ContinuationOverflowsTheFrame(task, warm).ShouldBeTrue();
+        AgentRunExecutor.ContinuationOverflowsTheFrame(AgentRunExecutor.RunCold(task), harness.BuildInvocation(AgentRunExecutor.RunCold(task))).ShouldBeFalse(customMessage: "a cold attempt carries no transcript, so only the goal is left to fit");
+        NativeLaunchProtocol.FitsTheFrame(harness.BuildInvocation(AgentRunExecutor.RunCold(task))).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void A_continuation_run_cold_drops_every_claim_of_continuity_and_says_so()
+    {
+        var task = TaskWith() with
+        {
+            ResumeFromSessionId = "sess-1", RestoredTranscript = "{\"line\":1}", RestoredTranscriptIsCheckpoint = true, ResumedFromCheckpointAt = DateTimeOffset.UnixEpoch,
+            ResumedFromAgentRunId = Guid.NewGuid(), Goal = AgentRetryContinuity.WithHonestNoContinuityHint("fix the flaky test"),
+        };
+
+        var launched = AgentRunExecutor.RunCold(task);
+
+        launched.ResumeFromSessionId.ShouldBeNull();
+        launched.RestoredTranscript.ShouldBeNull();
+        launched.RestoredTranscriptIsCheckpoint.ShouldBeFalse();
+        launched.ResumedFromCheckpointAt.ShouldBeNull();
+        launched.ResumedFromAgentRunId.ShouldBeNull("'resumed from run X' would be false for an attempt that restored nothing from X");
+        launched.Goal.ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
+        AgentRunExecutor.WithoutContinuity(task).Goal.ShouldBe(task.Goal, "the persisted envelope keeps its goal: the contract hash covers it");
+    }
+
+    [Fact]
+    public void A_task_that_restores_nothing_is_never_judged_an_overflow()
+    {
+        var task = TaskWith() with { Goal = new string('x', NativeLaunchProtocol.MaximumFrameBytes) };
+
+        AgentRunExecutor.ContinuationOverflowsTheFrame(task, new ClaudeCodeHarness().BuildInvocation(task)).ShouldBeFalse(customMessage: "a goal alone is the frame check's to refuse, honestly — there is nothing to drop");
     }
 
     [Fact]

@@ -9,8 +9,14 @@ public static class NativeLaunchProtocol
     public const int Version = 1;
     public const int MaximumFrameBytes = 16 * 1024 * 1024;
 
-    /// <summary>The share of <see cref="MaximumFrameBytes"/> one large carrier may take — an agent's standard input, or a continued session's restored transcript — leaving the rest of the invocation far more room than it uses. Measured as encoded for the pipe (<see cref="EncodedBytes"/>).</summary>
+    /// <summary>The share of <see cref="MaximumFrameBytes"/> an agent's standard input may take, checked before a spool exists so a goal no attempt can carry is refused before any work. Half the frame, leaving the rest room for everything else a launch carries — a continued session's restored transcript included. Measured as encoded for the pipe (<see cref="EncodedBytes"/>).</summary>
     public const int LargeCarrierBudgetBytes = MaximumFrameBytes / 2;
+
+    /// <summary>What the frame keeps free beyond a spec for what wraps it — the child's command, environment and paths, a few kilobytes in practice — so a spec that fits by <see cref="FitsTheFrame"/> fits the frame it is sent in.</summary>
+    public const int InvocationAllowanceBytes = 1024 * 1024;
+
+    /// <summary>Whether a built spec, once encoded for the pipe, leaves the frame room for what wraps it. Measures everything the spec carries at once — goal, restored transcript, the persona's files — so a continuation is judged on what it actually sends, not on any one part of it.</summary>
+    public static bool FitsTheFrame(SandboxSpec spec) => JsonSerializer.SerializeToUtf8Bytes(spec, Json).LongLength <= MaximumFrameBytes - InvocationAllowanceBytes;
 
     /// <summary>The bytes <paramref name="value"/> occupies once encoded for the frame. The web JSON defaults escape every non-ASCII character, so CJK text roughly doubles and emoji triple.</summary>
     public static int EncodedBytes(string value) => JsonSerializer.SerializeToUtf8Bytes(value, Json).Length;
