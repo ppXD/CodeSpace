@@ -23,6 +23,7 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.AgentRun, "AgentRun")]
     [InlineData(WorkflowWaitKinds.SupervisorDecision, "SupervisorDecision")]
     [InlineData(WorkflowWaitKinds.Decision, "Decision")]
+    [InlineData(WorkflowWaitKinds.ActorIdentityLink, "ActorIdentityLink")]
     public void Wait_kind_literals_are_pinned(string actual, string expected)
     {
         actual.ShouldBe(expected);
@@ -37,6 +38,7 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.AgentRun)]
     [InlineData(WorkflowWaitKinds.SupervisorDecision)]
     [InlineData(WorkflowWaitKinds.Decision)]
+    [InlineData(WorkflowWaitKinds.ActorIdentityLink)]
     public void ValidateWaitKind_admits_every_known_kind(string kind)
     {
         WorkflowEngine.ValidateWaitKind("node-1", kind).ShouldBe(kind);
@@ -68,6 +70,7 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.AgentRun, false)]
     [InlineData(WorkflowWaitKinds.SupervisorDecision, false)]
     [InlineData(WorkflowWaitKinds.SupervisorAgentWaits, false)]
+    [InlineData(WorkflowWaitKinds.ActorIdentityLink, false)]
     public void IsOperatorReissuable_allows_only_the_signal_driven_stranding_kinds(string waitKind, bool expected) =>
         WorkflowWaitKinds.IsOperatorReissuable(waitKind).ShouldBe(expected);
 

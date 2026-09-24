@@ -21,10 +21,19 @@ public sealed class ActorIdentityRequiredException : Exception, IFailure
     public ProviderKind ProviderKind { get; }
     public Guid ProviderInstanceId { get; }
 
-    public ActorIdentityRequiredException(ProviderKind providerKind, Guid providerInstanceId)
+    /// <summary>
+    /// The CodeSpace user whose identity is missing. On the synchronous 428 path this is always the caller, so the
+    /// response never needs it — but a workflow node acts as a person who is NOT the one watching, and a run parked
+    /// waiting for that link has to be able to NAME whom it is waiting on. Carried here so the one throw site the
+    /// enforcement seam owns stays the single source of that fact.
+    /// </summary>
+    public Guid ActorUserId { get; }
+
+    public ActorIdentityRequiredException(ProviderKind providerKind, Guid providerInstanceId, Guid actorUserId)
         : base($"This action must be performed as your own {providerKind} identity, but you haven't linked one for this provider instance. Connect your {providerKind} account, then retry.")
     {
         ProviderKind = providerKind;
         ProviderInstanceId = providerInstanceId;
+        ActorUserId = actorUserId;
     }
 }

@@ -81,6 +81,19 @@ public static class WorkflowWaitKinds
     public const string SupervisorInfraPark = "SupervisorInfraPark";
 
     /// <summary>
+    /// An ACT-AS-USER node parked until the person it acts as has a linked provider identity. A node whose manifest
+    /// declares <c>ActsAsUser</c> (git.pr_review, git.merge_pull_request, the issue writes) can only authenticate as
+    /// that person's own token; with no live identity it used to FAIL the run in the background, a minute after the
+    /// click that triggered it returned 204. It now parks here instead. Like <see cref="SupervisorInfraPark"/> the
+    /// DEADLINE IS THE WAKE — nothing else resolves it: the wake re-runs the node, which simply succeeds once the
+    /// identity exists, so the run heals no matter HOW it appeared (a PAT link, an OAuth connect, a re-activated
+    /// credential). The <c>TimeoutPayload</c> carries the ladder position + the actor/provider the run is waiting on,
+    /// so the re-entry continues the ladder durably and the run detail can name who must connect what. Bounded: once
+    /// the whole window has elapsed the node fails honestly rather than parking forever.
+    /// </summary>
+    public const string ActorIdentityLink = "ActorIdentityLink";
+
+    /// <summary>
     /// The wait kinds an operator may FORCE-REISSUE via the reissue verb — the SIGNAL-driven waits that can strand with
     /// no backstop: a <see cref="Timer"/> whose scheduled wake was dropped (a lost Hangfire job — there is no reconciler
     /// sweep for it, unlike <see cref="SupervisorDecision"/>), and a <see cref="Callback"/> whose external system never
@@ -88,7 +101,9 @@ public static class WorkflowWaitKinds
     /// <see cref="Action"/> / <see cref="Decision"/>) carry a human decision and resolve via their own verbs (a blind
     /// reissue would feed the node a decision-less payload); the completion-driven waits (<see cref="Subworkflow"/> /
     /// <see cref="AgentRun"/>) and the supervisor self-waits resolve only when their real work completes — faking their
-    /// result payload here would corrupt the node — so none is operator-reissuable. (All of them ALSO have a reconciler
+    /// result payload here would corrupt the node — so none is operator-reissuable. The SELF-WAKING parks
+    /// (<see cref="SupervisorInfraPark"/> / <see cref="ActorIdentityLink"/>) are excluded from the other side: their
+    /// DEADLINE is the wake, so a reissue would only re-fire what the schedule already owns. (All of them ALSO have a reconciler
     /// backstop that re-fires the real completion: <see cref="AgentRun"/> + the supervisor self-waits, and — closing the
     /// last un-backstopped strand — a stranded <see cref="Subworkflow"/> parent whose child already went terminal.)
     /// Pinned by a unit test so widening the set is a conscious, reviewed decision (Rule 8).

@@ -17,7 +17,7 @@ public sealed class ActorCredentialProvider : IActorCredentialProvider, IScopedD
     {
         var identity = await _resolver.ResolveAsync(actorUserId, instance.Id, cancellationToken).ConfigureAwait(false);
 
-        if (identity == null) throw new ActorIdentityRequiredException(instance.Provider, instance.Id);
+        if (identity == null) throw new ActorIdentityRequiredException(instance.Provider, instance.Id, actorUserId);
 
         return identity.Credential;
     }
