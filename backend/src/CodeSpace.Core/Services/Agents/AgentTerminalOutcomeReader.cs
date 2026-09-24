@@ -23,6 +23,19 @@ public static class AgentTerminalOutcomeReader
     public const string ContextWindowExceededExitReason = "context-window-exceeded";
 
     /// <summary>
+    /// What an OpenAI-compatible gateway (vLLM, LiteLLM) says when it refuses a request as over the model's window —
+    /// the overflow shape neither CLI stamps as its own, because the gateway speaks in its own words and codes (vLLM
+    /// sends <c>code: 400</c>, LiteLLM <c>code: "400"</c>, with the reason only in the message). Read ONLY off a
+    /// provider refusal body a CLI relays (Claude's 400 <c>api_error</c> result, Codex's <c>turn.failed</c>) — never
+    /// off an agent's prose, which is how a crash or a rubric used to pass for a diagnosis. Shared so the two folds
+    /// cannot disagree about the same gateway.
+    /// </summary>
+    public static bool NamesAContextOverflow(string providerMessage) =>
+        GatewayOverflowMarkers.Any(marker => providerMessage.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+    private static readonly string[] GatewayOverflowMarkers = { "maximum context length is", "context_length_exceeded" };
+
+    /// <summary>
     /// True when the last Completed-or-Error event in the stream is an Error — i.e. the harness itself reported
     /// the run failed, even if the OS exit code was 0. False when no such event exists (nothing to reconcile
     /// against, so the exit code alone decides) or the last one was Completed.
