@@ -201,6 +201,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private Task<Messages.Agents.SessionTranscriptCheckpoint?> _sessionCheckpoint = Task.FromResult<Messages.Agents.SessionTranscriptCheckpoint?>(null);
     private DateTimeOffset? _sessionCheckpointAttemptedAt;
     private readonly SessionCheckpointWatermark _sessionCheckpointWatermark = new();
+    // The launch this pass last got onto the row — cleared the moment another launch begins, set once its handle write
+    // lands. A cancel's kill of the recorded handle proves the clone empty only while the two agree (see
+    // StopCancelledAttemptAsync): mid-launch, the row still names the previous round's finished process while a new
+    // one may already be running in the clone. A value left from an earlier run on a reused instance names that run's
+    // own spool, so it can never agree with another run's row.
+    private SandboxHandle? _acknowledgedLaunch;
     private readonly ILogger<AgentRunExecutor> _logger;
 
     public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, Recovery.IAgentSessionTranscriptCheckpointer? sessionCheckpointer = null, TimeProvider? clock = null)
@@ -284,6 +290,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // reaps it by age if no re-attach ever claims it.
         IWorkspaceHandle? workspace = null;
         var leaveWorkspaceForReattach = false;
+
+        // Set by a tear-down arm that found the run CANCELLED at this attempt and confirmed its agent dead (see
+        // StopCancelledAttemptAsync): the clone is then nobody's, even though the terminal is not this pass's own write.
+        var cancelledAgentStopped = false;
 
         // Hoisted for the tear-down arm exactly as `redactor` is for the catch-all. A run whose model credential THIS
         // worker BROKERED cannot outlive this process: the lease is held in its memory, behind a listener that dies
@@ -652,15 +662,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (AgentRunOwnershipLostException)
         {
-            leaveWorkspaceForReattach = true;
             observerCts.Cancel();
+
+            // A RECLAIM hands the live agent and its clone to the worker that re-attaches it, so both are left alone.
+            // A CANCEL hands them to nobody — the host that flipped the row may be one that cannot reach this process
+            // at all — so this pass, the one host that can, stops the agent, and only a confirmed death frees the clone.
+            cancelledAgentStopped = await StopCancelledAttemptAsync(owner, _acknowledgedLaunch).ConfigureAwait(false);
+            leaveWorkspaceForReattach = !cancelledAgentStopped;
             throw;
         }
         catch (OperationCanceledException)
         {
             // Worker torn down (pod shutdown): leave the run Running for the reconciler / a re-claim — do NOT
             // complete, and do NOT delete the workspace (the detached agent is still running inside it; see above).
-            leaveWorkspaceForReattach = true;
+            // Unless the run was CANCELLED at this attempt: a lost fence reaches this arm too — the heartbeat reports
+            // one by cancelling the observer — and a cancelled run's agent has no re-attach coming for it.
+            cancelledAgentStopped = await StopCancelledAttemptAsync(owner, _acknowledgedLaunch).ConfigureAwait(false);
+            leaveWorkspaceForReattach = !cancelledAgentStopped;
 
             // Unless the HOST is going away AND this worker BROKERED the run's credential. Then the detached agent is
             // still running but its model access stops existing with this process, and no re-attach can restore it —
@@ -682,7 +700,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             //
             // Best-effort by construction: a drain budget is finite, and a run this misses is caught by the re-attach
             // half, which reaches the identical outcome one sweep later rather than at the spec timeout.
-            if (brokeredHere && _lifetime?.ApplicationStopping.IsCancellationRequested == true && await EndBrokeredAttemptOnShutdownAsync(owner, run.TeamId, agentRunId).ConfigureAwait(false))
+            if (!cancelledAgentStopped && brokeredHere && _lifetime?.ApplicationStopping.IsCancellationRequested == true && await EndBrokeredAttemptOnShutdownAsync(owner, run.TeamId, agentRunId).ConfigureAwait(false))
                 leaveWorkspaceForReattach = false;   // the agent's death is CONFIRMED (see the landing), so nothing is standing in the clone
 
             throw;
@@ -709,11 +727,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Terminal exit (success / failure) owns the clone's cleanup; a worker tear-down leaves it for re-attach.
             // The one tear-down that DOES own it is the lost-lease landing above: it confirmed the agent is dead
             // before landing, so nothing is standing in the clone — and it needs a token of its own, because the one
-            // this pass was cancelled on would make the ownership check below decline without ever asking.
+            // this pass was cancelled on would make the ownership check below decline without ever asking. A cancel
+            // this pass stopped the agent of owns it too, but its terminal is the canceller's write, not this pass's,
+            // so the ownership check cannot vouch for it — the confirmed stop is the proof instead.
             using var cleanupBudget = cancellationToken.IsCancellationRequested && !leaveWorkspaceForReattach ? new CancellationTokenSource(ShutdownLeaseLandingBudget) : null;
             var cleanupToken = cleanupBudget?.Token ?? cancellationToken;
 
-            if (workspace is not null && !leaveWorkspaceForReattach && await CanCleanOwnedWorkspaceAsync(owner, cleanupToken).ConfigureAwait(false))
+            if (workspace is not null && !leaveWorkspaceForReattach && (cancelledAgentStopped || await CanCleanOwnedWorkspaceAsync(owner, cleanupToken).ConfigureAwait(false)))
                 await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -879,11 +899,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (AgentRunOwnershipLostException)
         {
             observerCts.Cancel();
+
+            // The same question the launch path asks: a re-attached pass is its agent's owner too, and a cancel of its
+            // attempt leaves nobody else able to stop it. It holds no clone, so the verdict decides nothing further.
+            await StopCancelledAttemptAsync(owner, handle).ConfigureAwait(false);
             throw;
         }
         catch (OperationCanceledException)
         {
-            throw;   // worker torn down again — leave Running for the next re-attach
+            // Worker torn down again — leave Running for the next re-attach. Unless the run was cancelled at this
+            // attempt (a lost fence arrives here too, as a cancelled observer): then no re-attach is coming.
+            await StopCancelledAttemptAsync(owner, handle).ConfigureAwait(false);
+            throw;
         }
         catch (Exception ex)
         {
@@ -4836,6 +4863,88 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _logger.LogWarning("Agent run {RunId}: the kill issued because {Because} was NOT carried out for pid {Pid} on host {OwnerHost} — outcome {Outcome}: {Detail}; the agent may keep running until its wall-clock deadline", runId, because, handle.ProcessId, handle.LaunchHost, result.Outcome, result.Detail);
     }
 
+    /// <summary>
+    /// How long a pass that has just lost its run may spend finding out whether the loss was a CANCEL and, if so,
+    /// stopping the agent it launched: one indexed row read and one terminate, whose runner already bounds its own reap
+    /// wait. On a token of its own because every token the asking arms hold is already cancelled, and bounded so a
+    /// worker draining for shutdown never spends another run's share of its drain on it.
+    /// </summary>
+    private static readonly TimeSpan CancelledAgentStopBudget = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Ask the FRESH row what took this pass's run away, and stop the agent when the answer is a cancel of this very
+    /// attempt.
+    ///
+    /// <para>A lost fence has two very different authors. A RECLAIM — the reconciler reserving a re-attach, or the
+    /// re-attach that then took the run — keeps the row Running and hands the live agent to its successor, so the
+    /// agent is left exactly as it was. A CANCEL ends the run, and the host that performed it may be one that cannot
+    /// reach this process at all: in the api/worker split the API pod runs the cancel, its kill is withheld as
+    /// not-local, and every reconciler sweep but the owning host's cancelled-agent arm selects Running rows only. This
+    /// pass is then the one host that can stop the agent, so it does: the credential first (a signal races the
+    /// agent's next model call, a withdrawn lease does not — the order <c>CancelRunningAsync</c> keeps), then the
+    /// runner's own identity-checked terminate, which also tears down the run's netns and cgroup.</para>
+    ///
+    /// <para>The kill is aimed at the handle the row records — exactly the one the cancel would have killed from a host
+    /// that could reach it. Whether its death proves the clone empty is a separate question, answered by
+    /// <paramref name="acknowledged"/>: the execution this pass last got onto the row (or, for a re-attach, the one it
+    /// adopted). Mid-launch the row still names the previous round's finished process while the new one may already
+    /// be running in the clone, and "already gone" about the old one says nothing about the new.</para>
+    /// </summary>
+    /// <returns>True only when the run was cancelled at this attempt, its recorded agent is provably not running, AND the row names the execution this pass last acknowledged — the one case whose clone is nobody's any more. Every failure answers false, which leaves the pass exactly where it was before it asked.</returns>
+    internal async Task<bool> StopCancelledAttemptAsync(AgentRunOwnerToken owner, SandboxHandle? acknowledged)
+    {
+        using var budget = new CancellationTokenSource(CancelledAgentStopBudget);
+
+        try
+        {
+            var run = await _runs.GetAsync(owner.RunId, budget.Token).ConfigureAwait(false);
+
+            if (!CancelledThisAttempt(run, owner)) return false;
+
+            await RevokeBrokeredCredentialQuietlyAsync(owner, "run-cancelled").ConfigureAwait(false);
+
+            var recorded = DeserializeHandle(run.RunnerHandleJson);
+
+            return await TerminateCancelledAgentAsync(run.Id, recorded, budget.Token).ConfigureAwait(false) && RecordsAcknowledgedLaunch(run.Id, recorded, acknowledged);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Agent run {RunId}: could not establish whether its lost ownership was a cancel, or could not stop its agent if it was; the agent is left for the owning host's reconciler sweep", owner.RunId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the fresh row is a cancel of THIS attempt: Cancelled, still naming this pass's owner, at exactly the epoch
+    /// <c>CancelRunningAsync</c>'s CAS moves this pass's epoch to. A reclaim clears the owner and keeps the row Running,
+    /// and a cancel that lands after a reclaim names the successor at a later epoch — neither matches, and the second is
+    /// the owning host's reconciler sweep to answer.
+    /// </summary>
+    private static bool CancelledThisAttempt(AgentRun run, AgentRunOwnerToken owner) => run.Status == AgentRunStatus.Cancelled && run.OwnerId == owner.OwnerId && run.FenceEpoch == owner.Epoch + 1;
+
+    /// <summary>Kill the cancelled run's recorded execution and say whether it is provably gone. No handle, or none a durable runner here can act on, is not proof of no process — a launch whose handle was never acknowledged may still be running — so it answers false.</summary>
+    private async Task<bool> TerminateCancelledAgentAsync(Guid runId, SandboxHandle? handle, CancellationToken cancellationToken)
+    {
+        if (handle is null || _runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return false;
+
+        var result = await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false);
+
+        WarnIfKillWithheld(result, handle, runId, "its run was cancelled");
+
+        if (result.IsSettled) _logger.LogInformation("Agent run {RunId} was cancelled while this worker owned it; its agent (pid {Pid}) is stopped — outcome {Outcome}", runId, handle.ProcessId, result.Outcome);
+
+        return result.IsSettled;
+    }
+
+    /// <summary>Whether the row still names the execution this pass last acknowledged: the same launch slot and the same process. The fields a checkpoint rewrites (offsets, the capture session) do not count — the identity does.</summary>
+    private bool RecordsAcknowledgedLaunch(Guid runId, SandboxHandle? recorded, SandboxHandle? acknowledged)
+    {
+        if (recorded is not null && acknowledged is not null && recorded.SpoolDirectory == acknowledged.SpoolDirectory && recorded.ProcessId == acknowledged.ProcessId) return true;
+
+        _logger.LogWarning("Agent run {RunId}: its recorded agent is stopped, but the row does not name the launch this pass last acknowledged — a newer launch may still be running in the clone, so the clone is left for the workspace janitor", runId);
+        return false;
+    }
+
     /// <summary>The posture a run's launch recorded, or null when it recorded none / the row cannot be read — a record nobody can parse is treated exactly like a record that was never written.</summary>
     private static SandboxConfinement? DeserializeConfinement(string? confinementJson)
     {
@@ -4874,6 +4983,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // the next few statements recoverable: the runner refuses to admit a second execution for it, and a recovery
         // can re-discover this one by the identity instead of by a handle that may never have been written.
         var identity = LaunchIdentityOf(sinks);
+
+        // From the call below a process may exist that the row does not name yet — whatever it names is now a round behind.
+        _acknowledgedLaunch = null;
+
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath, ModelBrokerRunToken = context.ModelBrokerRunToken,
@@ -4942,6 +5055,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             await _runs.SetRunnerHandleAsync(context.Owner, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+            _acknowledgedLaunch = handle;
             await RecordConfinementAsync(context.Owner, WithResumeProvenance(WithCredentialPosture(handle.Confinement, context.ModelCredentialBrokered), context.ResumedFromCheckpointAt), cancellationToken).ConfigureAwait(false);
             var capture = await OpenLogCaptureAsync(new LogCaptureContext(context.TeamId, context.RunId, context.ActorId, context.WorkerFenceEpoch, context.Redactor), durable, handle, cancellationToken).ConfigureAwait(false);
             if (capture.Handle != handle)

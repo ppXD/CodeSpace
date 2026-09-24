@@ -802,9 +802,9 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>The re-attach, tolerating the ownership loss a concurrent fence bump raises — the run is the point, not which pass observed it.</summary>
-    private async Task ReattachUntilStoppedAsync(AgentRunReattachReservation reservation, IAgentHarness harness, IModelCredentialBroker broker)
+    private async Task ReattachUntilStoppedAsync(AgentRunReattachReservation reservation, IAgentHarness harness, IModelCredentialBroker broker, CancellationToken cancellationToken = default)
     {
-        try { await ReattachAsync(reservation, harness, broker); }
+        try { await ReattachAsync(reservation, harness, broker, cancellationToken); }
         catch (OperationCanceledException) { /* the worker went away again — what it left behind is what the test asserts */ }
         catch (CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException) { /* the fence moved on; the row it wrote is what the test asserts */ }
     }

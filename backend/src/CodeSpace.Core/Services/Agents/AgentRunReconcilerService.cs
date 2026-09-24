@@ -146,6 +146,8 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         var orphansCancelled = await SweepRunningUnderTerminalParentAsync(cancellationToken).ConfigureAwait(false);
 
+        var cancelledAgentsStopped = await SweepCancelledWithLiveLocalAgentAsync(cancellationToken).ConfigureAwait(false);
+
         var queuedOrphansCancelled = await SweepQueuedUnderTerminalParentAsync(cancellationToken).ConfigureAwait(false);
 
         var parentlessOrphansCancelled = await SweepOrphanedParentlessQueuedAsync(cancellationToken).ConfigureAwait(false);
@@ -158,10 +160,10 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
-        if (orphansCancelled > 0 || queuedOrphansCancelled > 0 || parentlessOrphansCancelled > 0 || abandoned > 0 || recovered > 0 || reattached > 0 || resumed > 0 || reDispatched > 0)
-            _logger.LogInformation("AgentRunReconciler: cancelled {Orphans} running orphan(s) under terminal parents, cancelled {QueuedOrphans} queued orphan(s) under terminal parents, cancelled {ParentlessOrphans} parentless queued orphan(s), abandoned {Abandoned}, recovered {Recovered} from spool, re-attached {Reattached} alive run(s), resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", orphansCancelled, queuedOrphansCancelled, parentlessOrphansCancelled, abandoned, recovered, reattached, resumed, reDispatched);
+        if (orphansCancelled > 0 || cancelledAgentsStopped > 0 || queuedOrphansCancelled > 0 || parentlessOrphansCancelled > 0 || abandoned > 0 || recovered > 0 || reattached > 0 || resumed > 0 || reDispatched > 0)
+            _logger.LogInformation("AgentRunReconciler: cancelled {Orphans} running orphan(s) under terminal parents, stopped {CancelledAgents} still-running agent(s) of cancelled runs, cancelled {QueuedOrphans} queued orphan(s) under terminal parents, cancelled {ParentlessOrphans} parentless queued orphan(s), abandoned {Abandoned}, recovered {Recovered} from spool, re-attached {Reattached} alive run(s), resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", orphansCancelled, cancelledAgentsStopped, queuedOrphansCancelled, parentlessOrphansCancelled, abandoned, recovered, reattached, resumed, reDispatched);
 
-        return new AgentRunReconcileSummary { CancelledRunningUnderTerminalParent = orphansCancelled, CancelledQueuedUnderTerminalParent = queuedOrphansCancelled, CancelledParentlessQueued = parentlessOrphansCancelled, MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ReattachedStaleRunning = reattached, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
+        return new AgentRunReconcileSummary { CancelledRunningUnderTerminalParent = orphansCancelled, StoppedCancelledRunAgents = cancelledAgentsStopped, CancelledQueuedUnderTerminalParent = queuedOrphansCancelled, CancelledParentlessQueued = parentlessOrphansCancelled, MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ReattachedStaleRunning = reattached, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
     }
 
     /// <summary>
@@ -214,6 +216,112 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             return 0;
         }
     }
+
+    /// <summary>
+    /// The owning host's backstop for a CANCELLED run whose agent is still alive. A cancel flips the row wherever the
+    /// request landed — the API pod, in the api/worker split — and that host cannot reach a process another host
+    /// launched, so its kill is withheld and the agent falls to the worker that owns it, which stops it when it next
+    /// sees its lost fence (<c>AgentRunExecutor.StopCancelledAttemptAsync</c>). This covers what that owner misses: an
+    /// owner that died before it looked, a kill it could not confirm, a cancel that landed after a reclaim. Every other
+    /// sweep selects Running rows only, so without it a Cancelled row over a live process is nobody's job until the
+    /// process's own wall-clock deadline — and for a run launched without one, never.
+    ///
+    /// <para>Fail-closed for anything this host did not launch: candidates are filtered to NATIVE handles minted HERE
+    /// before the limit (the spool reaper's rule — foreign rows neither fill the batch nor get judged here), the probe
+    /// answers Running only for a local, identity-bound execution, and the kill is the runner's own identity-checked
+    /// terminate, never a signal to a bare pid.</para>
+    ///
+    /// <para>It runs every minute, so the candidate set is kept to rows that could still be alive, and read the way the
+    /// spool reaper's partial index can serve: cancelled inside <see cref="CancelledAgentWindow"/>, and not past the
+    /// deadline the handle carries (the RunnerHost stops its process at that instant, so a row past it can only be
+    /// dead). Oldest cancel first, bounded by <see cref="BatchSize"/>: the freshest cancels are still inside their
+    /// owner's own reaction window, while an agent alive long after its cancel is one no owner is coming back for — and
+    /// the oldest rows are the ones nearest to losing, to the spool reaper, the launch files that identify their
+    /// process. The residual: <see cref="BatchSize"/> or more OLDER candidates with no deadline (a run launched without
+    /// a wall clock) can hold the head of the queue until they leave the window.</para>
+    /// </summary>
+    private async Task<int> SweepCancelledWithLiveLocalAgentAsync(CancellationToken cancellationToken)
+    {
+        var candidates = await CancelledLocalAgentsAsync(cancellationToken).ConfigureAwait(false);
+
+        var stopped = 0;
+
+        foreach (var candidate in candidates)
+            stopped += await StopCancelledLocalAgentAsync(candidate.RunId, candidate.RunnerHandleJson, cancellationToken).ConfigureAwait(false);
+
+        return stopped;
+    }
+
+    /// <summary>
+    /// How far back the cancelled-agent sweep looks: the spool reaper's retention plus one of its hourly passes. Past it
+    /// the reaper has reclaimed — or is about to — the handle and the launch files the kill identifies the process by, so
+    /// nothing here could act on such a row anyway. Tracks the reaper's own setting, so an operator who lengthens the
+    /// retention lengthens this with it.
+    /// </summary>
+    internal static TimeSpan CancelledAgentWindow => AgentRunSpoolReaper.Retention + TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Cancelled runs inside <see cref="CancelledAgentWindow"/> that still carry a native handle THIS host minted and
+    /// whose deadline has not passed, oldest cancel first. An unstamped (pre-host) or pre-native handle is excluded
+    /// outright: its pid can name nothing of ours, and nothing but the pid identifies it.
+    ///
+    /// <para>The first line repeats <c>ix_agent_run_spool_cleanup_due</c>'s own predicate verbatim, so the planner can
+    /// read the partial index — terminal rows that still hold a handle — without having to prove it. The deadline cast
+    /// cannot fail on these rows: every handle is a serialized <see cref="SandboxHandle"/>, whose deadline is a
+    /// required <see cref="DateTimeOffset"/> (<see cref="DateTimeOffset.MaxValue"/> for a run with no wall clock).</para>
+    /// </summary>
+    private async Task<List<CancelledAgentCandidate>> CancelledLocalAgentsAsync(CancellationToken cancellationToken)
+    {
+        var host = LocalProcessRunner.CurrentHost;
+        var window = CancelledAgentWindow;
+
+        return await _db.AgentRun.FromSqlInterpolated($"""
+            SELECT agent_run.*, xmin FROM agent_run
+            WHERE runner_handle IS NOT NULL AND status NOT IN ('Queued', 'Running')
+              AND status = 'Cancelled' AND completed_at > statement_timestamp() - {window}
+              AND lower(runner_handle ->> 'launchHost') = lower({host}) AND jsonb_typeof(runner_handle -> 'nativeLaunch') = 'object'
+              AND (runner_handle ->> 'deadline')::timestamptz > statement_timestamp()
+            """).AsNoTracking()
+            .OrderBy(r => r.CompletedAt).ThenBy(r => r.Id)
+            .Take(BatchSize)
+            .Select(r => new CancelledAgentCandidate(r.Id, r.RunnerHandleJson!))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stop one cancelled run's agent when — and only when — the runner sees it ALIVE on this host. Returns 1 when the kill is confirmed. Never throws out of the sweep; a kill that is withheld or unconfirmed is logged and retried by the next sweep on this host.</summary>
+    private async Task<int> StopCancelledLocalAgentAsync(Guid runId, string handleJson, CancellationToken cancellationToken)
+    {
+        var durable = ResolveDurableRunner(handleJson, out var handle);
+
+        if (durable is null || handle is null || !await AgentAliveHereAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false)) return 0;
+
+        try
+        {
+            var termination = await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false);
+
+            _logger.LogWarning("AgentRunReconciler: agent run {RunId} is Cancelled but its agent (pid {Pid}) was still running on this host, so its owner never stopped it; terminate outcome {Outcome}: {Detail}", runId, handle.ProcessId, termination.Outcome, termination.Detail);
+
+            return termination.IsSettled ? 1 : 0;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: could not terminate the still-running agent of cancelled run {RunId}; the next sweep on this host tries again", runId);
+            return 0;
+        }
+    }
+
+    /// <summary>Whether the runner sees this handle's agent ALIVE on this host. Gone, exited, a handle it cannot bind or answer for here (Indeterminate), a probe that throws — none of them is this sweep's to act on.</summary>
+    private async Task<bool> AgentAliveHereAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
+    {
+        try { return (await durable.ProbeAsync(handle, cancellationToken).ConfigureAwait(false)).State == SandboxRunState.Running; }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: could not probe the agent of cancelled run {RunId}; leaving it for the next sweep", runId);
+            return false;
+        }
+    }
+
+    private sealed record CancelledAgentCandidate(Guid RunId, string RunnerHandleJson);
 
     /// <summary>
     /// The Queued-orphan backstop — the symmetric partner of <see cref="SweepRunningUnderTerminalParentAsync"/>: cancel
@@ -1237,6 +1345,9 @@ public sealed record AgentRunReconcileSummary
     /// <summary>Running branch-agent runs cancelled because their parent workflow run was terminal — the kill-wave's parent-terminal backstop (closes the snapshot-vs-claim orphan window regardless of lease/event liveness).</summary>
     public int CancelledRunningUnderTerminalParent { get; init; }
 
+    /// <summary>Cancelled runs whose agent was still running on THIS host — cancelled from a host that could not reach it, with no owner left to stop it — terminated by the owning host's sweep, the kill confirmed.</summary>
+    public int StoppedCancelledRunAgents { get; init; }
+
     /// <summary>Queued branch-agent runs cancelled because their parent workflow run was terminal AND no wait referenced them — the uncollectable-leak backstop for a suspension that committed the Queued run but crashed before its wait (the run would otherwise sit Queued forever, counted against the admission cap).</summary>
     public int CancelledQueuedUnderTerminalParent { get; init; }
 
@@ -1259,5 +1370,5 @@ public sealed record AgentRunReconcileSummary
     /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>
     public int ReDispatchedQueued { get; init; }
 
-    public int Total => CancelledRunningUnderTerminalParent + CancelledQueuedUnderTerminalParent + CancelledParentlessQueued + MarkedAbandonedFromRunning + RecoveredFromSpool + ReattachedStaleRunning + ResumedStalledParents + ReDispatchedQueued;
+    public int Total => CancelledRunningUnderTerminalParent + StoppedCancelledRunAgents + CancelledQueuedUnderTerminalParent + CancelledParentlessQueued + MarkedAbandonedFromRunning + RecoveredFromSpool + ReattachedStaleRunning + ResumedStalledParents + ReDispatchedQueued;
 }
