@@ -1141,8 +1141,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// Best-effort source-side orphan cleanup when a run lands Failure/Cancelled: resolve its still-Pending
-    /// waits (so none dangle) and mark the staged children they parked on Cancelled — Queued <c>AgentRun</c>
+    /// Best-effort source-side orphan cleanup when a run lands Failure/Cancelled: close its still-Pending
+    /// waits as <c>Discarded</c> (so none dangle, and none is later replayed as an answer — its payload still holds the
+    /// node's request) and mark the staged children they parked on Cancelled — Queued <c>AgentRun</c>
     /// children via the agent service's Queued-guarded CAS (a worker that already claimed one loses, untouched),
     /// and non-terminal <c>Subworkflow</c> children via a direct status-guarded CAS. NEVER throws out of
     /// completion (a cleanup failure must not turn a clean terminal into a stuck run); the reconciler's
@@ -1165,7 +1166,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             await _db.WorkflowRunWait
                 .Where(w => w.RunId == run.Id && w.Status == WorkflowWaitStatuses.Pending)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                    .SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded)
                     .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -2330,11 +2331,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var waits = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == run.Id && w.IterationKey == branchKey)
-            .Select(w => new { w.NodeId, w.Status, w.PayloadJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (var w in waits.Where(w => w.Status == WorkflowWaitStatuses.Resolved))
-            bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
+        InjectWaitAnswers(waits, bodyState.ResumePayloads);
 
         // This branch is still parked iff it has a Pending wait of its own. The single-wait immediate-resume
         // path re-walks the map with no wait-for-all barrier, so a still-pending sibling re-enters here.
@@ -2656,12 +2655,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             bodyState.EdgeLive[edge] = IsEdgeLive(edge, sourceStatus, bodyState.RoutingHints.GetValueOrDefault(edge.From));
         }
 
-        var resolved = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.RunId == run.Id && w.IterationKey == iterationKey && w.Status == WorkflowWaitStatuses.Resolved)
+        var waits = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == run.Id && w.IterationKey == iterationKey)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (var w in resolved)
-            bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
+        InjectWaitAnswers(waits, bodyState.ResumePayloads);
     }
 
     // The three iteration-key helpers below are the nested-loop key backbone (durable resume parses
@@ -3118,16 +3116,32 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // multi-park node (agent.supervisor, plan.confirm) accumulates resolved waits across its parks, and an
         // unordered scan let a STALE answer win the slot. Payload-reading multi-park nodes should still read
         // their OWN wait rows (the durable, iteration-scoped source); this makes the injected slot sane anyway.
-        var resolved = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Resolved)
+        var waits = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId)
             .OrderBy(w => w.ResolvedAt)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (var w in resolved)
-            state.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson)
-                ? EmptyJsonObject()
-                : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
+        InjectWaitAnswers(waits, state.ResumePayloads);
     }
+
+    /// <summary>
+    /// The ONE rule all three replay readers — the top-level walk, a map branch, a loop pass — apply when they turn a
+    /// node's wait rows into its <c>ResumePayload</c>: only a <see cref="WorkflowWaitStatuses.Resolved"/> wait carries an
+    /// ANSWER. A Pending wait has none yet, and a <see cref="WorkflowWaitStatuses.Discarded"/> one — closed by a cancel's
+    /// or terminal's teardown — still holds the node's own REQUEST (the approval prompt, the agent task, the timer's
+    /// wake_at). Replaying that as the answer is what made Continue fail a capped agent on its own task and read an
+    /// approval as rejected; skipped, the node finds no answer and re-parks a fresh wait exactly as a first run would.
+    /// Rows apply in the order given, so the caller's order decides which resolution wins a node's slot. internal so
+    /// the rule is unit-pinned directly (<c>WorkflowWaitReplayTests</c>).
+    /// </summary>
+    internal static void InjectWaitAnswers(IEnumerable<WorkflowRunWait> waits, IDictionary<string, JsonElement> resumePayloads)
+    {
+        foreach (var wait in waits.Where(w => w.Status == WorkflowWaitStatuses.Resolved))
+            resumePayloads[wait.NodeId] = ParseResumePayload(wait.PayloadJson);
+    }
+
+    private static JsonElement ParseResumePayload(string? payloadJson) =>
+        string.IsNullOrWhiteSpace(payloadJson) ? EmptyJsonObject() : JsonDocument.Parse(payloadJson).RootElement.Clone();
 
     private static JsonElement EmptyJsonObject() => JsonDocument.Parse("{}").RootElement.Clone();
 

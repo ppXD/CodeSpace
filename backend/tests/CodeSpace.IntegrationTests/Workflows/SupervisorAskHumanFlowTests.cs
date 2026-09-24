@@ -250,6 +250,73 @@ public class SupervisorAskHumanFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Continuing_a_run_stopped_while_parked_on_a_question_re_parks_on_it_instead_of_reading_a_blank_answer()
+    {
+        // The stop's teardown closes the parked ask wait WITHOUT an answer. Continue must put the run back where the stop
+        // found it — parked on the SAME question, answerable through the card already posted — never read the closed wait
+        // as an empty reply and advance the loop on an answer nobody gave.
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId);
+
+        ResolveJobClient().Clear();
+
+        // Drive to the ask park: turn 0 ask_human posts a card + parks on the Action wait.
+        await RunEngineAsync(runId);
+
+        string token;
+        using (var verify = _fixture.BeginScope())
+            token = (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending)).Token;
+
+        // The operator stops the parked run through the real cancel path, then continues it.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<Core.Services.Workflows.IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None))!.Cancelled.ShouldBeTrue("the parked run was stopped");
+
+        using (var verify = _fixture.BeginScope())
+            (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Token == token)).Status
+                .ShouldBe(WorkflowWaitStatuses.Discarded, "the stop closed the parked question unanswered");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<Core.Services.Workflows.IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None)).ShouldBeTrue("a run stopped while parked on a question continues in place");
+
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the continued run parked on the question again — it did not advance on an answer nobody gave");
+
+            (await LedgerKinds(runId, teamId)).ShouldBe(new[] { SupervisorDecisionKinds.AskHuman }, "no decision was taken past the unanswered question");
+
+            SupervisorOutcome.ReadAskHumanAnswer((await Ledger(db, runId, teamId)).Single().OutcomeJson)
+                .ShouldBeNull("the closed wait folded no answer — not even a blank one");
+
+            var open = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending);
+            open.Token.ShouldBe(token, "the SAME question is open again — the card already posted answers it");
+
+            (await db.Message.AsNoTracking().IgnoreQueryFilters().CountAsync(m => m.ConversationId == conversationId && m.InteractionJson != null && m.DeletedDate == null))
+                .ShouldBe(1, "no duplicate question card — the re-park reuses the one already posted");
+        }
+
+        // The human's real answer, through the card already posted, resumes the continued run end-to-end.
+        await AnswerAsync(token, "patch it", userId, teamId);
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the real answer resumed the continued run → stop → Success");
+
+            var stop = (await Ledger(db, runId, teamId)).Single(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
+            JsonDocument.Parse(stop.OutcomeJson!).RootElement.GetProperty("summary").GetString()
+                .ShouldBe("human said: patch it", "the next turn saw the human's real answer, not a blank one");
+        }
+    }
+
+    [Fact]
     public async Task A_crash_after_the_wait_but_before_terminal_then_an_answer_recovers_to_success_with_the_answer_preserved()
     {
         var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
