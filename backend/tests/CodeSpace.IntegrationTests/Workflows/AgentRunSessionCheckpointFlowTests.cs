@@ -289,6 +289,31 @@ public sealed class AgentRunSessionCheckpointFlowTests : IDisposable
             .ShouldBe(AgentRunStatus.Succeeded, "and the run must still land");
     }
 
+    [Fact]
+    public async Task An_unreadable_checkpoint_on_a_locally_graded_task_degrades_and_is_still_graded_on_its_contract()
+    {
+        // The degrade tells the agent by amending its goal, and local acceptance hashes the run's goal against the
+        // persisted envelope before launch. Graded against the amended goal, the contract never matched: the run
+        // failed as a grader fault (local-context-mismatch) before it launched — the attempt the degrade exists to save.
+        var team = await SeedTeamAsync();
+        var harness = new TranscriptWritingHarness("s-unreadable-graded");
+
+        var run = await SeedQueuedResumableRunAsync(team, authoredWorkingDirectory: true, task => task with
+        {
+            ResumeFromSessionId = "s-lost-host", RestoredTranscriptArtifactId = Guid.NewGuid(), RestoredTranscriptIsCheckpoint = true,
+            ResumedFromCheckpointAt = DateTimeOffset.UtcNow.AddMinutes(-3), ResumedFromAgentRunId = Guid.NewGuid(),
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "/bin/sh", "-c", "true" }, Description = "always passes" },
+        });
+
+        await ExecuteAsync(run.RunId, harness);
+
+        using var verify = _fixture.BeginScope();
+        var row = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == run.RunId);
+
+        row.Status.ShouldBe(AgentRunStatus.Succeeded, $"an unreadable checkpoint must cost the conversation, never the attempt — the run ended {row.Status}: {row.ResultJson}");
+        harness.Invocations.ShouldHaveSingleItem().Goal.ShouldContain(AgentRetryContinuity.LostHostCheckpointUnreadableHint, Case.Sensitive, "the agent is still told");
+    }
+
     [Theory]
     [InlineData(true)]    // a CHECKPOINT ref — best-effort, so an unreadable one must degrade
     [InlineData(false)]   // a CAPTURED ref — written by an attempt that finished, so an unreadable one is a fault
