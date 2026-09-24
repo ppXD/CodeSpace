@@ -29,6 +29,46 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 public partial class AgentRunExecutorTests
 {
+    [Fact]
+    public async Task A_cold_continuation_refused_for_spend_leaves_no_trace_of_a_conversation_set_aside()
+    {
+        // The cold degrade is decided before spend admission. A launch refused there never started a process, so the
+        // timeline must not say it "started a fresh conversation", and the Room's resumed mark keeps its envelope.
+        if (OperatingSystem.IsWindows()) return;
+
+        var transcript = new string('x', NativeLaunchProtocol.MaximumFrameBytes + 1);
+        var teamId = await SeedTeamAsync();
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: TerminalClaimUsd);
+        Guid runId;
+
+        using (var scope = await CodeSpace.IntegrationTests.Workflows.Infrastructure.WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
+        {
+            var artifactId = await scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>().PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(transcript), "text/plain", CancellationToken.None);
+            var created = await scope.Resolve<IAgentRunService>().CreateAsync(
+                new AgentTask { Goal = "resume the prior work", Harness = "scripted", Model = "claude-opus-4-8", TimeoutSeconds = 1800, MaxCostUsd = TerminalClaimUsd, ResumeFromSessionId = "session-too-large-to-restore", RestoredTranscriptArtifactId = artifactId },
+                teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
+            runId = created.Id;
+        }
+
+        // A dead attempt's claim holds the whole cap, so this attempt's admission is refused.
+        await MintLaunchClaimAsync(workflowRunId, teamId, runId, epoch: 6);
+        await ArmNextAttemptAsync(runId, priorEpoch: 6);
+
+        var harness = new ClaudeSpecScriptedHarness("cat >/dev/null; printf 'resumed\\n'");
+
+        await ExecuteAsync(runId, harness);
+
+        var result = await PersistedResultAsync(runId);
+        using var verify = _fixture.BeginScope();
+        var events = await verify.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        result.ExitReason.ShouldBe(FailureCodes.RunBudgetExhausted, "fixture check: the launch was refused for spend, before any process");
+        harness.Specs.Count.ShouldBe(2, "fixture check: the cold degrade was decided");
+        events.ShouldNotContain(e => e.Text == AgentRunExecutor.LaunchRanColdNote, "the trace must never say a conversation was set aside for an attempt that did not run");
+        JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)!.ResumeFromSessionId.ShouldBe("session-too-large-to-restore", "nothing ran, so nothing about its continuity changed");
+    }
+
     /// <summary>The cost a priced terminal leaves behind, and the reserve every claim below is minted for.</summary>
     private const decimal TerminalObservedUsd = 0.75m;
     private const decimal TerminalClaimUsd = 5m;
