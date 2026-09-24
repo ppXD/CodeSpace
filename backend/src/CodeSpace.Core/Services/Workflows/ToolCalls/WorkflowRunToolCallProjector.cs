@@ -32,6 +32,9 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
     /// Candidate SQL is shared with the true-Postgres plan pin. The partial-index predicate is textually exact;
     /// AdmissionOrdinal is the gap-tolerant source rank, never a cursor or dense re-numbering. Selected fields are
     /// bounded metadata only: the ledger payload, error, hash, approval bearer and decision envelope never enter it.
+    /// A reviewer's rejection is therefore recognised from approval metadata, not its error text: a Failed row that was
+    /// parked for approval (a deadline was stamped) and never approved can never have executed, because execution
+    /// claims only an approved row.
     /// </summary>
     internal const string CandidateSql = """
         SELECT ledger.id,
@@ -44,7 +47,8 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
                ledger.tool_kind,
                ledger.status,
                ledger.created_date,
-               ledger.last_modified_date
+               ledger.last_modified_date,
+               (ledger.status = 'Failed' AND ledger.approval_deadline_at IS NOT NULL AND ledger.approved_at IS NULL) AS rejected_before_execution
         FROM tool_call_ledger AS ledger
         CROSS JOIN LATERAL (
             SELECT agent.workflow_run_id,
@@ -246,6 +250,7 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
         NodeId = reader.IsDBNull(4) ? null : reader.GetString(4), IterationKey = reader.GetString(5), AdmissionOrdinal = reader.GetInt64(6),
         RawToolKind = reader.GetString(7), SourceStatus = reader.GetString(8),
         CreatedAt = reader.GetFieldValue<DateTimeOffset>(9), SourceModifiedAt = reader.GetFieldValue<DateTimeOffset>(10),
+        RejectedBeforeExecution = reader.GetBoolean(11),
     };
 
     private static void AddParameter(DbCommand command, string name, DbType type, object value)
@@ -279,6 +284,7 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
         public string SourceStatus { get; init; } = string.Empty;
         public DateTimeOffset CreatedAt { get; init; }
         public DateTimeOffset SourceModifiedAt { get; init; }
+        public bool RejectedBeforeExecution { get; init; }
     }
     private sealed record Projection(WorkflowRunToolCall Call, WorkflowRunToolCallAttempt Attempt, Outcome Outcome);
     private readonly record struct SourceIdentity(Guid TeamId, Guid WorkflowRunId, Guid SourceId)
@@ -294,6 +300,7 @@ public sealed class WorkflowRunToolCallProjector : IWorkflowRunToolCallProjector
             return candidate.SourceStatus switch
             {
                 nameof(ToolCallLedgerStatus.Succeeded) => new(ToolCallAttemptStatus.Succeeded, ToolCallState.Completed, null, sourceTerminalAt),
+                nameof(ToolCallLedgerStatus.Failed) when candidate.RejectedBeforeExecution => new(ToolCallAttemptStatus.Denied, ToolCallState.Completed, GovernanceDenied, sourceTerminalAt),
                 nameof(ToolCallLedgerStatus.Failed) => new(ToolCallAttemptStatus.Indeterminate, ToolCallState.Abandoned, FailedOutcomeUnknown, sourceTerminalAt),
                 nameof(ToolCallLedgerStatus.Denied) => new(ToolCallAttemptStatus.Denied, ToolCallState.Completed, GovernanceDenied, sourceTerminalAt),
                 nameof(ToolCallLedgerStatus.Expired) => new(ToolCallAttemptStatus.Denied, ToolCallState.Completed, ApprovalExpired, sourceTerminalAt),

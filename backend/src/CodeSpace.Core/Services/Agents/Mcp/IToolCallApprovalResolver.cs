@@ -11,8 +11,9 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// Records the human's DECISION (approve / reject) on a parked tool-call approval (durable mid-turn HITL, item D) and
 /// wakes any in-memory waiter so a blocked handler call (item D2) resumes. It does NOT run the side effect — approve
 /// only STAMPS the decision (the row stays <c>AwaitingApproval</c>; the handler flips it to terminal once it executes);
-/// reject drives <c>AwaitingApproval → Failed</c> directly. Owns the status-guarded CAS over the ledger row (mirrors
-/// <see cref="ToolCallLedgerService"/>.RecordTerminalAsync) and team-scopes every read for defense-in-depth (mirrors
+/// reject drives an undecided <c>AwaitingApproval → Failed</c> directly. Both CASes require a not-yet-approved row, so
+/// the row takes the first decision even from two cards carrying one token. Owns the status-guarded CAS over the
+/// ledger row (mirrors <see cref="ToolCallLedgerService"/>.RecordTerminalAsync) and team-scopes every read for defense-in-depth (mirrors
 /// <c>WorkflowResumeService.ResumeByActionTokenAsync</c>). Returns an <see cref="ActionResumeResult"/> so the chat
 /// caller knows whether to stamp the card (Resumed / NoWait) or reject a late click (AlreadyResolved).
 /// </summary>
@@ -24,6 +25,14 @@ public interface IToolCallApprovalResolver
 
 public sealed class ToolCallApprovalResolver : IToolCallApprovalResolver, IScopedDependency
 {
+    /// <summary>
+    /// The error a rejected row carries — and, because the row is terminal, the exact text the blocked call and every
+    /// identical re-call replay to the model. Load-bearing: the session-effect receipts recognise it to say nothing ran
+    /// instead of "outcome uncertain". It names no one: the reviewer is on the row's <c>last_modified_by</c> and on the
+    /// card's resolution, and a raw user id tells the model nothing.
+    /// </summary>
+    public const string RejectedError = "A reviewer rejected this tool call before it ran, so nothing was executed. Re-issuing it with identical arguments returns this same rejection without asking again; change the approach rather than retrying it.";
+
     private const string Approve = "approve";
     private const string Reject = "reject";
 
@@ -69,16 +78,19 @@ public sealed class ToolCallApprovalResolver : IToolCallApprovalResolver, IScope
         };
     }
 
-    // Reject — status-guarded CAS AwaitingApproval → Failed (a legal transition). No side effect to run.
+    // Reject — status-guarded CAS AwaitingApproval → Failed (a legal transition). No side effect to run. The reviewer is
+    // recorded in last_modified_by, not in the error: the error is what the model is replayed. The approved_at == null
+    // guard mirrors ApproveAsync's: a card only serializes its own clicks, so a reject on a second card after an approve
+    // must lose here rather than fail an approved call before it runs.
     private async Task<ActionResumeResult> RejectAsync(Guid ledgerId, Guid teamId, Guid actorUserId, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
 
         var affected = await _db.ToolCallLedger
-            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval)
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.Failed)
-                .SetProperty(l => l.Error, $"rejected by {actorUserId}")
+                .SetProperty(l => l.Error, RejectedError)
                 .SetProperty(l => l.LastModifiedDate, now)
                 .SetProperty(l => l.LastModifiedBy, actorUserId), ct)
             .ConfigureAwait(false);

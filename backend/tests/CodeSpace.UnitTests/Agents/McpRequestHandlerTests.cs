@@ -866,27 +866,39 @@ public class McpRequestHandlerTests
         /// <summary>When set, TryBeginApprovalAsync returns this — true is the park CAS WON, i.e. the row is now live on the answer surface and the block is next.</summary>
         public Func<bool>? BeginApprovalResult { get; init; }
 
+        /// <summary>The approval token the park stamped on the row — what a card for that row must carry.</summary>
+        public string? BegunApprovalToken { get; private set; }
+
         public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct)
         {
             if (OnBeginApprovalThrow is { } make) throw make();
 
+            BegunApprovalToken = approvalToken;
+
             return Task.FromResult(BeginApprovalResult?.Invoke() ?? false);
         }
 
-        public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct) => Task.CompletedTask;
+        /// <summary>Every card id recorded on a row.</summary>
+        public List<(Guid LedgerId, Guid MessageId)> ApprovalMessages { get; } = new();
+
+        public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct)
+        {
+            ApprovalMessages.Add((ledgerId, messageId));
+            return Task.CompletedTask;
+        }
 
         /// <summary>Records every execution-claim attempt; returns the configured outcome (default true → the caller is the single winner).</summary>
         public List<Guid> ExecutionClaims { get; } = new();
         public Func<bool>? ExecutionClaimResult { get; init; }
 
-        public Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken ct)
+        public Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, long fenceEpoch, CancellationToken ct)
         {
             ExecutionClaims.Add(ledgerId);
             return Task.FromResult(ExecutionClaimResult?.Invoke() ?? true);
         }
 
-        /// <summary>When set, ReadApprovalStateAsync returns this (the post-wake / loser-of-claim authority); else null.</summary>
-        public Func<ToolCallApprovalState?>? ApprovalState { get; init; }
+        /// <summary>When set, ReadApprovalStateAsync returns this (the post-wake / loser-of-claim authority); else null. Settable so a state can read what the handler already wrote to this ledger.</summary>
+        public Func<ToolCallApprovalState?>? ApprovalState { get; set; }
 
         public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken ct) =>
             Task.FromResult(ApprovalState?.Invoke());
@@ -1265,16 +1277,32 @@ public class McpRequestHandlerTests
     private sealed class StubBot : Core.Services.Chat.IChatBotService
     {
         public bool ConversationInTeam { get; init; }
-        public int PostCount { get; private set; }
+        public int PostCount => Posted.Count;
+
+        /// <summary>When set, the next post throws (a transient chat fault) before anything is posted.</summary>
+        public bool FailNextPost { get; set; }
+
+        /// <summary>Every card actually posted: its message id and the interaction it carried.</summary>
+        public List<(Guid Id, Messages.Dtos.Chat.Interactions.MessageInteraction? Interaction)> Posted { get; } = new();
 
         public Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
         public Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken ct) => Task.FromResult(ConversationInTeam);
 
         public Task<Messages.Dtos.Chat.MessageView> PostAsBotAsync(Guid conversationId, string body, Messages.Dtos.Chat.Interactions.MessageInteraction? interaction, CancellationToken ct)
         {
-            PostCount++;
-            return Task.FromResult(new Messages.Dtos.Chat.MessageView { Id = Guid.NewGuid(), ConversationId = conversationId, AuthorUserId = Guid.NewGuid(), Body = body, CreatedDate = DateTimeOffset.UnixEpoch, IsDeleted = false, References = Array.Empty<Messages.Dtos.Chat.MessageReferenceView>() });
+            if (FailNextPost)
+            {
+                FailNextPost = false;
+                throw new InvalidOperationException("transient chat fault");
+            }
+
+            var id = Guid.NewGuid();
+            Posted.Add((id, interaction));
+            return Task.FromResult(new Messages.Dtos.Chat.MessageView { Id = id, ConversationId = conversationId, AuthorUserId = Guid.NewGuid(), Body = body, CreatedDate = DateTimeOffset.UnixEpoch, IsDeleted = false, References = Array.Empty<Messages.Dtos.Chat.MessageReferenceView>() });
         }
+
+        /// <summary>The approval token each posted card carried.</summary>
+        public IEnumerable<string> PostedTokens => Posted.Select(p => ((Messages.Dtos.Chat.Interactions.ToolCallApprovalTarget)p.Interaction!.Target).Token);
     }
 
     private sealed class StubWaiters : IToolApprovalWaiterRegistry
@@ -1448,6 +1476,82 @@ public class McpRequestHandlerTests
         ledger.ExecutionClaims.ShouldHaveSingleItem("the approved row is claimed for execution exactly once");
         tool.CallCount.ShouldBe(1, "the side effect the human approved runs now, not ten minutes from now");
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+    }
+
+    // ── a parked approval whose card never posted ──
+
+    /// <summary>The full approval surface over a waiter that arms but is never signalled — the durable row is the only way out of the block.</summary>
+    private static McpRequestHandler ParkedApprovalHandler(SpyLedger ledger, StubBot bot, IAgentTool tool) =>
+        new(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
+            approvalConversationId: Guid.NewGuid(), bot, new ArmedButNeverSignalledWaiters(), new StubComponents());
+
+    /// <summary>Await a re-call of a parked approval under <see cref="ArmRaceBudget"/> — one still running past it is blocked on a row no one can approve.</summary>
+    private static async Task<JsonElement> WithinCardlessBudgetAsync(Task<JsonElement?> call)
+    {
+        (await Task.WhenAny(call, Task.Delay(ArmRaceBudget))).ShouldBeSameAs(call,
+            customMessage: $"the re-call blocked on the {McpRequestHandler.DefaultApprovalBoundSeconds}s bound behind a parked approval with no card — nothing else lists a pending approval, so no one could ever give it");
+
+        return (await call)!.Value;
+    }
+
+    [Theory]
+    [InlineData(false, 1)]   // no card recorded — the park's post failed — so the re-call posts it
+    [InlineData(true, 0)]    // the card is recorded, so the re-call never posts a second one
+    public async Task A_re_call_of_a_parked_approval_posts_its_card_only_when_none_was_recorded(bool cardRecorded, int expectedPosts)
+    {
+        var reads = 0;
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.InFlight(Guid.NewGuid()),
+            ApprovalState = () => ++reads == 1
+                ? new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = "parked-token", ApprovalMessageId = cardRecorded ? Guid.NewGuid() : null }
+                : new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = "parked-token", ApprovedAt = DateTimeOffset.UtcNow },   // a human then approved
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var result = (await WithinCardlessBudgetAsync(ParkedApprovalHandler(ledger, bot, tool).HandleAsync(Parse(Call("git.merge_pr", "{}")), CancellationToken.None))).GetProperty("result");
+
+        bot.PostCount.ShouldBe(expectedPosts);
+        bot.PostedTokens.ShouldAllBe(token => token == "parked-token", "a re-posted card carries the parked row's own token, so a click resolves that row");
+        ledger.ApprovalMessages.Select(m => m.MessageId).ShouldBe(bot.Posted.Select(p => p.Id), "a re-posted card's id is recorded on the row");
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "the approval proceeds either way");
+    }
+
+    [Fact]
+    public async Task A_card_whose_first_post_threw_is_posted_by_the_next_identical_call_and_the_approval_proceeds()
+    {
+        // The park CAS wins, then the card post throws: the call degrades to a retryable error and the row is left
+        // AwaitingApproval with NO card. Nothing else lists a pending approval, so no one can give it. The identical
+        // re-call must post that card with the token the park stamped, record it, and let the approval land.
+        var ledgerId = Guid.NewGuid();
+        var claims = 0;
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ++claims == 1 ? ToolCallClaim.Proceed(ledgerId) : ToolCallClaim.InFlight(ledgerId),
+            BeginApprovalResult = () => true,
+        };
+        ledger.ApprovalState = () => ledger.ApprovalMessages.Count == 0
+            ? new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = ledger.BegunApprovalToken }
+            : new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = ledger.BegunApprovalToken, ApprovalMessageId = ledger.ApprovalMessages[0].MessageId, ApprovedAt = DateTimeOffset.UtcNow };   // once a card exists, a human approves it
+        var bot = new StubBot { ConversationInTeam = true, FailNextPost = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = ParkedApprovalHandler(ledger, bot, tool);
+
+        var first = (await Respond(handler, Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        first.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        first.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull().ShouldContain("retry", customMessage: "a failed card post degrades to a retryable error");
+        bot.PostCount.ShouldBe(0);
+        ledger.ApprovalMessages.ShouldBeEmpty("the row is parked with no card");
+
+        var second = (await WithinCardlessBudgetAsync(handler.HandleAsync(Parse(Call("git.merge_pr", "{}")), CancellationToken.None))).GetProperty("result");
+
+        bot.PostedTokens.ShouldHaveSingleItem().ShouldBe(ledger.BegunApprovalToken, "the card carries the token the park stamped on the row");
+        ledger.ApprovalMessages.ShouldHaveSingleItem().MessageId.ShouldBe(bot.Posted[0].Id, "the posted card's id is recorded on the row");
+        second.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "the approved call runs once");
     }
 
     [Fact]

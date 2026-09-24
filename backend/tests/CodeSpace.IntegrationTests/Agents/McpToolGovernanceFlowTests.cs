@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -18,7 +19,8 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// stands in for a side-effecting tool whose body must run exactly once). Covers: a write tool deduped across two
 /// identical calls (the body runs ONCE, both responses carry the same result, exactly one Succeeded ledger row); a
 /// read-only tool writing NO row; a different-args call running separately; redact-before-persist on the stored row;
-/// and the flag-OFF byte-identical path (no rows, the tool runs on every call).
+/// a call a lost worker left in flight answered as interrupted once the run is re-attached; and the flag-OFF
+/// byte-identical path (no rows, the tool runs on every call).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -170,6 +172,36 @@ public class McpToolGovernanceFlowTests
         tool.CallCount.ShouldBe(1, "...without running the tool again");
     }
 
+    [Theory]
+    [InlineData(true, McpRequestHandler.InterruptedToolCallError)]               // claimed by the attempt whose worker was lost → answered as interrupted
+    [InlineData(false, "This tool call is already in progress; retry shortly.")]  // claimed by this attempt → genuinely in flight
+    public async Task A_call_a_lost_worker_left_in_flight_is_answered_as_interrupted_once_the_run_is_re_attached(bool claimedByTheLostAttempt, string expected)
+    {
+        // A worker hard-killed mid-call leaves its row Pending — its recovery write never ran — while the detached agent
+        // survives and the run is re-attached at a new epoch. The run stays live, so the stale-row reaper (terminal runs
+        // only) never settles the row, and the agent's identical re-call used to hear "in progress" for the rest of the run.
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedRunningRunWithLapsedLeaseAsync(teamId);
+        var tool = new CountingWriteTool();
+        var arguments = new { branch = "main" };
+        var inputHash = ToolCallKey.InputHash(JsonSerializer.SerializeToElement(arguments));
+
+        if (claimedByTheLostAttempt) await ClaimAsync(teamId, runId, tool.Kind, inputHash, fenceEpoch: 0);   // the lost worker's claim, never settled
+
+        var epoch = await ReattachAsync(runId);
+
+        if (!claimedByTheLostAttempt) await ClaimAsync(teamId, runId, tool.Kind, inputHash, epoch);   // this attempt's own call, still running
+
+        using var scope = _fixture.BeginScope();
+        var handler = new McpRequestHandler(new SingleToolRegistry(tool), AgentAutonomyLevel.Unleashed, teamId, null, runId, scope.Resolve<IToolCallLedgerService>(), epoch, governanceEnabled: true);
+
+        var reCall = await CallToolAsync(handler, tool.Kind, arguments);
+
+        reCall.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(reCall).ShouldBe(expected);
+        tool.CallCount.ShouldBe(0, "neither answer re-runs the side effect — exactly-once holds");
+    }
+
     [Fact]
     public async Task A_governed_side_effecting_tool_on_a_null_team_run_does_not_crash_and_writes_no_row()
     {
@@ -220,6 +252,35 @@ public class McpToolGovernanceFlowTests
     }
 
     private static string Text(JsonElement toolResult) => toolResult.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+
+    /// <summary>A live run whose worker's lease has lapsed — the state a hard-killed worker leaves, and the one a re-attach reserves from.</summary>
+    private async Task<Guid> SeedRunningRunWithLapsedLeaseAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var runId = Guid.NewGuid();
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, LeaseExpiresAt = DateTimeOffset.UtcNow - TimeSpan.FromHours(1), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return runId;
+    }
+
+    /// <summary>Re-attach the run the way the reconciler does — a new fence epoch, the run still Running — and return that epoch.</summary>
+    private async Task<long> ReattachAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+    }
+
+    /// <summary>Claim the call through the real ledger at <paramref name="fenceEpoch"/>, leaving its row Pending — as a claim whose tool never returned does.</summary>
+    private async Task ClaimAsync(Guid teamId, Guid runId, string toolKind, string inputHash, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var claim = await scope.Resolve<IToolCallLedgerService>().TryClaimAsync(runId, teamId, toolKind, ToolCallKey.For(toolKind, inputHash), inputHash, fenceEpoch, CancellationToken.None);
+
+        claim.Outcome.ShouldBe(ToolCallClaimOutcome.Proceed);
+    }
 
     private async Task<Guid> SeedTeamAsync()
     {

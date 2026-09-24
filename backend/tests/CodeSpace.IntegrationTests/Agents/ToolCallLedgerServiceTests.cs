@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -18,7 +19,8 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// Drives the REAL ToolCallLedgerService (resolved through CodeSpaceModule's DI, proving it's registered) against real
 /// Postgres: the INSERT-first exactly-once invariant (a claim wins; a second claim for the same (run, key) dedups —
-/// terminal returns the stored result, non-terminal returns InFlight; a CONCURRENT race yields exactly one Proceed),
+/// terminal returns the stored result, non-terminal returns InFlight unless an earlier attempt left it in flight, which
+/// is settled interrupted; a CONCURRENT race yields exactly one Proceed),
 /// the status-guarded terminal CAS (legal flip wins; an already-terminal row rejects; a FOREIGN team cannot flip the
 /// owner's row), and the team-scoped audit read. The unique (agent_run_id, idempotency_key) index is the proof — driven
 /// over real PG, not mocked.
@@ -368,6 +370,116 @@ public class ToolCallLedgerServiceTests
             .ShouldBe(ToolCallClaimOutcome.Proceed, "the CURRENT owner's claim, at its own live fence, must still proceed");
     }
 
+    // A worker hard-killed mid-call leaves its row non-terminal (its recovery write never ran) while the detached agent
+    // survives and the run is re-attached at a new epoch. The run is still live, so ExpireStaleToolCallsAsync (terminal runs
+    // only) never settles the row, and every identical re-call used to read InFlight for the rest of the run.
+    [Theory]
+    [InlineData(ToolCallLedgerStatus.Pending, "git.open_pr", true, true)]                        // the lost worker's claim, maybe mid-call → settled, replayed
+    [InlineData(ToolCallLedgerStatus.Running, "git.open_pr", true, true)]                        // an approved call the lost worker was executing → settled, replayed
+    [InlineData(ToolCallLedgerStatus.Pending, "git.open_pr", false, false)]                      // claimed at the caller's own epoch → genuinely in flight
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, "git.open_pr", true, false)]              // a parked approval outlives a re-attach — its human can still decide it
+    [InlineData(ToolCallLedgerStatus.Pending, DecisionToolKinds.DecisionRequest, true, false)]   // a decision has no effect to be unsure of; its own flow owns it
+    public async Task A_row_an_earlier_attempt_left_in_flight_is_settled_interrupted_when_the_re_attached_run_claims_it_again(ToolCallLedgerStatus status, string toolKind, bool claimedByAnEarlierAttempt, bool settled)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var key = $"{toolKind}:{runId:N}";
+
+        await SeedAgentRunAsync(teamId, runId, AgentRunStatus.Running, DateTimeOffset.UtcNow - TimeSpan.FromHours(1));   // the worker died: its lease lapsed
+
+        var epoch = await ReattachAsync(runId);
+        var ledgerId = await SeedToolCallAsync(teamId, runId, status, toolKind, key, DateTimeOffset.UtcNow, claimedByAnEarlierAttempt ? epoch - 1 : epoch);
+
+        ToolCallClaim claim;
+        using (var scope = _fixture.BeginScope())
+            claim = await Svc(scope).TryClaimAsync(runId, teamId, toolKind, key, InputHash, epoch, CancellationToken.None);
+
+        var row = await ReadRowAsync(ledgerId);
+
+        claim.LedgerId.ShouldBe(ledgerId, "the claim reports the existing row either way — never a second one");
+
+        if (settled)
+        {
+            claim.Outcome.ShouldBe(ToolCallClaimOutcome.Duplicate, "the row an earlier attempt left in flight is settled and replayed — never re-run, never InFlight forever");
+            claim.PriorStatus.ShouldBe(ToolCallLedgerStatus.Failed);
+            claim.PriorError.ShouldBe(McpRequestHandler.InterruptedToolCallError, "its effect may or may not have landed, and the replayed text says exactly that");
+            row.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+            row.Error.ShouldBe(McpRequestHandler.InterruptedToolCallError);
+        }
+        else
+        {
+            claim.Outcome.ShouldBe(ToolCallClaimOutcome.InFlight);
+            row.Status.ShouldBe(status, "the guard held — a same-epoch call, a parked approval and a decision are all left alone");
+        }
+    }
+
+    /// <summary>How a row read as the lost attempt's Pending claim moves on before the settle decided on that read runs.</summary>
+    public enum MovedAfterRead
+    {
+        CurrentAttemptBeganRunningIt,
+        LostAttemptRecordedItsResult,
+    }
+
+    [Theory]
+    [InlineData(MovedAfterRead.CurrentAttemptBeganRunningIt, ToolCallLedgerStatus.Running)]      // parked, approved and begun under the current epoch — a live action
+    [InlineData(MovedAfterRead.LostAttemptRecordedItsResult, ToolCallLedgerStatus.Succeeded)]    // the old worker's own late result — a real outcome
+    public async Task A_settle_decided_on_a_stale_read_never_lands_on_a_row_that_has_since_moved(MovedAfterRead move, ToolCallLedgerStatus expected)
+    {
+        // The claim reads the existing row, then settles it. The settle must match the status AND epoch it read: landing on
+        // a row that moved since would record a live, approved action as interrupted mid-run, or overwrite a real result.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        await SeedAgentRunAsync(teamId, runId, AgentRunStatus.Running, DateTimeOffset.UtcNow - TimeSpan.FromHours(1));
+
+        Guid ledgerId;
+        using (var lost = _fixture.BeginScope())
+            ledgerId = (await Svc(lost).TryClaimAsync(runId, teamId, "git.open_pr", Key, InputHash, 0, CancellationToken.None)).LedgerId;   // the lost attempt's claim
+
+        var staleRead = await ReadRowAsync(ledgerId);   // what the re-claim read: Pending at epoch 0
+        var epoch = await ReattachAsync(runId);
+
+        if (move == MovedAfterRead.CurrentAttemptBeganRunningIt) await ParkApproveAndBeginExecutionAsync(teamId, ledgerId, epoch);
+        else await RecordSucceededAsync(teamId, ledgerId);
+
+        using (var scope = _fixture.BeginScope())
+            await ((ToolCallLedgerService)Svc(scope)).SettleStrandedClaimAsync(staleRead, epoch, CancellationToken.None);
+
+        var row = await ReadRowAsync(ledgerId);
+        row.Status.ShouldBe(expected, "the row moved since it was read, so a settle decided on that read must not land");
+        row.Error.ShouldBeNull();
+    }
+
+    /// <summary>Re-attach the run as the reconciler does — a new fence epoch, the run still Running — and return that epoch.</summary>
+    private async Task<long> ReattachAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+    }
+
+    /// <summary>Park the row for approval, approve it through the real resolver, and begin its execution at <paramref name="fenceEpoch"/>.</summary>
+    private async Task ParkApproveAndBeginExecutionAsync(Guid teamId, Guid ledgerId, long fenceEpoch)
+    {
+        using var scope = _fixture.BeginScope();
+        var token = $"tok-{Guid.NewGuid():N}";
+
+        (await Svc(scope).TryBeginApprovalAsync(ledgerId, teamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+        (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, "approve", Guid.NewGuid(), teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
+        (await Svc(scope).TryBeginExecutionAsync(ledgerId, teamId, fenceEpoch, CancellationToken.None)).ShouldBeTrue();
+    }
+
+    /// <summary>Record the call's own result — what a lost attempt's worker writes if it was only presumed lost.</summary>
+    private async Task RecordSucceededAsync(Guid teamId, Guid ledgerId)
+    {
+        using var scope = _fixture.BeginScope();
+        await Svc(scope).RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Succeeded, """{"content":[{"type":"text","text":"opened"}],"isError":false}""", null, CancellationToken.None);
+    }
+
+    private async Task<ToolCallLedger> ReadRowAsync(Guid ledgerId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == ledgerId);
+    }
+
     private async Task SeedAgentRunAsync(Guid teamId, Guid runId, AgentRunStatus status, DateTimeOffset leaseExpiresAt)
     {
         using var scope = _fixture.BeginScope();
@@ -378,7 +490,7 @@ public class ToolCallLedgerServiceTests
         await db.SaveChangesAsync();
     }
 
-    private async Task<Guid> SeedToolCallAsync(Guid teamId, Guid runId, ToolCallLedgerStatus status, string toolKind, string key, DateTimeOffset at)
+    private async Task<Guid> SeedToolCallAsync(Guid teamId, Guid runId, ToolCallLedgerStatus status, string toolKind, string key, DateTimeOffset at, long fenceEpoch = 0)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -386,7 +498,7 @@ public class ToolCallLedgerServiceTests
         var id = Guid.NewGuid();
         db.ToolCallLedger.Add(new ToolCallLedger
         {
-            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = toolKind, IdempotencyKey = key, InputHash = InputHash, Status = status,
+            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = toolKind, IdempotencyKey = key, InputHash = InputHash, Status = status, FenceEpoch = fenceEpoch,
             CreatedDate = at, LastModifiedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 

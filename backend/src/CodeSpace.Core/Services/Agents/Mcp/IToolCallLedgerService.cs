@@ -26,7 +26,11 @@ public interface IToolCallLedgerService
     /// Claim the right to execute this call. INSERTs a Pending row; on the unique-index collision (a concurrent or
     /// prior call for the same key) re-reads the existing row and returns <see cref="ToolCallClaimOutcome.Duplicate"/>
     /// (with the prior terminal result) when terminal, else <see cref="ToolCallClaimOutcome.InFlight"/>. Exactly one
-    /// caller for a given key ever gets <see cref="ToolCallClaimOutcome.Proceed"/>.
+    /// caller for a given key ever gets <see cref="ToolCallClaimOutcome.Proceed"/>. A Pending / Running side-effecting
+    /// row stamped with an OLDER epoch than <paramref name="fenceEpoch"/> (its claim's, or its execution's — see
+    /// <see cref="TryBeginExecutionAsync"/>) was left by a worker lost mid-call before the run was re-attached: it is first
+    /// settled Failed with <see cref="McpRequestHandler.InterruptedToolCallError"/> and returned as that Duplicate, never
+    /// re-run and never InFlight for the rest of the run.
     ///
     /// <para>
     /// P07/P09 3a: fenced on <paramref name="fenceEpoch"/> against the owning Agent Run's LIVE fence (mirrors
@@ -62,10 +66,12 @@ public interface IToolCallLedgerService
     /// executors of the same approved (run, key) wins (returns true) and runs <c>tool.CallAsync</c>; every loser sees the
     /// row already Running/terminal, gets false, and re-reads + replays rather than re-running the side effect. Returns
     /// false when the row is not an approved AwaitingApproval (not yet approved, already claimed, or already terminal).
+    /// The winner stamps its own <paramref name="fenceEpoch"/> on the row: a call parked by an earlier attempt and run by
+    /// the re-attached one is then in flight on the CURRENT attempt, not stranded by the lost one (see <see cref="TryClaimAsync"/>).
     /// </summary>
-    Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
+    Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken);
 
-    /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error} — the post-wake authority a blocked handler re-reads to decide the outcome. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
+    /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error, ApprovalMessageId, ApprovalToken} — the post-wake authority a blocked handler re-reads to decide the outcome, and what a re-call needs to re-post a card whose first post failed. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -223,7 +229,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
             _db.ChangeTracker.Clear();
 
-            return await ReadExistingClaimAsync(agentRunId, idempotencyKey, cancellationToken).ConfigureAwait(false);
+            return await ReadExistingClaimAsync(agentRunId, idempotencyKey, fenceEpoch, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -294,7 +300,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
                 .SetProperty(l => l.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 
-    public async Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken)
+    public async Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
 
@@ -303,10 +309,12 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
         // state BEFORE the side effect runs: of N executors racing the same approved (run, key) exactly one update
         // affects 1 row (true → run the side effect once), every loser affects 0 (false → re-read + replay). This is the
         // exactly-once-after-approve gate the terminal CAS alone cannot provide, since that runs AFTER the side effect.
+        // The executing attempt stamps its epoch, so the row names who is running it, not who first claimed it.
         var claimed = await _db.ToolCallLedger
             .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt != null)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.Running)
+                .SetProperty(l => l.FenceEpoch, fenceEpoch)
                 .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
@@ -318,7 +326,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
     public async Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()
             .Where(l => l.Id == ledgerId && l.TeamId == teamId)
-            .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error })
+            .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error, ApprovalMessageId = l.ApprovalMessageId, ApprovalToken = l.ApprovalToken })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task<ToolCallTerminalReplayState?> ReadTerminalForReplayAsync(Guid ledgerId, Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
@@ -604,19 +612,63 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .OrderByDescending(l => l.CreatedDate)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-    private async Task<ToolCallClaim> ReadExistingClaimAsync(Guid agentRunId, string idempotencyKey, CancellationToken cancellationToken)
+    /// <summary>The claim for a caller that lost the INSERT race: the existing row's terminal (Duplicate) or InFlight — after first settling a row an EARLIER attempt left in flight (<see cref="IsStrandedByAnEarlierAttempt"/>), which nothing else settles while the run lives.</summary>
+    private async Task<ToolCallClaim> ReadExistingClaimAsync(Guid agentRunId, string idempotencyKey, long fenceEpoch, CancellationToken cancellationToken)
     {
+        var existing = await ReadClaimedRowAsync(agentRunId, idempotencyKey, cancellationToken).ConfigureAwait(false);
+
+        if (!IsStrandedByAnEarlierAttempt(existing, fenceEpoch)) return ClaimFor(existing);
+
+        await SettleStrandedClaimAsync(existing, fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        return ClaimFor(await ReadClaimedRowAsync(agentRunId, idempotencyKey, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async Task<ToolCallLedger> ReadClaimedRowAsync(Guid agentRunId, string idempotencyKey, CancellationToken cancellationToken) =>
         // Keyed on the unique index (agent_run_id, idempotency_key) — which is team-AGNOSTIC, so the winner's row is
         // ALWAYS found here regardless of which team won. Filtering by TeamId too would let a cross-team race on the
         // same (run, key) find nothing and throw a 500; the unique index already makes (run, key) globally unique, so
         // the predicate is exactly the index and TeamId is read off the found row (it's invariant per run anyway).
-        var existing = await _db.ToolCallLedger.AsNoTracking()
+        await _db.ToolCallLedger.AsNoTracking()
             .SingleOrDefaultAsync(l => l.AgentRunId == agentRunId && l.IdempotencyKey == idempotencyKey, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"ToolCallLedger row for run {agentRunId} key was missing after a unique-violation race.");
 
-        return ToolCallLedgerStateMachine.IsTerminal(existing.Status)
-            ? ToolCallClaim.Duplicate(existing.Id, existing.Status, existing.ResultJson, existing.Error)
-            : ToolCallClaim.InFlight(existing.Id);
+    private static ToolCallClaim ClaimFor(ToolCallLedger row) =>
+        ToolCallLedgerStateMachine.IsTerminal(row.Status)
+            ? ToolCallClaim.Duplicate(row.Id, row.Status, row.ResultJson, row.Error)
+            : ToolCallClaim.InFlight(row.Id);
+
+    /// <summary>
+    /// A row an earlier attempt left in flight: Pending or Running, side-effecting, and stamped with an OLDER fence epoch
+    /// than the caller's — the epoch of the attempt that claimed it, or that began executing it after an approval
+    /// (<see cref="TryBeginExecutionAsync"/>). The caller's epoch is the run's live one (the claim fenced it before the
+    /// INSERT), so that attempt lost the run to a reclaim — a worker killed mid-call while its agent survived — and nothing
+    /// else settles the row while the re-attached run lives (<see cref="ExpireStaleToolCallsAsync"/> waits for a terminal
+    /// run). A same-epoch row is genuinely in flight on this attempt; a parked AwaitingApproval row outlives a re-attach
+    /// (its human can still decide it); a decision has no effect to be unsure of and its own flow owns it.
+    /// </summary>
+    private static bool IsStrandedByAnEarlierAttempt(ToolCallLedger row, long fenceEpoch) =>
+        row.FenceEpoch < fenceEpoch && row.Status is ToolCallLedgerStatus.Pending or ToolCallLedgerStatus.Running
+        && row.ToolKind != DecisionToolKinds.DecisionRequest;
+
+    /// <summary>
+    /// Settle a stranded row Failed with <see cref="McpRequestHandler.InterruptedToolCallError"/> — its effect may or may
+    /// not have landed, and an identical re-call replays that, never re-runs it. Single-winner CAS on the exact status AND
+    /// epoch <paramref name="row"/> was read with, so it never lands on a row that moved since: a terminal a racing writer
+    /// recorded first (the old worker's late result, another re-call's settle), or a row the current attempt has since
+    /// parked, approved and begun running under its own epoch. Internal so that stale-read guard is pinned directly.
+    /// </summary>
+    internal async Task SettleStrandedClaimAsync(ToolCallLedger row, long fenceEpoch, CancellationToken cancellationToken)
+    {
+        var settled = await _db.ToolCallLedger
+            .Where(l => l.Id == row.Id && l.Status == row.Status && l.FenceEpoch == row.FenceEpoch)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, ToolCallLedgerStatus.Failed)
+                .SetProperty(l => l.Error, McpRequestHandler.InterruptedToolCallError)
+                .SetProperty(l => l.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (settled > 0) _logger.LogWarning("Agent run {RunId}: tool call ledger {LedgerId} was left {Status} by the attempt at epoch {RowEpoch}, which no longer owns the run (now epoch {Epoch}); settled it as interrupted", row.AgentRunId, row.Id, row.Status, row.FenceEpoch, fenceEpoch);
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>

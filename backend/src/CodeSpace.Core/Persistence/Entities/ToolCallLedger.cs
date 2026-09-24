@@ -18,10 +18,11 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <para>Concurrency protection is FIRST-WRITER-WINS on <see cref="Status"/>, NOT epoch fencing: the single-winner
 /// guarantee comes from the status-guarded CAS transitions (the Pending INSERT, AwaitingApproval → Running execution
 /// claim, then → terminal) — exactly one writer wins each transition and any racer loses cleanly and replays.
-/// <see cref="FenceEpoch"/> is RECORDED (mirrors the run's epoch at claim time) for AUDIT/forensics only; it is NOT
-/// (yet) a guard in any CAS, so a stale-epoch revived worker is fenced by losing the Status CAS, not by an epoch
-/// comparison. (An explicit epoch guard on the transitions is a possible future hardening — see <see cref="AgentRun.FenceEpoch"/>
-/// for where epoch IS load-bearing.)</para>
+/// <see cref="FenceEpoch"/> names the attempt responsible for the row: stamped at claim, and re-stamped by the attempt
+/// that begins executing an approved call. The transitions are not epoch-fenced; the epoch decides one thing — a claim
+/// that finds a Pending / Running row stamped older than its own live epoch settles that lost attempt's row as
+/// interrupted (<c>IToolCallLedgerService.TryClaimAsync</c>). See <see cref="AgentRun.FenceEpoch"/> for where the epoch
+/// fences writes.</para>
 ///
 /// <para>The approval columns (<see cref="ApprovalMessageId"/> / <see cref="ApprovalToken"/> /
 /// <see cref="ApprovalDeadlineAt"/>) + the <c>AwaitingApproval</c> / <c>Expired</c> statuses are reserved for item D
@@ -89,7 +90,7 @@ public class ToolCallLedger : IEntity<Guid>, IAuditable
     /// <summary>When the call was approved (item D). NULL distinguishes a not-yet-decided AwaitingApproval row from an approved-but-not-yet-executed one — the D3 reaper only expires <c>approved_at IS NULL</c> rows.</summary>
     public DateTimeOffset? ApprovedAt { get; set; }
 
-    /// <summary>Mirrors <see cref="AgentRun.FenceEpoch"/> at record time — a reclaimed-then-revived worker's terminal CAS is fenced out (item D resume).</summary>
+    /// <summary>The <see cref="AgentRun.FenceEpoch"/> of the attempt responsible for the row: stamped at claim, re-stamped when an approved call begins executing. A Pending / Running row older than a live caller's epoch was left by a lost attempt.</summary>
     public long FenceEpoch { get; set; }
 
     public DateTimeOffset CreatedDate { get; set; }

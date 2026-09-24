@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -29,7 +30,9 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// + card Resolved; reject → Failed refusal → card Resolved → not run; bound-timeout (env var set tiny) → pending-ticket
 /// → row stays AwaitingApproval → a later approve + re-call runs once; Confined → flat Deny, no card; Unleashed →
 /// straight execute, no card; NO approval conversation → flat refusal, no card, no block (the conversation-less-run
-/// safety); only ONE card per (run, key) on a re-call; two concurrent approve responders → exactly one execution.
+/// safety); only ONE card per (run, key) on a re-call; a card whose post failed → posted by the next identical call;
+/// an approval spanning a re-attach, run by the new attempt → in flight, not interrupted, for an identical call; two
+/// concurrent approve responders → exactly one execution.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -90,10 +93,18 @@ public class McpToolApprovalFlowTests
         var result = await call;
 
         result.GetProperty("isError").GetBoolean().ShouldBeTrue("a rejected call returns an isError refusal");
+        Text(result).ShouldBe(ToolCallApprovalResolver.RejectedError, "the model is told a reviewer rejected the call and that nothing ran");
+        Text(result).ShouldNotContain(ownerId.ToString(), customMessage: "the reviewer's raw user id is never model-facing");
         tool.CallCount.ShouldBe(0, "a rejected call NEVER runs the side effect");
 
         (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Failed, "reject drives AwaitingApproval → Failed");
         (await ReadInteractionStateAsync(messageId)).ShouldBe(InteractionState.Resolved, "the card is stamped resolved by the reject");
+
+        var reCall = await CallToolAsync(handler, "git.open_pr", new { branch = "main" });
+
+        Text(reCall).ShouldBe(Text(result), "an identical re-call replays the same rejection without asking again");
+        tool.CallCount.ShouldBe(0, "the replayed rejection never runs the side effect");
+        (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "a replayed rejection posts no second card");
     }
 
     [Fact]
@@ -160,6 +171,106 @@ public class McpToolApprovalFlowTests
 
             (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "a re-call of a still-parked (run, key) must NOT post a second card");
             tool.CallCount.ShouldBe(0, "still no decision → the side effect never ran");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task A_card_whose_post_failed_is_posted_by_the_next_identical_call_and_the_approval_proceeds()
+    {
+        // The park CAS wins, then the chat post throws: the first call degrades to a retryable error and the row is left
+        // AwaitingApproval with NO card — and nothing else lists a pending approval, so no one could ever give it. The
+        // identical re-call posts the card with the row's own token, so the real respond path resolves THIS row, and a
+        // human's approve then runs the side effect once.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "30");   // bounds the re-call's block, so a card that is never posted fails this in seconds rather than hanging
+
+        try
+        {
+            using var scope = _fixture.BeginScope();
+            var handler = new McpRequestHandler(new SingleToolRegistry(tool), AgentAutonomyLevel.Standard, teamId, null, runId,
+                scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: true, approvalConversationId: channelId,
+                new FailingFirstPostBot(scope.Resolve<IChatBotService>()), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+
+            var first = await CallToolAsync(handler, "git.open_pr", new { branch = "main" });
+
+            first.GetProperty("isError").GetBoolean().ShouldBeTrue("the failed card post degrades to a retryable error");
+            var parked = (await ReadRunRowsAsync(teamId, runId)).ShouldHaveSingleItem();
+            parked.Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the park CAS won before the post failed");
+            parked.ApprovalMessageId.ShouldBeNull("no card was ever posted");
+            (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(0);
+
+            var call = Task.Run(() => CallToolAsync(handler, "git.open_pr", new { branch = "main" }));
+
+            var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+            await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+            var result = await call;
+
+            result.GetProperty("isError").GetBoolean().ShouldBeFalse("the approval given on the re-posted card lets the call run");
+            tool.CallCount.ShouldBe(1, "the side effect runs exactly once, after the approval");
+            ledgerId.ShouldBe(parked.Id, "the re-posted card resolved the row the first call parked");
+            (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+            (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "exactly one card exists — the re-post");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task An_approved_call_the_re_attached_run_is_executing_stays_in_flight_for_an_identical_call()
+    {
+        // Attempt e parks the call; its worker is lost and the run is re-attached at e+1; a human approves and e+1's
+        // re-call runs the tool. While it runs, an identical call on a second e+1 connection must hear "in progress":
+        // the row is Running under the CURRENT attempt, not stranded by the lost one. Settling it would record a live,
+        // approved action as interrupted — and reject the running call's own result.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = await SeedRunningRunWithLapsedLeaseAsync(teamId);
+        var tool = new GatedWriteTool();
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "1");   // attempt e's call returns its pending ticket instead of blocking
+
+        try
+        {
+            using (var lostScope = _fixture.BeginScope())
+                (await CallToolAsync(ApprovalHandler(lostScope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool), "git.open_pr", new { branch = "main" }))
+                    .GetProperty("isError").GetBoolean().ShouldBeTrue("attempt e parked the call and its bound elapsed");
+
+            var epoch = await ReattachAsync(runId);
+            var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+            await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+            using var runningScope = _fixture.BeginScope();
+            var running = Task.Run(() => CallToolAsync(ApprovalHandler(runningScope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool, epoch), "git.open_pr", new { branch = "main" }));
+
+            await tool.Started.WaitAsync(TimeSpan.FromSeconds(10));   // attempt e+1 is inside the tool: the row is Running
+
+            JsonElement identical;
+            using (var secondScope = _fixture.BeginScope())
+                identical = await CallToolAsync(ApprovalHandler(secondScope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool, epoch), "git.open_pr", new { branch = "main" });
+
+            tool.Release();
+            var result = await running;
+
+            Text(identical).ShouldBe("This tool call is already in progress; retry shortly.", "the current attempt is running it — in flight, not stranded");
+            result.GetProperty("isError").GetBoolean().ShouldBeFalse("the running call's own result is recorded and returned, not replaced by an interrupted one");
+            tool.CallCount.ShouldBe(1);
+
+            var row = await ReadRowAsync(ledgerId);
+            row.Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+            row.FenceEpoch.ShouldBe(epoch, "execution stamps the attempt that runs it");
         }
         finally
         {
@@ -613,10 +724,30 @@ public class McpToolApprovalFlowTests
 
     // ─── Build the handler / endpoint with the full approval surface ─────────────
 
-    private McpRequestHandler ApprovalHandler(ILifetimeScope scope, AgentAutonomyLevel autonomy, Guid teamId, Guid runId, Guid channelId, IAgentTool tool) =>
+    private McpRequestHandler ApprovalHandler(ILifetimeScope scope, AgentAutonomyLevel autonomy, Guid teamId, Guid runId, Guid channelId, IAgentTool tool, long fenceEpoch = 0) =>
         new(new SingleToolRegistry(tool), autonomy, teamId, null, runId,
-            scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: true, approvalConversationId: channelId,
+            scope.Resolve<IToolCallLedgerService>(), fenceEpoch, governanceEnabled: true, approvalConversationId: channelId,
             scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+
+    /// <summary>A live run whose worker's lease has lapsed — what a lost worker leaves, and what a re-attach reserves from.</summary>
+    private async Task<Guid> SeedRunningRunWithLapsedLeaseAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var runId = Guid.NewGuid();
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, LeaseExpiresAt = DateTimeOffset.UtcNow - TimeSpan.FromHours(1), CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return runId;
+    }
+
+    /// <summary>Re-attach the run as the reconciler does — a new fence epoch, the run still Running — and return that epoch.</summary>
+    private async Task<long> ReattachAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull().Epoch;
+    }
 
     private AgentMcpEndpoint NewEndpoint(Guid runId, Guid teamId, Guid channelId, string socketPath, string token, IAgentTool tool)
     {
@@ -779,12 +910,62 @@ public class McpToolApprovalFlowTests
         }
     }
 
+    /// <summary>A side-effecting tool that holds inside its call until released — the window in which an identical call arrives while it runs.</summary>
+    private sealed class GatedWriteTool : IAgentTool
+    {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CallCount { get; private set; }
+        public Task Started => _started.Task;
+        public string Kind => "git.open_pr";
+        public string Description => "open a PR";
+        public JsonElement InputSchema { get; } = JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone();
+        public JsonElement OutputSchema { get; } = JsonDocument.Parse("{}").RootElement.Clone();
+        public bool IsReadOnly => false;
+        public bool IsDestructive => true;
+
+        public AgentToolValidation ValidateInput(JsonElement input) => AgentToolValidation.Valid;
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken ct)
+        {
+            CallCount++;
+            _started.TrySetResult();
+
+            await _release.Task.WaitAsync(ct);
+
+            return AgentToolResult.Ok(JsonDocument.Parse("""{"opened":true}""").RootElement.Clone(), 14);
+        }
+    }
+
     private sealed class SingleToolRegistry : IAgentToolRegistry
     {
         private readonly IAgentTool _tool;
         public SingleToolRegistry(IAgentTool tool) => _tool = tool;
         public IReadOnlyList<IAgentTool> All => new[] { _tool };
         public IAgentTool? Resolve(string kind) => kind == _tool.Kind ? _tool : null;
+    }
+
+    /// <summary>The real chat bot, except that its first post throws before anything is posted — a transient chat fault landing between the park and its card.</summary>
+    private sealed class FailingFirstPostBot : IChatBotService
+    {
+        private readonly IChatBotService _inner;
+        private bool _failedOnce;
+
+        public FailingFirstPostBot(IChatBotService inner) => _inner = inner;
+
+        public Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken ct) => _inner.GetOrCreateTeamBotAsync(teamId, ct);
+        public Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken ct) => _inner.ConversationBelongsToTeamAsync(conversationId, teamId, ct);
+
+        public Task<Messages.Dtos.Chat.MessageView> PostAsBotAsync(Guid conversationId, string body, MessageInteraction? interaction, CancellationToken ct)
+        {
+            if (_failedOnce) return _inner.PostAsBotAsync(conversationId, body, interaction, ct);
+
+            _failedOnce = true;
+            throw new InvalidOperationException("transient chat fault");
+        }
     }
 
     /// <summary>A real AF_UNIX client (the proxy's stand-in) — sends the run token as line 1, then newline-delimited JSON-RPC (mirrors AgentMcpEndpointFlowTests.McpClient).</summary>

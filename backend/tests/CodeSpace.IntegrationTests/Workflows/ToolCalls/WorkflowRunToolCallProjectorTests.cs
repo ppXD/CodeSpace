@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.ToolCalls;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -163,6 +164,35 @@ public sealed class WorkflowRunToolCallProjectorTests
         observation.Attempt.Status.ShouldBe(ToolCallAttemptStatus.Indeterminate);
         observation.Attempt.ErrorCode.ShouldBe(WorkflowRunToolCallProjector.FailedOutcomeUnknown);
         observation.Call.State.ShouldBe(ToolCallState.Abandoned);
+    }
+
+    /// <summary>How a governed call reached ledger status Failed. Each path runs the production writers, so the projector reads the row shape production leaves.</summary>
+    public enum FailurePath
+    {
+        RejectedByReviewer,
+        ApprovedThenFailed,
+        AllowedThenFailed,
+    }
+
+    [Theory]
+    [InlineData(FailurePath.RejectedByReviewer, ToolCallAttemptStatus.Denied, ToolCallState.Completed, WorkflowRunToolCallProjector.GovernanceDenied)]
+    [InlineData(FailurePath.ApprovedThenFailed, ToolCallAttemptStatus.Indeterminate, ToolCallState.Abandoned, WorkflowRunToolCallProjector.FailedOutcomeUnknown)]
+    [InlineData(FailurePath.AllowedThenFailed, ToolCallAttemptStatus.Indeterminate, ToolCallState.Abandoned, WorkflowRunToolCallProjector.FailedOutcomeUnknown)]
+    public async Task A_failed_call_a_reviewer_rejected_projects_as_refused_while_an_executed_failure_stays_indeterminate(FailurePath path, ToolCallAttemptStatus attemptStatus, ToolCallState callState, string errorCode)
+    {
+        // Every row here is ledger status Failed. Only the rejected one provably never ran — it was parked for a human
+        // approval that was never granted — so only it may read as refused-before-execution; an executed call that
+        // failed may have landed its effect and must stay Indeterminate.
+        var world = await SeedWorldAsync(AgentRunStatus.Running);
+        var ledgerId = await FailThroughProductionAsync(world, path);
+
+        await SweepAsync(250);
+
+        var observation = await ReadProjectionAsync(ledgerId);
+        observation.Attempt.Status.ShouldBe(attemptStatus);
+        observation.Attempt.ErrorCode.ShouldBe(errorCode);
+        observation.Call.State.ShouldBe(callState);
+        observation.Call.ErrorCode.ShouldBe(callState == ToolCallState.Abandoned ? errorCode : null);
     }
 
     [Fact]
@@ -339,6 +369,33 @@ public sealed class WorkflowRunToolCallProjectorTests
         db.ToolCallLedger.Add(row);
         await db.SaveChangesAsync();
         return row;
+    }
+
+    /// <summary>Drive one governed call to ledger status Failed along <paramref name="path"/> through the real ledger service and approval resolver.</summary>
+    private async Task<Guid> FailThroughProductionAsync(RunWorld world, FailurePath path)
+    {
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IToolCallLedgerService>();
+        var ledgerId = (await ledger.TryClaimAsync(world.AgentRunId, world.TeamId, "git.open_pr", $"git.open_pr:{Guid.NewGuid():N}", InputHash, 0, CancellationToken.None)).LedgerId;
+
+        if (path == FailurePath.AllowedThenFailed)
+        {
+            await ledger.RecordTerminalAsync(ledgerId, world.TeamId, ToolCallLedgerStatus.Failed, null, "merge conflict", CancellationToken.None);
+            return ledgerId;
+        }
+
+        var token = $"tok-{Guid.NewGuid():N}";
+        (await ledger.TryBeginApprovalAsync(ledgerId, world.TeamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+
+        var verdict = path == FailurePath.RejectedByReviewer ? "reject" : "approve";
+        (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, verdict, SystemUsers.SeederId, world.TeamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
+
+        if (path == FailurePath.RejectedByReviewer) return ledgerId;
+
+        (await ledger.TryBeginExecutionAsync(ledgerId, world.TeamId, 0, CancellationToken.None)).ShouldBeTrue();
+        await ledger.RecordTerminalAsync(ledgerId, world.TeamId, ToolCallLedgerStatus.Failed, null, "merge conflict", CancellationToken.None);
+
+        return ledgerId;
     }
 
     private async Task<Guid> SeedLegacyLedgerAsync(RunWorld world, Guid ledgerId)
