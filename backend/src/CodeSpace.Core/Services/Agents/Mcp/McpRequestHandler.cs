@@ -68,11 +68,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     public const int DefaultApprovalBoundSeconds = 600;
 
     /// <summary>
-    /// The ledger error — and the model's answer — for a GOVERNED call interrupted mid-flight, by the tool's own timeout
-    /// or by the run's cancellation. Load-bearing: the row is terminal, so an identical re-call replays exactly this text
-    /// without running the tool, and a timed-out write may already have landed. It must never invite a blind retry.
+    /// The ledger error — and the model's answer — for a GOVERNED call interrupted mid-flight, by the tool's own timeout,
+    /// by the run's cancellation, or by the loss of the worker running it (settled by the claim once the run is
+    /// re-attached — see <see cref="IToolCallLedgerService.TryClaimAsync"/>). Load-bearing: the row is terminal, so an
+    /// identical re-call replays exactly this text without running the tool, and a timed-out write may already have
+    /// landed. It must never invite a blind retry.
     /// </summary>
-    public const string InterruptedToolCallError = "This tool call was interrupted before it completed (the tool timed out, or the run was cancelled), so whether its effect was applied is unknown; it may have been. It is recorded as failed: re-issuing it with identical arguments returns this same result without running it again. Check whether it took effect (for example, read back the PR or comment it would have created or changed) before re-issuing it with changed arguments.";
+    public const string InterruptedToolCallError = "This tool call was interrupted before it completed (the tool timed out, the run was cancelled, or the worker running it was lost), so whether its effect was applied is unknown; it may have been. It is recorded as failed: re-issuing it with identical arguments returns this same result without running it again. Check whether it took effect (for example, read back the PR or comment it would have created or changed) before re-issuing it with changed arguments.";
 
     /// <summary>The approval card's two button keys. The resolver (<see cref="IToolCallApprovalResolver"/>) only ever acts on these two; both resolve the wait (first-wins) — reject fails the call, approve stamps the decision for the handler to execute.</summary>
     private const string ApproveKey = "approve";
@@ -361,15 +363,16 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return claim.Outcome switch
         {
             ToolCallClaimOutcome.Duplicate => ReplayPriorResult(claim),                                            // already resolved — replay (approved+executed, rejected, or expired)
-            ToolCallClaimOutcome.InFlight => await ResumeOrTicketAsync(tool, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-parked row — never re-post the card
-            _ => await ParkForApprovalAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                        // fresh claim — park + post + block
+            ToolCallClaimOutcome.InFlight => await ResumeOrTicketAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-parked row — never a second card
+            _ => await ParkForApprovalAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                              // fresh claim — park + post + block
         };
     }
 
     /// <summary>
     /// A FRESH claim's park: CAS Pending → AwaitingApproval (stamping token + deadline), post the redacted approval
     /// card (stamping its message id), then BLOCK on the bounded wait. If the CAS is lost (a concurrent path already
-    /// parked or terminated the row), DON'T post — re-bind to whatever the row became (the no-second-card guard).
+    /// parked or terminated the row), DON'T post — re-bind to whatever the row became (the no-second-card guard). If the
+    /// post throws, the row stays parked with no card, and the next identical call posts it (<see cref="ResumeOrTicketAsync"/>).
     /// </summary>
     private async Task<JsonElement> ParkForApprovalAsync(IAgentTool tool, string name, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
@@ -378,11 +381,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, token, deadlineAt, cancellationToken).ConfigureAwait(false);
 
-        if (!parked) return await ResumeOrTicketAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (!parked) return await ResumeOrTicketAsync(tool, name, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
-        var messageId = await PostApprovalCardAsync(tool, name, token, cancellationToken).ConfigureAwait(false);
-
-        await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
+        await PostAndRecordApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
         return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
@@ -391,9 +392,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// Re-bind to an already-parked (or just-terminated) row WITHOUT posting a second card (§5 — one card per (run,
     /// key)). Re-reads the durable row (the authority): a terminal row replays; an AwaitingApproval row that's already
     /// approved runs the side effect once; a still-undecided one blocks again on a freshly-registered waiter. The card
-    /// was posted on the first park, so the existing waiter/deadline still drives it.
+    /// was posted on the first park, so the existing waiter/deadline still drives it — unless that post never landed
+    /// (the row records no card), in which case the card is posted now: nothing else surfaces a pending approval, so
+    /// without it this call could only block until the row expires.
     /// </summary>
-    private async Task<JsonElement> ResumeOrTicketAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    private async Task<JsonElement> ResumeOrTicketAsync(IAgentTool tool, string name, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
         var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -403,20 +406,47 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
+        if (UnpostedCardToken(state) is { } token) await RepostApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
         return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The token of a row parked for approval that records no card — its park's post threw — else null. A row with a recorded card, or not yet parked, has nothing to re-post.</summary>
+    private static string? UnpostedCardToken(ToolCallApprovalState state) =>
+        state is { Status: ToolCallLedgerStatus.AwaitingApproval, ApprovalMessageId: null } ? state.ApprovalToken : null;
+
+    /// <summary>
+    /// Post the card a park never landed, carrying the row's OWN token so a click resolves this row. The id is saved by
+    /// the same null-guarded write the park uses, so a recorded card is never replaced; a re-call racing a park still
+    /// mid-post can add a second card. Each card serializes only its own clicks, but both carry the one token, and the
+    /// resolver's CAS lets the row take only the first decision from either card — a later click on the other is refused.
+    /// </summary>
+    private async Task RepostApprovalCardAsync(IAgentTool tool, string name, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("Agent run {RunId}: tool call {LedgerId} is parked for approval but records no card (its post failed); posting it now", _runId, ledgerId);
+
+        await PostAndRecordApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Post the approval card carrying <paramref name="token"/> and record its message id on the row — the park's post, and the re-post of a park whose post never landed.</summary>
+    private async Task PostAndRecordApprovalCardAsync(IAgentTool tool, string name, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var messageId = await PostApprovalCardAsync(tool, name, token, cancellationToken).ConfigureAwait(false);
+
+        await _ledger!.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// The exactly-once-after-approve gate: claim the APPROVED row for execution (single-winner CAS AwaitingApproval →
-    /// Running) BEFORE running the side effect. ONLY the winner runs <see cref="ExecuteAndRecordAsync"/> (one
-    /// <c>tool.CallAsync</c>); a concurrent executor that LOST the claim (the row is already Running or terminal) must
+    /// Running, stamped with this attempt's epoch) BEFORE running the side effect. ONLY the winner runs
+    /// <see cref="ExecuteAndRecordAsync"/> (one <c>tool.CallAsync</c>); a concurrent executor that LOST the claim (the row is already Running or terminal) must
     /// NOT re-run the side effect — it re-reads the durable row and replays its terminal (or, if the winner hasn't
     /// recorded the terminal yet, returns the in-flight retry message). This closes the pre-terminal-CAS double-run
     /// window: two executors that both read <c>ApprovedAt != null</c> race here, not at <c>tool.CallAsync</c>.
     /// </summary>
     private async Task<JsonElement> ClaimThenExecuteAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
-        var won = await _ledger!.TryBeginExecutionAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+        var won = await _ledger!.TryBeginExecutionAsync(ledgerId, teamId, _fenceEpoch, cancellationToken).ConfigureAwait(false);
 
         if (won) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
@@ -838,9 +868,10 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <see cref="InterruptedToolCallError"/>: best-effort BEFORE the run's cancellation propagates (see
     /// <see cref="RecordInterruptedThenRethrow"/>), or as the answer itself when the tool cancelled itself while the run
     /// is live. Both writes take <see cref="CancellationToken.None"/>, so a cancel landing mid-write cannot abandon them.
-    /// A row is still stranded by a hard crash (SIGKILL) between the INSERT and the recovery write, or by that write
-    /// failing: <see cref="IToolCallLedgerService.ExpireStaleToolCallsAsync"/> fails it once the owning run is terminal
-    /// and past its worker's lease — never while a reattached run is still live.</para>
+    /// A hard crash (SIGKILL) between the INSERT and the recovery write, or that write failing, still leaves the row
+    /// non-terminal: an identical re-call on the re-attached run settles it (<see cref="IToolCallLedgerService.TryClaimAsync"/>
+    /// fails a row an earlier attempt left in flight), and <see cref="IToolCallLedgerService.ExpireStaleToolCallsAsync"/>
+    /// fails it once the owning run is terminal and past its worker's lease.</para>
     /// </summary>
     private async Task<JsonElement> ExecuteAndRecordAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {

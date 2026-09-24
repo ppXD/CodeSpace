@@ -1,4 +1,5 @@
 using System.Text;
+using CodeSpace.Core.Services.Agents.Mcp;
 
 namespace CodeSpace.Core.Services.Sessions;
 
@@ -19,7 +20,7 @@ internal static class SessionEffectReceiptText
         foreach (var receipt in page.Items)
         {
             sb.AppendLine();
-            sb.Append($"- receipt:tool-call-ledger/{receipt.Id}; workflowRun={receipt.WorkflowRunId}; agentRun={receipt.AgentRunId}; tool={OneLine(receipt.ToolKind)}; inputSha256={receipt.InputHash}; status={receipt.Status}; recordedAt={receipt.CreatedDate:O}; {Policy(receipt.Status)}");
+            sb.Append($"- receipt:tool-call-ledger/{receipt.Id}; workflowRun={receipt.WorkflowRunId}; agentRun={receipt.AgentRunId}; tool={OneLine(receipt.ToolKind)}; inputSha256={receipt.InputHash}; status={receipt.Status}; recordedAt={receipt.CreatedDate:O}; {Policy(receipt)}");
             if (!string.IsNullOrWhiteSpace(receipt.ResultText)) sb.Append($"; result={Excerpt(receipt.ResultText, receipt.ResultTextCharacters)}");
             if (!string.IsNullOrWhiteSpace(receipt.Error)) sb.Append($"; error={Excerpt(receipt.Error, receipt.ErrorCharacters)}");
             sb.AppendLine();
@@ -27,6 +28,10 @@ internal static class SessionEffectReceiptText
 
         return sb.ToString().TrimEnd();
     }
+
+    /// <summary>A reviewer's rejection is the one Failed row known to have run nothing — it carries <see cref="ToolCallApprovalResolver.RejectedError"/> — so it never reads as an executed call whose outcome is uncertain.</summary>
+    private static string Policy(SessionEffectReceipt receipt) =>
+        receipt is { Status: "Failed", Error: ToolCallApprovalResolver.RejectedError } ? "observation=rejected-before-execution; nothing ran; do not repeat it unchanged" : Policy(receipt.Status);
 
     private static string Policy(string status) => status switch
     {

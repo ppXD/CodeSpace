@@ -17,8 +17,9 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// row stays AwaitingApproval (the handler flips it later) and signals the waiter Approved; reject drives
 /// AwaitingApproval → Failed with an audit Error and signals Rejected; both team-scope every read (a foreign team or a
 /// missing token finds nothing → NoWait, row untouched); an already-terminal row is AlreadyResolved; two concurrent
-/// approves yield exactly one Resumed + one stamp (the approved_at == null CAS guard); an unknown responseKey is a
-/// fail-safe NoWait that never approves. The IToolApprovalWaiterRegistry is the real singleton from the container.
+/// approves yield exactly one Resumed + one stamp (the approved_at == null CAS guard); across two cards the first
+/// decision wins in either order; an unknown responseKey is a fail-safe NoWait that never approves. The
+/// IToolApprovalWaiterRegistry is the real singleton from the container.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -70,8 +71,9 @@ public class ToolCallApprovalResolverTests
 
         var row = await ReadRowAsync(ledgerId);
         row.Status.ShouldBe(ToolCallLedgerStatus.Failed, "reject drives AwaitingApproval → Failed (no side effect to run)");
-        row.Error.ShouldNotBeNull();
-        row.Error!.ShouldContain("rejected", customMessage: "the failure reason records the rejection");
+        row.Error.ShouldBe(ToolCallApprovalResolver.RejectedError, "the failure reason is the one rejection text every reader recognises — and the text the model is replayed");
+        row.Error!.ShouldNotContain(actor.ToString(), customMessage: "the model reads this text; a raw reviewer id tells it nothing");
+        row.LastModifiedBy.ShouldBe(actor, "who rejected stays on the row's audit column");
         row.ApprovedAt.ShouldBeNull("a rejected call was never approved");
     }
 
@@ -103,6 +105,40 @@ public class ToolCallApprovalResolverTests
 
         (await Resolver(scope).ResolveByTokenAsync(NewToken(), "approve", Guid.NewGuid(), teamId, CancellationToken.None))
             .ShouldBe(ActionResumeResult.NoWait, "no parked approval exists for this token");
+    }
+
+    [Theory]
+    [InlineData("approve", "reject")]
+    [InlineData("reject", "approve")]
+    public async Task The_first_decision_wins_across_two_cards_and_the_second_is_refused(string first, string second)
+    {
+        // A parked call can carry two cards with one token (a re-posted card racing the original post). Each card
+        // serializes only its own clicks, so the row must take the first decision from either card: a reject on the other
+        // card after an approve — before the approved call runs — must not fail the approved row, and vice versa.
+        var teamId = await SeedTeamAsync();
+        var token = NewToken();
+        var decider = Guid.NewGuid();
+        var ledgerId = await SeedAwaitingApprovalAsync(teamId, token);
+
+        using var scope = _fixture.BeginScope();
+
+        (await Resolver(scope).ResolveByTokenAsync(token, first, decider, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
+        (await Resolver(scope).ResolveByTokenAsync(token, second, Guid.NewGuid(), teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.AlreadyResolved, "the first decision already settled the row");
+
+        var row = await ReadRowAsync(ledgerId);
+        row.LastModifiedBy.ShouldBe(decider, "only the first decision was written");
+
+        if (first == "approve")
+        {
+            row.Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "still approved, waiting for its executor — not failed by the later reject");
+            row.ApprovedAt.ShouldNotBeNull();
+            row.Error.ShouldBeNull();
+        }
+        else
+        {
+            row.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+            row.ApprovedAt.ShouldBeNull("the later approve never stamped a rejected row");
+        }
     }
 
     [Fact]

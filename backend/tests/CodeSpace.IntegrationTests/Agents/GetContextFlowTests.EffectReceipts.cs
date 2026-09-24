@@ -2,6 +2,8 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -56,6 +58,25 @@ public partial class GetContextFlowTests
         text.ShouldContain("external outcome may be uncertain");
         text.ShouldContain("do not assume it is safe to retry");
         text.ShouldContain("exactly-once applies only within the recorded agent run");
+    }
+
+    [Fact]
+    public async Task A_receipt_for_a_call_a_reviewer_rejected_says_nothing_ran_instead_of_an_uncertain_outcome()
+    {
+        // The rejection is written by the real resolver and read back through the real receipt reader, so the receipt sees
+        // exactly the row a human's Reject leaves — ledger status Failed, the same as a call that ran and failed.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var runId = await SeedAgentRunAsync(teamId, sessionId);
+        var reviewerId = Guid.NewGuid();
+        await RejectThroughTheResolverAsync(teamId, runId, reviewerId);
+
+        var text = StructuredOutput(await CallToolAsync(teamId, runId, new { source = "session.effects" })).GetProperty("text").GetString()!;
+
+        text.ShouldContain("status=Failed");
+        text.ShouldContain("observation=rejected-before-execution; nothing ran");
+        text.ShouldNotContain("external outcome may be uncertain", customMessage: "nothing ran, so there is no external outcome to be unsure of");
+        text.ShouldNotContain(reviewerId.ToString(), customMessage: "a raw reviewer id never reaches the model");
     }
 
     [Fact]
@@ -165,6 +186,18 @@ public partial class GetContextFlowTests
         });
         await db.SaveChangesAsync();
         return id;
+    }
+
+    /// <summary>Park a governed call for approval through the real ledger service, then reject it through the real resolver.</summary>
+    private async Task RejectThroughTheResolverAsync(Guid teamId, Guid runId, Guid reviewerId)
+    {
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IToolCallLedgerService>();
+        var ledgerId = (await ledger.TryClaimAsync(runId, teamId, "git.open_pr", $"git.open_pr:{Guid.NewGuid():N}", new string('0', 64), 0, CancellationToken.None)).LedgerId;
+        var token = $"tok-{Guid.NewGuid():N}";
+
+        (await ledger.TryBeginApprovalAsync(ledgerId, teamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+        (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, "reject", reviewerId, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
     }
 
     private static IEnumerable<Guid> ReceiptIds(JsonElement output)

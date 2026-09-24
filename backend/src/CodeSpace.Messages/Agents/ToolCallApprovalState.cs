@@ -19,4 +19,10 @@ public sealed record ToolCallApprovalState
 
     /// <summary>The already-redacted terminal error/refusal reason on a Failed/Expired row (null otherwise).</summary>
     public string? Error { get; init; }
+
+    /// <summary>The recorded approval card's message id. Null on a parked row means no card was ever recorded — the park's post failed — so a re-call posts it.</summary>
+    public Guid? ApprovalMessageId { get; init; }
+
+    /// <summary>The server-side bearer the approval card resolves by, stamped at park — what a re-posted card must carry to resolve THIS row. Never surfaced to a client.</summary>
+    public string? ApprovalToken { get; init; }
 }
