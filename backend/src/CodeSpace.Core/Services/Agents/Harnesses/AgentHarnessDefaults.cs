@@ -24,26 +24,27 @@ public static class AgentHarnessDefaults
     public const string DefaultHarnessEnvVar = "CODESPACE_DEFAULT_HARNESS";
 
     /// <summary>The default harness kind: the <see cref="DefaultHarnessEnvVar"/> override (trimmed) when set to a non-blank value, else <c>codex-cli</c> (<see cref="CodexHarness.HarnessKind"/>) — the safe floor.</summary>
-    public static string DefaultHarness =>
-        Environment.GetEnvironmentVariable(DefaultHarnessEnvVar) is { } value && !string.IsNullOrWhiteSpace(value)
-            ? value.Trim()
-            : CodexHarness.HarnessKind;
+    public static string DefaultHarness => DefaultHarnessFrom(ConfiguredOverride);
+
+    /// <summary>The operator's override exactly as the process environment carries it — null when unset. The one read of <see cref="DefaultHarnessEnvVar"/>.</summary>
+    internal static string? ConfiguredOverride => Environment.GetEnvironmentVariable(DefaultHarnessEnvVar);
+
+    /// <summary>The default harness kind for a <paramref name="configured"/> override: it, trimmed, when non-blank, else the codex-cli floor. Pure — a test hands the override in rather than setting the process-wide variable every test class running beside it reads.</summary>
+    internal static string DefaultHarnessFrom(string? configured) => string.IsNullOrWhiteSpace(configured) ? CodexHarness.HarnessKind : configured.Trim();
 
     /// <summary>
-    /// FAIL-FAST guard (called once at startup from the harness registry): if the operator set
-    /// <see cref="DefaultHarnessEnvVar"/> to a kind NOT in <paramref name="registeredKinds"/>, throw — so a TYPO in a
+    /// FAIL-FAST guard (called once at startup from the harness registry): if the operator's <paramref name="configured"/>
+    /// override (<see cref="DefaultHarnessEnvVar"/>) names a kind NOT in <paramref name="registeredKinds"/>, throw — so a TYPO in a
     /// deliberate global config surfaces immediately, not as a per-run "no harness registered for kind 'X'" failure on
     /// the unclamped default paths (the single-agent / map projection + the supervisor spawn). This is the trusted-config
     /// counterpart to the planner's GRACEFUL clamp: a model-hallucinated harness is silently floored to a registered
     /// kind, but a deliberate operator override is loud about a typo. Unset / blank / already-registered → a no-op.
     /// </summary>
-    public static void Validate(IReadOnlyCollection<string> registeredKinds)
+    public static void Validate(IReadOnlyCollection<string> registeredKinds, string? configured)
     {
-        var raw = Environment.GetEnvironmentVariable(DefaultHarnessEnvVar);
+        if (string.IsNullOrWhiteSpace(configured)) return;
 
-        if (string.IsNullOrWhiteSpace(raw)) return;
-
-        var kind = raw.Trim();
+        var kind = configured.Trim();
 
         if (!registeredKinds.Any(k => string.Equals(k, kind, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException($"{DefaultHarnessEnvVar}='{kind}' is not a registered harness kind (registered: {string.Join(", ", registeredKinds)}). Unset it or set it to a registered kind.");

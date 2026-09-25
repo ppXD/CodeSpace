@@ -452,7 +452,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         var adoptionDeadline = now + AdoptionSweepBudget;
 
         foreach (var c in candidates)
-            switch (await ResolveStaleRunAsync(c, adoptionDeadline, cancellationToken).ConfigureAwait(false))
+            switch (await ResolveStaleRunQuietlyAsync(c, adoptionDeadline, cancellationToken).ConfigureAwait(false))
             {
                 case StaleOutcome.Recovered: recovered++; break;
                 case StaleOutcome.Abandoned: abandoned++; break;
@@ -460,6 +460,20 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             }
 
         return (abandoned, recovered, reattached);
+    }
+
+    /// <summary>Decide one stale run's fate, logging — never throwing — a failure: the runs after it in the batch, and the wait recovery after the sweep, are still owed. A run the failure left Running is a candidate again next tick.</summary>
+    private async Task<StaleOutcome> ResolveStaleRunQuietlyAsync(AgentRunReconciliationCandidate candidate, DateTimeOffset adoptionDeadline, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ResolveStaleRunAsync(candidate, adoptionDeadline, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "AgentRunReconciler: resolving stale run {RunId} failed; the rest of the sweep goes on, and a run left Running is a candidate again next tick", candidate.RunId);
+            return StaleOutcome.LeftAlone;
+        }
     }
 
     /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon / defer when the probe cannot be answered from this host), or blind-abandon when there's no usable handle or the probe fails.</summary>
@@ -690,6 +704,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// </summary>
     private async Task<StaleOutcome> AbandonAsync(AgentRunReconciliationCandidate candidate, AgentRunAbandonCause cause, CancellationToken cancellationToken, ISandboxDurableRunner? durable = null, SandboxHandle? handle = null)
     {
+        // The run's row and then its decisions, each in an autocommitted statement of its own, as a stop takes them: inside
+        // a caller's transaction the row lock would be held while the decisions are awaited — the reverse of the order the
+        // run's own end locks them in.
+        if (_db.Database.CurrentTransaction != null) throw new InvalidOperationException("An abandon lands its terminal and closes the run's decisions in statements of their own and cannot join an ambient transaction.");
+
         var runId = candidate.RunId;
 
         // NOTE the asymmetry with the executor's own terminal write, which RELEASES the run's session-transcript
@@ -1017,34 +1036,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private async Task<StaleOutcome> RecoverFromSpoolAsync(AgentRunReconciliationCandidate candidate, int exitCode, CancellationToken cancellationToken)
     {
         var runId = candidate.RunId;
-        var result = new AgentRunResult { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}." };
 
-        // Completion contract (Slice A1): even on this crash-recovery path, a clean exit can't be called Succeeded while a
-        // decision the run raised is still unanswered — re-grade to NeedsReview(NeedsDecision) so the invariant holds here
-        // too, mirroring AgentRunService.CompleteCoreAsync. Only a would-be Succeeded needs the lookup.
-        if (result.Status == AgentRunStatus.Succeeded)
-        {
-            var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
-            result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
-        }
+        var landed = await LandRecoveredResultAsync(candidate, exitCode, cancellationToken).ConfigureAwait(false);
+        if (landed is null) return StaleOutcome.LeftAlone;
 
-        // Acceptance contract (S5): the same every-terminal-path mirror — a contract-bearing task recovered from the
-        // spool has no published branch to grade (the workspace died with the worker), so it fails CLOSED rather than
-        // landing Succeeded ungraded because the backend restarted at the right moment. A1 above still wins (a
-        // NeedsDecision re-grade is no longer a would-be Succeeded).
-        if (result.Status == AgentRunStatus.Succeeded && await ReadTaskAsync(runId, cancellationToken).ConfigureAwait(false) is { } spoolTask && AgentAcceptanceContract.RequiresGrade(spoolTask))
-        {
-            _logger.LogWarning("AgentRunReconciler: agent run {RunId} carries an acceptance contract but was recovered from the spool with no gradable branch — failing closed", runId);
-
-            result = AgentAcceptanceContract.FailClosed(result, "no-branch-or-repo (recovered from spool — the branch never published)");
-        }
-
-        var status = result.Status;
-        var error = result.Error;
-        var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
-
-        var transitioned = await TerminalizeCandidateAsync(candidate, status, error, resultJson, cancellationToken).ConfigureAwait(false);
-        if (transitioned == 0) return StaleOutcome.LeftAlone;
+        // After the commit, as the abandon's settle follows its CAS: the budget ledger works in a transaction of its own.
+        await SettleSpendClaimsQuietlyAsync(candidate, cancellationToken).ConfigureAwait(false);
 
         // Only the winner can invalidate capture promises. A losing stale probe has no authority over its successor.
         await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
@@ -1054,7 +1051,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         // observer genuinely never saw this process exit.
         await TerminalizeRecoveredHarnessExecutionQuietlyAsync(candidate.TeamId, runId, candidate.Epoch + 1, cancellationToken).ConfigureAwait(false);
 
-        var kind = status switch
+        var kind = landed.Status switch
         {
             AgentRunStatus.Succeeded => AgentEventKind.Completed,
             AgentRunStatus.NeedsReview => AgentEventKind.Warning,   // recovered clean, but a raised decision is still unanswered — needs a human
@@ -1062,14 +1059,66 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         };
         await TryAppendEventAsync(runId, kind, $"{RecoveredError} (exit {exitCode})", cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("AgentRunReconciler: recovered agent run {RunId} from its durable spool as {Status} (exit {Exit})", runId, status, exitCode);
+        _logger.LogInformation("AgentRunReconciler: recovered agent run {RunId} from its durable spool as {Status} (exit {Exit})", runId, landed.Status, exitCode);
         return StaleOutcome.Recovered;
     }
 
     /// <summary>
-    /// The reconciler's ONE terminal write, and therefore the one place its runs' spend claims are closed. Every
-    /// abandon and every spool recovery arrives here, so a claim cannot be left live by an arm that forgot to
-    /// settle — the same by-construction shape the executor's own <c>CompleteAndNotifyAsync</c> uses.
+    /// The spool recovery's terminal, in the completion's own shape: one transaction entered with the run's decisions
+    /// locked, in which the contract checks read decisions no answer can move under them, the CAS lands the result, and the
+    /// decisions still unanswered close with it, saying the run ended. Checked and closed in separate steps, an answer
+    /// landing between them was told "answered" by a run recovered as waiting on that very question, and a close that
+    /// failed on its own was swallowed and left the question open for good. Returns the result as it landed, or null when
+    /// the CAS lost — another observer owns this run's terminal — and nothing is written.
+    /// </summary>
+    private async Task<AgentRunResult?> LandRecoveredResultAsync(AgentRunReconciliationCandidate candidate, int exitCode, CancellationToken cancellationToken)
+    {
+        if (_db.Database.CurrentTransaction != null) throw new InvalidOperationException("Spool recovery lands its terminal in a transaction of its own and cannot join an ambient one.");
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await StoppedRunDecisions.BoundLockWaitsAsync(_db, cancellationToken).ConfigureAwait(false);
+        await StoppedRunDecisions.LockAsync(_db, candidate.RunId, cancellationToken).ConfigureAwait(false);
+
+        var result = await ApplyRecoveryContractAsync(candidate.RunId, SpooledResult(exitCode), cancellationToken).ConfigureAwait(false);
+
+        if (await CasTerminalAsync(candidate, result.Status, result.Error, JsonSerializer.Serialize(result, AgentJson.Options), cancellationToken).ConfigureAwait(false) == 0) return null;
+
+        await StoppedRunDecisions.ExpireAsync(_db, candidate.RunId, StoppedRunDecisions.EndedError, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return result;
+    }
+
+    /// <summary>What the spool's exit marker alone says: a clean exit is a would-be success, any other code a failure naming it.</summary>
+    private static AgentRunResult SpooledResult(int exitCode) => new() { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}." };
+
+    /// <summary>
+    /// The completion contract on the crash-recovery path. Slice A1: a clean exit can't be called Succeeded while a
+    /// decision the run raised is still unanswered — re-grade to NeedsReview(NeedsDecision), mirroring
+    /// <c>AgentRunService.CompleteCoreAsync</c>. The acceptance contract (S5) is the same every-terminal-path mirror: a
+    /// contract-bearing task recovered from the spool has no published branch to grade (the workspace died with the
+    /// worker), so it fails CLOSED rather than landing Succeeded ungraded because the backend restarted at the right
+    /// moment. A1 wins: a NeedsDecision re-grade is no longer a would-be Succeeded.
+    /// </summary>
+    private async Task<AgentRunResult> ApplyRecoveryContractAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+
+        var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
+        result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+
+        if (result.Status != AgentRunStatus.Succeeded || await ReadTaskAsync(runId, cancellationToken).ConfigureAwait(false) is not { } spoolTask || !AgentAcceptanceContract.RequiresGrade(spoolTask)) return result;
+
+        _logger.LogWarning("AgentRunReconciler: agent run {RunId} carries an acceptance contract but was recovered from the spool with no gradable branch — failing closed", runId);
+
+        return AgentAcceptanceContract.FailClosed(result, "no-branch-or-repo (recovered from spool — the branch never published)");
+    }
+
+    /// <summary>
+    /// The abandon's terminal write, and the place its spend claims are closed — right after the CAS, so a claim cannot be
+    /// left live by an arm that forgot to settle, the same by-construction shape the executor's own
+    /// <c>CompleteAndNotifyAsync</c> uses. The spool recovery lands its terminal in a transaction of its own
+    /// (<see cref="LandRecoveredResultAsync"/>) and settles right after that commits, in <see cref="RecoverFromSpoolAsync"/>.
     /// </summary>
     private async Task<int> TerminalizeCandidateAsync(AgentRunReconciliationCandidate candidate, AgentRunStatus status, string? error, string? resultJson, CancellationToken cancellationToken)
     {

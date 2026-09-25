@@ -136,16 +136,16 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
-    public async Task A_cancels_spend_close_commits_on_its_own_connection()
+    public async Task A_cancel_inside_a_callers_transaction_is_refused_before_it_settles_anything()
     {
-        // WHY this must not join the cancelling command's transaction: CancelRunCommand is transactional, the
-        // ledger's settle takes advisory locks and writes, and a Postgres error there (a deadlock against the expiry
-        // or reconcile sweeps, which touch the same rows unordered) aborts the WHOLE transaction. The kill wave
-        // would then have terminated every sandbox and rolled back every status flip — dead processes, runs still
-        // Running, a 500 for the operator — with the swallowed exception as the only trace. A joined advisory lock
-        // would also be held for the rest of the command, serializing every admission on that workflow run.
-        // MUTATION THIS CATCHES: resolving IBudgetLedger from the scoped context instead of a fresh DI scope. The
-        // settle then lives inside the uncommitted transaction below and the reader never sees it.
+        // WHY a cancel refuses a caller's transaction: its terminal CAS takes the run's row and its close then takes the
+        // run's decisions, the reverse of the order the run's own end locks them in, which is safe only while each is an
+        // autocommitted statement of its own. The ledger's settle takes advisory locks and writes too, and a Postgres
+        // error there would roll the caller's whole transaction back under a kill wave that already terminated its
+        // sandboxes. Its one production caller, the workflow teardown, runs after its own terminal commits; so a caller
+        // holding a transaction is refused outright, before anything is killed, flipped or settled. Outside one, the
+        // same cancel settles at its own terminal (A_cancelled_running_run_settles_its_live_spend_claim_immediately).
+        // MUTATION THIS CATCHES: dropping CancelRunningAsync's ambient-transaction refusal, or moving it after the settle.
         var teamId = await SeedTeamAsync();
         var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: TerminalClaimUsd);
         var runId = await CreateScriptedRunAsync(teamId, maxCostUsd: TerminalClaimUsd, model: "claude-opus-4-8", workflowRunId: workflowRunId);
@@ -153,19 +153,17 @@ public partial class AgentRunExecutorTests
         await MintLaunchClaimAsync(workflowRunId, teamId, runId);
         await StartRunningAsync(runId, withACost: false);
 
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
+        using (var scope = _fixture.BeginScope())
+        {
+            // Stands in for a caller holding a transaction on exactly this context, as TransactionalBehavior does for an ICommand.
+            await using var ambient = await scope.Resolve<CodeSpaceDbContext>().Database.BeginTransactionAsync();
 
-        // Stands in for TransactionalBehavior, which opens exactly this on exactly this context for every ICommand.
-        await using var ambient = await db.Database.BeginTransactionAsync();
+            await Should.ThrowAsync<InvalidOperationException>(() => scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None));
+        }
 
-        (await scope.Resolve<IAgentRunService>().CancelRunningAsync(runId, "operator cancel", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue();
-
-        // Read from a DIFFERENT connection, which can only see the settle if it committed independently.
+        // Read from a DIFFERENT connection once the caller's transaction is gone: a settle on its own connection would show here.
         (await ReservationOfAsync(workflowRunId, runId)).ShouldNotBeNull().State
-            .ShouldBe(BudgetReservationStates.Indeterminate, "the close must own its connection — diagnose by checking whether SettleSpendClaimsQuietlyAsync resolves the ledger from its own DI scope");
-
-        await ambient.RollbackAsync();
+            .ShouldBe(BudgetReservationStates.Reserved, "refused before the settle: the launch's claim is still live");
     }
 
     [Fact]

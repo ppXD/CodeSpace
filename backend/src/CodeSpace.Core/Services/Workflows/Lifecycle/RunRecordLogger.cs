@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Workflows;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 
@@ -261,8 +262,24 @@ public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedge
         };
 
         _db.WorkflowRunRecord.Add(record);
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await SaveOrForgetAsync(record, cancellationToken).ConfigureAwait(false);
         return record.Id;
+    }
+
+    // A record that failed to land must not stay tracked as Added. A caller that logs the failure and carries on on this
+    // same context — a parent's teardown moving on to its next child's cancel — would otherwise have its next save insert
+    // it: a fact on the tape for a change its own transaction rolled back.
+    private async Task SaveOrForgetAsync(WorkflowRunRecord record, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _db.Entry(record).State = EntityState.Detached;
+            throw;
+        }
     }
 
     private static object EmptyObject() => new { };

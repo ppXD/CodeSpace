@@ -22,6 +22,9 @@ public sealed class TransientDatabaseFaultTests
         AdminShutdown,
         ConnectionFailure,
         TooManyConnections,
+        DeadlockVictim,
+        SerializationFailure,
+        LockTimeout,
         ServerDiskFull,
         StreamReadFailed,
         CommandTimeout,
@@ -48,6 +51,11 @@ public sealed class TransientDatabaseFaultTests
     [InlineData(Fault.AdminShutdown, true)]                         // 57P01: pg_terminate_backend, a restart, a failover
     [InlineData(Fault.ConnectionFailure, true)]                     // 08006
     [InlineData(Fault.TooManyConnections, true)]                    // 53300: the server is full now, not forever
+    // The terminal write's one retry rests on the next three being Npgsql's "not now": pinned, so an upgrade that changes
+    // Npgsql's list cannot silently turn the retry off.
+    [InlineData(Fault.DeadlockVictim, true)]                        // 40P01: chosen as a deadlock's victim
+    [InlineData(Fault.SerializationFailure, true)]                  // 40001
+    [InlineData(Fault.LockTimeout, true)]                           // 55P03: a lock wait past the terminal write's lock_timeout
     [InlineData(Fault.ServerDiskFull, true)]                        // 53100: Npgsql's own classification — the server's disk, "not now"
     [InlineData(Fault.StreamReadFailed, true)]                      // the socket died under a command
     [InlineData(Fault.CommandTimeout, true)]                        // Npgsql's command / pool timeout
@@ -78,6 +86,9 @@ public sealed class TransientDatabaseFaultTests
         Fault.AdminShutdown => Postgres(PostgresErrorCodes.AdminShutdown),
         Fault.ConnectionFailure => Postgres(PostgresErrorCodes.ConnectionFailure),
         Fault.TooManyConnections => Postgres(PostgresErrorCodes.TooManyConnections),
+        Fault.DeadlockVictim => Postgres(PostgresErrorCodes.DeadlockDetected),
+        Fault.SerializationFailure => Postgres(PostgresErrorCodes.SerializationFailure),
+        Fault.LockTimeout => Postgres(PostgresErrorCodes.LockNotAvailable),
         Fault.ServerDiskFull => Postgres(PostgresErrorCodes.DiskFull),
         Fault.StreamReadFailed => new NpgsqlException("Exception while reading from stream", new EndOfStreamException("Attempted to read past the end of the stream.")),
         Fault.CommandTimeout => new NpgsqlException("Exception while reading from stream", new TimeoutException("Timeout during reading attempt")),

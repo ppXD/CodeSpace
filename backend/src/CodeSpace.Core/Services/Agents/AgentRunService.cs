@@ -500,8 +500,12 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
     private async Task CompleteCoreAsync(CompletionWriter writer, AgentRunResult result, CancellationToken cancellationToken)
     {
+        // A terminal write owns its transaction: it holds the run's decision locks from its contract check to its commit,
+        // and nothing may learn the run landed before that commit is durable — joining a caller's transaction would stretch
+        // both across the caller's whole command.
+        if (_db.Database.CurrentTransaction is not null) throw new InvalidOperationException("A terminal write commits in a transaction of its own and cannot join an ambient one.");
+
         var runId = writer.RunId;
-        var expectedEpoch = writer.ExpectedEpoch;
         var owner = writer.Owner;
         if (owner is not null) await AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
         else await EnsureLegacyWriterAsync(runId, cancellationToken).ConfigureAwait(false);
@@ -529,23 +533,8 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         var current = snapshot.Status;
         if (writer.QueuedOnly && current != AgentRunStatus.Queued) throw new AgentRunTransitionException($"AgentRun {runId} has already been claimed; a preclaim refusal cannot complete it.");
 
-        // Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered —
-        // re-grade Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at
-        // THIS choke point (every normal completion) AND mirrored in the reconciler's spool recovery, so the invariant
-        // holds on every terminal write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
-        if (result.Status == AgentRunStatus.Succeeded)
-        {
-            // A1 (HARD gate): a raised-but-unanswered decision can never be buried under a green Succeeded.
-            var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
-            result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
-
-            // A2 (BEST-EFFORT net, opt-in): if no decision fired but the agent's FINAL message reads as an unresolved
-            // question handed back to the human, re-grade to NeedsReview(NeedsReview). A1 takes precedence — this runs
-            // only while still Succeeded, so a concrete decision outranks the heuristic. Flag-gated default-OFF.
-            if (result.Status == AgentRunStatus.Succeeded && FinalOutputReview.Enabled)
-                result = FinalOutputReview.ReGrade(result);
-        }
-
+        // Checked on the result as handed in: the completion contract below only ever re-grades a would-be Succeeded to
+        // NeedsReview, which is legal from exactly the same states.
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
             throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
 
@@ -553,6 +542,112 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
         result = await OffloadOrShedAsync(runId, result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+
+        result = await LandTerminalAsync(writer, current, result, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
+
+        // P2 (ledger-version full coverage): the terminal result is in the completion composer's read set — a
+        // completion landing between a compose read and its terminal stamp must move the version so the CAS refuses.
+        if (snapshot.WorkflowRunId is { } boundRunId)
+            await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, boundRunId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Write the terminal (<see cref="WriteTerminalAsync"/>), and write it once more when the first attempt failed on a
+    /// TRANSIENT database fault (<see cref="TransientDatabaseFault"/>) that left nothing behind — the run still stands
+    /// exactly where this writer's CAS expects it. That is a deadlock victim, a lock wait past
+    /// <see cref="StoppedRunDecisions.LockTimeout"/>, or a connection lost between the terminal UPDATE and its COMMIT, which
+    /// rolls the whole write back where an autocommitted UPDATE used to have landed. A fault after a commit that DID land
+    /// finds this worker's own terminal and returns it as it landed; for any other writer, and on a second fault, the
+    /// fault surfaces as it is.
+    /// </summary>
+    private async Task<AgentRunResult> LandTerminalAsync(CompletionWriter writer, AgentRunStatus current, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await WriteTerminalAsync(writer, current, result, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception fault) when (TransientDatabaseFault.Is(fault))
+        {
+            if (!await IsStillLiveForAsync(writer, current, cancellationToken).ConfigureAwait(false))
+            {
+                if (await ReadOwnTerminalAsync(writer, cancellationToken).ConfigureAwait(false) is { } landed) return landed;
+
+                throw;
+            }
+
+            _logger.LogWarning(fault, "Agent run {RunId} terminal write hit a transient database fault before it committed; writing it once more", writer.RunId);
+
+            return await WriteAgainAsync(writer, current, result, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The second attempt. The probe before it is a plain read, so a first attempt whose commit was still in doubt reads
+    /// live: this write then waits on that attempt's locks and loses its CAS to the terminal this worker landed itself.
+    /// Lost to its own terminal, it returns what landed — an ownership loss would make the executor skip the settling,
+    /// notifying and harness steps owed to a run it did finish.
+    /// </summary>
+    private async Task<AgentRunResult> WriteAgainAsync(CompletionWriter writer, AgentRunStatus current, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await WriteTerminalAsync(writer, current, result, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentRunOwnershipLostException)
+        {
+            if (await ReadOwnTerminalAsync(writer, cancellationToken).ConfigureAwait(false) is { } landed) return landed;
+
+            throw;
+        }
+    }
+
+    /// <summary>The terminal this worker landed itself, as stored: past Running under its own owner id and fence epoch, which every other terminal writer bumps (the executor reads the same predicate as "my terminal"). Null for a legacy writer, whose terminal carries nothing that tells it from another's.</summary>
+    private async Task<AgentRunResult?> ReadOwnTerminalAsync(CompletionWriter writer, CancellationToken cancellationToken)
+    {
+        if (writer.Owner is not { } owner) return null;
+
+        var resultJson = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == owner.RunId && r.OwnerId == owner.OwnerId && r.FenceEpoch == owner.Epoch && r.Status != AgentRunStatus.Running && r.Status != AgentRunStatus.Queued)
+            .Select(r => r.ResultJson)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return resultJson is null ? null : JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options);
+    }
+
+    /// <summary>
+    /// The contract check, the terminal write and the close of the decisions the run leaves unanswered, as one transaction
+    /// entered with the run's decisions locked: an answer racing the end either committed before the check (which then sees
+    /// it answered) or waits for this commit and is refused, the decision closed. Checked and closed in two steps instead,
+    /// an answer landing between them was told "answered" by a run that had just recorded its question as unanswered.
+    /// Returns the result as it landed, re-graded by the contract; the offload before it stays outside, so no row lock is
+    /// held across its I/O.
+    /// </summary>
+    private async Task<AgentRunResult> WriteTerminalAsync(CompletionWriter writer, AgentRunStatus current, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        await using var terminal = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await StoppedRunDecisions.BoundLockWaitsAsync(_db, cancellationToken).ConfigureAwait(false);
+        await StoppedRunDecisions.LockAsync(_db, writer.RunId, cancellationToken).ConfigureAwait(false);
+
+        var landed = await ApplyCompletionContractAsync(writer.RunId, result, cancellationToken).ConfigureAwait(false);
+
+        await FlipTerminalAsync(writer, current, landed, cancellationToken).ConfigureAwait(false);
+
+        // The run is over, so nothing reads an answer now: its unanswered decisions close with it, out of the queue and
+        // the Room. After the flip, so a completion that lost its CAS leaves them to whoever landed the run.
+        await StoppedRunDecisions.ExpireAsync(_db, writer.RunId, StoppedRunDecisions.EndedError, cancellationToken).ConfigureAwait(false);
+        await terminal.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return landed;
+    }
+
+    /// <summary>The terminal CAS: the owner-fenced flip for a worker holding the run, the status- and epoch-guarded one for a legacy writer. Throws when it lost the run.</summary>
+    private async Task FlipTerminalAsync(CompletionWriter writer, AgentRunStatus current, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        var runId = writer.RunId;
+        var expectedEpoch = writer.ExpectedEpoch;
+        var owner = writer.Owner;
 
         // Summary, ExitReason, Error and the inline transcript are all harness words — any of them can carry a NUL
         // that neither jsonb nor text will take. A run that DID its work must not fail at the last statement.
@@ -582,13 +677,38 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
                 throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current} at completion — a concurrent transition won the race.");
             }
         }
+    }
 
-        _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
+    /// <summary>Whether the run still stands exactly where <paramref name="writer"/>'s CAS expects it — so a terminal write that faulted before its commit landed nothing, and writing it again cannot overwrite anyone's terminal.</summary>
+    private async Task<bool> IsStillLiveForAsync(CompletionWriter writer, AgentRunStatus current, CancellationToken cancellationToken)
+    {
+        var run = _db.AgentRun.AsNoTracking().Where(r => r.Id == writer.RunId && r.Status == current);
 
-        // P2 (ledger-version full coverage): the terminal result is in the completion composer's read set — a
-        // completion landing between a compose read and its terminal stamp must move the version so the CAS refuses.
-        if (snapshot.WorkflowRunId is { } boundRunId)
-            await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, boundRunId, cancellationToken).ConfigureAwait(false);
+        var live = writer.Owner is { } owner
+            ? run.Where(r => r.OwnerId == owner.OwnerId && r.FenceEpoch == owner.Epoch)
+            : run.Where(r => r.OwnerId == null && r.ReattachReservationId == null && (writer.ExpectedEpoch == null || r.FenceEpoch == writer.ExpectedEpoch));
+
+        return await live.AnyAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered — re-grade
+    /// Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at the normal
+    /// completion's choke point AND mirrored in the reconciler's spool recovery, so the invariant holds on every terminal
+    /// write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
+    /// </summary>
+    private async Task<AgentRunResult> ApplyCompletionContractAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+
+        // A1 (HARD gate): a raised-but-unanswered decision can never be buried under a green Succeeded.
+        var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
+        result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+
+        // A2 (BEST-EFFORT net, opt-in): if no decision fired but the agent's FINAL message reads as an unresolved
+        // question handed back to the human, re-grade to NeedsReview(NeedsReview). A1 takes precedence — this runs
+        // only while still Succeeded, so a concrete decision outranks the heuristic. Flag-gated default-OFF.
+        return result.Status == AgentRunStatus.Succeeded && FinalOutputReview.Enabled ? FinalOutputReview.ReGrade(result) : result;
     }
 
     /// <summary>
@@ -783,6 +903,11 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
 
     public async Task<bool> CancelRunningAsync(Guid runId, string reason, AgentRunAbandonCause cause, CancellationToken cancellationToken)
     {
+        // The run's row and then its decisions, each in an autocommitted statement of its own: that is what keeps a stop
+        // from deadlocking the run's end, which locks them the other way round. Inside a caller's transaction the row lock
+        // would be held while the decisions are awaited.
+        if (_db.Database.CurrentTransaction is not null) throw new InvalidOperationException("A stop lands its terminal and closes the run's decisions in statements of their own and cannot join an ambient transaction.");
+
         // Read the run's epoch + handle FRESH + untracked, then flip via a status-guarded, epoch-fenced CAS pinned
         // to Running (mirrors the reconciler's AbandonAsync, but → Cancelled, a deliberate cancel, not Failed).
         // Fencing on the epoch we just read means a worker whose run was reclaimed (the reclaim bumped the epoch)

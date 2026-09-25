@@ -74,7 +74,7 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
 
         if (agent is not null)
         {
-            if (agent.Status != ToolCallLedgerStatus.AwaitingApproval) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved, RefusalReason(agent.Status));
+            if (agent.Status != ToolCallLedgerStatus.AwaitingApproval) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved, RefusalReason(agent));
 
             return await AnswerAgentAsync(decisionId, agent.EnvelopeJson, selectedOptions, freeText, author, teamId, cancellationToken).ConfigureAwait(false);
         }
@@ -149,17 +149,17 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
         return env is null || DecisionPolicyFloor.Effective(env) == DecisionPolicies.HumanRequired;
     }
 
-    /// <summary>What an answer refused on an agent decision is told. Expired is the one no-answer terminal a decision row reaches — its agent run's stop closed it — so it is named; any other winner (a concurrent answer, the deadline's default) is not.</summary>
-    private static string? RefusalReason(ToolCallLedgerStatus status) => status == ToolCallLedgerStatus.Expired ? StoppedRunDecisions.ExpiredError : null;
+    /// <summary>What an answer refused on an agent decision is told. Expired is the one no-answer terminal a decision row reaches — its agent run's stop or its own end closed it, stamping why (<see cref="StoppedRunDecisions"/>) — so that reason is named; any other winner (a concurrent answer, the deadline's default) is not.</summary>
+    private static string? RefusalReason(AgentDecision decision) => decision.Status == ToolCallLedgerStatus.Expired ? decision.Error : null;
 
-    /// <summary>Why an answer lost the row's CAS, read after the loss: a stop that expired the decision between this answer's read and its write is named like one that landed before the read.</summary>
+    /// <summary>Why an answer lost the row's CAS, read after the loss: a stop or an end that expired the decision between this answer's read and its write is named like one that landed before the read.</summary>
     private async Task<string?> LostAnswerReasonAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
-        await ReadAgentAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false) is { } agent ? RefusalReason(agent.Status) : null;
+        await ReadAgentAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false) is { } agent ? RefusalReason(agent) : null;
 
     private async Task<AgentDecision?> ReadAgentAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()
             .Where(l => l.Id == decisionId && l.TeamId == teamId && l.ToolKind == DecisionToolKinds.DecisionRequest)
-            .Select(l => new AgentDecision(l.Status, l.DecisionEnvelopeJson))
+            .Select(l => new AgentDecision(l.Status, l.DecisionEnvelopeJson, l.Error))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     private async Task<NodeDecision?> ReadNodeAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) =>
@@ -223,7 +223,7 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
         return true;
     }
 
-    private sealed record AgentDecision(ToolCallLedgerStatus Status, string? EnvelopeJson);
+    private sealed record AgentDecision(ToolCallLedgerStatus Status, string? EnvelopeJson, string? Error);
 
     private sealed record NodeDecision(string Status, Guid RunId, string NodeId, string? EnvelopeJson);
 

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using System.Text.Json;
 using Autofac;
@@ -16,6 +17,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -62,6 +64,28 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
         var hasErrorEvent = await db.AgentRunEvent.AsNoTracking().AnyAsync(e => e.AgentRunId == runId && e.Kind == AgentEventKind.Error);
         hasErrorEvent.ShouldBeTrue("the reconciler appends an Error event so the timeline shows the abandonment");
+    }
+
+    [Fact]
+    public async Task A_stale_run_whose_abandon_faults_leaves_the_rest_of_the_sweep_to_run()
+    {
+        // One run's fault is that run's, not the sweep's. A CAS that timed out on the sweep's first candidate used to escape
+        // the loop, so every candidate after it — and the wait recovery after the sweep — went untouched, tick after tick,
+        // for as long as that one run kept faulting.
+        var teamId = await SeedTeamAsync();
+        var faulted = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.FromDays(3650), withRecentEvent: false);   // the lease that lapsed first: the sweep's first candidate
+        var next = await SeedRunAsync(teamId, AgentRunStatus.Running, livenessAgo: TimeSpan.FromDays(3649), withRecentEvent: false);
+
+        using (var scope = BeginScopeThrough(new FailAbandonOf(faulted)))
+            (await Record.ExceptionAsync(() => scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None))).ShouldBeNull("one run's fault is that run's, not the sweep's");
+
+        (await StatusAsync(faulted)).ShouldBe(AgentRunStatus.Running, "the faulted run is left for the next tick");
+        (await StatusAsync(next)).ShouldBe(AgentRunStatus.Failed, "and the run after it in the batch is still abandoned");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        (await StatusAsync(faulted)).ShouldBe(AgentRunStatus.Failed, "the next tick abandons it");
     }
 
     [Fact]
@@ -160,6 +184,10 @@ public class AgentRunRecoveryFlowTests : IDisposable
         stored.PendingDecisionId.ShouldBe(decisionId);
         (await db.AgentRunEvent.AsNoTracking().AnyAsync(e => e.AgentRunId == runId && e.Kind == AgentEventKind.Warning))
             .ShouldBeTrue("the recovered NeedsReview is recorded as a Warning, not a Completed/Error event");
+
+        var decision = await db.ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == decisionId);
+        decision.Status.ShouldBe(ToolCallLedgerStatus.Expired, "the recovered run is over, so its question closes with it rather than waiting in the queue for an answer nothing will read");
+        decision.Error.ShouldBe(StoppedRunDecisions.EndedError);
     }
 
     [Fact]
@@ -838,6 +866,42 @@ public class AgentRunRecoveryFlowTests : IDisposable
             TeamId = teamId, AgentRunId = runId, HarnessTypeKey = "codex-cli/v1", RunnerKind = "local",
             RunnerLocatorJson = "{}", WorkerFenceEpoch = fenceEpoch, Channel = NativeRecordChannel.Stdout,
         }, CancellationToken.None).ConfigureAwait(false)).ShouldNotBeNull("the plane must open a capture against a freshly seeded Running run");
+    }
+
+    private async Task<AgentRunStatus> StatusAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.Status).SingleAsync();
+    }
+
+    /// <summary>A scope whose database commands pass <paramref name="interceptor"/>.</summary>
+    private ILifetimeScope BeginScopeThrough(IInterceptor interceptor)
+    {
+        DbContextOptions<CodeSpaceDbContext> production;
+        using (var probe = _fixture.BeginScope())
+            production = probe.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>(production).AddInterceptors(interceptor).Options;
+
+        return _fixture.BeginScope(b => b.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance());
+    }
+
+    /// <summary>Times the reconciler's abandon CAS on one run out, once — the statement the sweep's per-candidate isolation exists for.</summary>
+    private sealed class FailAbandonOf : DbCommandInterceptor
+    {
+        private readonly Guid _runId;
+        private int _fired;
+
+        public FailAbandonOf(Guid runId) { _runId = runId; }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var isAbandonOf = command.CommandText.Contains("UPDATE agent_run AS target", StringComparison.Ordinal) && command.CommandText.Contains("fence_epoch = target.fence_epoch + 1", StringComparison.Ordinal) && command.Parameters.Cast<DbParameter>().Any(p => p.Value is Guid id && id == _runId);
+
+            if (!isAbandonOf || Interlocked.Exchange(ref _fired, 1) == 1) return ValueTask.FromResult(result);
+
+            throw new TimeoutException($"the abandon of run {_runId} timed out");
+        }
     }
 
     private async Task<Guid> SeedTeamAsync()

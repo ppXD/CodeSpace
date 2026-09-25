@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
@@ -119,9 +120,11 @@ public interface IToolCallLedgerService
     /// shared answer CAS (<see cref="TryAnswerDecisionAsync"/> → <c>Succeeded</c> carrying a <c>DecisionAnswer.Timeout</c>,
     /// NOT the approval <c>Expired</c> terminal — so the blocked call reads the default, not an error). A row with NO
     /// default is LEFT Pending (convert-to-human is D5d). Single-winner per row (a reaper tick racing a human answer leaves
-    /// one winner via the same CAS); team-agnostic; bounded per sweep (cap logged, never silently truncated).
+    /// one winner via the same CAS); team-agnostic; bounded per sweep (cap logged, never silently truncated). Yields each
+    /// decision it defaulted the moment that default commits, so the caller's follow-ups for it run before the sweep moves
+    /// on and no later row can cost them; a row whose own timeout faults is logged and left for the next tick.
     /// </summary>
-    Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken);
+    IAsyncEnumerable<TimedOutDecision> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>
     /// Stranded-execution reaper (D6): terminalize a side-effecting tool-call row left non-terminal by a HARD crash —
@@ -486,7 +489,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
     // DecisionAnswerService / DecisionQueueService use, so the reaper's timeout answer round-trips identically.
     private static readonly JsonSerializerOptions DecisionJson = new(JsonSerializerDefaults.Web);
 
-    public async Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    public async IAsyncEnumerable<TimedOutDecision> ExpireStaleDecisionsAsync(DateTimeOffset now, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // The decision-only complement of ExpireStaleApprovalsAsync's candidate set (disjoint by ToolKind, D5a). Selecting
         // the stashed envelope avoids a second read — the DefaultAction lives inside it, not in a column.
@@ -499,17 +502,35 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
         var capped = candidates.Count > ExpiryBatchSize;
 
-        var timedOut = new List<TimedOutDecision>(Math.Min(candidates.Count, ExpiryBatchSize));
+        var defaulted = 0;
 
         foreach (var c in candidates.Take(ExpiryBatchSize))
-            if (await TryTimeoutOneAsync(c.Id, c.TeamId, c.ApprovalMessageId, c.DecisionEnvelopeJson, now, cancellationToken).ConfigureAwait(false) is { } row)
-                timedOut.Add(row);
+        {
+            if (await TimeOutQuietlyAsync(c.Id, () => TryTimeoutOneAsync(c.Id, c.TeamId, c.ApprovalMessageId, c.DecisionEnvelopeJson, now, cancellationToken), cancellationToken).ConfigureAwait(false) is not { } row) continue;
 
-        if (timedOut.Count > 0) _logger.LogInformation("Decision reaper applied the default to {Count} timed-out decision(s)", timedOut.Count);
+            defaulted++;
+            yield return row;
+        }
+
+        if (defaulted > 0) _logger.LogInformation("Decision reaper applied the default to {Count} timed-out decision(s)", defaulted);
 
         if (capped) _logger.LogWarning("Decision reaper hit the per-sweep cap of {Cap} — a backlog remains for the next tick", ExpiryBatchSize);
+    }
 
-        return timedOut;
+    // One decision's fault is that decision's, not the sweep's: each row's write commits on its own, and the rows after a
+    // faulted one are just as overdue. The faulted row keeps whatever it had; one left AwaitingApproval is the next tick's.
+    private async Task<TimedOutDecision?> TimeOutQuietlyAsync(Guid ledgerId, Func<Task<TimedOutDecision?>> timeOut, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await timeOut().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Decision reaper could not time out decision {LedgerId}; the rest of the sweep goes on, and the next tick retries it if it is still pending", ledgerId);
+
+            return null;
+        }
     }
 
     /// <summary>How far a convert-to-human / deferred overdue decision's reaper re-examination is pushed out (D5b starvation guard). Re-examined hourly, it never re-fills the head of the ascending-deadline page — so an answerable (defaulted) row is never starved behind a backlog of human-only ones — while staying AwaitingApproval for a human in the queue.</summary>

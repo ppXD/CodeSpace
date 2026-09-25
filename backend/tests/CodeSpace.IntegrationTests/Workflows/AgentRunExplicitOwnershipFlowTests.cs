@@ -332,17 +332,20 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         (await runs.ActivateReattachAsync(reservation, CancellationToken.None))!.OwnerId.ShouldNotBe(prior.OwnerId.Value);
     }
 
-    [Fact]
-    public async Task A_terminal_write_with_lost_ack_preserves_the_result_but_does_not_reauthorize_completion()
+    [Theory]
+    [InlineData(false, typeof(IOException))]   // a bare I/O failure: never offered again, so it surfaces as it is
+    [InlineData(true, null)]                   // a transient one: the commit landed, so the worker finds its own terminal and is handed it back
+    public async Task A_terminal_write_with_lost_ack_preserves_the_result_but_does_not_reauthorize_completion(bool transient, Type? surfaces)
     {
         var runId = await CreateQueuedAsync();
-        var fault = new TerminalCommitAcknowledgementFault();
+        var fault = new TerminalCommitAcknowledgementFault { Transient = transient };
         using var scope = FaultScope(fault);
         var runs = scope.Resolve<IAgentRunService>();
         var owner = (await runs.ClaimOwnershipAsync(runId, CancellationToken.None))!;
         var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "durable first result" };
         fault.Armed = true;
-        await Should.ThrowAsync<IOException>(() => runs.CompleteAsync(owner, result, CancellationToken.None));
+        var thrown = await Record.ExceptionAsync(() => runs.CompleteAsync(owner, result, CancellationToken.None));
+        (thrown?.GetType()).ShouldBe(surfaces, "a write that did land is never written again: a bare I/O failure surfaces as it is, and a transient one hands back this worker's own terminal as it landed");
         fault.Armed.ShouldBeFalse();
         var terminal = await runs.GetAsync(runId, CancellationToken.None);
         terminal.Status.ShouldBe(AgentRunStatus.Succeeded);
@@ -354,14 +357,74 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         // This slice does not promise a terminal acknowledgement/notification receipt; recovery must read durable terminal state.
     }
 
-    private sealed class TerminalCommitAcknowledgementFault : DbCommandInterceptor
+    [Fact]
+    public async Task A_rewrite_that_loses_to_this_workers_own_terminal_hands_it_back_rather_than_an_ownership_loss()
+    {
+        // The rewrite's probe is a plain read, so a first attempt whose commit was still in doubt reads live, and the rewrite
+        // then loses its CAS to the terminal that very attempt landed. Here the worker's own terminal lands between the probe
+        // and the rewrite — standing in for that commit becoming visible late.
+        var runId = await CreateQueuedAsync();
+        var landedMeanwhile = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "landed while in doubt" };
+        AgentRunOwnerToken? owner = null;
+        var fault = new OwnTerminalLandsBeforeTheRewrite(() => CompleteElsewhereAsync(owner!, landedMeanwhile));
+        using var scope = FaultScope(fault);
+        var runs = scope.Resolve<IAgentRunService>();
+        owner = (await runs.ClaimOwnershipAsync(runId, CancellationToken.None))!;
+        fault.Armed = true;
+
+        (await Record.ExceptionAsync(() => runs.CompleteAsync(owner, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "the rewrite" }, CancellationToken.None))).ShouldBeNull("lost to its own terminal, the rewrite hands back what landed — an ownership loss would make the executor skip the steps owed to a run it did finish");
+
+        fault.Landed.ShouldBeTrue("precondition: the first attempt was cut off before its commit, and the worker's own terminal landed before the rewrite");
+        (await runs.GetAsync(runId, CancellationToken.None)).ResultJson.ShouldContain("landed while in doubt", customMessage: "the terminal that landed stands: the rewrite wrote nothing");
+    }
+
+    private async Task CompleteElsewhereAsync(AgentRunOwnerToken owner, AgentRunResult result)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentRunService>().CompleteAsync(owner, result, CancellationToken.None);
+    }
+
+    /// <summary>Cuts the first terminal attempt off just before its commit with a transient fault, so nothing lands and the probe reads the run live; then lands this worker's own terminal from another scope just as the rewrite's transaction starts.</summary>
+    private sealed class OwnTerminalLandsBeforeTheRewrite : DbTransactionInterceptor
+    {
+        private readonly Func<Task> _landOwnTerminal;
+        private int _committing;
+        private int _started;
+
+        public OwnTerminalLandsBeforeTheRewrite(Func<Task> landOwnTerminal) { _landOwnTerminal = landOwnTerminal; }
+
+        public bool Armed { get; set; }
+
+        public bool Landed { get; private set; }
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default)
+        {
+            if (!Armed || Interlocked.Increment(ref _committing) != 1) return ValueTask.FromResult(result);
+
+            throw new TimeoutException("the connection was lost just before the terminal's commit");
+        }
+
+        public override async ValueTask<DbTransaction> TransactionStartedAsync(DbConnection connection, TransactionEndEventData eventData, DbTransaction result, CancellationToken cancellationToken = default)
+        {
+            if (!Armed || Interlocked.Increment(ref _started) != 2) return result;
+
+            await _landOwnTerminal();
+            Landed = true;
+
+            return result;
+        }
+    }
+
+    /// <summary>Loses the acknowledgement of the terminal write's commit — it committed, and the caller hears a failure instead: a bare I/O one, or a transient one (a lost connection) the terminal writer would offer again if nothing had landed. The terminal write commits together with the decisions it closes, so its acknowledgement is its transaction's commit.</summary>
+    private sealed class TerminalCommitAcknowledgementFault : DbTransactionInterceptor
     {
         public bool Armed { get; set; }
-        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result, CancellationToken cancellationToken = default)
+        public bool Transient { get; init; }
+        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
         {
-            if (!Armed || !command.CommandText.Contains("completed_at = clock_timestamp()", StringComparison.Ordinal)) return ValueTask.FromResult(result);
+            if (!Armed) return Task.CompletedTask;
             Armed = false;
-            throw new IOException("Terminal write committed but its acknowledgement was lost");
+            throw Transient ? new TimeoutException("Terminal write committed but the connection was lost before its acknowledgement") : new IOException("Terminal write committed but its acknowledgement was lost");
         }
     }
 

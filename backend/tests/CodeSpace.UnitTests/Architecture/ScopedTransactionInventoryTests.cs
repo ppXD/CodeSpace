@@ -57,6 +57,8 @@ public class ScopedTransactionInventoryTests
         ["Agents/AgentRunLogging/AgentRunLogService.cs"] = (4, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Agents/AgentRunLogging/AgentRunLogService.Verification.cs"] = (1, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Agents/AgentRunLogging/AgentRunLogStorageReadiness.cs"] = (1, "rolls back and CONTINUES on a unique violation; joined, that rollback would discard the caller's work instead of its own."),
+        ["Agents/AgentRunReconcilerService.cs"] = (1, "the spool recovery's terminal: the run's decisions are locked, checked, closed and the CAS landed as one unit, inside a sweep that has no transaction to join — an ambient one is refused outright."),
+        ["Agents/AgentRunService.cs"] = (1, "a terminal write holds the run's decision locks from its contract check to its commit and must be durable before the executor notifies anyone — an ambient transaction is refused outright rather than joined."),
         ["Agents/AgentRunService.Ownership.cs"] = (1, "EnsureIndependentOwnershipTransaction refuses an ambient transaction outright — an execution claim must be durable before a worker acts on it."),
         ["Agents/AgentRunService.Review.cs"] = (1, "the same ownership guard, asserted two lines above this call."),
         ["Agents/Mcp/IToolCallLedgerService.cs"] = (1, "rolls back and CONTINUES on a lost claim race, then re-reads the winner; a joined rollback would take the caller's transaction with it."),

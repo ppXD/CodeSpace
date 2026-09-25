@@ -99,6 +99,43 @@ public class StuckRunReconcilerFlowTests
             "the young Pending row must remain Pending");
     }
 
+    [Theory]
+    [InlineData(WorkflowRunStatus.Cancelled)]
+    [InlineData(WorkflowRunStatus.Failure)]
+    [InlineData(WorkflowRunStatus.Success)]
+    public async Task A_stuck_pending_sub_workflow_under_a_finished_parent_is_never_dispatched(WorkflowRunStatus finished)
+    {
+        // A staged child whose cancel failed during its parent's stop sits Pending with a stale CreatedDate — exactly what
+        // this sweep re-dispatches. Dispatched, it ran under a finished parent toward a wait that parent had closed. The
+        // guard agent runs already have: a finished parent's staged child is not work anyone is waiting for.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var parentId = await StageStuckRunAsync(workflowId, teamId, finished, createdAgo: TimeSpan.FromHours(1));
+        var childId = await StageStuckPendingUnderAsync(workflowId, teamId, parentId, WorkflowRunSourceTypes.ChildWorkflow);
+
+        var versionBefore = await ReadRowVersionAsync(childId);
+
+        await ReconcileAsync();
+
+        (await ReadRowVersionAsync(childId)).ShouldBe(versionBefore, $"a staged sub-workflow under a {finished} parent must not be dispatched — nor touched at all");
+        (await ReadStatusAsync(childId)).ShouldBe(WorkflowRunStatus.Pending);
+    }
+
+    [Fact]
+    public async Task A_stuck_pending_rerun_of_a_finished_run_is_still_dispatched()
+    {
+        // The other meaning of ParentRunId: a rerun's parent is its lineage, which has finished by definition. The
+        // finished-parent guard is for sub-workflow children only — a rerun it swallowed would never start.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var originalId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Failure, createdAgo: TimeSpan.FromHours(1));
+        var rerunId = await StageStuckPendingUnderAsync(workflowId, teamId, originalId, WorkflowRunSourceTypes.Rerun);
+
+        await ReconcileAsync();
+
+        (await ReadStatusAsync(rerunId)).ShouldBe(WorkflowRunStatus.Enqueued, "a stuck rerun of a finished run is re-dispatched like any stuck Pending run");
+    }
+
     [Fact]
     public async Task Stuck_enqueued_is_reverted_to_pending_for_next_tick()
     {
@@ -1084,6 +1121,17 @@ public class StuckRunReconcilerFlowTests
             backdateLastModified
                 ? new object[] { createdAt, createdAt, runId }
                 : new object[] { createdAt, runId });
+
+        return runId;
+    }
+
+    /// <summary>A Pending run stuck past the threshold, started under <paramref name="parentRunId"/> as <paramref name="sourceType"/>: a sub-workflow child, or a rerun whose parent is only its lineage.</summary>
+    private async Task<Guid> StageStuckPendingUnderAsync(Guid workflowId, Guid teamId, Guid parentRunId, string sourceType)
+    {
+        var runId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Pending, createdAgo: StuckRunReconcilerService.PendingStuckAfter + TimeSpan.FromMinutes(1));
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.ParentRunId, parentRunId).SetProperty(r => r.SourceType, sourceType));
 
         return runId;
     }

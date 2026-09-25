@@ -147,9 +147,16 @@ public interface IWorkflowService
     /// → <c>Cancelled</c>, then tear the whole thing down — resolve its still-pending waits (closed as moot; the
     /// wait-status domain has no <c>Cancelled</c> value), KILL-WAVE its
     /// branch agent runs (Queued via <c>CancelQueuedAsync</c>, Running via <c>CancelRunningAsync</c> + a durable
-    /// process kill), and cancel its staged non-terminal sub-workflow children — and emit a <c>run.cancelled</c>
-    /// ledger record. The teardown is best-effort, so one failed kill never aborts the cancel; the reconciler's
-    /// parent-run-terminal guard re-cleans anything missed.
+    /// process kill), and cancel its non-terminal sub-workflow children through this same cancel (so each child's own
+    /// teardown kills its agents and cancels its own children) — and emit a <c>run.cancelled</c>
+    /// ledger record. The teardown is best-effort, so one agent's failed kill never strands the other agents, and one
+    /// child's failed cancel never strands its siblings or the run's remaining waits. The agent-run reconciler's
+    /// parent-run-terminal guard re-cleans an agent run the teardown missed, and the stuck-run reconciler never dispatches
+    /// a child still staged under a finished parent; nothing stops a child that had already started.
+    /// The teardown runs after the terminal commits and does not stop when the request that asked for it goes away — and
+    /// the response waits for it across the whole sub-tree: every descendant's agents, children and waits are torn down
+    /// before this returns. Returning at the commit instead is a follow-up, not built: a <c>TearDownStoppedRunAsync</c>
+    /// background job enqueued with the terminal, keyed by the run and the generation it stopped.
     ///
     /// <para>TEAM-SCOPED + fail-closed: returns <c>null</c> when the run isn't <paramref name="teamId"/>'s (a
     /// foreign id leaks neither existence nor a spurious success). An already-terminal run is an idempotent no-op
