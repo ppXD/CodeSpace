@@ -51,8 +51,10 @@ public class ListHarnessesQueryHandlerTests
             new Dictionary<string, string> { ["KEY"] = credential.ApiKey ?? "" };
     }
 
+    // No default-harness override is handed in, so what the registry validates never depends on the process
+    // environment another test class could be holding a value in.
     private static ListHarnessesQueryHandler HandlerFor(params IAgentHarness[] harnesses) =>
-        new(new AgentHarnessRegistry(harnesses));
+        new(new AgentHarnessRegistry(harnesses, configuredDefault: null));
 
     [Fact]
     public async Task Projects_kind_version_models_and_the_supported_providers_a_harness_can_drive()

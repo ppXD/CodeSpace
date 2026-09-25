@@ -354,12 +354,13 @@ public sealed class AgentRunExplicitOwnershipFlowTests
         // This slice does not promise a terminal acknowledgement/notification receipt; recovery must read durable terminal state.
     }
 
-    private sealed class TerminalCommitAcknowledgementFault : DbCommandInterceptor
+    /// <summary>Loses the acknowledgement of the terminal write's commit — it committed, and the caller hears an I/O failure instead. The terminal write commits together with the decisions it closes, so its acknowledgement is its transaction's commit.</summary>
+    private sealed class TerminalCommitAcknowledgementFault : DbTransactionInterceptor
     {
         public bool Armed { get; set; }
-        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result, CancellationToken cancellationToken = default)
+        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
         {
-            if (!Armed || !command.CommandText.Contains("completed_at = clock_timestamp()", StringComparison.Ordinal)) return ValueTask.FromResult(result);
+            if (!Armed) return Task.CompletedTask;
             Armed = false;
             throw new IOException("Terminal write committed but its acknowledgement was lost");
         }

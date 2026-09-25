@@ -240,8 +240,9 @@ public sealed record AgentRunResult
 
     /// <summary>
     /// When <see cref="CompletionDisposition"/> is <see cref="CompletionDisposition.NeedsDecision"/>, the ledger id of the
-    /// still-unanswered <c>decision.request</c> the run raised — the handle a reviewer (or the "Needs decision" queue)
-    /// resolves. Null in every other case.
+    /// <c>decision.request</c> the run ended with still unanswered — what a reviewer has to settle. The same terminal write
+    /// closed that question (Expired), so it does not wait in the "Needs decision" queue for an answer no run would read.
+    /// Null in every other case.
     /// </summary>
     public Guid? PendingDecisionId { get; init; }
 

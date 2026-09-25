@@ -13,7 +13,10 @@ public sealed class AgentHarnessRegistry : IAgentHarnessRegistry, ISingletonDepe
 {
     private readonly IReadOnlyDictionary<string, IAgentHarness> _byKind;
 
-    public AgentHarnessRegistry(IEnumerable<IAgentHarness> harnesses)
+    public AgentHarnessRegistry(IEnumerable<IAgentHarness> harnesses) : this(harnesses, AgentHarnessDefaults.ConfiguredOverride) { }
+
+    /// <summary>Build over <paramref name="harnesses"/> with the operator's default-harness override handed in rather than read from the process environment — which a test cannot set without every test class running beside it reading the same value.</summary>
+    internal AgentHarnessRegistry(IEnumerable<IAgentHarness> harnesses, string? configuredDefault)
     {
         var list = harnesses.ToList();
 
@@ -29,7 +32,7 @@ public sealed class AgentHarnessRegistry : IAgentHarnessRegistry, ISingletonDepe
         // config typo surfaces at startup, not as a per-run "no harness registered" failure on the unclamped default
         // paths. (A model-hallucinated per-subtask harness is clamped gracefully by the planner; the operator override is
         // trusted config, so a bad value is loud.) Unset / registered → a no-op.
-        AgentHarnessDefaults.Validate(list.Select(h => h.Kind).ToList());
+        AgentHarnessDefaults.Validate(list.Select(h => h.Kind).ToList(), configuredDefault);
     }
 
     public IReadOnlyList<IAgentHarness> All { get; }

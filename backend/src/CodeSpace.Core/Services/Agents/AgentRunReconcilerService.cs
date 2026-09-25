@@ -1049,6 +1049,9 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         // Only the winner can invalidate capture promises. A losing stale probe has no authority over its successor.
         await _captureIntents.MarkIndeterminateForRunAsync(runId, cancellationToken).ConfigureAwait(false);
 
+        // The recovered run is over, so nothing reads an answer now: its unanswered decisions close with it, saying it ended.
+        await StoppedRunDecisions.ExpireQuietlyAsync(_db, runId, StoppedRunDecisions.EndedError, _logger, cancellationToken).ConfigureAwait(false);
+
         // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence. The spool's exit
         // code lands on the Agent Run's own result above; it never reaches the native record plane, whose own
         // observer genuinely never saw this process exit.

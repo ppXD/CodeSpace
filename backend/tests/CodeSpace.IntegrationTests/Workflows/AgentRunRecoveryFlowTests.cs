@@ -160,6 +160,10 @@ public class AgentRunRecoveryFlowTests : IDisposable
         stored.PendingDecisionId.ShouldBe(decisionId);
         (await db.AgentRunEvent.AsNoTracking().AnyAsync(e => e.AgentRunId == runId && e.Kind == AgentEventKind.Warning))
             .ShouldBeTrue("the recovered NeedsReview is recorded as a Warning, not a Completed/Error event");
+
+        var decision = await db.ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == decisionId);
+        decision.Status.ShouldBe(ToolCallLedgerStatus.Expired, "the recovered run is over, so its question closes with it rather than waiting in the queue for an answer nothing will read");
+        decision.Error.ShouldBe(StoppedRunDecisions.EndedError);
     }
 
     [Fact]

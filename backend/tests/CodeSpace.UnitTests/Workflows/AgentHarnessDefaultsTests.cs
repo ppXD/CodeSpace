@@ -9,12 +9,11 @@ namespace CodeSpace.UnitTests.Workflows;
 /// codex-cli floor (byte-identical to the prior hardcoded default the projection / spawn tests still pin); SET → the
 /// operator's override (trimmed), so an air-gapped / fork operator can flip the global default off codex in ONE place.
 ///
-/// This test MUTATES the process-global override env var, so it shares the "DefaultHarnessEnvMutation" collection with
-/// every test that READS the unset default (the definition builders / planner / supervisor build) — same collection =
-/// run sequentially, so a concurrent reader can never observe a transient override (mirrors the repo's McpEndpointEnvMutation pattern).
+/// <para>The override is read from the process environment in production and handed in as a value here, so nothing in
+/// this class touches that environment — xunit runs test classes in parallel in one process, and a value set here was
+/// read by every class constructing a harness registry beside it.</para>
 /// </summary>
 [Trait("Category", "Unit")]
-[Collection("DefaultHarnessEnvMutation")]
 public sealed class AgentHarnessDefaultsTests
 {
     [Fact]
@@ -28,20 +27,8 @@ public sealed class AgentHarnessDefaultsTests
     [InlineData("   ", "codex-cli")]           // whitespace → the floor
     [InlineData("claude-code", "claude-code")] // a set override flips the global default off codex
     [InlineData("  claude-code  ", "claude-code")]   // trimmed
-    public void DefaultHarness_is_the_env_override_else_the_codex_floor(string? envValue, string expected)
-    {
-        var original = Environment.GetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar, envValue);
-
-            AgentHarnessDefaults.DefaultHarness.ShouldBe(expected);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar, original);
-        }
-    }
+    public void DefaultHarness_is_the_configured_override_else_the_codex_floor(string? configured, string expected) =>
+        AgentHarnessDefaults.DefaultHarnessFrom(configured).ShouldBe(expected);
 
     [Theory]
     [InlineData(null, false)]            // unset → no-op
@@ -49,30 +36,14 @@ public sealed class AgentHarnessDefaultsTests
     [InlineData("codex-cli", false)]     // registered (case-exact) → no-op
     [InlineData("CLAUDE-CODE", false)]   // registered (case-insensitive) → no-op
     [InlineData("clftaude-typo", true)]  // a typo'd / unregistered kind → fail-fast throw
-    public void Validate_fails_fast_only_for_an_unregistered_override(string? envValue, bool expectThrow)
+    public void Validate_fails_fast_only_for_an_unregistered_override(string? configured, bool expectThrow)
     {
         var registered = new[] { "codex-cli", "claude-code" };
-        var original = Environment.GetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar, envValue);
 
-            if (expectThrow)
-            {
-                // The error must name the bad kind so the operator can fix the typo.
-                var ex = Should.Throw<InvalidOperationException>(() => AgentHarnessDefaults.Validate(registered));
-                ex.Message.ShouldContain(envValue!.Trim());
-            }
-            else
-                Should.NotThrow(() => AgentHarnessDefaults.Validate(registered));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentHarnessDefaults.DefaultHarnessEnvVar, original);
-        }
+        if (expectThrow)
+            // The error must name the bad kind so the operator can fix the typo.
+            Should.Throw<InvalidOperationException>(() => AgentHarnessDefaults.Validate(registered, configured)).Message.ShouldContain(configured!.Trim());
+        else
+            Should.NotThrow(() => AgentHarnessDefaults.Validate(registered, configured));
     }
 }
-
-/// <summary>Groups the env-mutating <see cref="AgentHarnessDefaultsTests"/> with every test that reads the unset default-harness, so they run SEQUENTIALLY (a collection is xUnit's parallelization boundary) — the mutator never overlaps a reader. Plain (not DisableParallelization), so the group still runs in parallel with the rest of the suite.</summary>
-[CollectionDefinition("DefaultHarnessEnvMutation")]
-public sealed class DefaultHarnessEnvMutationCollection { }

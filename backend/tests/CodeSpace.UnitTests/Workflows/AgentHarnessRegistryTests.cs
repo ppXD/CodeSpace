@@ -45,6 +45,21 @@ public class AgentHarnessRegistryTests
         Should.Throw<InvalidOperationException>(() => new AgentHarnessRegistry(new[] { new FakeHarness("codex-cli"), new FakeHarness("codex-cli") }));
     }
 
+    [Theory]
+    [InlineData("clftaude-typo", true)]   // an override naming no registered harness fails fast at construction
+    [InlineData("codex-cli", false)]      // a registered one is accepted
+    [InlineData(null, false)]             // none at all is the floor
+    public void Construction_validates_the_default_harness_override_it_is_handed(string? configuredDefault, bool expectThrow)
+    {
+        // Handed in as a value, so this pins the startup fail-fast without touching the process environment.
+        var harnesses = new[] { new FakeHarness("codex-cli") };
+
+        if (expectThrow)
+            Should.Throw<InvalidOperationException>(() => new AgentHarnessRegistry(harnesses, configuredDefault)).Message.ShouldContain(configuredDefault!);
+        else
+            Should.NotThrow(() => new AgentHarnessRegistry(harnesses, configuredDefault));
+    }
+
     [Fact]
     public void All_lists_every_registered_harness()
     {
