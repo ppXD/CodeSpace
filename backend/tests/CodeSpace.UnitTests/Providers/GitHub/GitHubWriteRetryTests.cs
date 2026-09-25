@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.IntegrationTests.Webhooks;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using static CodeSpace.IntegrationTests.Webhooks.StubProviderHost;
@@ -192,6 +193,86 @@ public sealed class GitHubWriteRetryTests : IDisposable
         comments.ShouldHaveSingleItem().Body.ShouldBe("Reproduced on main.");
     }
 
+    [Theory]
+    [InlineData(RepositoryHooks, WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(RepositoryHooks, WriteScenario.LandsThenConnectionDrops, 1)]
+    [InlineData(RepositoryHooks, WriteScenario.RefusedBeforeLanding, 2)]
+    [InlineData(RepositoryHooks, WriteScenario.RefusedThenLandsThenGatewayError, 2)]
+    [InlineData(OrganizationHooks, WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(OrganizationHooks, WriteScenario.LandsThenConnectionDrops, 1)]
+    [InlineData(OrganizationHooks, WriteScenario.RefusedBeforeLanding, 2)]
+    [InlineData(OrganizationHooks, WriteScenario.RefusedThenLandsThenGatewayError, 2)]
+    public async Task RegisterWebhook_registers_exactly_one_hook(string hooksPath, WriteScenario scenario, int expectedCreates)
+    {
+        // GitHub refuses a second hook at a URL one already has with 422, so re-sending a create that landed does not
+        // duplicate the hook — it reports a registration that succeeded as failed, and the registrar backs off.
+        var hooks = new ForgeCollection(scenario, HookJson, refuse: RefuseSecondHookAtOneUrl);
+        _github.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        var hook = await RegisterWebhookAsync(hooksPath);
+
+        var landed = hooks.Stored.ShouldHaveSingleItem("a hook that landed must not be created again");
+        hook.ExternalId.ShouldBe(landed.Id.ToString());
+        hook.CallbackUrl.ShouldBe(Registration.CallbackUrl);
+        _github.Sent("POST", hooksPath).ShouldBe(expectedCreates);
+    }
+
+    [Theory]
+    [InlineData(RepositoryHooks)]
+    [InlineData(OrganizationHooks)]
+    public async Task RegisterWebhook_adopts_the_hook_GitHub_refuses_to_create_twice(string hooksPath)
+    {
+        // Between the registrar's lookup and this create, another run of the same registration made the hook (a stuck row
+        // re-dispatched while the first run was still in flight). GitHub answers the create 422 "Hook already exists" —
+        // the hook this registration asked for is there, so the registration succeeded.
+        var hooks = new ForgeCollection(_ => AttemptOutcome.Lands, HookJson, refuse: RefuseSecondHookAtOneUrl);
+        hooks.Seed(HookAt(Registration.CallbackUrl));
+        _github.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        var hook = await RegisterWebhookAsync(hooksPath);
+
+        hook.ExternalId.ShouldBe(hooks.Stored.ShouldHaveSingleItem().Id.ToString(), "GitHub's refusal named a hook that is already there — that hook is the registration's result");
+        _github.Sent("POST", hooksPath).ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(RepositoryHooks)]
+    [InlineData(OrganizationHooks)]
+    public async Task RegisterWebhook_still_fails_on_a_422_that_leaves_no_hook_at_its_url(string hooksPath)
+    {
+        // GitHub refuses this create for a reason of its own, and the only hook there is another registration's. Only a
+        // hook at THIS registration's callback URL means the work is done; anything else leaves the refusal standing.
+        var hooks = new ForgeCollection(_ => AttemptOutcome.Lands, HookJson, refuse: (_, _) => new StubReply(422, HookLimitRefusal));
+        hooks.Seed(HookAt("https://codespace.test/api/webhooks/another-registration"));
+        _github.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        var failure = await Record.ExceptionAsync(() => RegisterWebhookAsync(hooksPath));
+
+        var refused = failure.ShouldBeOfType<ProviderWebhookRegistrationException>();
+        refused.Diagnostic.StatusCode.ShouldBe(422);
+        refused.Diagnostic.ResponseBody.ShouldNotBeNull().ShouldContain("cannot have more than 20 hooks", Case.Insensitive, "the attempt row keeps GitHub's own words about why");
+    }
+
+    [Theory]
+    [InlineData(RepositoryHooks, false)]
+    [InlineData(RepositoryHooks, true)]
+    [InlineData(OrganizationHooks, false)]
+    [InlineData(OrganizationHooks, true)]
+    public async Task A_probe_that_cannot_read_the_hooks_never_sends_the_create_again(string hooksPath, bool probeConnectionDrops)
+    {
+        // The create landed and its answer was lost to a 502; then the probe cannot read the hooks either. Octokit's 5xx
+        // and a dropped connection (or a timeout) are transient, so the failed probe spends its attempt and is asked
+        // again — never a re-send — and once the attempts are spent the registration fails for the registrar's next run.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenGatewayError, HookJson, refuse: RefuseSecondHookAtOneUrl);
+        _github.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, _ => probeConnectionDrops ? StubReply.DropConnection : new StubReply(502, """{"message":"Server Error"}"""));
+
+        var failure = await Record.ExceptionAsync(() => RegisterWebhookAsync(hooksPath));
+
+        failure.ShouldBeOfType<ProviderWebhookRegistrationException>();
+        _github.Sent("POST", hooksPath).ShouldBe(1, "a probe that cannot tell is not 'nothing landed'");
+        _github.Sent("GET", hooksPath).ShouldBe(ExternalCallResilience.MaxAttempts - 1);
+    }
+
     // ── Loopback GitHub ──
 
     private static readonly RemoteRepository Repository = new()
@@ -285,6 +366,40 @@ public sealed class GitHubWriteRetryTests : IDisposable
         user = new { login = "codespace-bot" },
         submitted_at = "2026-09-24T08:00:00Z",
         html_url = $"https://github.test/acme/api/pull/7#pullrequestreview-{id}"
+    });
+
+    private const string RepositoryHooks = "/repositories/4242/hooks";
+
+    private const string OrganizationHooks = "/orgs/acme/hooks";
+
+    private const string HookLimitRefusal = """{"message":"Validation Failed","errors":[{"resource":"Hook","code":"custom","message":"The \"push\" event cannot have more than 20 hooks"}]}""";
+
+    private static readonly WebhookRegistration Registration = new() { CallbackUrl = "https://codespace.test/api/webhooks/0f5e2c7a-9b1d-4e3f-8a6b-2c4d6e8f0a1b", Secret = "whsec-loopback", SubscribedEvents = new[] { "push", "pull_request" } };
+
+    /// <summary>The create the path names — a repository hook or an organization hook, the two GitHub refuses to repeat at one URL.</summary>
+    private Task<RemoteWebhook> RegisterWebhookAsync(string hooksPath) => hooksPath == OrganizationHooks
+        ? Provider().RegisterConnectionWebhookAsync(Context(), "acme", Registration, CancellationToken.None)
+        : Provider().RegisterWebhookAsync(Context(), Repository, Registration, CancellationToken.None);
+
+    /// <summary>GitHub's rule, honoured: a create for a URL a hook on the same owner already has is refused with 422 and changes nothing.</summary>
+    private static StubReply? RefuseSecondHookAtOneUrl(JsonElement sent, IReadOnlyList<ForgeCollection.StoredItem> stored) =>
+        stored.Any(s => string.Equals(HookUrl(s.Sent), HookUrl(sent), StringComparison.OrdinalIgnoreCase))
+            ? new StubReply(422, """{"message":"Validation Failed","errors":[{"resource":"Hook","code":"custom","message":"Hook already exists on this repository"}]}""")
+            : null;
+
+    private static string? HookUrl(JsonElement sent) => sent.GetProperty("config").GetProperty("url").GetString();
+
+    private static object HookAt(string callbackUrl) => new { name = "web", active = true, events = new[] { "*" }, config = new { url = callbackUrl, content_type = "json" } };
+
+    private static string HookJson(long id, JsonElement sent) => JsonSerializer.Serialize(new
+    {
+        id,
+        name = "web",
+        active = true,
+        events = new[] { "*" },
+        config = new { url = HookUrl(sent), content_type = "json" },
+        created_at = "2026-09-24T08:00:00Z",
+        updated_at = "2026-09-24T08:00:00Z"
     });
 
     /// <summary>Pull request #7 on feature/retry. Each merge call follows the <see cref="WriteScenario"/>; one that lands merges it, and GitHub answers a merge of an already-merged pull request with 405.</summary>

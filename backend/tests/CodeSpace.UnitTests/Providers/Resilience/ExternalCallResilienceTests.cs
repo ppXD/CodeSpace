@@ -2,6 +2,7 @@ using System.Net;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -124,6 +125,18 @@ public class ExternalCallResilienceTests
 
         await act.ShouldThrowAsync<InvalidOperationException>();
         calls.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_lets_a_plan_refusal_through_untouched()
+    {
+        // Already typed where it was raised: it names the plan the call needs and the way around it. Re-labelled as a bare
+        // ProviderApiException(403) it would read as a credential problem and send the operator to re-scope a good token.
+        var refusal = new ProviderPlanRequirementException(ProviderKind.GitLab, "group webhooks", "Premium", 403, "Upgrade the group, or stay on per-repository scope.", new InvalidOperationException("GitLab answered HTTP 403"));
+
+        var act = async () => await BuildPolicy().ExecuteAsync<int>(Instance, "test", _ => throw refusal, CancellationToken.None);
+
+        (await act.ShouldThrowAsync<ProviderPlanRequirementException>()).ShouldBeSameAs(refusal);
     }
 
     [Fact]

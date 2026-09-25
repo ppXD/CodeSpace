@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Diagnostics;
+using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -26,22 +27,37 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
 
     private const string GroupHookFeature = "group webhooks";
 
+    /// <summary>GitLab's largest page. Its default is 20, and a lookup that reads one page cannot see a hook past it.</summary>
+    private const int GroupHooksPageSize = 100;
+
     public WebhookRepositoryIdentity? Identify(string body, IReadOnlyDictionary<string, string> headers) => _repositoryIdentifier.Identify(body, headers);
 
     public async Task<RemoteWebhook?> FindConnectionWebhookByCallbackUrlAsync(ProviderContext context, string ownerPath, string callbackUrl, CancellationToken cancellationToken)
     {
-        var answer = await CallGroupHooksAsync(context, HttpMethod.Get, ownerPath, null, null, cancellationToken).ConfigureAwait(false);
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var url = BuildGroupHooksUrl(host, ownerPath, null);
 
-        return MatchGroupHookByCallbackUrl(answer.Body, callbackUrl);
+        var hooks = await _resilience.ExecuteAsync(context.Instance, nameof(FindConnectionWebhookByCallbackUrlAsync), _ => ListGroupHooksAsync(url, token, cancellationToken), cancellationToken).ConfigureAwait(false);
+
+        return MatchGroupHookByCallbackUrl(hooks, callbackUrl);
     }
 
     public async Task<RemoteWebhook> RegisterConnectionWebhookAsync(ProviderContext context, string ownerPath, WebhookRegistration request, CancellationToken cancellationToken)
     {
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var url = BuildGroupHooksUrl(host, ownerPath, null);
         var payload = JsonSerializer.Serialize(BuildGroupHookUpsert(request));
 
-        var answer = await CallGroupHooksAsync(context, HttpMethod.Post, ownerPath, null, payload, cancellationToken).ConfigureAwait(false);
+        // GitLab takes a second hook at a URL a hook already has, and a dropped connection or a timeout on this raw call
+        // is transient: a blind re-send of a create that landed leaves two hooks on the group. A retry first lists the
+        // group's hooks for the one at this registration's callback URL, which carries the row's own id. The create's
+        // answer is judged outside the wrapper: a 4xx/5xx is the registration's failure, not retried.
+        var answer = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(RegisterConnectionWebhookAsync),
+            _ => SendGroupHookRequestAsync(HttpMethod.Post, url, token, payload, cancellationToken),
+            _ => FindLandedGroupHookAsync(url, token, request.CallbackUrl, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
 
-        var created = JsonSerializer.Deserialize<GitLabGroupHook>(answer.Body, _snakeCaseJson);
+        var created = JsonSerializer.Deserialize<GitLabGroupHook>(EnsureAccepted(answer, CaptureGroupHookRequest("POST", url, token, payload)).Body, _snakeCaseJson);
 
         if (created == null)
             throw new InvalidOperationException($"GitLab accepted the group hook on {ownerPath} but answered a body we could not read");
@@ -49,43 +65,91 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         return new RemoteWebhook { ExternalId = created.Id.ToString(), CallbackUrl = request.CallbackUrl, SubscribedEvents = request.SubscribedEvents.ToList(), Active = true };
     }
 
-    public async Task DeleteConnectionWebhookAsync(ProviderContext context, string ownerPath, string externalWebhookId, CancellationToken cancellationToken) =>
-        await CallGroupHooksAsync(context, HttpMethod.Delete, ownerPath, externalWebhookId, null, cancellationToken).ConfigureAwait(false);
-
-    /// <summary>
-    /// One call, one place that decides what a refusal means. Every exit carries the request we sent
-    /// and the answer we got, because for this endpoint the answer IS the diagnosis — a Free
-    /// instance and a wrongly-scoped token both answer 403, and only GitLab's own words separate them.
-    /// </summary>
-    private async Task<GroupHookAnswer> CallGroupHooksAsync(ProviderContext context, HttpMethod method, string ownerPath, string? hookId, string? payload, CancellationToken cancellationToken)
+    public async Task DeleteConnectionWebhookAsync(ProviderContext context, string ownerPath, string externalWebhookId, CancellationToken cancellationToken)
     {
         var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
-        var url = BuildGroupHooksUrl(host, ownerPath, hookId);
+        var url = BuildGroupHooksUrl(host, ownerPath, externalWebhookId);
 
-        var answer = await SendGroupHookRequestAsync(context, method, url, token, payload, cancellationToken).ConfigureAwait(false);
+        var answer = await _resilience.ExecuteAsync(context.Instance, nameof(DeleteConnectionWebhookAsync), _ => SendGroupHookRequestAsync(HttpMethod.Delete, url, token, null, cancellationToken), cancellationToken).ConfigureAwait(false);
 
+        EnsureAccepted(answer, CaptureGroupHookRequest("DELETE", url, token, null));
+    }
+
+    /// <summary>
+    /// One place that decides what a refusal means. Every exit carries the request we sent and the
+    /// answer we got, because for this endpoint the answer IS the diagnosis — a Free instance and a
+    /// wrongly-scoped token both answer 403, and only GitLab's own words separate them.
+    /// </summary>
+    private static GroupHookAnswer EnsureAccepted(GroupHookAnswer answer, CapturedProviderRequest request)
+    {
         if (answer.Status is >= HttpStatusCode.OK and < HttpStatusCode.MultipleChoices) return answer;
 
-        throw DescribeGroupHookRefusal(answer, CaptureGroupHookRequest(method.Method, url, token, payload));
+        throw DescribeGroupHookRefusal(answer, request);
     }
 
-    private async Task<GroupHookAnswer> SendGroupHookRequestAsync(ProviderContext context, HttpMethod method, string url, string token, string? payload, CancellationToken cancellationToken)
+    /// <summary>
+    /// The hook an earlier attempt of this create landed, answered the way the create would have
+    /// answered — or null when none did. Read raw, inside the create's attempt: a list GitLab
+    /// refuses fails the attempt with the list's own answer rather than reading as "nothing
+    /// landed", so a probe that cannot tell never leads to a second create.
+    /// </summary>
+    private static async Task<GroupHookAnswer?> FindLandedGroupHookAsync(string url, string token, string callbackUrl, CancellationToken cancellationToken)
     {
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CallGroupHooksAsync), async _ =>
-        {
-            using var request = new HttpRequestMessage(method, url);
+        var landed = FindGroupHook(await ListGroupHooksAsync(url, token, cancellationToken).ConfigureAwait(false), callbackUrl);
 
-            if (payload != null) request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
-
-            using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-            return new GroupHookAnswer(response.StatusCode, body);
-        }, cancellationToken).ConfigureAwait(false);
+        return landed == null ? null : new GroupHookAnswer(HttpStatusCode.OK, JsonSerializer.Serialize(landed, _snakeCaseJson));
     }
+
+    /// <summary>
+    /// Every hook on the group — the one list both the registrar's idempotency check and a retried create's probe read.
+    /// GitLab answers 20 to a page unless asked for more, and an unpaged read never saw a hook past the twentieth: in a
+    /// busier group both lookups missed this registration's hook, and a retry created a second one. So the list asks
+    /// for GitLab's largest page and follows <c>X-Next-Page</c> forward until GitLab names no later page. Every page is
+    /// judged like any other answer: a refused page leaves the list unknown, never shorter.
+    /// </summary>
+    private static async Task<List<GitLabGroupHook>> ListGroupHooksAsync(string url, string token, CancellationToken cancellationToken)
+    {
+        var hooks = new List<GitLabGroupHook>();
+        int? page = 1;
+
+        while (page is { } current)
+        {
+            var pageUrl = $"{url}?per_page={GroupHooksPageSize}&page={current}";
+            var answer = EnsureAccepted(await SendGroupHookRequestAsync(HttpMethod.Get, pageUrl, token, null, cancellationToken).ConfigureAwait(false), CaptureGroupHookRequest("GET", pageUrl, token, null));
+
+            hooks.AddRange(JsonSerializer.Deserialize<List<GitLabGroupHook>>(answer.Body, _snakeCaseJson) ?? new List<GitLabGroupHook>());
+            page = NextPageAfter(current, answer.NextPage);
+        }
+
+        return hooks;
+    }
+
+    /// <summary>
+    /// The page to read after <paramref name="current"/>, or null when it was the last. Only a later page counts: empty or
+    /// absent is GitLab's own last page, and a value that does not advance — a proxy or a GitLab bug repeating a page — is
+    /// read the same way, so the list can never go round forever.
+    /// </summary>
+    private static int? NextPageAfter(int current, string? nextPage) =>
+        int.TryParse(nextPage, out var next) && next > current ? next : null;
+
+    private static async Task<GroupHookAnswer> SendGroupHookRequestAsync(HttpMethod method, string url, string token, string? payload, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(method, url);
+
+        if (payload != null) request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+        using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+        return new GroupHookAnswer(response.StatusCode, body, ReadNextPage(response));
+    }
+
+    /// <summary>GitLab's <c>X-Next-Page</c>: the next page's number on a list, empty on its last page, absent on anything else.</summary>
+    private static string? ReadNextPage(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("X-Next-Page", out var values) ? values.FirstOrDefault() : null;
 
     /// <summary>
     /// Which refusal this is.
@@ -130,16 +194,18 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         return ProviderCallCapture.CaptureRedacted(method, url, headers, body, new[] { token });
     }
 
-    private static RemoteWebhook? MatchGroupHookByCallbackUrl(string listBody, string callbackUrl)
+    private static RemoteWebhook? MatchGroupHookByCallbackUrl(IEnumerable<GitLabGroupHook> hooks, string callbackUrl)
     {
-        var hooks = JsonSerializer.Deserialize<List<GitLabGroupHook>>(listBody, _snakeCaseJson) ?? new List<GitLabGroupHook>();
-
-        var match = hooks.FirstOrDefault(h => string.Equals(h.Url, callbackUrl, StringComparison.OrdinalIgnoreCase));
+        var match = FindGroupHook(hooks, callbackUrl);
 
         if (match == null) return null;
 
         return new RemoteWebhook { ExternalId = match.Id.ToString(), CallbackUrl = match.Url ?? callbackUrl, SubscribedEvents = ReadSubscribedEvents(match), Active = true };
     }
+
+    /// <summary>The listed hook at <paramref name="callbackUrl"/> — the one match behind the registrar's idempotency check and a retried create's probe.</summary>
+    private static GitLabGroupHook? FindGroupHook(IEnumerable<GitLabGroupHook> hooks, string callbackUrl) =>
+        hooks.FirstOrDefault(h => string.Equals(h.Url, callbackUrl, StringComparison.OrdinalIgnoreCase));
 
     private static List<string> ReadSubscribedEvents(GitLabGroupHook hook) =>
         GitLabHookEvents.Names(hook.PushEvents, hook.MergeRequestsEvents, hook.IssuesEvents);
@@ -165,7 +231,7 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         return body;
     }
 
-    private sealed record GroupHookAnswer(HttpStatusCode Status, string Body);
+    private sealed record GroupHookAnswer(HttpStatusCode Status, string Body, string? NextPage = null);
 
     private sealed record GitLabGroupHook
     {

@@ -111,6 +111,10 @@ public sealed class ExternalCallResilience : IExternalCallResilience, ISingleton
     /// </summary>
     private void TranslateAndThrowIfProviderApi(ProviderInstance instance, string operationName, Exception ex)
     {
+        // Typed where it was raised: it names the plan and the way around it. Re-labelled as a bare status it would read
+        // as a credential problem, so it leaves as it came.
+        if (ex is ProviderPlanRequirementException) return;
+
         var status = ExtractStatusCode(ex);
         if (status == null) return;
 

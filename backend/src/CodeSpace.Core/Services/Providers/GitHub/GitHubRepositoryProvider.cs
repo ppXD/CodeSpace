@@ -786,9 +786,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             // GET /repositories/:id/hooks — the hook's `config["url"]` carries the callback we set
             // at register time, so a case-insensitive exact match against our generated callback
             // URL identifies a prior registration uniquely.
-            return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), async _ =>
-                MatchHookByCallbackUrl(await client.Repository.Hooks.GetAll(repositoryId).ConfigureAwait(false), callbackUrl),
-                cancellationToken).ConfigureAwait(false);
+            return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), _ => FindRepositoryHookAsync(client, repositoryId, callbackUrl), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -798,6 +796,10 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", baseAddress, repositoryId, token, null)), ex);
         }
     }
+
+    /// <summary>The repository's hook at <paramref name="callbackUrl"/>, read raw — the one lookup behind the registrar's idempotency check, a retried create's probe and a refused create's.</summary>
+    private static async Task<RemoteWebhook?> FindRepositoryHookAsync(GitHubClient client, long repositoryId, string callbackUrl) =>
+        MatchHookByCallbackUrl(await client.Repository.Hooks.GetAll(repositoryId).ConfigureAwait(false), callbackUrl);
 
     private static RemoteWebhook? MatchHookByCallbackUrl(IEnumerable<RepositoryHook> hooks, string callbackUrl)
     {
@@ -820,26 +822,63 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         // can never drift into describing different requests.
         var config = new Dictionary<string, string> { ["url"] = request.CallbackUrl, ["content_type"] = "json", ["secret"] = request.Secret };
 
+        Task<RemoteWebhook?> FindExisting() => FindRepositoryHookAsync(client, repositoryId, request.CallbackUrl);
+
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
-            {
-                var newHook = new NewRepositoryHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
-                var created = await client.Repository.Hooks.Create(repositoryId, newHook).ConfigureAwait(false);
-
-                return new RemoteWebhook
-                {
-                    ExternalId = created.Id.ToString(),
-                    CallbackUrl = request.CallbackUrl,
-                    SubscribedEvents = created.Events.ToList(),
-                    Active = created.Active
-                };
-            }, cancellationToken).ConfigureAwait(false);
+            // A create can land and lose its answer — a 5xx, a dropped connection, a timeout. Re-sent, GitHub refuses it
+            // with 422 (a hook is already at that URL), and a registration that succeeded reads as failed. So every
+            // retry first looks for the hook at this registration's callback URL, which carries the row's own id.
+            return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(RegisterWebhookAsync),
+                _ => CreateHookOrAdoptExistingAsync(() => CreateRepositoryHookAsync(client, repositoryId, config, request.CallbackUrl), FindExisting),
+                _ => FindExisting(),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("POST", baseAddress, repositoryId, token, body)), ex);
+        }
+    }
+
+    private static async Task<RemoteWebhook> CreateRepositoryHookAsync(GitHubClient client, long repositoryId, Dictionary<string, string> config, string callbackUrl)
+    {
+        var newHook = new NewRepositoryHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
+        var created = await client.Repository.Hooks.Create(repositoryId, newHook).ConfigureAwait(false);
+
+        return new RemoteWebhook
+        {
+            ExternalId = created.Id.ToString(),
+            CallbackUrl = callbackUrl,
+            SubscribedEvents = created.Events.ToList(),
+            Active = created.Active
+        };
+    }
+
+    /// <summary>
+    /// A hook create, with the one refusal that means it is already done. GitHub answers a create for a URL one of the
+    /// owner's hooks already has with 422, and a registration's callback URL carries its own row's id — so a hook found
+    /// there after that refusal is this registration's (an earlier attempt made it, or another run of the same
+    /// registration did), and it is the result rather than a failure. A 422 with no hook at the URL is a real
+    /// validation failure and is rethrown untouched. Probed, not matched on GitHub's wording, for the reason the
+    /// pull-request bind gives: the status cannot tell GitHub's validation failures apart, and the message is prose.
+    /// </summary>
+    private static async Task<RemoteWebhook> CreateHookOrAdoptExistingAsync(Func<Task<RemoteWebhook>> create, Func<Task<RemoteWebhook?>> findExisting)
+    {
+        try
+        {
+            return await create().ConfigureAwait(false);
+        }
+        catch (ApiValidationException)
+        {
+            var existing = await findExisting().ConfigureAwait(false);
+
+            if (existing == null)
+                throw;
+
+            Serilog.Log.Information("GitHub refused the hook create for {CallbackUrl} as a duplicate; adopted hook {ExternalId}, already there, as the registration's result", existing.CallbackUrl, existing.ExternalId);
+
+            return existing;
         }
     }
 

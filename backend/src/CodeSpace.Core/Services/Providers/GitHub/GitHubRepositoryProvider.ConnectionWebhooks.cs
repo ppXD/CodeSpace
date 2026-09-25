@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Diagnostics;
+using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Exceptions;
 using Octokit;
@@ -26,9 +27,7 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
 
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(FindConnectionWebhookByCallbackUrlAsync), async _ =>
-                MatchOrganizationHookByCallbackUrl(await client.Organization.Hook.GetAll(ownerPath).ConfigureAwait(false), callbackUrl),
-                cancellationToken).ConfigureAwait(false);
+            return await _resilience.ExecuteAsync(context.Instance, nameof(FindConnectionWebhookByCallbackUrlAsync), _ => FindOrganizationHookAsync(client, ownerPath, callbackUrl), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -46,27 +45,36 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
         // can never drift into describing different requests.
         var config = new Dictionary<string, string> { ["url"] = request.CallbackUrl, ["content_type"] = "json", ["secret"] = request.Secret };
 
+        Task<RemoteWebhook?> FindExisting() => FindOrganizationHookAsync(client, ownerPath, request.CallbackUrl);
+
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterConnectionWebhookAsync), async _ =>
-            {
-                var newHook = new NewOrganizationHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
-                var created = await client.Organization.Hook.Create(ownerPath, newHook).ConfigureAwait(false);
-
-                return new RemoteWebhook
-                {
-                    ExternalId = created.Id.ToString(),
-                    CallbackUrl = request.CallbackUrl,
-                    SubscribedEvents = created.Events.ToList(),
-                    Active = created.Active
-                };
-            }, cancellationToken).ConfigureAwait(false);
+            // The repository hook's rules, at the organization: a retry first looks for the hook at this registration's
+            // callback URL, and GitHub's 422 for a second hook at that URL is answered by the hook already there.
+            return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(RegisterConnectionWebhookAsync),
+                _ => CreateHookOrAdoptExistingAsync(() => CreateOrganizationHookAsync(client, ownerPath, config, request.CallbackUrl), FindExisting),
+                _ => FindExisting(),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
             throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("POST", baseAddress, ownerPath, token, body)), ex);
         }
+    }
+
+    private static async Task<RemoteWebhook> CreateOrganizationHookAsync(GitHubClient client, string ownerPath, Dictionary<string, string> config, string callbackUrl)
+    {
+        var newHook = new NewOrganizationHook("web", config) { Active = true, Events = GitHubHookEvents.All.ToArray() };
+        var created = await client.Organization.Hook.Create(ownerPath, newHook).ConfigureAwait(false);
+
+        return new RemoteWebhook
+        {
+            ExternalId = created.Id.ToString(),
+            CallbackUrl = callbackUrl,
+            SubscribedEvents = created.Events.ToList(),
+            Active = created.Active
+        };
     }
 
     public async Task DeleteConnectionWebhookAsync(ProviderContext context, string ownerPath, string externalWebhookId, CancellationToken cancellationToken)
@@ -77,6 +85,10 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
             _ => client.Organization.Hook.Delete(ownerPath, int.Parse(externalWebhookId)),
             cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The organization's hook at <paramref name="callbackUrl"/>, read raw — the one lookup behind the registrar's idempotency check, a retried create's probe and a refused create's.</summary>
+    private static async Task<RemoteWebhook?> FindOrganizationHookAsync(GitHubClient client, string ownerPath, string callbackUrl) =>
+        MatchOrganizationHookByCallbackUrl(await client.Organization.Hook.GetAll(ownerPath).ConfigureAwait(false), callbackUrl);
 
     private static RemoteWebhook? MatchOrganizationHookByCallbackUrl(IEnumerable<OrganizationHook> hooks, string callbackUrl)
     {

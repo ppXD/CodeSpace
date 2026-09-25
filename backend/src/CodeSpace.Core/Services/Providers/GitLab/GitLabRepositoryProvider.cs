@@ -1272,7 +1272,11 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
         try
         {
-            return await _resilience.ExecuteAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
+            // GitLab takes a second hook at a URL a hook already has, and this create is raw HTTP, not NGitLab: a dropped
+            // connection or a timeout reaches the wrapper as transient, and a blind re-send of a create that landed leaves
+            // two hooks. A retry first looks for the hook at this registration's callback URL, which carries the row's own
+            // id. A 4xx/5xx answer is thrown below as the registration's failure, which is not retried.
+            return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
                 using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
                 message.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
@@ -1293,7 +1297,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
                     SubscribedEvents = GitLabHookEvents.ProjectHookAttributes.ToList(),
                     Active = true
                 };
-            }, cancellationToken).ConfigureAwait(false);
+            }, _ => Task.FromResult(MatchHookByCallbackUrl(client.GetRepository(projectId).ProjectHooks.All, request.CallbackUrl)), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

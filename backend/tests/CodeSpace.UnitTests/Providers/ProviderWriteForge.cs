@@ -21,11 +21,14 @@ public enum WriteScenario
     RefusedBeforeLanding,
 
     /// <summary>Attempt 1 is refused without effect, attempt 2 lands and its answer is lost to a 502 — the effect first appears on the second attempt, and the third must adopt it.</summary>
-    RefusedThenLandsThenGatewayError
+    RefusedThenLandsThenGatewayError,
+
+    /// <summary>The connection drops before the provider applies anything; the retry lands. To the caller it is the same dropped connection as <see cref="LandsThenConnectionDrops"/> — only a probe can tell them apart.</summary>
+    DroppedBeforeLanding
 }
 
 /// <summary>What the loopback provider does with one attempt of a write.</summary>
-public enum AttemptOutcome { Lands, LandsThenGatewayError, LandsThenConnectionDrops, Refused }
+public enum AttemptOutcome { Lands, LandsThenGatewayError, LandsThenConnectionDrops, Refused, DroppedBeforeLanding }
 
 internal static class WriteScenarios
 {
@@ -37,15 +40,16 @@ internal static class WriteScenarios
         (WriteScenario.RefusedBeforeLanding, 0) => AttemptOutcome.Refused,
         (WriteScenario.RefusedThenLandsThenGatewayError, 0) => AttemptOutcome.Refused,
         (WriteScenario.RefusedThenLandsThenGatewayError, 1) => AttemptOutcome.LandsThenGatewayError,
+        (WriteScenario.DroppedBeforeLanding, 0) => AttemptOutcome.DroppedBeforeLanding,
         _ => AttemptOutcome.Lands
     };
 
-    /// <summary>The answer for an attempt that has already applied its effect (or, for <see cref="AttemptOutcome.Refused"/>, never will).</summary>
+    /// <summary>The answer for an attempt that has already applied its effect (or, for <see cref="AttemptOutcome.Refused"/> and <see cref="AttemptOutcome.DroppedBeforeLanding"/>, never will).</summary>
     public static StubReply Answer(this AttemptOutcome outcome, Func<string> landedBody) => outcome switch
     {
         AttemptOutcome.Refused => new StubReply(503, """{"message":"503 Service Unavailable"}"""),
         AttemptOutcome.LandsThenGatewayError => new StubReply(502, """{"message":"502 Bad Gateway"}"""),
-        AttemptOutcome.LandsThenConnectionDrops => StubReply.DropConnection,
+        AttemptOutcome.LandsThenConnectionDrops or AttemptOutcome.DroppedBeforeLanding => StubReply.DropConnection,
         _ => new StubReply(201, landedBody())
     };
 }
@@ -83,7 +87,7 @@ internal sealed class ForgeCollection
         var outcome = _script(_creates++);
         var sent = JsonDocument.Parse(request.Body).RootElement.Clone();
 
-        if (outcome == AttemptOutcome.Refused) return outcome.Answer(() => string.Empty);
+        if (outcome is AttemptOutcome.Refused or AttemptOutcome.DroppedBeforeLanding) return outcome.Answer(() => string.Empty);
 
         if (_refuse?.Invoke(sent, _stored) is { } refusal) return refusal;
 
@@ -94,6 +98,31 @@ internal sealed class ForgeCollection
     }
 
     public StubReply List(RecordedRequest _) => new(200, "[" + string.Join(",", _stored.Select(s => _render(s.Id, s.Sent))) + "]");
+
+    /// <summary>
+    /// One page of everything stored, the way GitLab pages a list: <c>per_page</c> items (GitLab's default of 20 when the
+    /// request names none) from <c>page</c>, with <c>X-Next-Page</c> naming the next page — empty on the last — and the
+    /// same page as a <c>Link</c> header, since GitLab sends both. A caller that reads one page sees only that page.
+    /// </summary>
+    public StubReply ListGitLabPage(RecordedRequest request, string baseUrl)
+    {
+        var query = ForgeQuery.Of(request);
+        var perPage = int.Parse(query["per_page"] ?? "20");
+        var page = int.Parse(query["page"] ?? "1");
+        var items = _stored.Skip((page - 1) * perPage).Take(perPage).Select(s => _render(s.Id, s.Sent));
+        int? nextPage = _stored.Count > page * perPage ? page + 1 : null;
+
+        return new StubReply(200, "[" + string.Join(",", items) + "]") { Headers = GitLabPageHeaders(request, baseUrl, perPage, nextPage) };
+    }
+
+    private static Dictionary<string, string> GitLabPageHeaders(RecordedRequest request, string baseUrl, int perPage, int? nextPage)
+    {
+        var headers = new Dictionary<string, string> { ["X-Next-Page"] = nextPage?.ToString() ?? string.Empty };
+
+        if (nextPage is { } next) headers["Link"] = $"<{baseUrl}{request.PathAndQuery.Split('?')[0]}?per_page={perPage}&page={next}>; rel=\"next\"";
+
+        return headers;
+    }
 
     internal sealed record StoredItem(long Id, JsonElement Sent)
     {
