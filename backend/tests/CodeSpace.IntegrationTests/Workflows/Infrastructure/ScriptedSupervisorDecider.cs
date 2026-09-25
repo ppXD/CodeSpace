@@ -28,8 +28,18 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
     /// <summary>The question the AskHumanStop arc asks at turn 0 — the integration test asserts the posted card body + the recorded outcome carry it.</summary>
     public const string AskQuestion = "which approach: rewrite or patch?";
 
-    public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
+        // A test holds a turn mid-decision — the slow model call is where a stop and a continue most likely land — and can
+        // have the held turn come back with a decision of its own, as a real model asked twice may.
+        if (_script.TakeDecisionHold(context.SupervisorRunId) is { } hold)
+        {
+            hold.Gate.Started.TrySetResult();
+            await hold.Gate.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            if (hold.Decides is { } decides) return decides;
+        }
+
         // A test injects a TRANSIENT (retryable) infra fault on a specific turn — thrown BEFORE any decision is produced,
         // so the production RetryingSupervisorDeciderDecorator that wraps this scripted decider must retry + recover it.
         if (_script.TryConsumeTransientFault(context.TurnNumber))
@@ -57,7 +67,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             _ => PlanThenStop(context),
         };
 
-        return Task.FromResult(decision);
+        return decision;
     }
 
     // E5 arc: turn 0 plan(2) → EVERY later turn spawn(both). The decider NEVER stops on its own — it's the
@@ -310,6 +320,12 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         },
     });
 
+    /// <summary>A spawn of the given plan units, in the scripted decider's own canonical shape — for a held turn that decides differently from the script.</summary>
+    public static SupervisorDecision SpawnOf(params string[] subtaskIds) => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = subtaskIds });
+
+    /// <summary>A server-authored gate question, as the publish or delivery gate substitutes one for a model's decision — the scripted decider stands in for the whole decider pipeline, so it may pose one. Unflagged, the ask clamp would strip the gate's reserved prefix as a model posing as a server card.</summary>
+    public static SupervisorDecision GateAskOf(string question) => Canonical(SupervisorDecisionKinds.AskHuman, new SupervisorAskHumanPayload { Question = question }) with { ServerAuthored = true };
+
     private static SupervisorDecision Canonical<TPayload>(string kind, TPayload payload) => new()
     {
         Kind = kind,
@@ -326,6 +342,39 @@ public sealed class SupervisorDecisionScript
     public IReadOnlyList<string> ArtifactPaths { get; set; } = Array.Empty<string>();
 
     private readonly Dictionary<int, int> _transientFaults = new();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, DecisionHold> _decisionHolds = new();
+
+    /// <summary>Hold the next decision <paramref name="runId"/>'s supervisor makes until the test releases the returned gate: the decider signals <see cref="CancelGateNode.Gate.Started"/>, awaits <see cref="CancelGateNode.Gate.Release"/>, then decides <paramref name="decides"/> — or as scripted, when none is given. One-shot, and keyed by run, so no sibling test's run is ever held.</summary>
+    public CancelGateNode.Gate HoldNextDecision(Guid runId, SupervisorDecision? decides = null)
+    {
+        var gate = new CancelGateNode.Gate();
+        _decisionHolds[runId] = new DecisionHold(gate, decides);
+        return gate;
+    }
+
+    /// <summary>Take the hold armed for <paramref name="runId"/>, if any (called by the scripted decider on each decide).</summary>
+    public DecisionHold? TakeDecisionHold(Guid runId) => _decisionHolds.TryRemove(runId, out var hold) ? hold : null;
+
+    /// <summary>A held decision: the gate the decider waits on, and the decision the held turn comes back with (null → as scripted).</summary>
+    public sealed record DecisionHold(CancelGateNode.Gate Gate, SupervisorDecision? Decides);
+
+    /// <summary>The next decision <paramref name="runId"/>'s supervisor makes is <paramref name="decides"/>, whatever the script says: a hold released before it is reached.</summary>
+    public void DecideNext(Guid runId, SupervisorDecision decides) => HoldNextDecision(runId, decides).Release.TrySetResult();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, DecisionLogHold> _decisionLogHolds = new();
+
+    /// <summary>Hold <paramref name="runId"/>'s supervisor once at <paramref name="at"/> in its decision log, in whichever walk reaches it first — the engine's own included, through the fixture-root <see cref="ScriptedDecisionLog"/>.</summary>
+    public DecisionLogHold HoldDecisionLog(Guid runId, DecisionLogStep at) => _decisionLogHolds[runId] = new DecisionLogHold(at);
+
+    /// <summary>Whether any run has a decision-log hold armed.</summary>
+    public bool AnyDecisionLogHold => !_decisionLogHolds.IsEmpty;
+
+    /// <summary>The decision-log hold armed for <paramref name="runId"/>, if any.</summary>
+    public DecisionLogHold? DecisionLogHoldFor(Guid runId) => _decisionLogHolds.TryGetValue(runId, out var hold) ? hold : null;
+
+    /// <summary>Disarm <paramref name="runId"/>'s decision-log hold (its hold fired).</summary>
+    public void DisarmDecisionLogHold(Guid runId) => _decisionLogHolds.TryRemove(runId, out _);
 
     /// <summary>Inject a transient (retryable) brain-call fault on a specific TURN: the next <paramref name="times"/> decide invocations for that turn throw a Transient <c>LlmApiException</c> before any decision is produced, then it proceeds — driving the production retry decorator that wraps the scripted decider. <paramref name="times"/> UNDER the in-call retry budget → the decorator recovers in place; AT/OVER it → the exhausted fault escapes and the node's infra park (P1.1) engages.</summary>
     public void FailTransientlyOnTurn(int turn, int times) => _transientFaults[turn] = times;

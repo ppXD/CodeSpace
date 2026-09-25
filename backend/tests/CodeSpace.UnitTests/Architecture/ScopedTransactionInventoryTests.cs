@@ -42,6 +42,7 @@ public class ScopedTransactionInventoryTests
     [
         "Agents/AgentRunSpoolReaper.cs",
         "Workflows/Budget/BudgetLedger.cs",
+        "Workflows/Engine/RunGenerationFence.cs",
         "Workflows/ModelCalls/WorkflowRunModelCallProjector.cs",
         "Workflows/ToolCalls/WorkflowRunToolCallProjector.cs",
         "Workflows/WorkflowService.cs",

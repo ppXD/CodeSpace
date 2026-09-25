@@ -652,28 +652,35 @@ public sealed partial class RealSupervisorActionExecutor
     ///         turn already exist; we REUSE them verbatim and re-park without staging anything.</item>
     ///   <item>crash BEFORE the waits committed → no waits, but orphan <c>Queued</c> agents linger; we RECLAIM
     ///         them for the leading slots and create agents only for the remainder.</item>
+    ///   <item>the waits committed but the run's end CLOSED some of them (a stop's teardown, a failure's cleanup, a
+    ///         Continue's revive — each Discards them and ends their agents) → nothing will answer those slots, so they
+    ///         are staged afresh on the same keys; a slot whose agent had already finished keeps its agent and its
+    ///         answered wait, and runs no second time.</item>
     /// </list>
     /// Safe because the node only reaches a spawn turn with ZERO pending agent waits (its re-entry guard re-parks
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
+    ///
+    /// <para>FENCED on the walk's claimed run generation (<see cref="Workflows.Engine.RunGenerationFence"/>): a turn a
+    /// Continue overtook stands down before it re-parks, and the wave's transaction takes the fence before it reserves
+    /// budget or writes a row, so such a turn reserves and stages nothing. A stop or a Continue that lands after the fence
+    /// waits for the whole wave to commit: the stop's teardown then ends all of it, and a revive closes it like any other
+    /// of the ended attempt's work.</para>
     /// </summary>
     private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken, SupervisorRetryEscalationOutcome? escalation = null, SupervisorStakeSet? stakes = null)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
 
-        var existingWaitAgentIds = await ExistingTurnWaitAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
+        // A turn a Continue overtook stands down before it re-parks on a wave the revived walk now owns; every write
+        // after this is fenced where it happens.
+        await Workflows.Engine.RunGenerationFence.ThrowIfSupersededAsync(_db, context.SupervisorRunId, cancellationToken).ConfigureAwait(false);
 
-        if (existingWaitAgentIds.Count > 0)
-            return ReparkOnExistingWaits(context, existingWaitAgentIds);
+        var wave = await TurnWaveAsync(context, cancellationToken).ConfigureAwait(false);
 
-        // W-hard 2a: ATOMIC wave admission — every attempt of this wave reserves its budget slice
-        // (cap ÷ total-spawn cap, the config-derived natural estimate) BEFORE anything stages, all-or-nothing:
-        // one rejection releases the wave's fresh reservations and returns a budget-blocked outcome the decider
-        // can read (mirroring the dependency-block precedent — positional integrity is never truncated mid-wave).
-        // Scope keys are the per-spawn iteration keys, so a crash-replayed staging lands on its own reservations
-        // (admitted as already-reserved). An uncapped run (no MaxCostUsd) reserves nothing — same authority as
-        // the realized-spend bound, which stays the user-facing stop.
+        if (wave.IsOpen)
+            return ReparkOnExistingWaits(context, wave.AgentRunIds);
+
         // D1 fail-CLOSED, BEFORE any reservation: a wave that would run a model nobody can price cannot be admitted
         // under a cost cap — its spend folds back as $0, so the cap it is admitted against would never trip. Blocking
         // is the same shape as the ledger's own refusal below (a synchronous budget-blocked outcome the decider reads,
@@ -697,36 +704,6 @@ public sealed partial class RealSupervisorActionExecutor
                 unpricedModel = unpriced,
                 capUsd = cap,
             }, AgentJson.Options));
-        }
-
-        if (context.MaxCostUsd is { } capUsd && context.SupervisorRunId != Guid.Empty && context.TeamId != Guid.Empty)
-        {
-            var estimate = capUsd / Math.Max(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1);
-            var reservedKeys = new List<string>();
-
-            for (var k = 0; k < tasks.Count; k++)
-            {
-                var scopeKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}#{k}";
-                var admission = await _budget.ReserveAsync(context.SupervisorRunId, context.TeamId, Workflows.Budget.BudgetKinds.AgentAttempt, scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, AttemptReservationDeadline(tasks[k].Task), cancellationToken).ConfigureAwait(false);
-
-                if (!admission.Admitted)
-                {
-                    foreach (var key in reservedKeys)
-                        await _budget.ReleaseAsync(context.SupervisorRunId, context.TeamId, Workflows.Budget.BudgetKinds.AgentAttempt, key, cancellationToken).ConfigureAwait(false);
-
-                    _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: {Reason}", tasks.Count, context.SupervisorRunId, admission.Reason);
-
-                    return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new
-                    {
-                        budgetBlocked = tasks.Select(t => t.Task.SubtaskId).ToArray(),
-                        reason = admission.Reason,
-                        committedUsd = admission.CommittedUsd,
-                        capUsd = admission.CapUsd,
-                    }, AgentJson.Options));
-                }
-
-                reservedKeys.Add(scopeKey);
-            }
         }
 
         var orphans = await ReclaimableOrphanAgentIdsAsync(context, cancellationToken).ConfigureAwait(false);
@@ -761,6 +738,14 @@ public sealed partial class RealSupervisorActionExecutor
         // transaction until ALL K slots and waits exist. A cap rejection, resolver fault, or process disconnect rolls
         // the wave back to zero visible residue; replay never observes a prefix and mistakes it for a complete wave.
         await using var stagingTransaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        // The fence comes first, so a turn a Continue overtook reserves and stages nothing (see RunGenerationFence), and a
+        // stop or a Continue that lands after it waits for the whole wave, reservations included, to commit.
+        await Workflows.Engine.RunGenerationFence.EnterAsync(_db, context.SupervisorRunId, cancellationToken).ConfigureAwait(false);
+
+        if (await AdmitWaveAsync(tasks, context, wave, cancellationToken).ConfigureAwait(false) is { } budgetBlocked) return budgetBlocked;
+
+        await DropClosedWaveAsync(context, cancellationToken).ConfigureAwait(false);
 
         // P2a-2 (R): the staged units' acceptance obligations become durable requirement rows AT AUTHORIZATION —
         // the composer reads these, never re-derives them from the tape. Upsert-idempotent: a crash-replayed
@@ -803,9 +788,18 @@ public sealed partial class RealSupervisorActionExecutor
 
         var agentRunIds = new List<Guid>(tasks.Count);
         var reclaimedAny = false;
+        var orphanCursor = 0;
 
         for (var k = 0; k < tasks.Count; k++)
         {
+            // A slot of a closed wave whose agent had already finished keeps that agent and its answered wait: only the
+            // slots the stop or failure closed run again.
+            if (wave.KeptAgentRunId(k) is { } kept)
+            {
+                agentRunIds.Add(kept);
+                continue;
+            }
+
             // Reuse a reclaimed orphan for the leading slots (crash recovery — these were created by a prior
             // crashed pass of THIS decision, whose persisted TaskJson was ALREADY persona-resolved, so re-running
             // the resolver here would be redundant); else resolve the persona into the task (mirroring
@@ -813,14 +807,14 @@ public sealed partial class RealSupervisorActionExecutor
             // gate — team inherited from the supervisor run, never model-supplied. Linked to the supervisor run
             // + node so the completion notifier resumes the right run, and the reconciler's parent-terminal
             // guard governs it.
-            var reclaimed = k < orphans.Count;
+            var reclaimed = orphanCursor < orphans.Count;
             reclaimedAny |= reclaimed;
 
             // 3c: the ONE staging seam every spawn wave, retry and resolve passes through, so the checkpoint opt-in is
             // decided once here rather than at each verb's own task build — see CheckpointsSessionTranscript for who
             // is excluded and why.
             var agentRunId = reclaimed
-                ? orphans[k]
+                ? orphans[orphanCursor++]
                 : await CreateResolvedAgentRunAsync(tasks[k].Task with { CheckpointSessionTranscript = CheckpointsSessionTranscript(tasks[k].Task, context, tasks.Count) }, tasks[k].Spec, context, cancellationToken).ConfigureAwait(false);
 
             StageAgentWait(context, k, agentRunId);
@@ -846,7 +840,51 @@ public sealed partial class RealSupervisorActionExecutor
 
         _logger.LogInformation("Supervisor staged {Count} agent run(s) at turn {Turn} on node {NodeId} (reused {Reused} crash orphan(s)); units: {Units}", agentRunIds.Count, context.TurnNumber, context.NodeId, Math.Min(orphans.Count, tasks.Count), DescribeStagedUnits(tasks));
 
+        if (wave.KeptSlotCount > 0)
+            _logger.LogInformation("Supervisor re-staged a closed wave at turn {Turn} on node {NodeId}: kept {Kept} finished slot(s), staged {Restaged} afresh", context.TurnNumber, context.NodeId, wave.KeptSlotCount, tasks.Count - wave.KeptSlotCount);
+
         return SupervisorExecution.ParkedOnAgents(outcome, agentRunIds.Count);
+    }
+
+    /// <summary>
+    /// W-hard 2a: ATOMIC wave admission — every slot this wave stages for the first time reserves its budget slice
+    /// (cap ÷ total-spawn cap, the config-derived natural estimate), all-or-nothing, inside the wave's own fenced
+    /// transaction: the reservations commit with the agents and waits or not at all, so a turn a Continue overtook — or
+    /// a crash before the commit — leaves none behind to hold the cap or to refuse the replay as a different intent. A
+    /// refusal returns the budget-blocked outcome the decider reads (mirroring the dependency-block precedent —
+    /// positional integrity is never truncated mid-wave) and the caller's rollback takes back what this wave reserved.
+    /// A slot that already holds a row — a closed wave's slot staged afresh, or a finished slot kept — keeps the
+    /// reservation it was first admitted under: settlement settles <c>{node}#turn{N}#{k}</c> with whichever attempt the
+    /// decision records for slot k. An uncapped run (no MaxCostUsd) reserves nothing — same authority as the
+    /// realized-spend bound, which stays the user-facing stop.
+    /// </summary>
+    private async Task<SupervisorExecution?> AdmitWaveAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, TurnWave wave, CancellationToken cancellationToken)
+    {
+        if (context.MaxCostUsd is not { } capUsd || context.SupervisorRunId == Guid.Empty || context.TeamId == Guid.Empty) return null;
+
+        var estimate = capUsd / Math.Max(context.MaxTotalSpawns ?? SupervisorLane.DefaultMaxTotalSpawns, 1);
+
+        for (var k = 0; k < tasks.Count; k++)
+        {
+            if (wave.HasSlot(k)) continue;
+
+            var scopeKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}#{k}";
+            var admission = await _budget.ReserveAsync(context.SupervisorRunId, context.TeamId, Workflows.Budget.BudgetKinds.AgentAttempt, scopeKey, estimate, capUsd, priceVersion: "realized-v1", parentReservationId: null, AttemptReservationDeadline(tasks[k].Task), cancellationToken).ConfigureAwait(false);
+
+            if (admission.Admitted) continue;
+
+            _logger.LogWarning("Budget admission blocked a {Count}-agent wave on run {RunId}: {Reason}", tasks.Count, context.SupervisorRunId, admission.Reason);
+
+            return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new
+            {
+                budgetBlocked = tasks.Select(t => t.Task.SubtaskId).ToArray(),
+                reason = admission.Reason,
+                committedUsd = admission.CommittedUsd,
+                capUsd = admission.CapUsd,
+            }, AgentJson.Options));
+        }
+
+        return null;
     }
 
     /// <summary>The plan-local unit ids this staging dispatches, comma-joined ("s1,s2"); a task with no subtask key (a free-form spawn under no plan) reads "(unkeyed)". Pure + pinned — the other half of the plan log's edges↔units join.</summary>
@@ -865,28 +903,67 @@ public sealed partial class RealSupervisorActionExecutor
         return NullIfBlank(actualModel) is { } model ? escalation with { To = model } : escalation;
     }
 
-    /// <summary>This turn's already-staged AgentRun wait tokens (the agent-run ids) in spawn-index order, or empty when none — the recovery anchor for a crash AFTER the waits committed but before the terminal was recorded.</summary>
-    private async Task<IReadOnlyList<Guid>> ExistingTurnWaitAgentIdsAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    /// <summary>
+    /// This turn's wave as staged so far, one slot per spawn index: the agent-run id and its wait's status — the recovery
+    /// anchor for a crash AFTER the waits committed but before the terminal was recorded. Empty when the turn staged
+    /// nothing yet.
+    /// </summary>
+    private async Task<TurnWave> TurnWaveAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        var keyPrefix = $"{context.NodeId}#turn{context.TurnNumber}#";
+        var keyPrefix = TurnWaveKeyPrefix(context);
 
         var waits = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId
                         && w.WaitKind == WorkflowWaitKinds.AgentRun && w.IterationKey.StartsWith(keyPrefix))
-            .Select(w => new { w.IterationKey, w.Token })
+            .Select(w => new { w.IterationKey, w.Token, w.Status })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         // Order by the PARSED NUMERIC spawn index, NOT the lexicographic IterationKey: the key's trailing #{k} is raw
         // (non-zero-padded), so a text sort yields #0,#1,#10,…,#2 for K≥11 — scrambling agentRunIds out of the authored
         // subtaskIds[i] order the fan-out + the per-unit acceptance join rely on. SQL can't parse the index, so order
         // in memory (K ≤ 20).
-        return waits
-            .OrderBy(w => SupervisorOutcome.SpawnIndexOf(w.IterationKey))
-            .Select(w => Guid.TryParse(w.Token, out var id) ? id : (Guid?)null)
-            .Where(id => id.HasValue)
-            .Select(id => id!.Value)
-            .ToList();
+        return new TurnWave(waits
+            .Select(w => (Index: SupervisorOutcome.SpawnIndexOf(w.IterationKey), AgentRunId: Guid.TryParse(w.Token, out var id) ? id : (Guid?)null, w.Status))
+            .Where(w => w.AgentRunId.HasValue)
+            .OrderBy(w => w.Index)
+            .Select(w => new WaveSlot(w.Index, w.AgentRunId!.Value, w.Status))
+            .ToList());
     }
+
+    /// <summary>
+    /// A turn's staged wave. OPEN while every slot's wait still stands (Pending, or Resolved by its agent's end): a replay
+    /// re-parks on it. CLOSED once the run's end Discarded any of its waits (a stop, or a failure's cleanup): those
+    /// agents were ended and nothing answers those waits any more, so the replay stages those slots afresh and keeps the
+    /// rest — a slot whose agent already finished is not run twice.
+    /// </summary>
+    private sealed record TurnWave(IReadOnlyList<WaveSlot> Slots)
+    {
+        public bool IsOpen => Slots.Count > 0 && Slots.All(s => s.Status != WorkflowWaitStatuses.Discarded);
+
+        public IReadOnlyList<Guid> AgentRunIds => Slots.Select(s => s.AgentRunId).ToList();
+
+        public int KeptSlotCount => Slots.Count(s => s.Status != WorkflowWaitStatuses.Discarded);
+
+        public bool HasSlot(int index) => Slots.Any(s => s.Index == index);
+
+        public Guid? KeptAgentRunId(int index) => Slots.FirstOrDefault(s => s.Index == index && s.Status != WorkflowWaitStatuses.Discarded)?.AgentRunId;
+    }
+
+    /// <summary>One slot of a <see cref="TurnWave"/>: its spawn index, its agent run and its wait's status.</summary>
+    private sealed record WaveSlot(int Index, Guid AgentRunId, string Status);
+
+    /// <summary>Delete the wait rows of this turn's slots that the run's end closed, so their fresh waits can take the same per-turn-per-spawn keys under the unique (run, node, iteration) index — the supervisor's twin of the engine replacing a cell's earlier wait when its step parks again. A finished slot's answered wait stays. A no-op for a first staging.</summary>
+    private async Task DropClosedWaveAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var keyPrefix = TurnWaveKeyPrefix(context);
+
+        await _db.WorkflowRunWait
+            .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.IterationKey.StartsWith(keyPrefix) && w.Status == WorkflowWaitStatuses.Discarded)
+            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The IterationKey prefix every AgentRun wait of this turn's wave carries (<c>&lt;nodeId&gt;#turn{N}#</c>, then the spawn index).</summary>
+    private static string TurnWaveKeyPrefix(SupervisorTurnContext context) => $"{context.NodeId}#turn{context.TurnNumber}#";
 
     /// <summary>Re-park on the K waits a prior crashed pass already staged this turn — re-derive the outcome from their tokens WITHOUT staging or creating anything (no double-spawn). The node re-suspends on the existing waits.</summary>
     private SupervisorExecution ReparkOnExistingWaits(SupervisorTurnContext context, IReadOnlyList<Guid> agentRunIds)

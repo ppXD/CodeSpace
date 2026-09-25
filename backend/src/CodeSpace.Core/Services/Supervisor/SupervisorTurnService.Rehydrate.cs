@@ -519,8 +519,14 @@ public sealed partial class SupervisorTurnService
     /// parent-terminal-guarded) → an explicit <c>Unknown</c> placeholder, so the folded set is always N-for-N and the
     /// decider never sees a silent hole shorter than agentCount. Ids are iterated in RECORDED spawn order
     /// (replay-deterministic), never DB-row order.</para>
+    ///
+    /// <para>Nothing is folded while any staged agent is still Queued or Running: the fold is written once and never
+    /// revisited, so a status read before the agent ended would stand on the tape as its result for good. The barrier
+    /// normally rules that out; a turn re-entered without it — a Continue, whose revive ends the stopped attempt's agents
+    /// in the same commit, or any re-walk of a parked supervisor — is what this guards. Unfolded, the decision is read
+    /// again on the next rehydrate.</para>
     /// </summary>
-    private static SupervisorPriorDecision FoldAgentResults(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, SupervisorAgentResult> resultsById)
+    internal static SupervisorPriorDecision FoldAgentResults(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, SupervisorAgentResult> resultsById)
     {
         if (!SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return decision;
 
@@ -532,8 +538,13 @@ public sealed partial class SupervisorTurnService
 
         var folded = ids.Select(id => resultsById.TryGetValue(id, out var r) ? r : UnknownAgentResult(id)).ToList();
 
+        if (folded.Any(IsStillLive)) return decision;
+
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, folded) };
     }
+
+    /// <summary>A folded result whose agent has not ended: Queued or Running. The placeholder for an agent that no longer resolves is final, not live.</summary>
+    private static bool IsStillLive(SupervisorAgentResult result) => Enum.TryParse<AgentRunStatus>(result.Status, out var status) && !AgentRunStateMachine.IsTerminal(status);
 
     /// <summary>
     /// Validate one active-plan resolve's fixed K=1 carrier against its tenant-scoped durable AgentRun. A failure adds

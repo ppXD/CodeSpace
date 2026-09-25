@@ -9,11 +9,13 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
 /// <summary>
-/// Test-only node whose FIRST pass holds on a gate (the <see cref="CancelGateNode"/> handshake) and then parks on an
-/// AgentRun wait — the suspend an <c>agent.run</c> step produces, from which the engine stages a real agent run. It
-/// opens the window of a step still in flight when its run is stopped and continued: the step parks only when the test
-/// lets it, after the revived walk has parked the same cell. A resumed pass completes. Registered through
-/// <c>PostgresFixture.RegisterTestAssemblyTypes</c>; NOT in any IPluginModule, so it never reaches the editor palette.
+/// Test-only node whose FIRST pass holds on a gate (the <see cref="CancelGateNode"/> handshake) and then parks: on an
+/// AgentRun wait by default — the suspend an <c>agent.run</c> step produces, from which the engine stages a real agent
+/// run — or, with the <c>"wait": "Action"</c> input, on an Action wait that stages nothing, which a step can still park
+/// after its run was stopped. It opens the window of a step still in flight when its run is stopped and continued: the
+/// step parks only when the test lets it, after the revived walk has parked the same cell or while the Continue waits
+/// on the park. A resumed pass completes. Registered through <c>PostgresFixture.RegisterTestAssemblyTypes</c>; NOT in
+/// any IPluginModule, so it never reaches the editor palette.
 /// </summary>
 public sealed class GatedAgentParkNode : INodeRuntime
 {
@@ -53,6 +55,11 @@ public sealed class GatedAgentParkNode : INodeRuntime
             gate.Started.TrySetResult();
             await gate.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        // "wait": "Action" parks a wait with no staged child instead — one a step can still park after its run was stopped,
+        // where agent admission refuses a new agent under the terminal run.
+        if (context.Inputs.TryGetValue("wait", out var wait) && wait.GetString() == WorkflowWaitKinds.Action)
+            return NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.Action, Payload = JsonSerializer.SerializeToElement(new { }) });
 
         var task = new AgentTask { Goal = "Fix the failing billing tests", Harness = "codex-cli", Model = "gpt-5.3-codex", RunnerKind = "local" };
 

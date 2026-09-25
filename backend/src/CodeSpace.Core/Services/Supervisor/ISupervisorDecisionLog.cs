@@ -4,6 +4,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -30,7 +31,9 @@ public interface ISupervisorDecisionLog
     /// Claim the right to execute this decision. INSERTs a Pending row; on the unique-index collision (a concurrent or
     /// prior decision for the same key) re-reads the existing row and returns <see cref="SupervisorDecisionClaimOutcome.Duplicate"/>
     /// (with the prior terminal outcome) when terminal, else <see cref="SupervisorDecisionClaimOutcome.InFlight"/>. Exactly
-    /// one caller for a given key ever gets <see cref="SupervisorDecisionClaimOutcome.Proceed"/>.
+    /// one caller for a given key ever gets <see cref="SupervisorDecisionClaimOutcome.Proceed"/>. Inside a walk the INSERT
+    /// is fenced on the walk's claimed run generation (<see cref="RunGenerationFence"/>): a turn a Continue overtook
+    /// inserts nothing and gets <see cref="RunSupersededException"/>.
     /// </summary>
     Task<SupervisorDecisionClaim> TryClaimAsync(SupervisorDecisionClaimRequest request, CancellationToken cancellationToken);
 
@@ -39,10 +42,11 @@ public interface ISupervisorDecisionLog
     /// — it flips the row out of the claimable state BEFORE the side effect runs, so the synchronous path does NOT rely
     /// on the INSERT alone. Of N concurrent executors of the same claimed (run, key) exactly one update affects 1 row
     /// (true → run the side effect once); every loser affects 0 (false → re-read + replay). Returns whether THIS caller won.
+    /// Fenced like <see cref="TryClaimAsync"/>: an overtaken turn begins nothing and gets <see cref="RunSupersededException"/>.
     /// </summary>
     Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken);
 
-    /// <summary>Status-guarded CAS Running → terminal (Succeeded/Failed/Expired), team-scoped (defense-in-depth). Stores the execution outcome/error. Throws when the transition is illegal or lost the CAS. Gated by <see cref="SupervisorDecisionStateMachine"/>.</summary>
+    /// <summary>Status-guarded CAS Running → terminal (Succeeded/Failed/Expired), team-scoped (defense-in-depth). Stores the execution outcome/error. Throws when the transition is illegal or lost the CAS. Gated by <see cref="SupervisorDecisionStateMachine"/>. Fenced like <see cref="TryClaimAsync"/>: an overtaken turn records nothing and gets <see cref="RunSupersededException"/>.</summary>
     Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken);
 
     /// <summary>Team-scoped audit/replay read of a run's decision rows, ordered by <c>Sequence</c> (the replay tape). A foreign run id returns empty.</summary>
@@ -137,15 +141,12 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             QualityDecisionsJson = PersistedText.SanitizeJson(request.QualityDecisionsJson),
         };
 
-        _db.SupervisorDecisionRecord.Add(row);
-
         try
         {
             // INSERT-first against the unique (supervisor_run_id, idempotency_key) index — the serialization point. Two
-            // identical concurrent decisions both reach here; the DB lets exactly one INSERT win.
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-            return SupervisorDecisionClaim.Proceed(row.Id);
+            // identical concurrent decisions both reach here; the DB lets exactly one INSERT win. Fenced on the walk's
+            // claim: a turn a Continue overtook inserts nothing, so the revived run never finds a decision it did not make.
+            return await RunGenerationFence.CommitUnderClaimAsync(_db, request.SupervisorRunId, () => InsertClaimAsync(row, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
@@ -159,65 +160,88 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
 
     public async Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken)
     {
+        // Fenced like the claim: a turn a Continue overtook between its claim and here begins nothing, and leaves the
+        // decision Pending for the revived walk, which finds it in flight and finishes it.
+        if (await DecisionRunIdAsync(decisionId, teamId, cancellationToken).ConfigureAwait(false) is not { } runId) return false;
+
+        var claimed = await RunGenerationFence.CommitUnderClaimAsync(_db, runId, () => BeginExecutionAsync(decisionId, teamId, cancellationToken), cancellationToken).ConfigureAwait(false);
+
+        if (claimed) _logger.LogInformation("Supervisor decision claimed for execution. DecisionId={DecisionId}", decisionId);
+
+        return claimed;
+    }
+
+    /// <summary>
+    /// Single-winner CAS Pending → Running (mirrors RecordTerminalAsync's ExecuteUpdate discipline). The Status == Pending
+    /// guard is the must-fix-#2 gate: it flips the row out of the claimable state BEFORE the side effect runs, so of N
+    /// executors racing the same claimed (run, key) exactly one update affects 1 row (true → run the side effect once),
+    /// every loser affects 0 (false → re-read + replay). This is the single-winner guarantee the INSERT alone cannot
+    /// provide for the synchronous execution path.
+    /// </summary>
+    private async Task<bool> BeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken)
+    {
         var now = DateTimeOffset.UtcNow;
 
-        // Single-winner CAS Pending → Running (mirrors RecordTerminalAsync's ExecuteUpdate discipline). The Status ==
-        // Pending guard is the must-fix-#2 gate: it flips the row out of the claimable state BEFORE the side effect runs,
-        // so of N executors racing the same claimed (run, key) exactly one update affects 1 row (true → run the side
-        // effect once), every loser affects 0 (false → re-read + replay). This is the single-winner guarantee the INSERT
-        // alone cannot provide for the synchronous execution path.
         var claimed = await _db.SupervisorDecisionRecord
             .Where(d => d.Id == decisionId && d.TeamId == teamId && d.Status == SupervisorDecisionStatus.Pending)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.Status, SupervisorDecisionStatus.Running)
-                .SetProperty(d => d.LastModifiedDate, now), cancellationToken)
-            .ConfigureAwait(false);
-
-        if (claimed > 0) _logger.LogInformation("Supervisor decision claimed for execution. DecisionId={DecisionId}", decisionId);
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, SupervisorDecisionStatus.Running).SetProperty(d => d.LastModifiedDate, now), cancellationToken).ConfigureAwait(false);
 
         return claimed > 0;
     }
+
+    /// <summary>INSERT the Pending claim row; a unique violation escapes to <see cref="TryClaimAsync"/>, which re-reads the winner.</summary>
+    private async Task<SupervisorDecisionClaim> InsertClaimAsync(SupervisorDecisionRecord row, CancellationToken cancellationToken)
+    {
+        _db.SupervisorDecisionRecord.Add(row);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return SupervisorDecisionClaim.Proceed(row.Id);
+    }
+
+    /// <summary>The supervisor run a decision belongs to — the run whose generation fences its writes — or null for an unknown or foreign decision. Team-scoped.</summary>
+    private async Task<Guid?> DecisionRunIdAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.SupervisorDecisionRecord.AsNoTracking().Where(d => d.Id == decisionId && d.TeamId == teamId).Select(d => (Guid?)d.SupervisorRunId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken)
     {
         if (!SupervisorDecisionStateMachine.IsTerminal(status))
             throw new SupervisorDecisionTransitionException($"SupervisorDecision terminal status must be terminal — got {status}.");
 
-        // Read the current status FRESH + untracked (team-scoped — defense-in-depth), then flip via a status-guarded CAS
-        // (NOT a tracked save on the xmin token — same rationale as ToolCallLedgerService.RecordTerminalAsync).
-        var row = await _db.SupervisorDecisionRecord.AsNoTracking()
-            .Where(d => d.Id == decisionId && d.TeamId == teamId)
-            .Select(d => new { d.Status, d.SupervisorRunId })
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+        var runId = await DecisionRunIdAsync(decisionId, teamId, cancellationToken).ConfigureAwait(false)
             ?? throw new SupervisorDecisionTransitionException($"SupervisorDecision {decisionId} not found.");
-
-        var current = row.Status;
-
-        if (!SupervisorDecisionStateMachine.IsLegalTransition(current, status))
-            throw new SupervisorDecisionTransitionException($"Illegal SupervisorDecision transition {current} → {status} (decision {decisionId}).");
-
-        var now = DateTimeOffset.UtcNow;
 
         // Both carry model/harness words; hoisted out of the expression tree so they are plain parameters.
         var outcome = PersistedText.SanitizeJson(outcomeJson);
         var storableError = PersistedText.Sanitize(error);
 
-        var flipped = await _db.SupervisorDecisionRecord
-            .Where(d => d.Id == decisionId && d.TeamId == teamId && d.Status == current)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.Status, status)
-                .SetProperty(d => d.OutcomeJson, outcome)
-                .SetProperty(d => d.Error, storableError)
-                .SetProperty(d => d.LastModifiedDate, now), cancellationToken)
-            .ConfigureAwait(false);
+        // Read the current status FRESH + untracked (team-scoped — defense-in-depth), then flip via a status-guarded CAS
+        // (NOT a tracked save on the xmin token — same rationale as ToolCallLedgerService.RecordTerminalAsync).
+        async Task<bool> FlipToTerminalAsync()
+        {
+            var current = await _db.SupervisorDecisionRecord.AsNoTracking().Where(d => d.Id == decisionId && d.TeamId == teamId).Select(d => d.Status).SingleAsync(cancellationToken).ConfigureAwait(false);
 
-        if (flipped == 0)
-            throw new SupervisorDecisionTransitionException($"SupervisorDecision {decisionId} was no longer {current} at terminal record — a concurrent transition won the race.");
+            if (!SupervisorDecisionStateMachine.IsLegalTransition(current, status))
+                throw new SupervisorDecisionTransitionException($"Illegal SupervisorDecision transition {current} → {status} (decision {decisionId}).");
+
+            var flipped = await _db.SupervisorDecisionRecord
+                .Where(d => d.Id == decisionId && d.TeamId == teamId && d.Status == current)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, status).SetProperty(d => d.OutcomeJson, outcome).SetProperty(d => d.Error, storableError).SetProperty(d => d.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+            if (flipped == 0)
+                throw new SupervisorDecisionTransitionException($"SupervisorDecision {decisionId} was no longer {current} at terminal record — a concurrent transition won the race.");
+
+            // P2 (ledger-version full coverage): a decision turning terminal enters the completion composer's read set.
+            await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, runId, cancellationToken).ConfigureAwait(false);
+
+            return true;
+        }
+
+        // Fenced like the claim, and the fence comes BEFORE the status is read: a turn a Continue overtook records nothing
+        // and stands down — never reading the revived walk's terminal as an illegal transition, which it would otherwise
+        // throw into the engine as the supervisor step failing, in the revived run's journal.
+        await RunGenerationFence.CommitUnderClaimAsync(_db, runId, FlipToTerminalAsync, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Supervisor decision recorded terminal. DecisionId={DecisionId} Status={Status}", decisionId, status);
-
-        // P2 (ledger-version full coverage): a decision turning terminal enters the completion composer's read set.
-        await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, row.SupervisorRunId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
