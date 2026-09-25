@@ -1063,7 +1063,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var stopped = await ReadStoppedAttemptAsync(runId, current.Generation, cancellationToken).ConfigureAwait(false);
         await terminalTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
-        await DeferTeardownAsync(runId, current.Generation, stopped, cancellationToken).ConfigureAwait(false);
+        await DeferTeardownAsync(runId, teamId, current.Generation, stopped, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Workflow run cancelled by operator. RunId={RunId} TeamId={TeamId} From={From} BranchAgentsTargeted={BranchAgentsTargeted}", runId, teamId, current.Status, stopped.Agents.Count);
 
@@ -1091,7 +1091,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// write they guard, and do nothing once a Continue has moved it: the waits and the walk live by then are the revived
     /// run's.</para>
     /// </summary>
-    private async Task DeferTeardownAsync(Guid runId, int generation, StoppedAttempt stopped, CancellationToken cancellationToken) =>
+    private async Task DeferTeardownAsync(Guid runId, Guid teamId, int generation, StoppedAttempt stopped, CancellationToken cancellationToken) =>
         await _postCommit.RunAfterCommitAsync(async ct =>
         {
             // Trip the in-process walk's token so an actively-running engine walk on THIS host stops cooperatively
@@ -1101,7 +1101,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             // registered here by then is the revived one, and tripping it would stop the run the operator continued.
             if (await IsStillAtGenerationAsync(runId, generation, ct).ConfigureAwait(false)) _cancellationRegistry.Cancel(runId);
 
-            var agentRunsCancelled = await TearDownCancelledRunAsync(runId, generation, stopped, ct).ConfigureAwait(false);
+            var agentRunsCancelled = await TearDownCancelledRunAsync(runId, teamId, generation, stopped, ct).ConfigureAwait(false);
 
             _logger.LogInformation("Workflow run {RunId} teardown complete. AgentRunsCancelled={AgentRunsCancelled}", runId, agentRunsCancelled);
         }, cancellationToken).ConfigureAwait(false);
@@ -1164,14 +1164,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary>
     /// Tear down a just-cancelled run, best-effort: close the waits the stopped attempt's agents and children answer,
-    /// KILL-WAVE those branch agent runs (Queued + Running), cancel those staged non-terminal sub-workflow children, and
-    /// close the run's other still-pending waits so none dangle. Best-effort end to end — one failed kill never aborts
+    /// KILL-WAVE those branch agent runs (Queued + Running), cancel those sub-workflow children through this same cancel,
+    /// and close the run's other still-pending waits so none dangle. Best-effort end to end — one failed kill never aborts
     /// the cancel (the run is already Cancelled; the reconciler's parent-run-terminal guard re-cleans anything missed).
     /// Returns how many branch agent runs the kill-wave flipped. The work is the <paramref name="stopped"/> attempt's plus
     /// whatever the old walk staged at the stopped <paramref name="generation"/> since; the run-wide close is fenced on
     /// that generation (see <see cref="DeferTeardownAsync"/>).
     /// </summary>
-    private async Task<int> TearDownCancelledRunAsync(Guid runId, int generation, StoppedAttempt stopped, CancellationToken cancellationToken)
+    private async Task<int> TearDownCancelledRunAsync(Guid runId, Guid teamId, int generation, StoppedAttempt stopped, CancellationToken cancellationToken)
     {
         try
         {
@@ -1181,7 +1181,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
             var agentRunsCancelled = await KillWaveBranchAgentsAsync(attempt.Agents, cancellationToken).ConfigureAwait(false);
 
-            await CancelStagedSubworkflowChildrenAsync(attempt.Children, cancellationToken).ConfigureAwait(false);
+            await CancelChildRunsAsync(attempt.Children, teamId, cancellationToken).ConfigureAwait(false);
 
             await CancelPendingWaitsAsync(runId, generation, cancellationToken).ConfigureAwait(false);
 
@@ -1263,17 +1263,17 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, AgentRunAbandonCause.OperatorCancelled, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Cancel the stopped attempt's staged non-terminal sub-workflow children (Pending/Enqueued → Cancelled CAS), mirroring the engine's source-side cleanup. Child runs that already started running / finished are left to their own lifecycle. Only the children handed in are touched — a revived walk's child is never among them.</summary>
-    private async Task CancelStagedSubworkflowChildrenAsync(IReadOnlyList<Guid> ids, CancellationToken cancellationToken)
+    /// <summary>
+    /// Cancel the stopped attempt's sub-workflow children through this same cancel, whatever each has reached — staged,
+    /// walking, or parked on its own agents — so each child's own teardown kills its agents and cancels its own children
+    /// in turn. Cancelling only a staged child let one already started run on under a Cancelled parent, toward a wait
+    /// this teardown had closed. A child that finished first keeps its terminal: the cancel reads it terminal, or loses
+    /// its status CAS to the finish. Only the children handed in are touched — a revived walk's child is never among them.
+    /// </summary>
+    private async Task CancelChildRunsAsync(IReadOnlyList<Guid> ids, Guid teamId, CancellationToken cancellationToken)
     {
-        if (ids.Count == 0) return;
-
-        await _db.WorkflowRun
-            .Where(r => ids.Contains(r.Id) && (r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
-                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-            .ConfigureAwait(false);
+        foreach (var id in ids)
+            await CancelRunAsync(id, teamId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

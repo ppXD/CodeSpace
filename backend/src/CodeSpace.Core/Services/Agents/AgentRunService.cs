@@ -529,23 +529,8 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         var current = snapshot.Status;
         if (writer.QueuedOnly && current != AgentRunStatus.Queued) throw new AgentRunTransitionException($"AgentRun {runId} has already been claimed; a preclaim refusal cannot complete it.");
 
-        // Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered —
-        // re-grade Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at
-        // THIS choke point (every normal completion) AND mirrored in the reconciler's spool recovery, so the invariant
-        // holds on every terminal write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
-        if (result.Status == AgentRunStatus.Succeeded)
-        {
-            // A1 (HARD gate): a raised-but-unanswered decision can never be buried under a green Succeeded.
-            var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
-            result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
-
-            // A2 (BEST-EFFORT net, opt-in): if no decision fired but the agent's FINAL message reads as an unresolved
-            // question handed back to the human, re-grade to NeedsReview(NeedsReview). A1 takes precedence — this runs
-            // only while still Succeeded, so a concrete decision outranks the heuristic. Flag-gated default-OFF.
-            if (result.Status == AgentRunStatus.Succeeded && FinalOutputReview.Enabled)
-                result = FinalOutputReview.ReGrade(result);
-        }
-
+        // Checked on the result as handed in: the completion contract below only ever re-grades a would-be Succeeded to
+        // NeedsReview, which is legal from exactly the same states.
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
             throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
 
@@ -553,6 +538,15 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
         result = await OffloadOrShedAsync(runId, result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+
+        // The contract check, the terminal write and the close of the decisions the run leaves unanswered are one
+        // transaction, entered with the run's decisions locked: an answer racing the end either committed before the
+        // check (which then sees it answered) or waits for this commit and is refused, the decision closed. Checked and
+        // closed in two steps instead, an answer landing between them was told "answered" by a run that had just
+        // recorded its question as unanswered. The offload above stays outside, so no row lock is held across its I/O.
+        await using var terminal = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false);
+        await StoppedRunDecisions.LockAsync(_db, runId, cancellationToken).ConfigureAwait(false);
+        result = await ApplyCompletionContractAsync(runId, result, cancellationToken).ConfigureAwait(false);
 
         // Summary, ExitReason, Error and the inline transcript are all harness words — any of them can carry a NUL
         // that neither jsonb nor text will take. A run that DID its work must not fail at the last statement.
@@ -583,12 +577,37 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
             }
         }
 
+        // The run is over, so nothing reads an answer now: its unanswered decisions close with it, out of the queue and
+        // the Room. After the terminal write, so a completion that lost its CAS above leaves them to whoever landed the run.
+        await StoppedRunDecisions.ExpireAsync(_db, runId, StoppedRunDecisions.EndedError, cancellationToken).ConfigureAwait(false);
+        await terminal.CommitAsync(cancellationToken).ConfigureAwait(false);
+
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
 
         // P2 (ledger-version full coverage): the terminal result is in the completion composer's read set — a
         // completion landing between a compose read and its terminal stamp must move the version so the CAS refuses.
         if (snapshot.WorkflowRunId is { } boundRunId)
             await Services.Completion.CompletionLedgerVersionBump.BumpAsync(_db, boundRunId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered — re-grade
+    /// Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at the normal
+    /// completion's choke point AND mirrored in the reconciler's spool recovery, so the invariant holds on every terminal
+    /// write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
+    /// </summary>
+    private async Task<AgentRunResult> ApplyCompletionContractAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+
+        // A1 (HARD gate): a raised-but-unanswered decision can never be buried under a green Succeeded.
+        var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
+        result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+
+        // A2 (BEST-EFFORT net, opt-in): if no decision fired but the agent's FINAL message reads as an unresolved
+        // question handed back to the human, re-grade to NeedsReview(NeedsReview). A1 takes precedence — this runs
+        // only while still Succeeded, so a concrete decision outranks the heuristic. Flag-gated default-OFF.
+        return result.Status == AgentRunStatus.Succeeded && FinalOutputReview.Enabled ? FinalOutputReview.ReGrade(result) : result;
     }
 
     /// <summary>

@@ -40,6 +40,7 @@ public class ScopedTransactionInventoryTests
     /// <summary>The services whose transaction is their caller's when they have one — one coherent unit of work each, reachable from a transactional command.</summary>
     private static readonly string[] JoinsItsCaller =
     [
+        "Agents/AgentRunService.cs",
         "Agents/AgentRunSpoolReaper.cs",
         "Workflows/Budget/BudgetLedger.cs",
         "Workflows/ModelCalls/WorkflowRunModelCallProjector.cs",
