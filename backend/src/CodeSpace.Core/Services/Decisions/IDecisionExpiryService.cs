@@ -18,13 +18,17 @@ namespace CodeSpace.Core.Services.Decisions;
 /// timeout default), NOT <c>Expired</c> (the approval grain's "no decision" terminal — which the blocked call would
 /// surface as an error). The recurring reaper job dispatches a command whose thin handler (Rule 16) calls this.
 ///
-/// <para>The wake + card mirror are deferred via <see cref="IPostCommitActions"/> so a woken handler — re-reading the row
-/// on its OWN connection — sees the COMMITTED <c>Succeeded</c> terminal, not the pre-commit <c>AwaitingApproval</c>. Called
-/// outside a transaction (ad-hoc / tests), the deferred action runs inline since the CAS already auto-committed.</para>
+/// <para>The wake + card mirror go through <see cref="IPostCommitActions"/> so a woken handler — re-reading the row on its
+/// OWN connection — sees the COMMITTED <c>Succeeded</c> terminal, not the pre-commit <c>AwaitingApproval</c>. The sweep's
+/// command is non-transactional, so each decision's CAS commits on its own, and its follow-ups run inline as the sweep
+/// reaches it — right after that CAS, before the sweep moves on, so no later decision's fault can cost them; only a caller
+/// inside a transaction of its own defers them to its commit. With no drain to swallow a failure they are best-effort
+/// here, the wake and the mirror each on its own: one decision's failed card mirror still leaves it woken and the next
+/// decision woken and mirrored.</para>
 /// </summary>
 public interface IDecisionExpiryService
 {
-    /// <summary>Apply the configured default to every undecided decision past <paramref name="now"/>, then best-effort wake waiters + mirror cards (deferred until the ambient command transaction commits). Returns the count durably defaulted (the ledger-CAS winners; rows without a default are left Pending for a human).</summary>
+    /// <summary>Apply the configured default to every undecided decision past <paramref name="now"/>, best-effort waking each one's waiter and mirroring its card right after its default commits — deferred to the commit only when called inside a caller's transaction. Returns the count durably defaulted (the ledger-CAS winners; rows without a default are left Pending for a human).</summary>
     Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken);
 }
 
@@ -48,29 +52,59 @@ public sealed class DecisionExpiryService : IDecisionExpiryService, IScopedDepen
     public async Task<int> ExpireDueAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         // The durable answer CAS is the authority + the count we return — the row is Succeeded-by-default regardless of the follow-ups.
-        var timedOut = await _ledger.ExpireStaleDecisionsAsync(now, cancellationToken).ConfigureAwait(false);
+        var defaulted = 0;
 
-        // Defer the per-row signal + card mirror until AFTER the command transaction commits (the CAS isn't visible to a
-        // woken handler's own connection until then). Outside a transaction this runs inline (the CAS auto-committed).
-        foreach (var row in timedOut)
+        // The sweep hands each default back the moment its CAS autocommits, so the per-row signal + card mirror run right
+        // then, before it moves on. Only inside a caller's transaction do they wait for its commit — until then a woken
+        // handler's own connection would still read the row AwaitingApproval.
+        await foreach (var row in _ledger.ExpireStaleDecisionsAsync(now, cancellationToken).ConfigureAwait(false))
+        {
+            defaulted++;
             await _postCommit.RunAfterCommitAsync(ct => ResolveAsync(row, ct), cancellationToken).ConfigureAwait(false);
+        }
 
-        return timedOut.Count;
+        return defaulted;
     }
 
     private async Task ResolveAsync(TimedOutDecision row, CancellationToken cancellationToken)
     {
-        // Best-effort SAME-POD fast-path: wake a decision call blocked on THIS pod so it re-reads the now-committed
-        // Succeeded terminal + its default answer (Approved — the decision was ANSWERED by timeout, not expired; the row
-        // is Succeeded, not an error terminal). Cross-pod it harmlessly returns false — the durable Succeeded row + the
-        // blocked call's bounded-elapse → re-call that replays the terminal IS the cross-pod guarantee.
-        _waiters.TrySignal(row.LedgerId, ToolApprovalOutcome.Approved);
+        WakeQuietly(row);
 
-        // Best-effort + idempotent: mirror the decision card to timed-out (no-ops if a human already resolved it, or if no
-        // card was ever posted). The ledger row is the authority; this is its display mirror.
-        if (row.ApprovalMessageId is { } messageId)
+        await MirrorQuietlyAsync(row, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Decision defaulted on timeout. LedgerId={LedgerId} TeamId={TeamId}", row.LedgerId, row.TeamId);
+    }
+
+    // Best-effort SAME-POD fast-path: wake a decision call blocked on THIS pod so it re-reads the now-committed Succeeded
+    // terminal + its default answer (Approved — the decision was ANSWERED by timeout, not expired; the row is Succeeded,
+    // not an error terminal). Cross-pod it harmlessly returns false — the durable Succeeded row + the blocked call's
+    // bounded-elapse → re-call that replays the terminal IS the cross-pod guarantee. A wake that throws costs its card
+    // nothing: the mirror is its own step.
+    private void WakeQuietly(TimedOutDecision row)
+    {
+        try
+        {
+            _waiters.TrySignal(row.LedgerId, ToolApprovalOutcome.Approved);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Decision {LedgerId} was defaulted on timeout, but waking its call failed; the call reads the default when it next looks", row.LedgerId);
+        }
+    }
+
+    // Best-effort + idempotent: mirror the decision card to timed-out (no-ops if a human already resolved it, or if no
+    // card was ever posted). The ledger row is the authority; this is its display mirror.
+    private async Task MirrorQuietlyAsync(TimedOutDecision row, CancellationToken cancellationToken)
+    {
+        if (row.ApprovalMessageId is not { } messageId) return;
+
+        try
+        {
             await _interactions.MarkTimedOutAsync(messageId, "timed out", cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation("Decision defaulted on timeout and mirrored. LedgerId={LedgerId} TeamId={TeamId}", row.LedgerId, row.TeamId);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Decision {LedgerId} was defaulted on timeout, but mirroring its card failed; the ledger row stands as the answer", row.LedgerId);
+        }
     }
 }

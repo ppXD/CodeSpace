@@ -163,13 +163,17 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// Pending older than threshold: call DispatchAsync. The dispatcher's own CAS prevents
     /// double-dispatch if a normal flow is racing us; we just hand the id back into the
     /// queue and Hangfire takes it from there.
+    /// <para>Never a sub-workflow child whose parent has finished — one whose cancel failed during its parent's stop, say.
+    /// Dispatched, it would run under the finished parent toward a wait that parent no longer holds open; no one is waiting
+    /// for it. The guard is by source type because <c>ParentRunId</c> is also a rerun's lineage, finished by definition.</para>
     /// </summary>
     private async Task<int> RedispatchStuckPendingAsync(CancellationToken cancellationToken)
     {
         var threshold = DateTimeOffset.UtcNow - PendingStuckAfter;
 
         var stuckIds = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.Status == WorkflowRunStatus.Pending && r.CreatedDate < threshold)
+            .Where(r => r.Status == WorkflowRunStatus.Pending && r.CreatedDate < threshold
+                        && !(r.SourceType == WorkflowRunSourceTypes.ChildWorkflow && _db.WorkflowRun.Any(p => p.Id == r.ParentRunId && TerminalRunStatuses.Contains(p.Status))))
             .OrderBy(r => r.CreatedDate)
             .Take(BatchSize)
             .Select(r => r.Id)
@@ -738,4 +742,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// Includes <c>AwaitingApproval</c> (reserved/unused today). When the HITL-approval slice lands, such a decision parks the run <c>Suspended</c>, not <c>Running</c>, so this Running-only sweep still won't yank a legitimately-awaiting-approval run — revisit this predicate if that ever changes.</summary>
     private static readonly SupervisorDecisionStatus[] NonTerminalDecisionStatuses =
         Enum.GetValues<SupervisorDecisionStatus>().Where(s => !SupervisorDecisionStateMachine.IsTerminal(s)).ToArray();
+
+    /// <summary>The terminal <c>WorkflowRunStatus</c> set, derived ONCE so the finished-parent guard can't drift from <see cref="WorkflowRunState.IsTerminal"/>.</summary>
+    private static readonly WorkflowRunStatus[] TerminalRunStatuses = Enum.GetValues<WorkflowRunStatus>().Where(WorkflowRunState.IsTerminal).ToArray();
 }

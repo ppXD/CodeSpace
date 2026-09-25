@@ -24,7 +24,6 @@ namespace CodeSpace.UnitTests.Workflows;
 /// onto the planner model + the agent.run body via the SAME shared mapping the single-agent builder uses.
 /// </summary>
 [Trait("Category", "Unit")]
-[Collection("DefaultHarnessEnvMutation")]   // an absent-harness build reads the unset default harness — serialize with the env-mutating AgentHarnessDefaultsTests
 public class PlanMapSynthDefinitionBuilderTests
 {
     private static readonly PlanMapSynthDefinitionBuilder Builder = new();

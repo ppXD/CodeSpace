@@ -46,7 +46,6 @@ public class RecurringJobTransactionInventoryTests
         ["ExpireStaleToolCallsCommand"] = "a bounded batch of status-guarded CAS updates with no lease of its own to strand: an all-or-nothing rollback loses nothing the next tick will not redo.",
         ["ExpireStaleSupervisorDecisionsCommand"] = "the same shape — guarded CAS updates, no fence, no per-row catch to preserve.",
         ["ExpireStaleToolApprovalsCommand"] = "the same shape, and its follow-ups are deliberately deferred to the post-commit drain because a transaction is expected.",
-        ["ExpireStaleDecisionsCommand"] = "the same shape, delegating to the same guarded ledger CAS.",
         ["FireDueScheduleTriggersCommand"] = "a rollback loses no trigger: the lookback window re-fires them and their idempotency keys roll back with the runs, so nothing double-fires.",
     };
 

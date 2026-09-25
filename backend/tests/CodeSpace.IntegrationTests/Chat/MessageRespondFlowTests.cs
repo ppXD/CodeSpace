@@ -570,6 +570,32 @@ public class MessageRespondFlowTests
         rejected.Message.ShouldBe(StoppedRunDecisions.ExpiredError, "the person is told the asking agent was stopped");
     }
 
+    [Fact]
+    public async Task A_click_on_an_ended_agents_decision_card_says_the_agent_ended()
+    {
+        // The agent finished with its question still open, and its end closed the question (Expired). The click is
+        // rejected with why: the run that asked is over — not stopped by someone, not answered by someone else.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (agentId, token) = await SeedAgentDecisionAsync(teamId);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(agentId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the executor faulted" }, CancellationToken.None);
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "a", Label = "Ship" } } },
+            Target = new DecisionRequestTarget { Token = token },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Ship the migration?", card, default)).Id;
+
+        var rejected = await Should.ThrowAsync<InvalidOperationException>(() => RespondViaMediatorAsync(ownerId, teamId, cardId, "a"));
+        rejected.Message.ShouldBe(StoppedRunDecisions.EndedError, "the person is told the asking agent's run ended");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId)

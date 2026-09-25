@@ -1,15 +1,21 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Decisions;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Decisions;
@@ -125,6 +131,98 @@ public class DecisionReaperFlowTests
     }
 
     [Fact]
+    public async Task A_decision_the_sweep_cannot_settle_leaves_the_ones_it_settled_woken_and_mirrored()
+    {
+        // Each decision's default commits on its own. A fault on a later row used to escape the loop before the sweep
+        // returned what it had settled, so an earlier row's parked call was never woken and its card stayed Open — and the
+        // next tick selects only rows still pending, so nothing ever mirrored it.
+        var (teamId, ownerId) = await SeedTeamWithOwnerAsync();
+        var settledCard = await SeedDecisionCardAsync(teamId, ownerId);
+        var faultedCard = await SeedDecisionCardAsync(teamId, ownerId);
+        var settled = await SeedDecisionAsync(teamId, deadlineAt: LongAgo, defaultAction: "a", approvalMessageId: settledCard);
+        var faulted = await SeedDecisionAsync(teamId, deadlineAt: LongAgo.AddSeconds(1), defaultAction: "a", approvalMessageId: faultedCard);
+
+        using var waiters = _fixture.BeginScope();
+        var registry = waiters.Resolve<IToolApprovalWaiterRegistry>();
+        var settledCall = registry.Register(settled);
+        var faultedCall = registry.Register(faulted);
+
+        try
+        {
+            (await Record.ExceptionAsync(() => SweepThroughAsync(new FailLedgerWriteOf(faulted)))).ShouldBeNull("one decision's fault is that decision's, not the tick's");
+
+            (await WokenAsync(settledCall, "the settled decision's parked call")).ShouldBe(ToolApprovalOutcome.Approved, customMessage: "it is woken with its default — check ExpireStaleDecisionsAsync hands back the rows it won");
+            (await CardStateAsync(settledCard)).ShouldBe(InteractionState.Resolved, "and its card is mirrored");
+
+            (await ReadRowAsync(faulted)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the faulted decision stays pending for the next tick");
+            faultedCall.Completion.IsCompleted.ShouldBeFalse("nothing settled it, so nothing woke its call");
+            (await CardStateAsync(faultedCard)).ShouldBe(InteractionState.Open);
+
+            await SweepThroughAsync();
+
+            (await WokenAsync(faultedCall, "the faulted decision's parked call, on the next tick")).ShouldBe(ToolApprovalOutcome.Approved, customMessage: "the next tick settles what the fault left pending");
+            (await CardStateAsync(faultedCard)).ShouldBe(InteractionState.Resolved, "and mirrors its card");
+        }
+        finally
+        {
+            registry.Remove(settled);
+            registry.Remove(faulted);
+        }
+    }
+
+    [Fact]
+    public async Task A_sweep_stopped_part_way_leaves_the_defaults_it_committed_woken_and_mirrored()
+    {
+        // A decision's follow-ups run right after its default commits, not once the sweep is done. A sweep stopped part-way
+        // — its host shutting down under it — used to take the woken call and the mirrored card of every default it had
+        // already committed with it, and the next tick selects only rows still pending, so nothing ever came back for them.
+        var (teamId, ownerId) = await SeedTeamWithOwnerAsync();
+        var settledCard = await SeedDecisionCardAsync(teamId, ownerId);
+        var settled = await SeedDecisionAsync(teamId, deadlineAt: LongAgo, defaultAction: "a", approvalMessageId: settledCard);
+        var cutOff = await SeedDecisionAsync(teamId, deadlineAt: LongAgo.AddSeconds(1), defaultAction: "a");
+
+        using var waiters = _fixture.BeginScope();
+        var registry = waiters.Resolve<IToolApprovalWaiterRegistry>();
+        var settledCall = registry.Register(settled);
+        using var shutdown = new CancellationTokenSource();
+
+        try
+        {
+            (await Record.ExceptionAsync(() => SweepThroughAsync(shutdown.Token, new StopBeforeLedgerWriteOf(cutOff, shutdown)))).ShouldBeAssignableTo<OperationCanceledException>("precondition: the sweep was stopped at its second decision");
+
+            (await WokenAsync(settledCall, "the parked call of the decision defaulted before the stop")).ShouldBe(ToolApprovalOutcome.Approved, customMessage: "its follow-ups ran before the sweep moved on");
+            (await CardStateAsync(settledCard)).ShouldBe(InteractionState.Resolved, "and its card was mirrored then too");
+            (await ReadRowAsync(cutOff)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the decision the stop cut off is the next tick's");
+
+            await SweepThroughAsync(CancellationToken.None);
+
+            (await ReadRowAsync(cutOff)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "and the next tick defaults it");
+        }
+        finally
+        {
+            registry.Remove(settled);
+        }
+    }
+
+    [Fact]
+    public async Task A_card_mirror_that_fails_to_save_leaves_the_tick_ending_cleanly_with_its_count()
+    {
+        // The sweep's command runs outside a transaction and refuses to end with tracked changes unsaved. A card mirror
+        // whose save failed used to leave the card's change tracked, so a tick that had committed every default then
+        // failed as a whole.
+        var (teamId, ownerId) = await SeedTeamWithOwnerAsync();
+        var card = await SeedDecisionCardAsync(teamId, ownerId);
+        var ledgerId = await SeedDecisionAsync(teamId, deadlineAt: LongAgo, defaultAction: "a", approvalMessageId: card);
+
+        ExpireStaleDecisionsResponse? response = null;
+        (await Record.ExceptionAsync(async () => response = await SweepThroughAsync(new FailCardSaveOf(card)))).ShouldBeNull("a best-effort mirror that failed leaves nothing tracked for the tick to trip on");
+
+        response.ShouldNotBeNull().Defaulted.ShouldBeGreaterThanOrEqualTo(1, "the tick reports the decisions it defaulted");
+        (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the default stands");
+        (await CardStateAsync(card)).ShouldBe(InteractionState.Open, "only the display mirror was lost");
+    }
+
+    [Fact]
     public async Task Two_concurrent_reaper_sweeps_default_a_row_exactly_once()
     {
         // The single-winner answer CAS across two reaper pods: a single overdue defaulted row is defaulted exactly once.
@@ -134,7 +232,7 @@ public class DecisionReaperFlowTests
         async Task<IReadOnlyList<TimedOutDecision>> SweepAsync()
         {
             using var scope = _fixture.BeginScope();
-            return await scope.Resolve<IToolCallLedgerService>().ExpireStaleDecisionsAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+            return await scope.Resolve<IToolCallLedgerService>().ExpireStaleDecisionsAsync(DateTimeOffset.UtcNow, CancellationToken.None).ToListAsync();
         }
 
         var results = await Task.WhenAll(SweepAsync(), SweepAsync());
@@ -217,10 +315,113 @@ public class DecisionReaperFlowTests
     private static DateTimeOffset Past => DateTimeOffset.UtcNow.AddMinutes(-5);
     private static DateTimeOffset Future => DateTimeOffset.UtcNow.AddMinutes(5);
 
+    /// <summary>Overdue ahead of anything else overdue in this shared database, so the sweep reaches these rows first.</summary>
+    private static readonly DateTimeOffset LongAgo = new(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    /// <summary>One tick of the sweep as its recurring job sends it — through the mediator, so the command's own transaction boundary and unsaved-changes check apply — in a scope whose commands pass <paramref name="interceptors"/>.</summary>
+    private Task<ExpireStaleDecisionsResponse> SweepThroughAsync(params IInterceptor[] interceptors) => SweepThroughAsync(CancellationToken.None, interceptors);
+
+    /// <summary>As <see cref="SweepThroughAsync(IInterceptor[])"/>, on <paramref name="cancellationToken"/> — the token a host shutting down cancels.</summary>
+    private async Task<ExpireStaleDecisionsResponse> SweepThroughAsync(CancellationToken cancellationToken, params IInterceptor[] interceptors)
+    {
+        DbContextOptions<CodeSpaceDbContext> production;
+        using (var probe = _fixture.BeginScope())
+            production = probe.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>(production).AddInterceptors(interceptors).Options;
+
+        using var scope = _fixture.BeginScope(b => b.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance());
+        return await scope.Resolve<IMediator>().Send(new ExpireStaleDecisionsCommand(), cancellationToken);
+    }
+
+    /// <summary>Stops the sweep just before its write to one decision's row, the way a host shutting down cancels the tick under it.</summary>
+    private sealed class StopBeforeLedgerWriteOf : DbCommandInterceptor
+    {
+        private readonly Guid _ledgerId;
+        private readonly CancellationTokenSource _shutdown;
+
+        public StopBeforeLedgerWriteOf(Guid ledgerId, CancellationTokenSource shutdown)
+        {
+            _ledgerId = ledgerId;
+            _shutdown = shutdown;
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("UPDATE tool_call_ledger", StringComparison.Ordinal) || !Carries(command, _ledgerId)) return ValueTask.FromResult(result);
+
+            _shutdown.Cancel();
+            throw new OperationCanceledException(_shutdown.Token);
+        }
+    }
+
+    /// <summary>The outcome <paramref name="signal"/> was woken with; fails by its name when it is not woken within five seconds.</summary>
+    private static async Task<ToolApprovalOutcome> WokenAsync(IToolApprovalWaiter call, string signal)
+    {
+        var first = await Task.WhenAny(call.Completion, Task.Delay(TimeSpan.FromSeconds(5)));
+
+        (first == call.Completion).ShouldBeTrue($"{signal} was not woken within 5s — check DecisionExpiryService.ResolveAsync reached it");
+
+        return await call.Completion;
+    }
+
+    /// <summary>Fails the sweep's write to one decision's row, once, the way a lost connection or a command timeout would.</summary>
+    private sealed class FailLedgerWriteOf : DbCommandInterceptor
+    {
+        private readonly Guid _ledgerId;
+        private int _fired;
+
+        public FailLedgerWriteOf(Guid ledgerId) { _ledgerId = ledgerId; }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("UPDATE tool_call_ledger", StringComparison.Ordinal) || !Carries(command, _ledgerId) || Interlocked.Exchange(ref _fired, 1) == 1) return ValueTask.FromResult(result);
+
+            throw new TimeoutException($"the write to decision {_ledgerId} timed out");
+        }
+    }
+
+    /// <summary>Fails the save of one card's timed-out mirror, once.</summary>
+    private sealed class FailCardSaveOf : DbCommandInterceptor
+    {
+        private readonly Guid _messageId;
+        private int _fired;
+
+        public FailCardSaveOf(Guid messageId) { _messageId = messageId; }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            Fail(command);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Fail(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Fail(DbCommand command)
+        {
+            if (command.CommandText.Contains("UPDATE message", StringComparison.Ordinal) && Carries(command, _messageId) && Interlocked.Exchange(ref _fired, 1) == 0)
+                throw new TimeoutException($"saving card {_messageId} timed out");
+        }
+    }
+
+    private static bool Carries(DbCommand command, Guid value) => command.Parameters.Cast<DbParameter>().Any(parameter => parameter.Value is Guid id && id == value);
+
+    private async Task<InteractionState> CardStateAsync(Guid messageId)
+    {
+        using var scope = _fixture.BeginScope();
+        var json = await scope.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().Where(m => m.Id == messageId).Select(m => m.InteractionJson).SingleAsync();
+
+        return MessageInteractionJson.Deserialize(json)!.State;
+    }
+
     private async Task<IReadOnlyList<TimedOutDecision>> ReapAsync()
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IToolCallLedgerService>().ExpireStaleDecisionsAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+        return await scope.Resolve<IToolCallLedgerService>().ExpireStaleDecisionsAsync(DateTimeOffset.UtcNow, CancellationToken.None).ToListAsync();
     }
 
     private async Task<ToolCallLedger> ReadRowAsync(Guid ledgerId)
@@ -231,7 +432,7 @@ public class DecisionReaperFlowTests
 
     // ─── Seeding ──────────────────────────────────────────────────────────────────
 
-    private async Task<Guid> SeedDecisionAsync(Guid teamId, DateTimeOffset deadlineAt, string? defaultAction, string policy = DecisionPolicies.SupervisorFirst)
+    private async Task<Guid> SeedDecisionAsync(Guid teamId, DateTimeOffset deadlineAt, string? defaultAction, string policy = DecisionPolicies.SupervisorFirst, Guid? approvalMessageId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -267,6 +468,7 @@ public class DecisionReaperFlowTests
             InputHash = InputHash,
             Status = ToolCallLedgerStatus.AwaitingApproval,
             ApprovalDeadlineAt = deadlineAt,
+            ApprovalMessageId = approvalMessageId,
             DecisionEnvelopeJson = JsonSerializer.Serialize(envelope, Json),
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
@@ -326,7 +528,9 @@ public class DecisionReaperFlowTests
         return id;
     }
 
-    private async Task<Guid> SeedTeamAsync()
+    private async Task<Guid> SeedTeamAsync() => (await SeedTeamWithOwnerAsync()).TeamId;
+
+    private async Task<(Guid TeamId, Guid OwnerId)> SeedTeamWithOwnerAsync()
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -339,6 +543,23 @@ public class DecisionReaperFlowTests
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Owner });
 
         await db.SaveChangesAsync();
-        return teamId;
+        return (teamId, userId);
+    }
+
+    /// <summary>An open decision card posted by the bot into a fresh channel of the team — the message the sweep mirrors a timed-out decision onto.</summary>
+    private async Task<Guid> SeedDecisionCardAsync(Guid teamId, Guid ownerId)
+    {
+        using var scope = _fixture.BeginScope();
+        var slug = "reaper-" + Guid.NewGuid().ToString("N")[..8];
+        var channelId = await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, ownerId, default);
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "a", Label = "A" } } },
+            Target = new DecisionRequestTarget { Token = Guid.NewGuid().ToString("N") },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+
+        return (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "which migration path?", card, default)).Id;
     }
 }

@@ -240,8 +240,10 @@ public sealed record AgentRunResult
 
     /// <summary>
     /// When <see cref="CompletionDisposition"/> is <see cref="CompletionDisposition.NeedsDecision"/>, the ledger id of the
-    /// still-unanswered <c>decision.request</c> the run raised — the handle a reviewer (or the "Needs decision" queue)
-    /// resolves. Null in every other case.
+    /// oldest <c>decision.request</c> the run ended with still unanswered — what a reviewer has to settle. A decision that
+    /// was parked (AwaitingApproval) was closed (Expired) by that same terminal write, on the normal completion and on the
+    /// spool recovery alike, so it does not wait in the "Needs decision" queue for an answer no run would read. One that
+    /// was claimed but never parked (Pending) still blocks the success but is left as it was. Null in every other case.
     /// </summary>
     public Guid? PendingDecisionId { get; init; }
 

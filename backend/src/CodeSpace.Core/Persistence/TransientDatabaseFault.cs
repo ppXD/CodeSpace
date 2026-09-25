@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Persistence;
 /// <para>Deliberately small and explicit, because everything it admits gets retried and everything it refuses
 /// surfaces. It admits: <see cref="NpgsqlException.IsTransient"/> — Npgsql's own answer, which covers a reset or
 /// refused connection, a command or pool timeout, and the server-side SQLSTATEs that mean "not now" (57P01 admin
-/// shutdown, 08xxx connection failures, 53xxx insufficient resources, 40001/40P01); a bare
+/// shutdown, 08xxx connection failures, 53xxx insufficient resources, 40001/40P01, 55P03 lock timeout); a bare
 /// <see cref="TimeoutException"/> or <see cref="SocketException"/>; and an <see cref="IOException"/> that IS a socket
 /// reset. It sees through the two wrappers a transport fault arrives in: a <see cref="DbUpdateException"/>, and the
 /// <see cref="InvalidOperationException"/> the Npgsql EF provider's execution strategy raises around a transient
