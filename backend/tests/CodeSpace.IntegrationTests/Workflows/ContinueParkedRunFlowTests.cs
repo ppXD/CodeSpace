@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Middlewares.Transactional;
@@ -14,6 +15,8 @@ using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -28,7 +31,8 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// a map branch, a loop pass) through the operator stop's teardown, and one through the engine's own teardown when a
 /// run lands Failure beside a parked step — plus one where the stop's teardown lands only after the Continue has
 /// re-parked every step, and must leave the revived run's fresh waits, agent and child alone, and one where it lands
-/// before the continued walk starts, and the agent it kills must not answer the continued step.
+/// before the continued walk starts, and the agent it kills must not answer the continued step. Two more pin the teardown
+/// itself: it never waits on a Continue holding the stopped attempt's waits, and no failed step costs it its kill-wave.
 ///
 /// <para>Fidelity (Rule 12) 🟢 high for everything under test: the REAL <c>WorkflowService</c> cancel (terminal flip plus
 /// its post-commit teardown) and the REAL engine terminal cleanup, which are what close the waits; the REAL Continue for
@@ -163,6 +167,38 @@ public class ContinueParkedRunFlowTests
     }
 
     [Fact]
+    public async Task A_stop_teardown_landing_after_a_continue_never_leaves_a_map_branch_parked_on_the_wait_it_closes()
+    {
+        // The Continue lands before the stop's teardown closed the branch's wait. The revived walk re-entered the branch,
+        // found that wait still open, and parked the branch on it as its own; the teardown then closed it, and the branch
+        // sat parked on a closed wait until the reconciler re-dispatched the run.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverCappedAgentDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a"] }""");
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedWait = (await WaitsAsync(runId)).Single(w => w.IterationKey == "map#0" && w.WaitKind == WorkflowWaitKinds.AgentRun);
+        stoppedWait.Status.ShouldBe(WorkflowWaitStatuses.Pending, "precondition: the branch agent parked");
+
+        using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId);
+        await ContinueAsync(runId, teamId);
+        await RunEngineAsync(runId);
+        await stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);   // the stop's teardown lands only now
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var branchWait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.IterationKey == "map#0");
+        branchWait.Status.ShouldBe(WorkflowWaitStatuses.Pending, customMessage: $"the branch is parked on an open wait after the late teardown — Discarded means it adopted the stopped attempt's wait. Records: {await StepVerdictsAsync(db, runId)}");
+        branchWait.Token.ShouldNotBe(stoppedWait.Token, "the branch staged a fresh agent instead of adopting the stopped attempt's");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == Guid.Parse(branchWait.Token))).Status.ShouldBe(AgentRunStatus.Queued, "the late teardown left the fresh branch agent alone");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == Guid.Parse(stoppedWait.Token))).Status.ShouldBe(AgentRunStatus.Cancelled, "the stopped attempt's branch agent is ended");
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended, "the revived run is parked on the branch's fresh wait");
+    }
+
+    [Fact]
     public async Task Continuing_a_loop_stopped_while_its_body_approval_was_parked_re_parks_that_pass()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -263,6 +299,11 @@ public class ContinueParkedRunFlowTests
 
         using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId);
         await ContinueAsync(runId, teamId);
+
+        using (var afterRevive = _fixture.BeginScope())
+            (await afterRevive.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == stoppedChildId)).Status
+                .ShouldBe(WorkflowRunStatus.Cancelled, "the revive cancelled the stopped attempt's staged child with the waits it closed — no worker can claim it while the teardown is still to come");
+
         await RunEngineAsync(runId);
 
         var fresh = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
@@ -289,9 +330,9 @@ public class ContinueParkedRunFlowTests
             .ShouldBe(WorkflowRunStatus.Suspended, "the revived run is still parked on its fresh waits");
 
         (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == stoppedAgentId)).Status
-            .ShouldBe(AgentRunStatus.Cancelled, "the stopped attempt's agent was live when the stop committed — the late teardown still ends it");
+            .ShouldBe(AgentRunStatus.Cancelled, "the stopped attempt's agent was live when the stop committed — it stays ended");
         (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == stoppedChildId)).Status
-            .ShouldBe(WorkflowRunStatus.Cancelled, "and cancels the stopped attempt's staged child run");
+            .ShouldBe(WorkflowRunStatus.Cancelled, "and so does the stopped attempt's staged child run");
     }
 
     [Fact]
@@ -333,7 +374,147 @@ public class ContinueParkedRunFlowTests
             .ShouldNotBe(stoppedAgentWait.Token, "the continued step staged a fresh agent");
     }
 
+    [Fact]
+    public async Task A_continue_holding_the_stopped_attempts_waits_never_stalls_the_stop_teardown_short_of_its_kill_wave()
+    {
+        // The revive discards every pending wait of the run in its own transaction, holding those rows to its commit, while
+        // the stop's teardown closes the waits of the same stopped attempt. Each statement locked the rows in its own order,
+        // so the two could deadlock — and a teardown picked as the victim gave up before its kill-wave. The teardown's wait
+        // closes now skip a wait another transaction holds: they never wait on the revive, so the kill-wave always runs.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CappedAgentBesideApprovalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedWaits = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
+        stoppedWaits.Count.ShouldBe(2, "precondition: the agent and the approval parked");
+        var stoppedAgentId = Guid.Parse(stoppedWaits.Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun).Token);
+        await MarkRunningAsync(stoppedAgentId);   // a worker claimed it
+
+        using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId);
+
+        var discarded = new HeldCommand(text => text.StartsWith("UPDATE", StringComparison.Ordinal) && text.Contains("workflow_run_wait"), afterItRuns: true);
+        using var continueScope = StopContinueSignals.InterceptedScope(_fixture, discarded);
+        var revive = continueScope.Resolve<IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
+
+        try
+        {
+            await StopContinueSignals.AwaitAsync(discarded.Reached.Task, "the Continue's revive holding every pending wait of the run, its commit still to come");
+            await StopContinueSignals.AwaitAsync(stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None), "the stop's teardown finishing while the revive holds the waits");
+
+            (await AgentStatusAsync(stoppedAgentId)).ShouldBe(AgentRunStatus.Cancelled, "its kill-wave ran: the stopped attempt's running agent is ended");
+        }
+        finally
+        {
+            discarded.Release.TrySetResult();
+        }
+
+        await StopContinueSignals.AwaitAsync(revive, "the Continue returning");
+        (await revive).ShouldBeTrue("the run continued in place");
+
+        var closed = await WaitStatusesAsync(stoppedWaits);
+        closed.Count.ShouldBe(2);
+        closed.ShouldAllBe(s => s == WorkflowWaitStatuses.Discarded, "the waits the teardown skipped, the revive closed");
+    }
+
+    [Fact]
+    public async Task A_teardown_step_that_fails_never_costs_the_kill_wave()
+    {
+        // The teardown ran as one best-effort block: a failure closing the stopped attempt's waits — a deadlock victim, a
+        // dropped connection — abandoned it before its kill-wave, and the stopped attempt's running agent ran on.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CappedAgentBesideApprovalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedWaits = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
+        stoppedWaits.Count.ShouldBe(2, "precondition: the agent and the approval parked");
+        var stoppedAgentId = Guid.Parse(stoppedWaits.Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun).Token);
+        await MarkRunningAsync(stoppedAgentId);
+
+        var victim = new DeadlockVictim(text => text.Contains("SKIP LOCKED") && text.Contains("token = ANY"));   // the close of the stopped attempt's own waits
+
+        using (var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId, victim))
+            await stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);
+
+        victim.Fired.ShouldBeTrue("precondition: the teardown's close of the stopped attempt's waits failed");
+        (await AgentStatusAsync(stoppedAgentId)).ShouldBe(AgentRunStatus.Cancelled, "the kill-wave after it still ran");
+
+        var closed = await WaitStatusesAsync(stoppedWaits);
+        closed.Count.ShouldBe(2);
+        closed.ShouldAllBe(s => s == WorkflowWaitStatuses.Discarded, "and the run-wide close after that still closed the waits the failed step missed");
+    }
+
+    [Fact]
+    public async Task A_wait_the_teardown_had_to_skip_is_closed_once_the_transaction_holding_it_lets_go()
+    {
+        // The teardown skips a wait another transaction holds — a Continue's revive, which closes it itself. When that
+        // transaction rolled back instead of committing, the skipped wait stayed Pending under the Cancelled run, for the
+        // stopped attempt's kill to answer and a later Continue to replay as the step's result. The teardown's closes now
+        // pass over the waits they skipped again, and one released in time is closed.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CappedAgentBesideApprovalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedWaits = (await WaitsAsync(runId)).Where(w => w.Status == WorkflowWaitStatuses.Pending).ToList();
+        stoppedWaits.Count.ShouldBe(2, "precondition: the agent and the approval parked");
+        var agentWait = stoppedWaits.Single(w => w.WaitKind == WorkflowWaitKinds.AgentRun);
+
+        using var holderScope = _fixture.BeginScope();   // a second connection holds the agent's wait, as a revive about to roll back does
+        var holderDb = holderScope.Resolve<CodeSpaceDbContext>();
+        await using var holder = await holderDb.Database.BeginTransactionAsync();
+        await holderDb.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM workflow_run_wait WHERE id = {agentWait.Id} FOR UPDATE");
+
+        var lastClose = new HeldCommand(text => text.Contains("SKIP LOCKED") && text.Contains("EXISTS"), afterItRuns: true);   // the teardown's run-wide close, its first pass done
+        using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId, lastClose);
+        var teardown = stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);
+
+        try
+        {
+            await StopContinueSignals.AwaitAsync(lastClose.Reached.Task, "the teardown's last wait close, having skipped the held wait");
+
+            await holder.RollbackAsync();   // the holder lets go without closing it
+        }
+        finally
+        {
+            lastClose.Release.TrySetResult();
+        }
+
+        await StopContinueSignals.AwaitAsync(teardown, "the teardown finishing");
+
+        var closed = await WaitStatusesAsync(stoppedWaits);
+        closed.Count.ShouldBe(2);
+        closed.ShouldAllBe(s => s == WorkflowWaitStatuses.Discarded, "a later pass closed the wait once its lock cleared, so no kill can answer it");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    private async Task MarkRunningAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentRunService>().MarkRunningAsync(agentRunId, CancellationToken.None);
+    }
+
+    private async Task<AgentRunStatus> AgentStatusAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == agentRunId).Select(r => r.Status).SingleAsync();
+    }
+
+    private async Task<IReadOnlyList<string>> WaitStatusesAsync(IEnumerable<Core.Persistence.Entities.WorkflowRunWait> waits)
+    {
+        var ids = waits.Select(w => w.Id).ToList();
+
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().Where(w => ids.Contains(w.Id)).Select(w => w.Status).ToListAsync();
+    }
 
     private async Task NotifyAgentEndedAsync(Guid agentRunId)
     {
@@ -535,4 +716,20 @@ public class ContinueParkedRunFlowTests
             new() { From = "ls", To = "gate" },
         },
     };
+
+    /// <summary>Fails the first command <paramref name="matches"/> accepts the way Postgres fails a deadlock victim (40P01), once.</summary>
+    private sealed class DeadlockVictim(Func<string, bool> matches) : DbCommandInterceptor
+    {
+        private int _fired;
+
+        public bool Fired => Volatile.Read(ref _fired) == 1;
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (matches(command.CommandText) && Interlocked.Exchange(ref _fired, 1) == 0)
+                throw new PostgresException("deadlock detected", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected);
+
+            return ValueTask.FromResult(result);
+        }
+    }
 }

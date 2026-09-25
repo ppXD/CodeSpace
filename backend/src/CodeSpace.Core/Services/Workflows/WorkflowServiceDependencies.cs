@@ -38,9 +38,10 @@ public sealed class WorkflowLaunchServices : IScopedDependency
 
 public sealed class WorkflowControlServices : IScopedDependency
 {
-    public WorkflowControlServices(IWorkflowResumeService resume, IAgentRunService agents, IRerunCellSeeder cells, IRunCancellationRegistry cancellation) { Resume = resume; Agents = agents; Cells = cells; Cancellation = cancellation; }
+    public WorkflowControlServices(IWorkflowResumeService resume, IAgentRunService agents, IRunningAgentCancellation runningAgents, IRerunCellSeeder cells, IRunCancellationRegistry cancellation) { Resume = resume; Agents = agents; RunningAgents = runningAgents; Cells = cells; Cancellation = cancellation; }
     public IWorkflowResumeService Resume { get; }
     public IAgentRunService Agents { get; }
+    public IRunningAgentCancellation RunningAgents { get; }
     public IRerunCellSeeder Cells { get; }
     public IRunCancellationRegistry Cancellation { get; }
 }

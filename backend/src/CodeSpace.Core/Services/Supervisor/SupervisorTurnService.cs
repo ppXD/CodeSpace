@@ -706,9 +706,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// CRASH-RECOVERY path, NOT a concurrent racer: the engine's run-level Enqueued → Running single-writer claim
     /// means no second walk executes this run concurrently, so a row already past Pending here was flipped Running
     /// by a PRIOR walk that crashed before recording terminal (e.g. mid spawn fan-out — orphan agents staged, no
-    /// waits, decision stuck Running). RE-EXECUTE under the existing Running claim so the turn doesn't self-advance
-    /// past an unfinished decision; the executor's spawn staging is idempotent (it reclaims this turn's orphan
-    /// agents), so the recovery produces exactly K agents + K waits with no double-spawn.
+    /// waits, decision stuck Running) — or, since a Continue fences the walk it overtook, by that walk. RE-EXECUTE
+    /// under the existing Running claim so the turn doesn't self-advance past an unfinished decision; the executor's
+    /// spawn staging is idempotent (it reclaims this turn's orphan agents), so the recovery produces exactly K agents +
+    /// K waits with no double-spawn.
     /// </summary>
     private async Task<SupervisorExecution> ExecuteUnderClaimAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
     {
@@ -717,6 +718,25 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         if (!won)
             _logger.LogWarning("Supervisor decision {DecisionId} was already Running (a prior walk crashed before recording terminal) — re-executing to recover, not self-advancing", decisionId);
 
+        return decision.Kind == SupervisorDecisionKinds.AskHuman
+            ? await ExecuteAndRecordTogetherAsync(decisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false)
+            : await ExecuteAndRecordAsync(decisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// ask_human's card, its wait and its terminal record commit as one transaction, fenced on the walk's claimed run
+    /// generation. A turn a Continue overtook writes none of the three, and one that got in first lands all three: a
+    /// question anyone can see — on its card, or through the run's ask API when there is no conversation — always has its
+    /// token on the tape the answer paths read (<see cref="ISupervisorAskAnswerService"/>, the plan confirmation, the
+    /// human-touch reader). Recorded apart, a refused or crashed terminal left the decision in flight behind a posted
+    /// question, which the node's human re-entry guard then re-parked on and nothing could answer.
+    /// </summary>
+    private async Task<SupervisorExecution> ExecuteAndRecordTogetherAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken) =>
+        await Workflows.Engine.RunGenerationFence.CommitUnderClaimAsync(_db, context.SupervisorRunId, () => ExecuteAndRecordAsync(decisionId, teamId, context, decision, cancellationToken), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Run the side effect ONCE, then record its terminal with the outcome enriched (see <see cref="ExecuteUnderClaimAsync"/>).</summary>
+    private async Task<SupervisorExecution> ExecuteAndRecordAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
+    {
         var execution = await ExecuteOrTerminalizeFailureAsync(decisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
         // L4 P1: a terminal stop carrying a MODEL-authored acceptance check is graded HERE — inline on the decided-stop

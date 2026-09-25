@@ -14,7 +14,8 @@ namespace CodeSpace.UnitTests.Agents;
 /// (terminal-scoping, DB-gate, persist-once) is proven over real Postgres in <c>SupervisorAgentResultsRehydrateFlowTests</c>;
 /// this pins the decision logic in isolation. The crown jewels: the fold is ADDITIVE (agentRunIds + agentCount stay
 /// byte-intact so the E5 spawn-cap / no-progress counters are unperturbed), and a Failed agent whose ResultJson is
-/// null still surfaces its ROW error (the exact signal the slice exists to surface).
+/// null still surfaces its ROW error (the exact signal the slice exists to surface). The rehydrate's own decision fold is
+/// pinned last: written once, it never folds a wave while any of its agents is still live.
 /// </summary>
 [Trait("Category", "Unit")]
 public class SupervisorAgentResultsFoldTests
@@ -422,4 +423,47 @@ public class SupervisorAgentResultsFoldTests
 
         SupervisorOutcome.HasSettledEvidence(mixed).ShouldBeTrue("any one settled-evidence agent is progress");
     }
+
+    // ── The rehydrate's decision fold: written once, so never over an agent still live ─────
+
+    [Theory]
+    [InlineData(new[] { "Succeeded", "Cancelled" }, true)]
+    [InlineData(new[] { "Failed", "TimedOut", "NeedsReview" }, true)]
+    [InlineData(new[] { "Succeeded", "Running" }, false)]
+    [InlineData(new[] { "Queued", "Cancelled" }, false)]
+    public void The_rehydrate_folds_a_spawn_only_once_every_agent_has_ended(string[] statuses, bool folds)
+    {
+        // The fold is never revisited, so a status read while an agent is still Queued or Running would stand on the
+        // tape as its result for good: a Continue's revived turn, re-entering without the barrier, once recorded a
+        // stopped wave's still-running agent as "Running" permanently.
+        var ids = statuses.Select(_ => Guid.NewGuid()).ToArray();
+        var results = ids.Zip(statuses).ToDictionary(p => p.First, p => new SupervisorAgentResult { AgentRunId = p.First, Status = p.Second });
+
+        var folded = SupervisorTurnService.FoldAgentResults(TerminalSpawn(ids), results);
+
+        SupervisorOutcome.ReadAgentResults(folded.OutcomeJson).Select(r => r.Status).ShouldBe(folds ? statuses : Array.Empty<string>(), "every agent ended → the whole wave folds, in spawn order; any still live → nothing folds yet");
+        SupervisorOutcome.ReadStagedAgentRunIds(folded.OutcomeJson).ShouldBe(ids, "the staged wave itself is untouched either way");
+    }
+
+    [Fact]
+    public void The_rehydrate_folds_an_agent_that_no_longer_resolves_as_a_final_placeholder()
+    {
+        var ended = Guid.NewGuid();
+        var gone = Guid.NewGuid();
+        var results = new Dictionary<Guid, SupervisorAgentResult> { [ended] = new() { AgentRunId = ended, Status = "Succeeded" } };
+
+        var folded = SupervisorOutcome.ReadAgentResults(SupervisorTurnService.FoldAgentResults(TerminalSpawn(ended, gone), results).OutcomeJson);
+
+        folded.Select(r => r.Status).ShouldBe(new[] { "Succeeded", "Unknown" }, "a row that is gone will never end either — it folds as final, not waited on");
+    }
+
+    private static SupervisorPriorDecision TerminalSpawn(params Guid[] agentRunIds) => new()
+    {
+        Id = Guid.NewGuid(),
+        Sequence = 1,
+        DecisionKind = SupervisorDecisionKinds.Spawn,
+        Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = "{}",
+        OutcomeJson = SpawnOutcome(agentRunIds),
+    };
 }

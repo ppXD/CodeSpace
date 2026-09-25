@@ -187,7 +187,7 @@ public interface IAgentRunService
     Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken);
 }
 
-public sealed partial class AgentRunService : IAgentRunService, IScopedDependency
+public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCancellation, IScopedDependency
 {
     public const string EventDataHolderKind = "agent_run_event";
 
@@ -908,24 +908,56 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // would be held while the decisions are awaited.
         if (_db.Database.CurrentTransaction is not null) throw new InvalidOperationException("A stop lands its terminal and closes the run's decisions in statements of their own and cannot join an ambient transaction.");
 
-        // Read the run's epoch + handle FRESH + untracked, then flip via a status-guarded, epoch-fenced CAS pinned
-        // to Running (mirrors the reconciler's AbandonAsync, but → Cancelled, a deliberate cancel, not Failed).
-        // Fencing on the epoch we just read means a worker whose run was reclaimed (the reclaim bumped the epoch)
-        // and then revived can't be killed by a cancel that observed the old epoch — and, crucially, a run that
-        // legitimately completed in the same instant loses the CAS, so we never kill a finished run. 0 rows = no
-        // longer Running at this epoch → leave it alone.
+        if (await CancelRunningRowCoreAsync(runId, reason, cancellationToken).ConfigureAwait(false) is not { } cancelled) return false;
+
+        await FinishCancelAsync(runId, cancelled, cause, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Agent run cancelled while running. RunId={RunId} Reason={Reason}", runId, reason);
+        return true;
+    }
+
+    public async Task<bool> CancelRunningRowAsync(Guid runId, string reason, CancellationToken cancellationToken) =>
+        await CancelRunningRowCoreAsync(runId, reason, cancellationToken).ConfigureAwait(false) is not null;
+
+    public async Task FinishRunningCancelAsync(Guid runId, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+    {
+        // The decisions close in statements of their own, after the row's flip committed — as in CancelRunningAsync.
+        if (_db.Database.CurrentTransaction is not null) throw new InvalidOperationException("A cancel's side effects close the run's decisions in statements of their own and cannot join an ambient transaction.");
+
+        var cancelled = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Cancelled)
+            .Select(r => new CancelledRun(r.TeamId, r.FenceEpoch, r.RunnerHandleJson, r.ResultJson))
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (cancelled is null) return;
+
+        await FinishCancelAsync(runId, cancelled, cause, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Agent run cancel finished after its row was flipped. RunId={RunId} Cause={Cause}", runId, cause);
+    }
+
+    /// <summary>
+    /// The row half of <see cref="CancelRunningAsync"/>: read the run's epoch + handle FRESH + untracked, then flip via a
+    /// status-guarded, epoch-fenced CAS pinned to Running (mirrors the reconciler's AbandonAsync, but → Cancelled, a
+    /// deliberate cancel, not Failed). Fencing on the epoch just read means a worker whose run was reclaimed (the reclaim
+    /// bumped the epoch) and then revived can't be killed by a cancel that observed the old epoch — and, crucially, a run
+    /// that legitimately completed in the same instant loses the CAS, so a finished run is never killed. Null = no longer
+    /// Running at this epoch → leave it alone. The epoch bump is itself the owning worker's cue to stop: it loses its fence.
+    ///
+    /// <para>3c: a deliberate cancel is a CLEAN landing, so it releases the mid-run session checkpoint exactly as
+    /// completion does. Nobody owes this run a continuation, and a kept reference would pin the artifact Referenced
+    /// (terminal in the retention ledger) for good — and make a later retry of the same subtask read the cancel as a host
+    /// loss. Only an abandon-class ending keeps these columns: the reconciler's abandon, or its spool recovery.</para>
+    /// </summary>
+    private async Task<CancelledRun?> CancelRunningRowCoreAsync(Guid runId, string reason, CancellationToken cancellationToken)
+    {
         var snapshot = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
             .Select(r => new { r.TeamId, r.Status, r.FenceEpoch, r.RunnerHandleJson, r.ResultJson })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return false;
+        if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return null;
 
-        // 3c: a deliberate cancel is a CLEAN landing, so it releases the mid-run session checkpoint exactly as
-        // completion does. Nobody owes this run a continuation, and a kept reference would pin the artifact
-        // Referenced (terminal in the retention ledger) for good — and make a later retry of the same subtask read
-        // the cancel as a host loss. Only an abandon-class ending keeps these columns: the reconciler's abandon, or
-        // its spool recovery.
         var cancelled = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running && r.FenceEpoch == snapshot.FenceEpoch)
             .ExecuteUpdateAsync(s => s
@@ -934,16 +966,22 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
                 .SetProperty(r => r.Error, reason)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow)
                 .SetProperty(r => r.SessionTranscriptCheckpointArtifactId, (Guid?)null)
-                .SetProperty(r => r.SessionTranscriptCheckpointAt, (DateTimeOffset?)null), cancellationToken)
-            .ConfigureAwait(false);
+                .SetProperty(r => r.SessionTranscriptCheckpointAt, (DateTimeOffset?)null), cancellationToken).ConfigureAwait(false);
 
-        if (cancelled == 0) return false;
+        return cancelled == 0 ? null : new CancelledRun(snapshot.TeamId, snapshot.FenceEpoch + 1, snapshot.RunnerHandleJson, snapshot.ResultJson);
+    }
 
+    /// <summary>
+    /// The side-effect half of a won running cancel, every step best-effort — the run already reached Cancelled, and
+    /// none of this may change that. <paramref name="cancelled"/> carries the run's FRESH fence (the CAS bumped it).
+    /// </summary>
+    private async Task FinishCancelAsync(Guid runId, CancelledRun cancelled, AgentRunAbandonCause cause, CancellationToken cancellationToken)
+    {
         // The run's unanswered decisions close with it, so its question leaves the queue and the Room the moment it stops.
         await StoppedRunDecisions.ExpireQuietlyAsync(_db, runId, _logger, cancellationToken).ConfigureAwait(false);
 
         // AFTER the CAS, never before: a cancel that lost the race leaves the claim to whoever lands the run.
-        await SettleSpendClaimsQuietlyAsync(runId, snapshot.TeamId, snapshot.ResultJson, cancellationToken).ConfigureAwait(false);
+        await SettleSpendClaimsQuietlyAsync(runId, cancelled.TeamId, cancelled.ResultJson, cancellationToken).ConfigureAwait(false);
 
         // FIRST side effect of a won cancel: withdraw the run's brokered model credential. Before the kill, not
         // after — a kill is a signal that races the agent's next model call, and losing that race used to mean the
@@ -953,23 +991,23 @@ public sealed partial class AgentRunService : IAgentRunService, IScopedDependenc
         // stops renewing on this very epoch bump and the lease lapses within its TTL.
         await RevokeBrokeredCredentialQuietlyAsync(runId, "run-cancelled").ConfigureAwait(false);
 
-        // The CAS above just bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own
-        // fencing is what makes a call here safe even if that read were ever stale.
-        await TerminalizeCancelledHarnessExecutionQuietlyAsync(snapshot.TeamId, runId, snapshot.FenceEpoch + 1, cause, cancellationToken).ConfigureAwait(false);
+        // The CAS bumped fence_epoch by exactly one, so this is the run's fresh fence — the closer's own fencing is what
+        // makes a call here safe even if that read were ever stale.
+        await TerminalizeCancelledHarnessExecutionQuietlyAsync(cancelled.TeamId, runId, cancelled.FenceEpoch, cause, cancellationToken).ConfigureAwait(false);
 
-        // Won the CAS → kill the sandbox process tree so the orphaned agent stops holding its workspace + burning
-        // the injected model credential. Best-effort (mirrors AbandonAsync's TerminateQuietlyAsync): the cancel
-        // stands even if the kill can't be issued. Only a durable runner with a parseable handle can be killed; a
-        // non-durable / handle-less run is already Cancelled and has no detached process to reap. Nor can a handle
-        // another HOST minted be reaped from here (the runner withholds the signal rather than kill whatever local
-        // process wears that pid) — that agent stops at its own wall-clock deadline instead.
-        var durable = ResolveDurableRunner(snapshot.RunnerHandleJson, out var handle);
+        // Kill the sandbox process tree so the orphaned agent stops holding its workspace + burning the injected model
+        // credential. Best-effort (mirrors AbandonAsync's TerminateQuietlyAsync): the cancel stands even if the kill can't
+        // be issued. Only a durable runner with a parseable handle can be killed; a non-durable / handle-less run is
+        // already Cancelled and has no detached process to reap. Nor can a handle another HOST minted be reaped from here
+        // (the runner withholds the signal rather than kill whatever local process wears that pid) — that agent stops at
+        // its own wall-clock deadline instead.
+        var durable = ResolveDurableRunner(cancelled.RunnerHandleJson, out var handle);
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation("Agent run cancelled while running. RunId={RunId} Reason={Reason}", runId, reason);
-        return true;
     }
+
+    /// <summary>What a won running cancel's side effects need: the run's team, its fresh fence (bumped by the cancel), its durable handle and its recorded result.</summary>
+    private sealed record CancelledRun(Guid TeamId, long FenceEpoch, string? RunnerHandleJson, string? ResultJson);
 
     /// <summary>
     /// Close the cancelled run's own live native-record execution + any attempt still Running inside it, stamped

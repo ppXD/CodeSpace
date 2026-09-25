@@ -44,12 +44,19 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly IPostCommitActions _postCommit;
     private readonly IAgentRunService _agentRunService;
+    private readonly IRunningAgentCancellation _runningAgents;
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
     private readonly Engine.IRunCancellationRegistry _cancellationRegistry;
     private readonly ILogger<WorkflowService> _logger;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
+
+    /// <summary>Reason stamped on an agent run that was still queued when Continue revived its parent workflow run: the attempt that staged it had ended, and the continued run stages its own.</summary>
+    private const string ContinuedRunAgentReason = "Cancelled before it started because its parent workflow run was continued; the continued run stages its own agents.";
+
+    /// <summary>Reason stamped on an agent run that was still running when Continue revived its parent workflow run: the attempt it worked for had ended, and nothing of the continued run waits on it.</summary>
+    private const string ContinuedRunRunningAgentReason = "Cancelled because its parent workflow run was continued; the attempt it worked for had ended, and the continued run stages its own agents.";
 
     /// <summary>What someone answering the question of a run that ended — its card or its Room decision — is told. The run's end closed the wait unanswered (Discarded): an operator's stop, or the engine's own cleanup when the run failed. Continue re-runs the step, which asks again: telling them the question was "already resolved" would say someone answered it.</summary>
     public const string EndedRunQuestionMessage = "This run ended (it was stopped or failed), so its question closed unanswered. It opens again when the run is continued.";
@@ -67,6 +74,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _resumeService = control.Resume;
         _postCommit = launch.PostCommit;
         _agentRunService = control.Agents;
+        _runningAgents = control.RunningAgents;
         _cellSeeder = control.Cells;
         _cancellationRegistry = control.Cancellation;
         _logger = logger;
@@ -949,7 +957,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         foreach (var nodeId in toReset)
             await _recordLogger.NodeStartedAsync(runId, nodeId, WorkflowIterationKeys.TopLevel, EmptyNodeBag, EmptyNodeBag, cancellationToken).ConfigureAwait(false);
 
-        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+        await DispatchRevivedRunAfterCommitAsync(runId, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Failed workflow run continued in place by operator. RunId={RunId} TeamId={TeamId} ResetNodes={ResetNodes}", runId, teamId, string.Join(",", toReset));
 
@@ -995,7 +1003,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         foreach (var nodeId in frontier)
             await _recordLogger.NodeStartedAsync(runId, nodeId, WorkflowIterationKeys.TopLevel, EmptyNodeBag, EmptyNodeBag, cancellationToken).ConfigureAwait(false);
 
-        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+        await DispatchRevivedRunAfterCommitAsync(runId, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Cancelled workflow run continued in place by operator. RunId={RunId} TeamId={TeamId} ResumedNodes={ResumedNodes}", runId, teamId, string.Join(",", frontier));
 
@@ -1003,22 +1011,156 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// The CAS both in-place revivals of a terminal run share: <paramref name="terminal"/> → Pending as a NEW generation,
-    /// atomically claiming the revive (false = a concurrent continue / replay already moved it). The bump is the fence:
-    /// the walk that ended the run — or one the reconciler gave up on that is still alive — and a stop's post-commit
-    /// teardown still in flight both carry the old generation, and lose to it from here on. The finish time and error
-    /// go in the same statement: the revived run is live again and they no longer describe it; its next terminal writes
-    /// its own.
+    /// The revive both in-place continues of a terminal run share, in one transaction (the command's, or its own). First
+    /// the CAS: <paramref name="terminal"/> → Pending as a NEW generation, atomically claiming the revive (false = a
+    /// concurrent continue / replay already moved it). The bump is the fence: the walk that ended the run — or one the
+    /// reconciler gave up on that is still alive — and a stop's post-commit teardown still in flight both carry the old
+    /// generation, and lose to it from here on. The finish time and error go in the same statement: the revived run is
+    /// live again and they no longer describe it; its next terminal writes its own.
+    ///
+    /// <para>Then what the ended attempt left pending is closed (<see cref="CloseEndedAttemptAsync"/>). The bump comes
+    /// first because it takes the run row's lock: a park, a supervisor decision or spawn wave of the old walk either
+    /// committed before it, and the close sees what it staged, or is refused at its own fence on the old generation.
+    /// The cancelled agents' side effects — process kills, credential revokes, spend settlement — run once that commit
+    /// is visible (<see cref="FinishRunningCancelsAsync"/>), ahead of the revived walk's dispatch.</para>
     /// </summary>
-    private async Task<bool> ReviveTerminalRunAsync(Guid runId, Guid teamId, WorkflowRunStatus terminal, CancellationToken cancellationToken) =>
+    private async Task<bool> ReviveTerminalRunAsync(Guid runId, Guid teamId, WorkflowRunStatus terminal, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<Guid> runningCancelled;
+
+        await using (var transaction = await ScopedTransaction.OwnOrJoinAsync(_db.Database, cancellationToken).ConfigureAwait(false))
+        {
+            if (!await BumpToNewGenerationAsync(runId, teamId, terminal, cancellationToken).ConfigureAwait(false)) return false;
+
+            runningCancelled = await CloseEndedAttemptAsync(runId, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await FinishRunningCancelsAsync(runningCancelled, cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>The revive's CAS: <paramref name="terminal"/> → Pending one generation on, the finish time and error cleared (see <see cref="ReviveTerminalRunAsync"/>).</summary>
+    private async Task<bool> BumpToNewGenerationAsync(Guid runId, Guid teamId, WorkflowRunStatus terminal, CancellationToken cancellationToken) =>
         await _db.WorkflowRun
             .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == terminal)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, WorkflowRunStatus.Pending)
                 .SetProperty(r => r.Generation, r => r.Generation + 1)
                 .SetProperty(r => r.CompletedAt, (DateTimeOffset?)null)
-                .SetProperty(r => r.Error, (string?)null), cancellationToken)
-            .ConfigureAwait(false) == 1;
+                .SetProperty(r => r.Error, (string?)null), cancellationToken).ConfigureAwait(false) == 1;
+
+    /// <summary>
+    /// Close what the ended attempt left, so the revived run starts from the state the stop's teardown — or the engine's
+    /// failure cleanup — leaves when it runs first, whether it has run yet or not, and never from less. Every still-Pending
+    /// wait goes Discarded: closed unanswered, so its step parks a fresh one instead of the revived walk adopting it (a
+    /// re-entered map branch) or re-parking on it (a supervisor's agent barrier). Every agent still Queued or Running is
+    /// cancelled, and every staged child run still Pending or Enqueued: nothing the ended attempt started can be picked
+    /// up by a worker, reclaimed by the revived supervisor, or folded onto its tape as still running. A Running agent
+    /// gets only its row flipped here (<see cref="IRunningAgentCancellation"/>); returned, so its side effects run after
+    /// commit. A stop's teardown landing afterwards finds nothing of the revived run's: its close is keyed by the stopped
+    /// attempt's own agents and children, its run-wide close is fenced on the stopped generation, and every CAS it takes
+    /// on what was already cancelled here simply loses — which also makes this the only kill a Continue after a Failure
+    /// gets, since that path has no teardown.
+    /// </summary>
+    private async Task<IReadOnlyList<Guid>> CloseEndedAttemptAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var stagedChildren = await StagedChildRunIdsAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        var waitsDiscarded = await DiscardPendingWaitsAsync(runId, cancellationToken).ConfigureAwait(false);
+        var queuedCancelled = await CancelQueuedAgentsAsync(runId, cancellationToken).ConfigureAwait(false);
+        var runningCancelled = await CancelRunningAgentRowsAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        await CancelStagedChildRunsAsync(stagedChildren, cancellationToken).ConfigureAwait(false);
+
+        if (waitsDiscarded + queuedCancelled + runningCancelled.Count + stagedChildren.Count > 0)
+            _logger.LogInformation("Continue closed what the ended attempt left. RunId={RunId} WaitsDiscarded={WaitsDiscarded} QueuedAgentsCancelled={QueuedAgentsCancelled} RunningAgentsCancelled={RunningAgentsCancelled} StagedChildren={StagedChildren}", runId, waitsDiscarded, queuedCancelled, runningCancelled.Count, stagedChildren.Count);
+
+        return runningCancelled;
+    }
+
+    /// <summary>
+    /// Cancel the stopped attempt's staged child runs still Pending or Enqueued, in the revive's transaction, so no worker
+    /// claims one between the Continue and the stop's teardown — the same status-guarded CAS the engine's own terminal
+    /// cleanup takes for a staged child, which has started nothing of its own yet. One already walking is left to that
+    /// teardown, which cancels every child it captured through the full cancel.
+    /// </summary>
+    private async Task CancelStagedChildRunsAsync(IReadOnlyList<Guid> ids, CancellationToken cancellationToken)
+    {
+        if (ids.Count == 0) return;
+
+        await _db.WorkflowRun
+            .Where(r => ids.Contains(r.Id) && (r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued))
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Cancelled).SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Close the run's still-Pending waits as Discarded, which no replay reader treats as an answer; returns how many.</summary>
+    private async Task<int> DiscardPendingWaitsAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunWait
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded).SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Cancel the run's still-Queued agent runs through the agent service's Queued-guarded CAS — one a worker claimed a moment ago is Running by then, and <see cref="CancelRunningAgentRowsAsync"/> takes it; returns how many.</summary>
+    private async Task<int> CancelQueuedAgentsAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var queued = await _db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Queued).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var cancelled = 0;
+
+        foreach (var agentId in queued)
+        {
+            if (await _agentRunService.CancelQueuedAsync(agentId, ContinuedRunAgentReason, cancellationToken).ConfigureAwait(false)) cancelled++;
+        }
+
+        return cancelled;
+    }
+
+    /// <summary>Flip the run's still-Running agent runs to Cancelled with the epoch-fenced CAS alone (the owning worker loses its fence and stops them), in this transaction; returns the ones flipped, whose side effects run after commit.</summary>
+    private async Task<IReadOnlyList<Guid>> CancelRunningAgentRowsAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var running = await _db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Running).OrderBy(r => r.Id).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var cancelled = new List<Guid>(running.Count);
+
+        foreach (var agentId in running)
+        {
+            if (await _runningAgents.CancelRunningRowAsync(agentId, ContinuedRunRunningAgentReason, cancellationToken).ConfigureAwait(false)) cancelled.Add(agentId);
+        }
+
+        return cancelled;
+    }
+
+    /// <summary>
+    /// The rest of each Running cancel the revive flipped — expire its decisions, settle its spend claims, revoke its
+    /// credential, close its harness execution, kill its process — once the revive's commit is visible: joined to a
+    /// command, after the command commits and ahead of the revived walk's dispatch. Each is its own best-effort action,
+    /// so one agent's failed kill neither stops the others' nor fails the Continue that already committed. Each runs on
+    /// <see cref="CancellationToken.None"/>, as the stop's teardown does: it is owed to a revive that has committed, and
+    /// a request that went away after that commit must not leave a flipped agent with its decisions, spend claims and
+    /// harness execution still open.
+    /// </summary>
+    private async Task FinishRunningCancelsAsync(IReadOnlyList<Guid> runningCancelled, CancellationToken cancellationToken)
+    {
+        foreach (var agentId in runningCancelled)
+            await _postCommit.RunAfterCommitAsync(_ => FinishRunningCancelQuietlyAsync(agentId), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task FinishRunningCancelQuietlyAsync(Guid agentId)
+    {
+        try
+        {
+            await _runningAgents.FinishRunningCancelAsync(agentId, AgentRunAbandonCause.OperatorCancelled, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "A continued run's cancelled agent {AgentRunId} could not finish its cancel; its owning worker stops it on its lost fence, and the reconciler's cancelled-agent sweep backs that up", agentId);
+        }
+    }
+
+    /// <summary>Dispatch the revived run once the Continue's commit is visible, on <see cref="CancellationToken.None"/> like the running agents' kills registered ahead of it: a request that went away after the commit must not leave the continued run Pending with nothing to walk it until the reconciler's sweep.</summary>
+    private async Task DispatchRevivedRunAfterCommitAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _postCommit.RunAfterCommitAsync(_ => _runDispatcher.DispatchAsync(runId, CancellationToken.None), cancellationToken).ConfigureAwait(false);
 
     private static readonly IReadOnlyDictionary<string, JsonElement> EmptyNodeBag = new Dictionary<string, JsonElement>();
 
@@ -1155,8 +1297,16 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .Select(w => w.Token)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return tokens.Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null).Where(id => id.HasValue).Select(id => id!.Value).ToList();
+        return ChildRunIds(tokens);
     }
+
+    /// <summary>The child runs the run's still-Pending Subworkflow waits staged — read by the revive, inside its own transaction, before it discards those waits.</summary>
+    private async Task<IReadOnlyList<Guid>> StagedChildRunIdsAsync(Guid runId, CancellationToken cancellationToken) =>
+        ChildRunIds(await _db.WorkflowRunWait.AsNoTracking().Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Subworkflow && w.Status == WorkflowWaitStatuses.Pending).Select(w => w.Token).ToListAsync(cancellationToken).ConfigureAwait(false));
+
+    /// <summary>A Subworkflow wait's token is its child run id; one that does not parse names no child.</summary>
+    private static IReadOnlyList<Guid> ChildRunIds(IEnumerable<string> tokens) =>
+        tokens.Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null).Where(id => id.HasValue).Select(id => id!.Value).ToList();
 
     /// <summary>A branch agent run the stop ends, with the status it was read in (the kill-wave's first CAS is chosen by it).</summary>
     private sealed record BranchAgent(Guid Id, AgentRunStatus Status);
@@ -1180,59 +1330,111 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// Tear down a just-cancelled run, best-effort: close the waits the stopped attempt's agents and children answer,
-    /// KILL-WAVE those branch agent runs (Queued + Running), cancel those sub-workflow children through this same cancel,
-    /// and close the run's other still-pending waits so none dangle. Best-effort end to end — one agent's failed kill or
-    /// one child's failed cancel is logged and the rest of the teardown still runs (the run is already Cancelled; the
-    /// reconciler's parent-run-terminal guard re-cleans an agent run it missed, and the stuck-run reconciler never
-    /// dispatches a child still staged under a finished parent, but nothing stops a child that had already started).
-    /// Returns how many branch agent runs the kill-wave flipped. The work is the <paramref name="stopped"/> attempt's plus
-    /// whatever the old walk staged at the stopped <paramref name="generation"/> since; the run-wide close is fenced on
-    /// that generation (see <see cref="DeferTeardownAsync"/>).
+    /// Tear down a just-cancelled run: close the waits the stopped attempt's agents and children answer, KILL-WAVE those
+    /// branch agent runs (Queued + Running), cancel those sub-workflow children through this same cancel, and close the
+    /// run's other still-pending waits so none dangle. The work is the <paramref name="stopped"/> attempt's plus whatever
+    /// the old walk staged at the stopped <paramref name="generation"/> since; the run-wide close is fenced on that
+    /// generation (see <see cref="DeferTeardownAsync"/>). Returns how many branch agent runs the kill-wave flipped.
+    ///
+    /// <para>Each step is best-effort on its own (<see cref="TearDownStepAsync{T}"/>), as is each agent's kill and each
+    /// child's cancel inside its step: the run is already Cancelled, so one failure never aborts the cancel, and never
+    /// costs what comes after it — a failed read or wait close still leaves the kill-wave to run. The reconciler's
+    /// parent-run-terminal guard re-cleans an agent run a failure missed, and the stuck-run reconciler never dispatches a
+    /// child still staged under a finished parent, but nothing stops a child that had already started.</para>
+    ///
+    /// <para>Neither wait close waits on a row lock: both skip a wait another transaction holds. That is how a Continue
+    /// landing mid-teardown is met — its revive discards every Pending wait of the run in its own transaction and holds
+    /// them to its commit, so the teardown never queues behind it, and the two can no longer deadlock over waits each
+    /// locks in its own order. A skipped wait is the revive's to close when it commits; one it releases by rolling back
+    /// is closed by a later pass (<see cref="CloseWaitsSkippingHeldOnesAsync"/>).</para>
     /// </summary>
     private async Task<int> TearDownCancelledRunAsync(Guid runId, Guid teamId, int generation, StoppedAttempt stopped, CancellationToken cancellationToken)
     {
+        var attempt = await TearDownStepAsync(async () => stopped.Union(await ReadStoppedAttemptAsync(runId, generation, cancellationToken).ConfigureAwait(false)), stopped, "read what the stopped walk staged since", runId).ConfigureAwait(false);
+
+        await TearDownStepAsync(() => CloseStoppedAttemptWaitsAsync(runId, attempt, cancellationToken), "close the stopped attempt's waits", runId).ConfigureAwait(false);
+
+        var agentRunsCancelled = await TearDownStepAsync(() => KillWaveBranchAgentsAsync(attempt.Agents, cancellationToken), 0, "kill the stopped attempt's agents", runId).ConfigureAwait(false);
+
+        await TearDownStepAsync(() => CancelChildRunsAsync(attempt.Children, teamId, cancellationToken), "cancel the stopped attempt's children", runId).ConfigureAwait(false);
+
+        await TearDownStepAsync(() => CancelPendingWaitsAsync(runId, generation, cancellationToken), "close the run's remaining waits", runId).ConfigureAwait(false);
+
+        return agentRunsCancelled;
+    }
+
+    /// <summary>One best-effort teardown step: a failure is logged and the teardown goes on with <paramref name="fallback"/>. The reconciler's parent-run-terminal guard re-cleans an agent run a failed step missed while the run stays stopped.</summary>
+    private async Task<T> TearDownStepAsync<T>(Func<Task<T>> step, T fallback, string stepName, Guid runId)
+    {
         try
         {
-            var attempt = stopped.Union(await ReadStoppedAttemptAsync(runId, generation, cancellationToken).ConfigureAwait(false));
-
-            await CloseStoppedAttemptWaitsAsync(runId, attempt, cancellationToken).ConfigureAwait(false);
-
-            var agentRunsCancelled = await KillWaveBranchAgentsAsync(attempt.Agents, cancellationToken).ConfigureAwait(false);
-
-            await CancelChildRunsAsync(attempt.Children, teamId, cancellationToken).ConfigureAwait(false);
-
-            await CancelPendingWaitsAsync(runId, generation, cancellationToken).ConfigureAwait(false);
-
-            return agentRunsCancelled;
+            return await step().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Run {RunId} was cancelled but tearing down its agents/children failed; the reconciler catches an orphaned agent run, not an unfinished sub-workflow", runId);
-            return 0;
+            _logger.LogWarning(ex, "Run {RunId} was cancelled but the teardown step to {Step} failed; the rest of the teardown still runs — the reconciler catches an orphaned agent run, not an unfinished sub-workflow", runId, stepName);
+            return fallback;
         }
     }
 
+    private async Task TearDownStepAsync(Func<Task> step, string stepName, Guid runId) =>
+        await TearDownStepAsync(async () => { await step().ConfigureAwait(false); return true; }, true, stepName, runId).ConfigureAwait(false);
+
     /// <summary>
-    /// Close the pending waits the stopped attempt's agents and children would answer, BEFORE they are killed. A Continue
-    /// that beat the teardown keeps the run's waits open (the fenced close in <see cref="CancelPendingWaitsAsync"/> skips
-    /// them), and the kill lands each agent Cancelled — a result its completion hands back through the step's wait. Left
-    /// open, that wait became the answer the continued walk replays, and the continued step failed on the stop's own
-    /// kill. Closed, the step finds no answer and parks a fresh one, exactly as when the teardown ran first. Keyed by the
-    /// stopped attempt's own agent and child ids, so no wait the revived walk parked is among them.
+    /// Close the pending waits the stopped attempt's agents and children would answer, BEFORE they are killed. The kill
+    /// lands each agent Cancelled — a result its completion hands back through the step's wait — and, left open, that
+    /// wait became the answer a Continue replays, so the continued step failed on the stop's own kill. Closed, the step
+    /// finds no answer and parks a fresh one. A Continue that beat the teardown has already closed them in its revive (and
+    /// the fenced close in <see cref="CancelPendingWaitsAsync"/> skips its run), so this then finds nothing left. Keyed by
+    /// the stopped attempt's own agent and child ids, so no wait the revived walk parked is among them. A wait another
+    /// transaction holds is skipped, not waited for, and passed over again once it may have cleared
+    /// (<see cref="CloseWaitsSkippingHeldOnesAsync"/>).
     /// </summary>
     private async Task CloseStoppedAttemptWaitsAsync(Guid runId, StoppedAttempt attempt, CancellationToken cancellationToken)
     {
-        var tokens = attempt.Agents.Select(a => a.Id).Concat(attempt.Children).Select(id => id.ToString()).ToList();
+        var tokens = attempt.Agents.Select(a => a.Id).Concat(attempt.Children).Select(id => id.ToString()).ToArray();
 
-        if (tokens.Count == 0) return;
+        if (tokens.Length == 0) return;
 
-        await _db.WorkflowRunWait
-            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && tokens.Contains(w.Token))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded)
-                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-            .ConfigureAwait(false);
+        Task Close() => _db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE workflow_run_wait SET status = {WorkflowWaitStatuses.Discarded}, resolved_at = {DateTimeOffset.UtcNow}
+            WHERE id IN (SELECT id FROM workflow_run_wait WHERE run_id = {runId} AND status = {WorkflowWaitStatuses.Pending} AND token = ANY({tokens}) FOR UPDATE SKIP LOCKED)
+            """, cancellationToken);
+
+        Task<int> StillPending() => _db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && tokens.Contains(w.Token), cancellationToken);
+
+        await CloseWaitsSkippingHeldOnesAsync(runId, "stopped-attempt waits", Close, StillPending).ConfigureAwait(false);
+    }
+
+    /// <summary>How many more passes a teardown wait close makes over waits it had to skip, and the pause before each: long enough for the transaction holding them — typically a Continue's revive — to end.</summary>
+    private const int SkippedWaitRetries = 3;
+
+    private static readonly TimeSpan SkippedWaitRetryDelay = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// A teardown wait close (<paramref name="close"/>, which skips a wait another transaction holds), passed again while
+    /// any of its waits is still Pending, up to <see cref="SkippedWaitRetries"/> more times. The holder is usually a
+    /// Continue's revive, which closes those waits itself when it commits. One that rolls back instead releases them
+    /// still Pending under the Cancelled run, where the stopped attempt's kill would answer them and a later Continue
+    /// replay that as the step's result — so a later pass closes them once the lock clears. What a holder keeps past the
+    /// last pass is logged.
+    /// </summary>
+    private async Task CloseWaitsSkippingHeldOnesAsync(Guid runId, string waits, Func<Task> close, Func<Task<int>> stillPending)
+    {
+        var left = 0;
+
+        for (var pass = 0; pass <= SkippedWaitRetries; pass++)
+        {
+            if (pass > 0) await Task.Delay(SkippedWaitRetryDelay).ConfigureAwait(false);
+
+            await close().ConfigureAwait(false);
+
+            left = await stillPending().ConfigureAwait(false);
+
+            if (left == 0) return;
+        }
+
+        _logger.LogWarning("Run {RunId} teardown could not close {Count} {Waits}: another transaction still held them after {Passes} passes", runId, left, waits, SkippedWaitRetries + 1);
     }
 
     /// <summary>
@@ -1329,16 +1531,21 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// resume affordance, and — unlike <c>Resolved</c>, which a real answer writes — is never replayed as an answer, so
     /// a later Continue re-parks the step instead of feeding it the request its payload still holds. The UPDATE itself
     /// checks the run is still at the stopped <paramref name="generation"/>: a wait the revived walk parked is visible to
-    /// it only once the Continue's bump is too, so the revived run's fresh waits are never closed.
+    /// it only once the Continue's bump is too, so the revived run's fresh waits are never closed. A wait another
+    /// transaction holds is skipped, not waited for, and passed over again once it may have cleared
+    /// (<see cref="CloseWaitsSkippingHeldOnesAsync"/>).
     /// </summary>
     private async Task CancelPendingWaitsAsync(Guid runId, int generation, CancellationToken cancellationToken)
     {
-        await _db.WorkflowRunWait
-            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && _db.WorkflowRun.Any(r => r.Id == runId && r.Generation == generation))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(w => w.Status, WorkflowWaitStatuses.Discarded)
-                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-            .ConfigureAwait(false);
+        Task Close() => _db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE workflow_run_wait SET status = {WorkflowWaitStatuses.Discarded}, resolved_at = {DateTimeOffset.UtcNow}
+            WHERE id IN (SELECT w.id FROM workflow_run_wait w WHERE w.run_id = {runId} AND w.status = {WorkflowWaitStatuses.Pending}
+                         AND EXISTS (SELECT 1 FROM workflow_run r WHERE r.id = {runId} AND r.generation = {generation}) FOR UPDATE OF w SKIP LOCKED)
+            """, cancellationToken);
+
+        Task<int> StillPending() => _db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && _db.WorkflowRun.Any(r => r.Id == runId && r.Generation == generation), cancellationToken);
+
+        await CloseWaitsSkippingHeldOnesAsync(runId, "remaining waits", Close, StillPending).ConfigureAwait(false);
     }
 
     /// <summary>Cap on a single page — clamps a caller-supplied limit so an unbounded page can't be requested.</summary>

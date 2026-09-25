@@ -433,6 +433,11 @@ public sealed class PostgresFixture : IAsyncLifetime
         // (resolved AsSelf by CodeSpaceModule), so the live brain drives the real engine. Same InstancePerLifetimeScope
         // lifetime + last-wins position, so the supervisor node's own DI scope resolves whichever the flag selects.
         builder.RegisterType<Workflows.Infrastructure.SupervisorDecisionScript>().AsSelf().SingleInstance();
+
+        // A decision-log hold a test arms per run (SupervisorDecisionScript.HoldDecisionLog), reachable inside the
+        // supervisor node's own scope, which the engine resolves from this root where a test's child-scope decorator
+        // cannot reach. Pass-through for every run nothing is armed for.
+        builder.RegisterDecorator<CodeSpace.Core.Services.Supervisor.ISupervisorDecisionLog>((c, _, inner) => new Workflows.Infrastructure.ScriptedDecisionLog(inner, c.Resolve<Workflows.Infrastructure.SupervisorDecisionScript>(), c.Resolve<CodeSpaceDbContext>()));
         builder.RegisterType<Workflows.Infrastructure.SupervisorDeciderMode>().AsSelf().SingleInstance();
         builder.RegisterType<Workflows.Infrastructure.ScriptedSupervisorDecider>().AsSelf().InstancePerLifetimeScope();
         builder.Register<CodeSpace.Core.Services.Supervisor.ISupervisorDecider>(c =>

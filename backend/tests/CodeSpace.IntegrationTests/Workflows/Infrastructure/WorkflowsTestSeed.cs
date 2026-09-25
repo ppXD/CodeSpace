@@ -296,11 +296,12 @@ public static class WorkflowsTestSeed
     /// <summary>
     /// Stop a run inside a command transaction and commit it WITHOUT draining: the stop's teardown stays queued on the
     /// returned scope's post-commit actions until the caller runs them (<c>IPostCommitActions.RunAllAsync</c>), standing
-    /// in for a teardown still in flight when the next operator action lands. The caller disposes the scope.
+    /// in for a teardown still in flight when the next operator action lands. The caller disposes the scope. The stop and
+    /// its teardown pass their commands through <paramref name="interceptors"/>, when given.
     /// </summary>
-    public static async Task<ILifetimeScope> StopWithTeardownHeldAsync(PostgresFixture fixture, Guid runId, Guid teamId)
+    public static async Task<ILifetimeScope> StopWithTeardownHeldAsync(PostgresFixture fixture, Guid runId, Guid teamId, params Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor[] interceptors)
     {
-        var scope = fixture.BeginScope();
+        var scope = interceptors.Length == 0 ? fixture.BeginScope() : StopContinueSignals.InterceptedScope(fixture, interceptors);
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         await using (var transaction = await db.Database.BeginTransactionAsync().ConfigureAwait(false))
