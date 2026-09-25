@@ -168,7 +168,10 @@ public interface IWorkflowService
     /// (the dispatcher's Pending → Enqueued CAS is the double-dispatch guard).
     ///
     /// <para>Reviving a terminal run starts a new run generation: a walk still winding down from the stop or failure,
-    /// and a stop's teardown still in flight, carry the old one and touch nothing of the revived run.</para>
+    /// and a stop's teardown still in flight, carry the old one and touch nothing of the revived run. The revive also
+    /// closes, in the same transaction, what the ended attempt left pending — its waits Discarded, its queued agents
+    /// cancelled — so the revived run never parks on or reuses work a late teardown then ends. A still-running agent of
+    /// the ended attempt is left to the stop's teardown, which kills it; its wait is closed, so it answers nothing.</para>
     ///
     /// <para>A step the continue re-runs starts over, because a wait the stop or failure closed carries no answer. So a
     /// <c>flow.sleep</c> parks a fresh timer for its FULL delay — the time it already slept is not credited — and a

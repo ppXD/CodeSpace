@@ -28,8 +28,15 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
     /// <summary>The question the AskHumanStop arc asks at turn 0 — the integration test asserts the posted card body + the recorded outcome carry it.</summary>
     public const string AskQuestion = "which approach: rewrite or patch?";
 
-    public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
+        // A test holds a turn mid-decision — the slow model call is where a stop and a continue most likely land.
+        if (_script.TakeDecisionHold(context.SupervisorRunId) is { } hold)
+        {
+            hold.Started.TrySetResult();
+            await hold.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         // A test injects a TRANSIENT (retryable) infra fault on a specific turn — thrown BEFORE any decision is produced,
         // so the production RetryingSupervisorDeciderDecorator that wraps this scripted decider must retry + recover it.
         if (_script.TryConsumeTransientFault(context.TurnNumber))
@@ -57,7 +64,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             _ => PlanThenStop(context),
         };
 
-        return Task.FromResult(decision);
+        return decision;
     }
 
     // E5 arc: turn 0 plan(2) → EVERY later turn spawn(both). The decider NEVER stops on its own — it's the
@@ -326,6 +333,19 @@ public sealed class SupervisorDecisionScript
     public IReadOnlyList<string> ArtifactPaths { get; set; } = Array.Empty<string>();
 
     private readonly Dictionary<int, int> _transientFaults = new();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, CancelGateNode.Gate> _decisionHolds = new();
+
+    /// <summary>Hold the next decision <paramref name="runId"/>'s supervisor makes until the test releases the returned gate: the decider signals <see cref="CancelGateNode.Gate.Started"/>, awaits <see cref="CancelGateNode.Gate.Release"/>, then decides as scripted. One-shot, and keyed by run, so no sibling test's run is ever held.</summary>
+    public CancelGateNode.Gate HoldNextDecision(Guid runId)
+    {
+        var gate = new CancelGateNode.Gate();
+        _decisionHolds[runId] = gate;
+        return gate;
+    }
+
+    /// <summary>Take the hold armed for <paramref name="runId"/>, if any (called by the scripted decider on each decide).</summary>
+    public CancelGateNode.Gate? TakeDecisionHold(Guid runId) => _decisionHolds.TryRemove(runId, out var gate) ? gate : null;
 
     /// <summary>Inject a transient (retryable) brain-call fault on a specific TURN: the next <paramref name="times"/> decide invocations for that turn throw a Transient <c>LlmApiException</c> before any decision is produced, then it proceeds — driving the production retry decorator that wraps the scripted decider. <paramref name="times"/> UNDER the in-call retry budget → the decorator recovers in place; AT/OVER it → the exhausted fault escapes and the node's infra park (P1.1) engages.</summary>
     public void FailTransientlyOnTurn(int turn, int times) => _transientFaults[turn] = times;

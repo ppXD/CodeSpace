@@ -54,6 +54,11 @@ public sealed class GatedAgentParkNode : INodeRuntime
             await gate.Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        // "wait": "Action" parks a wait with no staged child instead — one a step can still park after its run was stopped,
+        // where agent admission refuses a new agent under the terminal run.
+        if (context.Inputs.TryGetValue("wait", out var wait) && wait.GetString() == WorkflowWaitKinds.Action)
+            return NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.Action, Payload = JsonSerializer.SerializeToElement(new { }) });
+
         var task = new AgentTask { Goal = "Fix the failing billing tests", Harness = "codex-cli", Model = "gpt-5.3-codex", RunnerKind = "local" };
 
         return NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.AgentRun, Payload = JsonSerializer.SerializeToElement(task, AgentJson.Options) });

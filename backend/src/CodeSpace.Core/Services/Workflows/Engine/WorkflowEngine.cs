@@ -3097,7 +3097,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // caller's whole unit of work. The engine walks on its own scope, so nothing is ambient here.
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        if (!await LockRunAtGenerationAsync(wait.RunId, cancellationToken).ConfigureAwait(false)) return false;
+        if (!await RunGenerationFence.TryLockAsync(_db, wait.RunId, _generation, cancellationToken).ConfigureAwait(false)) return false;
 
         await _recordLogger.NodeSuspendedAsync(wait.RunId, wait.NodeId, wait.IterationKey, wait.WaitKind, wait.WakeAt, cancellationToken).ConfigureAwait(false);
         await ReplaceCellWaitAsync(wait, cancellationToken).ConfigureAwait(false);
@@ -3105,10 +3105,6 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         return true;
     }
-
-    /// <summary>Share-lock the run row while it still stands at this walk's generation; false once a Continue has moved it. Held to the end of the caller's transaction, so a Continue's bump waits for it.</summary>
-    private async Task<bool> LockRunAtGenerationAsync(Guid runId, CancellationToken cancellationToken) =>
-        (await _db.Database.SqlQuery<int>($"SELECT 1 AS \"Value\" FROM workflow_run WHERE id = {runId} AND generation = {_generation} FOR SHARE").ToListAsync(cancellationToken).ConfigureAwait(false)).Count > 0;
 
     /// <summary>One outstanding wait per (run, node, iteration): drop any prior (resolved) wait for the cell so a re-suspend can't trip the unique index, then add this one.</summary>
     private async Task ReplaceCellWaitAsync(WorkflowRunWait wait, CancellationToken cancellationToken)
@@ -3428,13 +3424,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// return; on a thrown exception returns <c>(null, message)</c> so the retry loop can treat it
     /// as a failure. Cancellation and the secret-leak guard are re-thrown — they're not retryable:
     /// a cancel stops the run, and a leak is a contract violation that must surface its detailed
-    /// message (the loop would otherwise mask it as a generic node failure).
+    /// message (the loop would otherwise mask it as a generic node failure). So is a
+    /// <see cref="RunSupersededException"/> from staging the node fenced on this walk's claim: the walk
+    /// stands down, and recording it as the node's failure would write that failure into the revived run.
     /// </summary>
     private async Task<(NodeResult? Result, Exception? Thrown)> RunNodeOnceAsync(NodeExecution exec, CancellationToken cancellationToken)
     {
         try
         {
             var context = BuildNodeRunContext(exec);
+
+            // The generation this walk claimed rides along with the node, for staging it commits in a transaction of its
+            // own (the supervisor's spawn wave) to fence on, as this engine fences its own park.
+            using var claim = RunGenerationFence.Claim(exec.Run.Id, _generation);
 
             // Recording (make "record EVERY in-process model call" literally true, not just supervisor.decision): push the
             // run/node correlation + this engine's SCOPED ledger writer + offloader for the duration of the node, so the
@@ -3451,6 +3453,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             return (result, null);
         }
         catch (OperationCanceledException) { throw; }
+        catch (RunSupersededException) { throw; }
         catch (WorkflowSecretLeakException) { throw; }
         catch (WorkflowRedactedOutputsUnrecoverableException) { throw; }
         catch (Exception ex)
@@ -3886,14 +3889,6 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private sealed class RunSuspendedException : Exception
     {
         public RunSuspendedException(string nodeId) : base($"Run suspended on node '{nodeId}'.") { }
-    }
-
-    /// <summary>Thrown at a wave check, or at a step's park, once a Continue has revived the run past the generation this walk claimed. Caught in RunAfterClaimAsync, which stands the walk down without writing — the run belongs to the revived walk.</summary>
-    private sealed class RunSupersededException : Exception
-    {
-        public RunSupersededException(int claimed) : base($"Run was continued past this walk (claimed generation {claimed}).") { Claimed = claimed; }
-
-        public int Claimed { get; }
     }
 
     /// <summary>
