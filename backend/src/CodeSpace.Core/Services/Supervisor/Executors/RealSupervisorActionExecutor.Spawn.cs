@@ -762,6 +762,9 @@ public sealed partial class RealSupervisorActionExecutor
         // the wave back to zero visible residue; replay never observes a prefix and mistakes it for a complete wave.
         await using var stagingTransaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
+        await FenceOnClaimedGenerationAsync(context, cancellationToken).ConfigureAwait(false);
+        await DropClosedWaveAsync(context, cancellationToken).ConfigureAwait(false);
+
         // P2a-2 (R): the staged units' acceptance obligations become durable requirement rows AT AUTHORIZATION —
         // the composer reads these, never re-derives them from the tape. Upsert-idempotent: a crash-replayed
         // staging lands on the same (run, kind, ref) rows. Model-authored oracles carry ModelProposal authority
@@ -849,6 +852,21 @@ public sealed partial class RealSupervisorActionExecutor
         return SupervisorExecution.ParkedOnAgents(outcome, agentRunIds.Count);
     }
 
+    /// <summary>
+    /// Share-lock the run at the generation the walk driving this turn claimed — the lock the engine's own park takes —
+    /// first in the wave's transaction, so it is held until the wave commits. A turn a Continue overtook (the stop never
+    /// reached its host, or reached it late) stands down here with nothing staged, and the revived walk re-runs the turn
+    /// and stages its own wave. A Continue that lands after the lock waits for the wave to commit, and its revive then
+    /// closes what the wave staged. A turn driven outside a walk carries no claim, and there is nothing to fence.
+    /// </summary>
+    private async Task FenceOnClaimedGenerationAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (Workflows.Engine.RunGenerationFence.ClaimedFor(context.SupervisorRunId) is not { } generation) return;
+
+        if (!await Workflows.Engine.RunGenerationFence.TryLockAsync(_db, context.SupervisorRunId, generation, cancellationToken).ConfigureAwait(false))
+            throw new Workflows.Engine.RunSupersededException(generation);
+    }
+
     /// <summary>The plan-local unit ids this staging dispatches, comma-joined ("s1,s2"); a task with no subtask key (a free-form spawn under no plan) reads "(unkeyed)". Pure + pinned — the other half of the plan log's edges↔units join.</summary>
     internal static string DescribeStagedUnits(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks) =>
         string.Join(",", tasks.Select(t => string.IsNullOrEmpty(t.Task.SubtaskId) ? "(unkeyed)" : t.Task.SubtaskId));
@@ -865,16 +883,18 @@ public sealed partial class RealSupervisorActionExecutor
         return NullIfBlank(actualModel) is { } model ? escalation with { To = model } : escalation;
     }
 
-    /// <summary>This turn's already-staged AgentRun wait tokens (the agent-run ids) in spawn-index order, or empty when none — the recovery anchor for a crash AFTER the waits committed but before the terminal was recorded.</summary>
+    /// <summary>This turn's already-staged AgentRun wait tokens (the agent-run ids) in spawn-index order, or empty when none — the recovery anchor for a crash AFTER the waits committed but before the terminal was recorded. Empty too when the run's end closed the wave (a stop or a failure Discarded its waits): its agents were ended and nothing answers those waits any more, so the replay stages the wave afresh (<see cref="DropClosedWaveAsync"/>) rather than re-parking on it.</summary>
     private async Task<IReadOnlyList<Guid>> ExistingTurnWaitAgentIdsAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        var keyPrefix = $"{context.NodeId}#turn{context.TurnNumber}#";
+        var keyPrefix = TurnWaveKeyPrefix(context);
 
         var waits = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId
                         && w.WaitKind == WorkflowWaitKinds.AgentRun && w.IterationKey.StartsWith(keyPrefix))
-            .Select(w => new { w.IterationKey, w.Token })
+            .Select(w => new { w.IterationKey, w.Token, w.Status })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (waits.Any(w => w.Status == WorkflowWaitStatuses.Discarded)) return Array.Empty<Guid>();
 
         // Order by the PARSED NUMERIC spawn index, NOT the lexicographic IterationKey: the key's trailing #{k} is raw
         // (non-zero-padded), so a text sort yields #0,#1,#10,…,#2 for K≥11 — scrambling agentRunIds out of the authored
@@ -887,6 +907,19 @@ public sealed partial class RealSupervisorActionExecutor
             .Select(id => id!.Value)
             .ToList();
     }
+
+    /// <summary>Delete this turn's wave rows that are no longer open — a wave a stop or a failure closed, being staged afresh — so the fresh wave can take the same per-turn-per-spawn keys under the unique (run, node, iteration) index: the supervisor's twin of the engine replacing a cell's earlier wait when its step parks again. A no-op for a first staging.</summary>
+    private async Task DropClosedWaveAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var keyPrefix = TurnWaveKeyPrefix(context);
+
+        await _db.WorkflowRunWait
+            .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.IterationKey.StartsWith(keyPrefix) && w.Status != WorkflowWaitStatuses.Pending)
+            .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The IterationKey prefix every AgentRun wait of this turn's wave carries (<c>&lt;nodeId&gt;#turn{N}#</c>, then the spawn index).</summary>
+    private static string TurnWaveKeyPrefix(SupervisorTurnContext context) => $"{context.NodeId}#turn{context.TurnNumber}#";
 
     /// <summary>Re-park on the K waits a prior crashed pass already staged this turn — re-derive the outcome from their tokens WITHOUT staging or creating anything (no double-spawn). The node re-suspends on the existing waits.</summary>
     private SupervisorExecution ReparkOnExistingWaits(SupervisorTurnContext context, IReadOnlyList<Guid> agentRunIds)

@@ -515,6 +515,50 @@ public class OperatorCancelInProgressWalkFlowTests
     }
 
     [Fact]
+    public async Task A_park_holding_the_run_lock_when_a_continue_lands_is_waited_for_then_closed_by_the_revive()
+    {
+        // The stopped walk's step parks after the stop, still at the stopped generation, and holds its share lock on the
+        // run row as the Continue lands. The revive waits for that park to commit and only then closes what the stopped
+        // attempt left pending — the park included. Closing before the bump would miss the park still in flight and leave
+        // its wait open under the revived run, for the revived walk to adopt (a map branch re-entered) or leave dangling.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var gateKey = Guid.NewGuid().ToString("N");
+        var gate = GatedAgentParkNode.Arm(gateKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, GatedAgentParkDefinition(gateKey, WorkflowWaitKinds.Action));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var heldPark = new HeldParkLockFault();
+        var stoppedWalk = WalkWithFaultInBackground(runId, heldPark);
+        await AwaitSignalAsync(gate.Started.Task, "the walk's step reaching its gate");
+
+        await StopAsync(runId, teamId);   // on this host; the walk runs on another, so only its park's fence can see it
+
+        heldPark.Arm();
+        gate.Release.TrySetResult();
+        await AwaitSignalAsync(heldPark.Reached.Task, "the step's park taking its share lock on the run row");   // nothing of the park written yet
+
+        using var continueScope = _fixture.BeginScope();
+        var continueDb = continueScope.Resolve<CodeSpaceDbContext>();
+        await continueDb.Database.OpenConnectionAsync();
+        var continuePid = await continueDb.Database.SqlQueryRaw<int>("SELECT pg_backend_pid() AS \"Value\"").SingleAsync();
+        var revive = continueScope.Resolve<IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
+
+        await WaitForLockWaitAsync(continuePid, "the Continue's revive to block on the parking step's lock on the run row");
+
+        heldPark.Release.TrySetResult();
+        await AwaitSignalAsync(revive, "the Continue returning once the park committed");
+        (await revive).ShouldBeTrue("the run continued in place");
+        await Record.ExceptionAsync(() => AwaitSignalAsync(stoppedWalk, "the stopped walk returning after its park"));
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.NodeId == "park")).Status
+            .ShouldBe(WorkflowWaitStatuses.Discarded, "the revive closed the park it waited for — the stopped attempt's, committed just before the bump");
+    }
+
+    [Fact]
     public async Task A_child_walk_a_continue_overtook_does_not_wake_the_parent_with_a_cancel_as_it_unwinds()
     {
         // A cancelled child's walk wakes its parked parent with the cancel as it unwinds. When a Continue revived the
@@ -679,6 +723,51 @@ public class OperatorCancelInProgressWalkFlowTests
         private static bool IsGenerationCheck(DbCommand command) => command.CommandText.Contains("FROM workflow_run AS") && command.CommandText.Contains("generation <>");
     }
 
+    /// <summary>Once armed, holds the scope's next park right after its share lock on the run row is granted — the park's transaction open and holding the lock, nothing of the park written yet.</summary>
+    private sealed class HeldParkLockFault : DbCommandInterceptor
+    {
+        private int _armed;
+
+        public TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Arm() => Interlocked.Exchange(ref _armed, 1);
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("FOR SHARE") || Interlocked.CompareExchange(ref _armed, 0, 1) != 1) return result;
+
+            Reached.TrySetResult();
+            await Release.Task.ConfigureAwait(false);
+
+            return result;
+        }
+    }
+
+    /// <summary>Awaits <paramref name="signal"/> for at most 30s, failing with the signal's name.</summary>
+    private static async Task AwaitSignalAsync(Task signal, string name)
+    {
+        try { await signal.WaitAsync(TimeSpan.FromSeconds(30)); }
+        catch (TimeoutException) { throw new TimeoutException($"Timed out after 30s waiting for {name}."); }
+    }
+
+    /// <summary>Waits, bounded, until session <paramref name="pid"/> is blocked on a lock — the signal a lock handoff proceeds on.</summary>
+    private async Task WaitForLockWaitAsync(int pid, string signal)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+
+        while (!await db.Database.SqlQuery<bool>($"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {pid} AND wait_event_type = 'Lock') AS \"Value\"").SingleAsync())
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"Timed out after 30s waiting for {signal}. Diagnose with: psql -c \"SELECT wait_event_type, wait_event, query FROM pg_stat_activity WHERE pid = {pid}\"");
+
+            await Task.Delay(10);
+        }
+    }
+
     /// <summary>
     /// The body-level twin of the top-level overtaken-walk test: the old walk (on another host) holds mid-body in the gate;
     /// the run is stopped and continued; the revived walk re-runs the container and holds in the same gate; the old walk's
@@ -794,14 +883,14 @@ public class OperatorCancelInProgressWalkFlowTests
         },
     };
 
-    // start → park (holds on its gate, then parks on an AgentRun wait) → end.
-    private static WorkflowDefinition GatedAgentParkDefinition(string gateKey) => new()
+    // start → park (holds on its gate, then parks on an AgentRun wait — or on the wait kind named) → end.
+    private static WorkflowDefinition GatedAgentParkDefinition(string gateKey, string wait = WorkflowWaitKinds.AgentRun) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "park", TypeKey = GatedAgentParkNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{ "gate": "{{gateKey}}" }""") },
+            new() { Id = "park", TypeKey = GatedAgentParkNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{ "gate": "{{gateKey}}", "wait": "{{wait}}" }""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>

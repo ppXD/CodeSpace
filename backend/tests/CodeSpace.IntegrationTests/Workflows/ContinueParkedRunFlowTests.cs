@@ -163,6 +163,38 @@ public class ContinueParkedRunFlowTests
     }
 
     [Fact]
+    public async Task A_stop_teardown_landing_after_a_continue_never_leaves_a_map_branch_parked_on_the_wait_it_closes()
+    {
+        // The Continue lands before the stop's teardown closed the branch's wait. The revived walk re-entered the branch,
+        // found that wait still open, and parked the branch on it as its own; the teardown then closed it, and the branch
+        // sat parked on a closed wait until the reconciler re-dispatched the run.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverCappedAgentDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a"] }""");
+
+        using var manual = ResolveJobClient().ManualExecution();
+
+        await RunEngineAsync(runId);
+        var stoppedWait = (await WaitsAsync(runId)).Single(w => w.IterationKey == "map#0" && w.WaitKind == WorkflowWaitKinds.AgentRun);
+        stoppedWait.Status.ShouldBe(WorkflowWaitStatuses.Pending, "precondition: the branch agent parked");
+
+        using var stop = await WorkflowsTestSeed.StopWithTeardownHeldAsync(_fixture, runId, teamId);
+        await ContinueAsync(runId, teamId);
+        await RunEngineAsync(runId);
+        await stop.Resolve<IPostCommitActions>().RunAllAsync(CancellationToken.None);   // the stop's teardown lands only now
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var branchWait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.IterationKey == "map#0");
+        branchWait.Status.ShouldBe(WorkflowWaitStatuses.Pending, customMessage: $"the branch is parked on an open wait after the late teardown — Discarded means it adopted the stopped attempt's wait. Records: {await StepVerdictsAsync(db, runId)}");
+        branchWait.Token.ShouldNotBe(stoppedWait.Token, "the branch staged a fresh agent instead of adopting the stopped attempt's");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == Guid.Parse(branchWait.Token))).Status.ShouldBe(AgentRunStatus.Queued, "the late teardown left the fresh branch agent alone");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == Guid.Parse(stoppedWait.Token))).Status.ShouldBe(AgentRunStatus.Cancelled, "the stopped attempt's branch agent is ended");
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended, "the revived run is parked on the branch's fresh wait");
+    }
+
+    [Fact]
     public async Task Continuing_a_loop_stopped_while_its_body_approval_was_parked_re_parks_that_pass()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
