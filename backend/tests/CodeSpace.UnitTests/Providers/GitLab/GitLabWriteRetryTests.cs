@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.IntegrationTests.Webhooks;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using static CodeSpace.IntegrationTests.Webhooks.StubProviderHost;
@@ -20,7 +21,8 @@ namespace CodeSpace.UnitTests.Providers.GitLab;
 /// The real <see cref="GitLabRepositoryProvider"/> — NGitLab, the wire, the resilience wrapper — against a loopback
 /// GitLab that applies each write before it answers. A gateway 502 after GitLab committed must not make the retry
 /// apply the write again. (NGitLab surfaces a dropped connection as a WebException, which the wrapper never
-/// retries, so the 5xx is the ambiguous failure that reaches a retry here.)
+/// retries, so the 5xx is the ambiguous failure that reaches a retry here. The two hook creates are the exception:
+/// they post raw HTTP, where a dropped connection or a timeout is the retried failure and a 5xx answer is not.)
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class GitLabWriteRetryTests : IDisposable
@@ -173,6 +175,169 @@ public sealed class GitLabWriteRetryTests : IDisposable
         comments.ShouldHaveSingleItem().Body.ShouldBe("Reproduced on main.");
     }
 
+    [Theory]
+    [InlineData(ProjectHooks, WriteScenario.LandsThenConnectionDrops, 1)]
+    [InlineData(ProjectHooks, WriteScenario.DroppedBeforeLanding, 2)]
+    [InlineData(GroupHooks, WriteScenario.LandsThenConnectionDrops, 1)]
+    [InlineData(GroupHooks, WriteScenario.DroppedBeforeLanding, 2)]
+    public async Task RegisterWebhook_registers_exactly_one_hook(string hooksPath, WriteScenario scenario, int expectedCreates)
+    {
+        // GitLab takes a second hook at a URL one already has, so re-sending a create that landed leaves two hooks, each
+        // delivering every event. Both hook creates are raw HTTP rather than NGitLab, so a dropped connection (or a
+        // timeout) reaches the wrapper as a transient failure and is retried.
+        var hooks = new ForgeCollection(scenario, HookJson);
+        _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        var hook = await RegisterWebhookAsync(hooksPath);
+
+        var landed = hooks.Stored.ShouldHaveSingleItem("a hook that landed must not be created again");
+        hook.ExternalId.ShouldBe(landed.Id.ToString());
+        _gitlab.Sent("POST", hooksPath).ShouldBe(expectedCreates);
+    }
+
+    [Theory]
+    [InlineData(ProjectHooks)]
+    [InlineData(GroupHooks)]
+    public async Task A_5xx_answer_to_a_hook_create_that_landed_leaves_one_hook(string hooksPath)
+    {
+        // Both hook creates read a non-2xx answer as the registration's failure, which the wrapper does not retry: the
+        // registrar records the attempt and its next run finds the hook by the callback URL. Whether this call then fails
+        // or adopts is not the claim — that a 502 after the create landed never costs a second hook is.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenGatewayError, HookJson);
+        _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        await Record.ExceptionAsync(() => RegisterWebhookAsync(hooksPath));
+
+        hooks.Stored.ShouldHaveSingleItem();
+        _gitlab.Sent("POST", hooksPath).ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(ProjectHooks, false, 2)]
+    [InlineData(ProjectHooks, true, 1)]
+    [InlineData(GroupHooks, false, 1)]
+    [InlineData(GroupHooks, true, 2)]
+    public async Task A_probe_that_cannot_read_the_hooks_never_sends_the_create_again(string hooksPath, bool probeConnectionDrops, int expectedProbes)
+    {
+        // The create landed and its answer was lost; then the probe cannot read the hooks either. The failed probe is
+        // asked again only where the wrapper counts its failure as transient — NGitLab's 5xx on the project list, a
+        // dropped connection (or a timeout) on the raw group list. NGitLab loses a connection as a WebException, and
+        // the group list reads a 5xx as a refusal; both fail the call at once. Never a second create.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenConnectionDrops, HookJson);
+        _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, _ => probeConnectionDrops ? StubReply.DropConnection : new StubReply(502, """{"message":"502 Bad Gateway"}"""));
+
+        var failure = await Record.ExceptionAsync(() => RegisterWebhookAsync(hooksPath));
+
+        failure.ShouldNotBeNull("a probe that cannot tell must fail the call, not answer 'nothing landed'");
+        hooks.Stored.ShouldHaveSingleItem();
+        _gitlab.Sent("POST", hooksPath).ShouldBe(1);
+        _gitlab.Sent("GET", hooksPath).ShouldBe(expectedProbes);
+    }
+
+    [Theory]
+    [InlineData(ProjectHooks)]
+    [InlineData(GroupHooks)]
+    public async Task A_retry_adopts_only_the_hook_at_its_own_callback_url(string hooksPath)
+    {
+        // Another registration's hook is already there, and this create's connection dropped before GitLab applied it.
+        // Adopting that hook would point this registration at someone else's hook and never create its own.
+        var hooks = new ForgeCollection(WriteScenario.DroppedBeforeLanding, HookJson);
+        hooks.Seed(new { url = "https://codespace.test/api/webhooks/another-registration" });
+        _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, hooks.List);
+
+        var hook = await RegisterWebhookAsync(hooksPath);
+
+        hook.ExternalId.ShouldBe(hooks.Stored.Single(h => h.Text("url") == Registration.CallbackUrl).Id.ToString());
+        hooks.Stored.Count.ShouldBe(2);
+    }
+
+    [Theory]
+    [InlineData(ProjectHooks)]
+    [InlineData(GroupHooks)]
+    public async Task A_hook_that_landed_past_the_first_page_is_found_not_created_again(string hooksPath)
+    {
+        // GitLab answers a list 20 to a page unless asked for more. With more hooks than a page holds, a probe that reads
+        // one page cannot see the hook this create landed, and the retry creates a second one.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenConnectionDrops, HookJson);
+        SeedOtherRegistrationsHooks(hooks, 120);
+        _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, request => hooks.ListGitLabPage(request, _gitlab.BaseUrl));
+
+        var hook = await RegisterWebhookAsync(hooksPath);
+
+        var ours = hooks.Stored.Where(h => h.Text("url") == Registration.CallbackUrl).ToList();
+        ours.ShouldHaveSingleItem("a hook that landed past the first page must be found, not created again");
+        hook.ExternalId.ShouldBe(ours[0].Id.ToString());
+        _gitlab.Sent("POST", hooksPath).ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(ProjectHooks)]
+    [InlineData(GroupHooks)]
+    public async Task The_registrar_lookup_finds_a_hook_past_the_first_page(string hooksPath)
+    {
+        // The registrar's idempotency check reads the same list. A hook an earlier run created, past GitLab's first page,
+        // must be found — otherwise the next run creates a second one.
+        var hooks = new ForgeCollection(_ => AttemptOutcome.Lands, HookJson);
+        SeedOtherRegistrationsHooks(hooks, 120);
+        hooks.Seed(new { url = Registration.CallbackUrl });
+        _gitlab.Answer("GET", hooksPath, request => hooks.ListGitLabPage(request, _gitlab.BaseUrl));
+
+        var found = await FindWebhookAsync(hooksPath);
+
+        found.ShouldNotBeNull("the hook is on GitLab, one page further than an unpaged read looks").ExternalId.ShouldBe(hooks.Stored[^1].Id.ToString());
+    }
+
+    [Fact]
+    public async Task A_group_hooks_page_GitLab_refuses_fails_the_probe_rather_than_ending_the_list()
+    {
+        // The hook this create landed is on the second page, and GitLab refuses that page. A list cut short by a refusal
+        // is not the whole list: the call fails for the registrar's next run to look again — never a second hook.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenConnectionDrops, HookJson);
+        SeedOtherRegistrationsHooks(hooks, 120);
+        _gitlab.Answer("POST", GroupHooks, hooks.Create).Answer("GET", GroupHooks, request => ForgeQuery.Of(request)["page"] == "2" ? new StubReply(502, """{"message":"502 Bad Gateway"}""") : hooks.ListGitLabPage(request, _gitlab.BaseUrl));
+
+        var failure = await Record.ExceptionAsync(() => RegisterWebhookAsync(GroupHooks));
+
+        failure.ShouldNotBeNull("a refused page leaves the list unknown, not shorter");
+        hooks.Stored.Count(h => h.Text("url") == Registration.CallbackUrl).ShouldBe(1);
+        _gitlab.Sent("POST", GroupHooks).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_plan_refusal_on_the_group_probe_keeps_its_type()
+    {
+        // The create landed and its answer was lost, and GitLab refuses the retry's probe with 403. That refusal reaches the
+        // registrar as the plan refusal a first attempt reports, not re-labelled as a bare 403 that reads as a token problem.
+        var hooks = new ForgeCollection(WriteScenario.LandsThenConnectionDrops, HookJson);
+        _gitlab.Answer("POST", GroupHooks, hooks.Create).Answer("GET", GroupHooks, 403, """{"message":"403 Forbidden"}""");
+
+        var failure = await Record.ExceptionAsync(() => RegisterWebhookAsync(GroupHooks));
+
+        failure.ShouldBeOfType<ProviderPlanRequirementException>();
+        _gitlab.Sent("POST", GroupHooks).ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData("1", 1)]
+    [InlineData("2", 2)]
+    [InlineData("next", 1)]
+    public async Task The_group_list_stops_at_a_next_page_that_does_not_advance(string nextPageHeader, int expectedReads)
+    {
+        // Every page answers the same X-Next-Page — back to page 1, a page it already read, or not a page at all — the way
+        // a proxy or a GitLab bug could. A next page that does not advance is the last page, or the lookup never returns
+        // and the registrar's run wedges with it.
+        var hooks = new ForgeCollection(_ => AttemptOutcome.Lands, HookJson);
+        hooks.Seed(new { url = Registration.CallbackUrl });
+        _gitlab.Answer("GET", GroupHooks, request => hooks.ListGitLabPage(request, _gitlab.BaseUrl) with { Headers = new Dictionary<string, string> { ["X-Next-Page"] = nextPageHeader } });
+
+        var lookup = FindWebhookAsync(GroupHooks);
+        var finished = await Task.WhenAny(lookup, Task.Delay(TimeSpan.FromSeconds(10)));
+
+        finished.ShouldBeSameAs(lookup, $"the group hook list kept reading pages while X-Next-Page answered '{nextPageHeader}' — check that a next page must be later than the page just read");
+        (await lookup).ShouldNotBeNull().ExternalId.ShouldBe(hooks.Stored.Single().Id.ToString());
+        _gitlab.Sent("GET", GroupHooks).ShouldBe(expectedReads);
+    }
+
     // ── Loopback GitLab ──
 
     private static readonly RemoteRepository Repository = new()
@@ -259,6 +424,38 @@ public sealed class GitLabWriteRetryTests : IDisposable
         created_at = "2026-09-24T08:00:00.000Z",
         updated_at = "2026-09-24T08:00:00.000Z",
         web_url = $"https://gitlab.test/acme/api/-/merge_requests/{id}"
+    });
+
+    private const string ProjectHooks = "/api/v4/projects/4242/hooks";
+
+    private const string GroupHooks = "/api/v4/groups/acme%2Fplatform/hooks";
+
+    private static readonly WebhookRegistration Registration = new() { CallbackUrl = "https://codespace.test/api/webhooks/0f5e2c7a-9b1d-4e3f-8a6b-2c4d6e8f0a1b", Secret = "whsec-loopback", SubscribedEvents = new[] { "Push Hook", "Merge Request Hook" } };
+
+    /// <summary>The create the path names — a project hook or a group hook, the two GitLab takes twice at one URL.</summary>
+    private Task<RemoteWebhook> RegisterWebhookAsync(string hooksPath) => hooksPath == GroupHooks
+        ? Provider().RegisterConnectionWebhookAsync(Context(), "acme/platform", Registration, CancellationToken.None)
+        : Provider().RegisterWebhookAsync(Context(), Repository, Registration, CancellationToken.None);
+
+    private Task<RemoteWebhook?> FindWebhookAsync(string hooksPath) => hooksPath == GroupHooks
+        ? Provider().FindConnectionWebhookByCallbackUrlAsync(Context(), "acme/platform", Registration.CallbackUrl, CancellationToken.None)
+        : Provider().FindWebhookByCallbackUrlAsync(Context(), Repository, Registration.CallbackUrl, CancellationToken.None);
+
+    /// <summary>Hooks other registrations own, ahead of this one's in GitLab's list — more than one page, even GitLab's largest.</summary>
+    private static void SeedOtherRegistrationsHooks(ForgeCollection hooks, int count)
+    {
+        for (var i = 1; i <= count; i++) hooks.Seed(new { url = $"https://codespace.test/api/webhooks/other-registration-{i}" });
+    }
+
+    private static string HookJson(long id, JsonElement sent) => JsonSerializer.Serialize(new
+    {
+        id,
+        url = sent.GetProperty("url").GetString(),
+        push_events = true,
+        merge_requests_events = true,
+        issues_events = true,
+        enable_ssl_verification = true,
+        created_at = "2026-09-24T08:00:00.000Z"
     });
 
     /// <summary>Merge request !7. Each accept follows the <see cref="WriteScenario"/>; one that lands merges it, and GitLab answers an accept of an already-merged merge request with 405.</summary>

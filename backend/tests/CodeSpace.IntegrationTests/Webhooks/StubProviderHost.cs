@@ -89,6 +89,7 @@ internal sealed class StubProviderHost : IDisposable
         var payload = Encoding.UTF8.GetBytes(reply.Body);
         context.Response.StatusCode = reply.StatusCode;
         context.Response.ContentType = "application/json";
+        foreach (var (name, value) in reply.Headers) context.Response.Headers[name] = value;
         context.Response.ContentLength64 = payload.Length;
         await context.Response.OutputStream.WriteAsync(payload).ConfigureAwait(false);
         context.Response.Close();
@@ -163,6 +164,9 @@ internal sealed class StubProviderHost : IDisposable
         public static StubReply DropConnection { get; } = new(0, string.Empty);
 
         public bool DropsConnection => StatusCode == 0;
+
+        /// <summary>Headers the answer carries besides its content type — a provider's paging headers, for one.</summary>
+        public IReadOnlyDictionary<string, string> Headers { get; init; } = new Dictionary<string, string>();
     }
 
     private sealed record StubResponse(string Method, string PathFragment, Func<RecordedRequest, StubReply> Respond)
