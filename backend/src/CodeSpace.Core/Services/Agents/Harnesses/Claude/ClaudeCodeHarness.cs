@@ -198,7 +198,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         // settings.json) — without it, Claude ALSO loads the target repo's own project/local .claude settings, which
         // could carry an UNTRUSTED Stop hook of the repo's own. Widening this condition (not adding a second flag) keeps
         // the pin's rule uniform: whenever WE write settings into the isolated config home, that's the ONLY layer that loads.
-        if (task.Skills is { Count: > 0 } || InLoopAcceptanceHook.AppliesTo(task))
+        // Keyed on the oracle's SHAPE, not on whether the hook is wired: a read-only run carries no hook (its workspace
+        // is mounted read-only, see InLoopAcceptanceHook.AppliesTo) but must not start loading the repo's settings for it.
+        if (task.Skills is { Count: > 0 } || InLoopAcceptanceHook.HasRunnableOracle(task))
         {
             args.Add("--setting-sources");
             args.Add("user");

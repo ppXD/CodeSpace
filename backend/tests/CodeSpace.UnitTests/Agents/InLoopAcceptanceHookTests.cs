@@ -43,6 +43,19 @@ public class InLoopAcceptanceHookTests
         InLoopAcceptanceHook.AppliesTo(task).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData(AgentWriteScope.Workspace, true)]
+    [InlineData(AgentWriteScope.ReadOnly, false)]
+    public void AppliesTo_only_a_run_that_may_write_its_workspace(AgentWriteScope scope, bool expected)
+    {
+        // The hook runs the check inside the sandbox, where a read-only run's workspace is mounted read-only: a check
+        // that builds would fail with EROFS and tell the agent its tests fail when they do not.
+        var task = new AgentTask { Goal = "g", Harness = "claude-code", Model = "m", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" } }, Permissions = new AgentPermissions { WriteScope = scope } };
+
+        InLoopAcceptanceHook.AppliesTo(task).ShouldBe(expected);
+        InLoopAcceptanceHook.HasRunnableOracle(task).ShouldBeTrue("the oracle's shape does not depend on the write scope");
+    }
+
     // ── MaxBlocks — the Rule-8 operator escape hatch ──
 
     [Fact]

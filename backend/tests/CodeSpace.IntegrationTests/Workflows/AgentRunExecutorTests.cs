@@ -363,6 +363,27 @@ public partial class AgentRunExecutorTests
         launched.MaxCpuPercent.ShouldBe(400, "…and its committed cpu quota with it");
     }
 
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Confined, null, true)]
+    [InlineData(AgentAutonomyLevel.Standard, null, false)]
+    [InlineData(AgentAutonomyLevel.Standard, AgentWriteScope.ReadOnly, true)]
+    public async Task The_launch_hands_the_runner_the_run_s_write_scope(AgentAutonomyLevel autonomy, AgentWriteScope? writeScope, bool expectedReadOnly)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The WIRING pin: ApplyWriteScope's unit tests would still pass if HardenSpec stopped calling it, and a
+        // read-only run would then be bound writable again with nothing but the CLI's own mode between it and a write.
+        var teamId = await SeedTeamAsync();
+        var permissions = AgentAutonomyPolicy.Derive(autonomy);
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Permissions = writeScope is { } scope ? permissions with { WriteScope = scope } : permissions });
+        var runner = new SpecRecordingDurableRunner();
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'one\\n'"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
+
+        var launched = runner.Launched.ShouldNotBeNull("the executor must have launched — a null spec means it failed before reaching the runner");
+        launched.ReadOnlyWorkingDirectory.ShouldBe(expectedReadOnly, $"a {autonomy} run with write scope {writeScope?.ToString() ?? "from its tier"} must reach the runner {(expectedReadOnly ? "read-only" : "writable")}");
+    }
+
     [Fact]
     public async Task The_capture_promise_commits_with_the_run()
     {
@@ -1949,6 +1970,13 @@ public partial class AgentRunExecutorTests
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = model, TimeoutSeconds = timeoutSeconds, MaxCostUsd = maxCostUsd, BudgetSpentUsd = budgetSpentUsd },
             teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    private async Task<Guid> CreateTaskRunAsync(Guid teamId, AgentTask task)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 

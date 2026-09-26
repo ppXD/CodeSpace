@@ -34,9 +34,11 @@ namespace CodeSpace.SandboxTests;
 /// the finding: a Confined reviewer on a confining worker cannot reach its model today.</para>
 ///
 /// <para>What it found on Linux, pinned so that a fix has to flip it deliberately: Claude's plan mode reads the diff
-/// under our bubblewrap; Codex runs no command there at all, in read-only or workspace-write, because its own sandbox
-/// is a nested bubblewrap that cannot configure its network namespace's loopback once ours has dropped every
-/// capability. Unconfined (a dev host), Codex reads the diff like Claude.</para>
+/// under our bubblewrap, over a workspace the kernel mounts read-only; Codex runs no command there at all, in
+/// read-only or workspace-write, because its own sandbox is a nested bubblewrap that cannot configure its network
+/// namespace's loopback once ours has dropped every capability. Unconfined (a dev host), Codex reads the diff like
+/// Claude. A Confined reviewer that tries to write its workspace is refused whichever layer gets there first — the
+/// CLI's plan mode or the read-only mount — and the workspace is left exactly as it was.</para>
 ///
 /// <para>Armed by <see cref="RequireEnvVar"/> (the sandbox lane sets it after installing the pins, and then a missing
 /// or unpinned binary FAILS) or by a harness's own command override for a local run; otherwise it returns. Each arm
@@ -129,6 +131,8 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
 
         var run = await RunAsync(harness, task);
 
+        run.Spec.ReadOnlyWorkingDirectory.ShouldBeTrue("fixture check: a Confined reviewer must be launched over a read-only workspace, or this arm does not show git reads surviving the mount");
+
         run.Result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the {harnessKind} reviewer did not finish cleanly (exit {run.Result.ExitCode}); stderr: {Tail(run.Result.Stderr)}. Reproduce by hand from the argv: {string.Join(' ', run.Spec.Args)}");
 
         var fedBack = upstream.Requests.Where(r => r.Body.Contains($"MARKER-NEW-{repo.Nonce}", StringComparison.Ordinal) && r.Body.Contains($"MARKER-OLD-{repo.Nonce}", StringComparison.Ordinal)).ToList();
@@ -146,6 +150,42 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         (await GitAsync(repo.Directory, "rev-parse HEAD")).Trim().ShouldBe(repo.Head, "and on the head it was given");
 
         output.WriteLine($"{RanMarker} read-only-diff {harnessKind} confined={BubblewrapSandbox.Available is not null}");
+    }
+
+    [Fact]
+    public async Task A_confined_reviewer_cannot_write_its_workspace()
+    {
+        const string harnessKind = ClaudeCodeHarness.HarnessKind;
+        var harness = HarnessFor(harnessKind);
+
+        if (!Armed(harnessKind) || OperatingSystem.IsWindows()) return;
+
+        if (BubblewrapSandbox.Available is null)
+        {
+            // Unconfined, only the CLI's own mode stands between a Confined run and a write — the mount is the claim here.
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove what confinement does here");
+            return;
+        }
+
+        await RequirePinnedBinaryAsync(harness, harnessKind);
+
+        var repo = NewReviewRepository();
+        var upstream = new ScriptedModelUpstream([$"echo TAMPER-{repo.Nonce} > app.txt"], $"REVIEW-DONE-{repo.Nonce}");
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var brokered = await OpenLeaseAsync(broker);
+
+        var task = ReviewTask(harnessKind, repo, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined) with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered));
+
+        var run = await RunAsync(harness, task);
+
+        var fedBack = ToolOutputs(upstream.Requests);
+
+        fedBack.ShouldNotBe("(none)", $"fixture check: the CLI must have handed the write's outcome back to the model, or this says nothing about who refused it. Requests: {Describe(upstream.Requests)}; stderr: {Tail(run.Result.Stderr)}");
+        File.ReadAllText(Path.Combine(repo.Directory, "app.txt")).ShouldNotContain($"TAMPER-{repo.Nonce}", customMessage: $"a Confined reviewer wrote its workspace; what the CLI fed back: {Tail(fedBack, 600)}");
+        (await GitAsync(repo.Directory, "status --porcelain")).ShouldBeEmpty("the workspace is exactly as the reviewer found it");
+
+        var refusedBy = fedBack.Contains("Read-only file system", StringComparison.Ordinal) ? "read-only-mount" : "cli-permission-mode";
+        output.WriteLine($"{RanMarker} write-refused {harnessKind} by={refusedBy} fedBack={Tail(fedBack.ReplaceLineEndings(" "), 160)}");
     }
 
     [Theory]
@@ -242,9 +282,10 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         Environment = new Dictionary<string, string>(brokeredEnvironment) { ["HOME"] = NewDirectory("review-home") },
     };
 
+    /// <summary>Launch the task the way the executor does: the harness invocation with the run's write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
     private static async Task<ReviewRun> RunAsync(IAgentHarness harness, AgentTask task)
     {
-        var spec = harness.BuildInvocation(task);
+        var spec = AgentRunExecutor.ApplyWriteScope(harness.BuildInvocation(task), task.Permissions);
         var lines = new List<string>();
 
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds((task.TimeoutSeconds ?? 300) + 60));

@@ -140,7 +140,8 @@ public sealed class RubricReviseFanoutE2ETests
         {
             Seed = new TaskLaunchSeed { Goal = SeedGoal, SurfaceKind = "test", TeamId = teamId },
             Route = new RoutePlan { RecipeKind = TaskRecipeKinds.MapFanout, ProjectionKind = TaskProjectionKinds.PlanMapSynth, Caps = new RouteCaps() },
-            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Confined", RepositoryId = repoId, ReviseRounds = 1 },
+            // Standard, not Confined: the branch agents WRITE the file the revise round heals, and a Confined agent's workspace is mounted read-only wherever the sandbox confines.
+            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Standard", RepositoryId = repoId, ReviseRounds = 1 },
             PlannerModelRowId = plannerRowId,
         };
 

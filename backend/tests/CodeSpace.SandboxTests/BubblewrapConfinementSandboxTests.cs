@@ -69,6 +69,41 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
     }
 
     [Fact]
+    public async Task A_durable_read_only_launch_cannot_write_its_workspace_but_keeps_its_config_home()
+    {
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove confinement here");
+            return;
+        }
+
+        // The durable launch is the path every agent run takes; the read-only mount must hold there too, while the
+        // per-run config home — where the CLI keeps its session and settings — stays writable.
+        var workspace = TempDir();
+        await File.WriteAllTextAsync(Path.Combine(workspace, "code.txt"), "WORKSPACE-VISIBLE\n");
+
+        var spec = new SandboxSpec
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", "cat code.txt; printf probe > \"$CLAUDE_CONFIG_DIR/probe\" || exit 3; if { printf x > tamper.txt; } 2>/tmp/err; then exit 4; fi; cat /tmp/err" },
+            WorkingDirectory = workspace,
+            ReadOnlyWorkingDirectory = true,
+            ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" },
+            TimeoutSeconds = 30,
+        };
+
+        var handle = await LaunchAsync(spec);
+        var (result, lines) = await AttachCollectAsync(handle);
+        var output = string.Join("\n", lines);
+
+        result.Status.ShouldBe(SandboxStatus.Success, $"exit {result.ExitCode} (3: the config home was not writable; 4: the workspace was): {output} {result.Stderr}");
+        output.ShouldContain("WORKSPACE-VISIBLE", customMessage: "a read-only workspace is still readable");
+        output.ShouldContain("Read-only file system", customMessage: "the workspace write must fail as EROFS — the kernel's refusal");
+        File.Exists(Path.Combine(workspace, "tamper.txt")).ShouldBeFalse("nothing written inside may reach the host workspace");
+        File.ReadAllText(Path.Combine(handle.SpoolDirectory, "agent-home", "probe")).ShouldBe("probe", "the config home stays writable under a read-only workspace");
+    }
+
+    [Fact]
     public async Task Bubblewrap_severs_egress_when_network_is_disallowed()
     {
         if (BubblewrapSandbox.Available is null)

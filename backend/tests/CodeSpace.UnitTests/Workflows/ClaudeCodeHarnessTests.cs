@@ -138,6 +138,21 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void A_read_only_acceptance_bearing_task_keeps_the_pin_though_it_gets_no_hook()
+    {
+        // A read-only run carries no Stop hook — its workspace is mounted read-only, so the check could only fail with
+        // EROFS — but it must not start loading the target repo's own .claude settings for that: an untrusted repo
+        // hook in a read-only reviewer is the exact input vector the pin exists to close.
+        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, Permissions = new AgentPermissions { WriteScope = AgentWriteScope.ReadOnly } };
+
+        var spec = Harness.BuildInvocation(task);
+        var args = spec.Args.ToList();
+
+        spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath, "no hook for a run that cannot act on its check");
+        args[args.IndexOf("--setting-sources") + 1].ShouldBe("user", "but the settings pin stays");
+    }
+
+    [Fact]
     public void A_task_with_neither_skills_nor_acceptance_gets_no_hook_files_and_no_setting_sources_pin()
     {
         var spec = Harness.BuildInvocation(Task() with { Acceptance = null });

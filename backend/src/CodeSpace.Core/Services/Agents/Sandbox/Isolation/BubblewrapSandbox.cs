@@ -10,7 +10,8 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// fresh mount / pid / ipc / uts / user / cgroup namespace over a READ-ONLY minimal root (the standard system dirs
 /// in <see cref="ReadOnlyRootDirs"/>), with EVERY Linux capability dropped (<c>--cap-drop ALL</c>), a fresh
 /// <c>/proc</c> + <c>/dev</c> + a tmpfs <c>/tmp</c>, and the ONLY writable host paths being THIS run's workspace +
-/// config-home. So a prompt-injected or malicious agent cannot read the operator's <c>~/.ssh</c> / <c>~/.aws</c> /
+/// config-home — the workspace only when the run may write it, since a read-only run's is mounted read-only. So a
+/// prompt-injected or malicious agent cannot read the operator's <c>~/.ssh</c> / <c>~/.aws</c> /
 /// <c>~/.config/gh</c>, cannot see other runs' clones or spools, cannot write outside its workspace, and cannot
 /// wield any capability — closing the audit's critical filesystem gaps.
 ///
@@ -97,9 +98,10 @@ public static class BubblewrapSandbox
 
     /// <summary>
     /// Build the bwrap argument vector that confines <paramref name="plan"/>'s command: a read-only minimal root,
-    /// fresh proc/dev/tmpfs-tmp, the plan's writable paths rw-bound at their real paths, HOME redirected into the
-    /// sandbox, chdir'd into the working directory, then <c>-- command args…</c>. PURE (no process, no probe) so it
-    /// is unit-testable on any OS; the caller prepends <see cref="Available"/> as the executable.
+    /// fresh proc/dev/tmpfs-tmp, the plan's writable paths rw-bound at their real paths, the working directory
+    /// re-mounted read-only when the plan says so, HOME redirected into the sandbox, chdir'd into the working
+    /// directory, then <c>-- command args…</c>. PURE (no process, no probe) so it is unit-testable on any OS; the
+    /// caller prepends <see cref="Available"/> as the executable.
     /// </summary>
     public static IReadOnlyList<string> BuildArgs(BwrapPlan plan)
     {
@@ -150,14 +152,25 @@ public static class BubblewrapSandbox
             args.Add(dir);
         }
 
-        // The ONLY writable host paths: this run's workspace + config-home, bound at their real paths so absolute
-        // refs (CLAUDE_CONFIG_DIR, the workspace) still resolve. Applied AFTER --tmpfs /tmp so a path under /tmp
-        // re-surfaces the real dir over the tmpfs.
+        // The ONLY writable host paths: this run's config-home and, when it may write it, its workspace, bound at
+        // their real paths so absolute refs (CLAUDE_CONFIG_DIR, the workspace) still resolve. Applied AFTER --tmpfs
+        // /tmp so a path under /tmp re-surfaces the real dir over the tmpfs.
         foreach (var path in DistinctNonEmpty(plan.WritablePaths))
         {
             args.Add("--bind");
             args.Add(path);
             args.Add(path);
+        }
+
+        // A run that may only read its workspace gets it mounted read-only, so a write there fails with EROFS whatever
+        // the CLI's own permission mode let through. After every --bind, because bwrap applies mounts in order: a
+        // writable path at or under the workspace is covered by this one rather than reopening it. A HARD bind, not
+        // -try, so a missing workspace fails the launch exactly as its writable bind would.
+        if (plan.WorkingDirectoryReadOnly && !string.IsNullOrEmpty(plan.WorkingDirectory))
+        {
+            args.Add("--ro-bind");
+            args.Add(plan.WorkingDirectory);
+            args.Add(plan.WorkingDirectory);
         }
 
         // HOME must point somewhere bound + writable inside the sandbox (the operator's real home is NOT bound), so
@@ -247,13 +260,16 @@ public sealed record BwrapPlan
 
     public IReadOnlyList<string> Args { get; init; } = Array.Empty<string>();
 
-    /// <summary>Directory the sandboxed command starts in (bound writable via <see cref="WritablePaths"/>).</summary>
+    /// <summary>Directory the sandboxed command starts in — bound writable via <see cref="WritablePaths"/>, or read-only when <see cref="WorkingDirectoryReadOnly"/>.</summary>
     public string? WorkingDirectory { get; init; }
+
+    /// <summary>Whether <see cref="WorkingDirectory"/> is mounted READ-ONLY, over any writable bind of it — a run whose write scope is read-only. <c>false</c> (the default) → the argv is exactly what it was without the flag.</summary>
+    public bool WorkingDirectoryReadOnly { get; init; }
 
     /// <summary>Value for the sandbox's HOME — a bound, writable path (the per-run config-home); <c>/tmp</c> when null.</summary>
     public string? HomeDir { get; init; }
 
-    /// <summary>Host paths bound READ-WRITE into the sandbox (this run's workspace + config-home) — the only writable host paths.</summary>
+    /// <summary>Host paths bound READ-WRITE into the sandbox (this run's config-home, and its workspace unless that is read-only) — the only writable host paths.</summary>
     public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
 
     /// <summary>Host dirs bound READ-ONLY (<c>--ro-bind-try</c>) so a needed binary stays reachable at its absolute path — the <c>codespace-mcp</c> proxy's dir. Init-only, defaulted empty → non-breaking.</summary>

@@ -29,6 +29,19 @@ public sealed record SandboxSpec
     /// <summary>Working directory for the command. <c>null</c> → the runner's default (current directory for the local runner).</summary>
     public string? WorkingDirectory { get; init; }
 
+    /// <summary>
+    /// Whether the command may only READ its <see cref="WorkingDirectory"/>. <c>true</c> → a confining runner mounts the
+    /// working directory read-only, so a write there fails with <c>EROFS</c> whatever the CLI's own permission mode
+    /// allowed; <c>false</c> (the default) → it is bound read-write. Set, for an agent run, from the run's write scope
+    /// by <c>AgentRunExecutor.ApplyWriteScope</c>. Enforced only by a sandboxing runner; a bare-process runner cannot
+    /// honour it.
+    ///
+    /// <para>Omitted from the JSON while false, so a spec that never sets it serializes, and hashes, exactly as it did
+    /// before the field existed.</para>
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ReadOnlyWorkingDirectory { get; init; }
+
     /// <summary>Exact host paths made readable by the server preparing this invocation. These are read-only mounts, never inferred from command arguments, and cannot be supplied through a serialized task. This in-process capability is not an OS principal boundary.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<string> ReadOnlyPaths { get; init; } = Array.Empty<string>();

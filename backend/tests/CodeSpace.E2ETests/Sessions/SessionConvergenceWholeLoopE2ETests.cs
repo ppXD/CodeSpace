@@ -147,10 +147,11 @@ public sealed class SessionConvergenceWholeLoopE2ETests
     /// <summary>Launch a FRESH turn (opens a new session), run it to completion, assert success, and return its produced branch + the session it opened.</summary>
     private async Task<(string Branch, Guid SessionId)> RunFreshTurnAsync(Guid teamId, Guid userId, Guid repoId, string goal)
     {
+        // Standard, not Confined: each turn WRITES a feature for the next to build on, and a Confined agent's workspace is mounted read-only wherever the sandbox confines.
         var result = await LaunchAsync(new TaskLaunchRequest
         {
             TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
-            TaskText = goal, RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
+            TaskText = goal, RepositoryId = repoId, RequestedEffort = TaskEffortModes.Quick, Autonomy = "Standard",
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
         });
 
@@ -181,7 +182,7 @@ public sealed class SessionConvergenceWholeLoopE2ETests
     {
         TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
         TaskText = text, ContinueSessionId = sessionId, RepositoryId = repoId,
-        RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
+        RequestedEffort = TaskEffortModes.Quick, Autonomy = "Standard",   // Standard for the same reason as the fresh turn: the continuation writes
         Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
     };
 
