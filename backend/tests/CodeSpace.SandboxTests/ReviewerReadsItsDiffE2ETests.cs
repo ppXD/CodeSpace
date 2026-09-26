@@ -76,7 +76,7 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
 
         var fedBack = upstream.Requests.Where(r => r.Body.Contains($"MARKER-NEW-{repo.Nonce}", StringComparison.Ordinal) && r.Body.Contains($"MARKER-OLD-{repo.Nonce}", StringComparison.Ordinal)).ToList();
 
-        fedBack.ShouldNotBeEmpty(customMessage: $"the model never received the diff: the {harnessKind} read-only mode did not run `git diff`, or ran it without output. Requests the model saw: {Describe(upstream.Requests)}. stdout tail: {Tail(string.Join('\n', run.Lines))}");
+        fedBack.ShouldNotBeEmpty(customMessage: $"the model never received the diff: the {harnessKind} read-only mode did not run `git diff`, or ran it without output. What the CLI fed back as the tool's result: {Tail(ToolOutputs(upstream.Requests), 1500)}. Requests the model saw: {Describe(upstream.Requests)}. stdout tail: {Tail(string.Join('\n', run.Lines))}. stderr tail: {Tail(run.Result.Stderr)}");
 
         AssertTheStreamCarriesTheDiff(harness, harnessKind, run.Lines, repo);
 
@@ -293,6 +293,23 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         {
             return null;
         }
+    }
+
+    /// <summary>Every tool result the CLI handed back to the model — a Claude <c>tool_result</c> block or a Codex <c>function_call_output</c> item — which is what a failed command looks like from the model's side.</summary>
+    private static string ToolOutputs(IReadOnlyList<RecordedRequest> requests)
+    {
+        var outputs = new List<string>();
+
+        foreach (var body in requests.Select(r => TryParse(r.Body)).OfType<JsonElement>())
+        {
+            if (body.TryGetProperty("input", out var input) && input.ValueKind == JsonValueKind.Array)
+                outputs.AddRange(input.EnumerateArray().Where(item => item.TryGetProperty("type", out var type) && type.GetString() == "function_call_output" && item.TryGetProperty("output", out _)).Select(item => item.GetProperty("output").ToString()));
+
+            if (body.TryGetProperty("messages", out var messages) && messages.ValueKind == JsonValueKind.Array)
+                outputs.AddRange(messages.EnumerateArray().Where(message => message.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array).SelectMany(message => message.GetProperty("content").EnumerateArray()).Where(block => block.TryGetProperty("type", out var type) && type.GetString() == "tool_result").Select(block => block.TryGetProperty("content", out var content) ? content.ToString() : ""));
+        }
+
+        return outputs.Count == 0 ? "(none)" : outputs.Distinct().Last();
     }
 
     private static string Describe(IReadOnlyList<RecordedRequest> requests) => requests.Count == 0 ? "(none)" : string.Join("; ", requests.Select(r => $"{r.Method} {r.Path} ({r.Body.Length} chars)"));
