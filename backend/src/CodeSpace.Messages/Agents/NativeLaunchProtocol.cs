@@ -50,6 +50,7 @@ public static class NativeLaunchProtocol
             EgressAllowlist = spec.EgressAllowlist is null ? null : Copy(spec.EgressAllowlist), McpDeclarationArgs = Copy(spec.McpDeclarationArgs),
             ConfigHomeFiles = spec.ConfigHomeFiles.Select(file => file with { }).ToArray(), Mcp = spec.Mcp is null ? null : spec.Mcp with { },
             CaptureBudget = spec.CaptureBudget is null ? null : spec.CaptureBudget with { },
+            WhenRunnerConfines = spec.WhenRunnerConfines is null ? null : new ArgsSubstitution { Replace = Copy(spec.WhenRunnerConfines.Replace), With = Copy(spec.WhenRunnerConfines.With) },
         };
     }
 

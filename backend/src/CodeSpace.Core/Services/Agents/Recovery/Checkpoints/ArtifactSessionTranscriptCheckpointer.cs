@@ -63,8 +63,10 @@ public sealed class ArtifactSessionTranscriptCheckpointer : IAgentSessionTranscr
         {
             // ONE open, shared with the writing CLI (and with a delete, so a rotating harness cannot wedge this).
             // Everything below reads THIS handle — the path is never resolved a second time, which is what closes the
-            // check-then-read window the clamp alone leaves open on a live config home.
-            using var stream = new FileStream(request.TranscriptPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            // check-then-read window the clamp alone leaves open on a live config home. Non-blocking and refused
+            // unless it is a regular file: the agent is still running with write access here, and a FIFO swapped in
+            // would otherwise block this open — and pin its thread — until a writer appears.
+            using var stream = AgentRunExecutor.OpenAgentWrittenFile(request.TranscriptPath);
 
             if (!OpenedTheResolvedFile(stream, request.TranscriptPath))
             {

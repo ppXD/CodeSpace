@@ -159,7 +159,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         // task.Tools is intentionally NOT projected here: Codex has no global tool allow-list (it restricts via
         // --sandbox + per-MCP-server enabled_tools), so a Claude-Code-style tool list has no faithful Codex flag.
         // The list rides along in the task for harnesses that enforce it (Claude Code → --allowed-tools); Codex
-        // bounds the agent through the sandbox mode below instead.
+        // bounds the agent through the sandbox mode below instead — or, where our runner confines it, through ours.
 
         // Omit --model when blank so Codex picks its own default (the Model=empty rule). Passing an empty
         // string would emit `--model ""`, which Codex rejects.
@@ -210,6 +210,9 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
             ConfigHomeFiles = BuildConfigHomeFiles(task),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
+            // Codex's own sandbox is a nested bubblewrap that cannot start inside ours, so where our runner confines
+            // the run it stands that sandbox down and ours bounds every command instead (see SandboxStandDown).
+            WhenRunnerConfines = SandboxStandDown(task),
         };
     }
 
@@ -569,6 +572,17 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     public string ResolveCommand() =>
         System.Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } path ? path : DefaultCommand;
 
+    /// <summary>
+    /// The mode Codex's own sandbox is given where OUR runner confines the run. Codex's sandbox is a bubblewrap of its
+    /// own, and inside ours — which has dropped every capability — it cannot configure its network namespace's
+    /// loopback ("bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"), so every command fails in read-only
+    /// and workspace-write alike. Full access stands it down and leaves ours as the boundary: a read-only minimal root,
+    /// a workspace the kernel mounts read-only for a read-only run, and the run's own network posture. Never chosen
+    /// where the runner does not confine — there Codex keeps <see cref="SandboxMode"/>. Pinned by a test; a committed
+    /// value that moves by PR.
+    /// </summary>
+    public const string ConfinedSandboxMode = "danger-full-access";
+
     private static string SandboxMode(AgentPermissions permissions) =>
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "read-only" : "workspace-write";
 
@@ -579,20 +593,15 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// argument", exit 2, verified against the pinned codex 0.142.2). <c>-c</c> is accepted on both, and
     /// <c>sandbox_mode</c> is the recognized config key the flag maps to, so a resumed run keeps the same confinement.
     /// </summary>
-    private static void AppendSandbox(List<string> args, AgentTask task)
-    {
-        var mode = SandboxMode(task.Permissions);
+    private static void AppendSandbox(List<string> args, AgentTask task) => args.AddRange(SandboxFragment(task, SandboxMode(task.Permissions)));
 
-        if (task.ResumeFromSessionId is { Length: > 0 })
-        {
-            args.Add("-c");
-            args.Add($"sandbox_mode={mode}");
-            return;
-        }
+    /// <summary>The argv that gives Codex's sandbox <paramref name="mode"/>, spelled the way this invocation's subcommand accepts it (see <see cref="AppendSandbox"/>).</summary>
+    private static string[] SandboxFragment(AgentTask task, string mode) =>
+        task.ResumeFromSessionId is { Length: > 0 } ? new[] { "-c", $"sandbox_mode={mode}" } : new[] { "--sandbox", mode };
 
-        args.Add("--sandbox");
-        args.Add(mode);
-    }
+    /// <summary>What the runner swaps the sandbox fragment for where it confines the run: the same spelling, carrying <see cref="ConfinedSandboxMode"/>.</summary>
+    private static ArgsSubstitution SandboxStandDown(AgentTask task) =>
+        new() { Replace = SandboxFragment(task, SandboxMode(task.Permissions)), With = SandboxFragment(task, ConfinedSandboxMode) };
 
     private static JsonDocument? TryParse(string s)
     {

@@ -35,6 +35,24 @@ public sealed partial class NativeLaunchRegistryTests
     }
 
     [Fact]
+    public void A_sandbox_stand_down_binds_the_launch_and_is_frozen_with_it()
+    {
+        var replace = new[] { "--sandbox", "read-only" };
+        var with = new[] { "--sandbox", "danger-full-access" };
+        var plain = NativeLaunchProtocol.Freeze(new SandboxSpec { Command = "/bin/sh", Args = replace });
+        var frozen = NativeLaunchProtocol.Freeze(plain with { WhenRunnerConfines = new ArgsSubstitution { Replace = replace, With = with } });
+        var hash = NativeLaunchProtocol.SpecHash(frozen);
+
+        hash.ShouldNotBe(NativeLaunchProtocol.SpecHash(plain), "a launch that may stand the CLI's own sandbox down is a different execution from one that may not");
+
+        replace[1] = "workspace-write"; with[1] = "read-only";
+        NativeLaunchProtocol.SpecHash(frozen).ShouldBe(hash, "the frozen stand-down must not follow later edits to the lists it was built from");
+        frozen.WhenRunnerConfines!.With.ShouldBe(new[] { "--sandbox", "danger-full-access" });
+
+        JsonSerializer.Serialize(plain, NativeLaunchProtocol.Json).ShouldNotContain("whenRunnerConfines", customMessage: "a spec without one must serialize, and hash, exactly as it did before the field existed");
+    }
+
+    [Fact]
     public void A_read_only_working_directory_binds_the_launch_and_a_spec_without_one_serializes_as_before()
     {
         var spec = NativeLaunchProtocol.Freeze(new SandboxSpec { Command = "/bin/sh", WorkingDirectory = "/work/ws" });
