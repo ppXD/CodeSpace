@@ -54,7 +54,7 @@ jobs:
   isolation:
     name: bubblewrap + prlimit confinement (fail-closed)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     container:
       image: mcr.microsoft.com/dotnet/sdk:10.0
@@ -82,6 +82,37 @@ jobs:
           echo "python3: $(python3 --version)"
           echo "git: $(git --version)"
           echo "cgroup: $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo 'no cgroup-v2 controllers visible')"
+
+      - name: Install the pinned harness CLIs (claude + codex)
+        # The reviewer E2E (ReviewerReadsItsDiffE2ETests) asks what each CLI's OWN read-only mode permits inside this
+        # confinement, which only the real binaries can answer. Installed the way the worker image installs them —
+        # Node 22 on /usr, where bubblewrap's read-only root can see it (a tool-cache node under /__t would be invisible
+        # inside the sandbox) — and at the versions backend/Dockerfile.worker pins, read from that file so the two
+        # cannot drift. Fatal with one retry: a missing CLI must fail here, never skip the arms it would have run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version="$(sed -n 's/^ARG CODEX_CLI_VERSION=//p' backend/Dockerfile.worker)"
+          claude_version="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' backend/Dockerfile.worker)"
+          test -n "$codex_version" && test -n "$claude_version" || { echo "::error::could not read the CLI pins from backend/Dockerfile.worker"; exit 1; }
+
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y --no-install-recommends nodejs
+          echo "node: $(node --version)"
+
+          install() { npm install --engine-strict -g "@openai/codex@${codex_version}" "@anthropic-ai/claude-code@${claude_version}"; }
+          install || { echo "npm install failed once; retrying"; sleep 15; install; }
+
+          echo "codex: $(codex --version)"
+          echo "claude: $(claude --version)"
+          codex --version | grep -F "$codex_version"
+          claude --version | grep -F "$claude_version"
+
+          {
+            echo "CODESPACE_CODEX_CLI_PATH=$(command -v codex)"
+            echo "CODESPACE_CLAUDE_CODE_PATH=$(command -v claude)"
+            echo "CODESPACE_REQUIRE_REVIEW_CLIS=1"
+          } >> "$GITHUB_ENV"
 
       - name: Probe — unprivileged user namespaces (informational)
         # Informational only: the authoritative gate is the test step below (REQUIRE_SANDBOX=1 → hard
@@ -193,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 47 ]; then
-            echo "::error::Expected >=47 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 51 ]; then
+            echo "::error::Expected >=51 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only reviewer reading its diff with the real CLIs), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -213,6 +244,17 @@ jobs:
           for method in methods:
               cases = [r for r in results if 'CommandIsolationE2ETests.' + method + '(' in r.get('testName', '')]
               assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both batch and stream must pass, skips are not evidence'
+
+          # The reviewer E2E returns early when it is not armed, and an early return reads as Passed — so a passing
+          # outcome is not evidence it ran. Each arm prints a marker when it really did; require all four.
+          text = open('backend/TestResults/sandbox.trx', encoding='utf-8').read()
+          for arm in ('read-only-diff claude-code', 'read-only-diff codex-cli', 'network-off claude-code', 'network-off codex-cli'):
+              assert f'[review-diff-e2e] ran {arm}' in text, f'reviewer E2E arm "{arm}" did not run — check CODESPACE_REQUIRE_REVIEW_CLIS and the CLI install step'
+          for method in ('A_read_only_reviewer_reads_the_diff_between_two_commits_with_git', 'A_network_off_reviewer_under_confinement_cannot_reach_its_model'):
+              cases = [r for r in results if 'ReviewerReadsItsDiffE2ETests.' + method + '(' in r.get('testName', '')]
+              assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both harnesses must pass'
+          print('All 4 reviewer E2E arms ran and passed.')
+
           print('All 8 batch/stream kernel cases passed.')
           PY
 
