@@ -224,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 53 ]; then
-            echo "::error::Expected >=53 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only reviewer reading its diff with the real CLIs), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 57 ]; then
+            echo "::error::Expected >=57 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a read-only reviewer reading its diff with the real CLIs), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -237,6 +237,7 @@ jobs:
           results = root.findall('.//{*}UnitTestResult')
           methods = (
               'Commands_can_write_their_workspace_but_cannot_read_other_workspaces_or_write_system_roots',
+              'Commands_given_a_read_only_workspace_can_read_and_git_diff_it_but_cannot_write_it',
               'Network_denial_blocks_a_real_host_listener_and_explicit_network_access_can_reach_it',
               'File_size_caps_reach_the_real_command',
               'Memory_caps_are_enforced_classified_from_the_kernel_and_reclaimed',
@@ -246,16 +247,16 @@ jobs:
               assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: both batch and stream must pass, skips are not evidence'
 
           # The reviewer E2E returns early when it is not armed, and an early return reads as Passed — so a passing
-          # outcome is not evidence it ran. Each arm prints a marker when it really did; require all four.
+          # outcome is not evidence it ran. Each arm prints a marker when it really did; require every one.
           text = open('backend/TestResults/sandbox.trx', encoding='utf-8').read()
-          for arm in ('read-only-diff claude-code', 'codex-nested-sandbox read-only', 'codex-nested-sandbox workspace-write', 'network-off claude-code', 'network-off codex-cli'):
+          for arm in ('read-only-diff claude-code', 'write-refused claude-code', 'codex-nested-sandbox read-only', 'codex-nested-sandbox workspace-write', 'network-off claude-code', 'network-off codex-cli'):
               assert f'[review-diff-e2e] ran {arm}' in text, f'reviewer E2E arm "{arm}" did not run — check CODESPACE_REQUIRE_REVIEW_CLIS and the CLI install step'
-          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('Codex_cannot_run_a_command_in_its_own_sandbox_nested_inside_ours', 2), ('A_network_off_reviewer_under_confinement_cannot_reach_its_model', 2)):
+          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('A_confined_reviewer_cannot_write_its_workspace', 1), ('Codex_cannot_run_a_command_in_its_own_sandbox_nested_inside_ours', 2), ('A_network_off_reviewer_under_confinement_cannot_reach_its_model', 2)):
               cases = [r for r in results if 'ReviewerReadsItsDiffE2ETests.' + method in r.get('testName', '')]
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
-          print('All 5 reviewer E2E arms ran and passed.')
+          print('All 6 reviewer E2E arms ran and passed.')
 
-          print('All 8 batch/stream kernel cases passed.')
+          print('All 10 batch/stream kernel cases passed.')
           PY
 
       - name: Assert every Git workspace confinement path passed

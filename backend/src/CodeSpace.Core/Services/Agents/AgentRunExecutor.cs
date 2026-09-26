@@ -4020,9 +4020,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return spec with { MaxMemoryMb = ceilings.MemoryMb, MaxCpuPercent = ceilings.CpuPercent };
     }
 
-    /// <summary>The harness invocation with BOTH of the executor's own spec post-processings applied — the egress posture and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
+    /// <summary>
+    /// Stamp the run's write scope onto the sandbox spec, so a confining runner mounts a read-only run's workspace
+    /// read-only rather than trusting the CLI's own permission mode to refuse the write — Claude Code's plan mode hands
+    /// a non-static shell command to its auto-mode classifier rather than refusing it. Only
+    /// <see cref="AgentWriteScope.Workspace"/> may write: a scope this code does not know reads as read-only, so an
+    /// added value fails closed until someone decides what it grants.
+    /// </summary>
+    internal static SandboxSpec ApplyWriteScope(SandboxSpec spec, AgentPermissions permissions) =>
+        spec with { ReadOnlyWorkingDirectory = permissions.WriteScope != AgentWriteScope.Workspace };
+
+    /// <summary>The harness invocation with every one of the executor's own spec post-processings applied — the egress posture, the write scope and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
     private static SandboxSpec HardenSpec(SandboxSpec spec, AgentTask task, string? modelBaseUrl, string? modelProvider, WorkspaceProvisionRequest? workspace) =>
-        ApplyResourceCeilings(ApplyEgressPolicy(spec, task.Permissions, modelBaseUrl, modelProvider, workspace), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
+        ApplyResourceCeilings(ApplyWriteScope(ApplyEgressPolicy(spec, task.Permissions, modelBaseUrl, modelProvider, workspace), task.Permissions), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
 
     /// <summary>The git clone URLs of every repo in the run's workspace provision (empty for a no-repo run) — the source of the allowlist's git hosts.</summary>
     private static IReadOnlyList<string> CloneUrlsOf(WorkspaceProvisionRequest? workspace) =>

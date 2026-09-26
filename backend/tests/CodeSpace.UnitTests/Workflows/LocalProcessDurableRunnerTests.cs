@@ -708,6 +708,26 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         uncapped.Environment["CSP_MAX_BYTES"].ShouldBe("0", "0 = unlimited keeps the unbounded copier — byte-identical to before the cap existed");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_read_only_spec_keeps_its_workspace_out_of_the_writable_binds_and_the_config_home_in(bool readOnly)
+    {
+        var spec = new SandboxSpec { Command = "/bin/sh", WorkingDirectory = "/work/ws", ReadOnlyWorkingDirectory = readOnly };
+
+        var plan = LocalProcessRunner.PlanFor(spec, spec.Args, "/spool/agent-home", Array.Empty<string>());
+
+        plan.WorkingDirectoryReadOnly.ShouldBe(readOnly);
+        plan.WritablePaths.Contains("/work/ws").ShouldBe(!readOnly, "a read-only run's workspace is never offered as a writable path");
+        plan.WritablePaths.ShouldContain("/spool/agent-home", customMessage: "the config home stays writable whatever the workspace is");
+        plan.WorkingDirectory.ShouldBe("/work/ws", "the command still starts in its workspace");
+
+        var argv = BubblewrapSandbox.BuildArgs(plan).ToList();
+        var boundAs = Enumerable.Range(0, argv.Count - 2).Where(i => argv[i + 1] == "/work/ws" && argv[i + 2] == "/work/ws").Select(i => argv[i]).ToList();
+
+        string.Join(" ", boundAs).ShouldBe(readOnly ? "--ro-bind" : "--bind", "the workspace is mounted exactly once, and only as the spec allows");
+    }
+
     [Fact]
     public void Supervisor_script_bounds_the_copiers_without_leaking_the_budget_to_the_child()
     {

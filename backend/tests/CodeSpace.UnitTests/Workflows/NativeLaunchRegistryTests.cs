@@ -35,6 +35,17 @@ public sealed partial class NativeLaunchRegistryTests
     }
 
     [Fact]
+    public void A_read_only_working_directory_binds_the_launch_and_a_spec_without_one_serializes_as_before()
+    {
+        var spec = NativeLaunchProtocol.Freeze(new SandboxSpec { Command = "/bin/sh", WorkingDirectory = "/work/ws" });
+
+        NativeLaunchProtocol.SpecHash(spec with { ReadOnlyWorkingDirectory = true }).ShouldNotBe(NativeLaunchProtocol.SpecHash(spec), "a launch that may only read its workspace is a different execution from one that may write it");
+
+        JsonSerializer.Serialize(spec, NativeLaunchProtocol.Json).ShouldNotContain("readOnlyWorkingDirectory", customMessage: "a spec that never sets the flag must serialize, and hash, exactly as it did before the field existed");
+        JsonSerializer.Deserialize<SandboxSpec>(JsonSerializer.Serialize(spec with { ReadOnlyWorkingDirectory = true }, NativeLaunchProtocol.Json), NativeLaunchProtocol.Json)!.ReadOnlyWorkingDirectory.ShouldBeTrue("the runner host rebuilds the spec from the request, so the flag has to survive the trip");
+    }
+
+    [Fact]
     public async Task Concurrent_real_OS_observers_share_one_physical_execution_and_the_same_receipt()
     {
         await using var fixture = new Fixture();

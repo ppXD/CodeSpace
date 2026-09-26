@@ -101,6 +101,31 @@ public sealed class BubblewrapSandboxTests
     }
 
     [Fact]
+    public void A_read_only_working_directory_is_mounted_read_only_after_every_writable_bind()
+    {
+        // Even a caller that still lists the workspace as writable cannot reopen it: the read-only mount lands after
+        // every --bind, and bwrap applies mounts in order, so the later one wins.
+        var a = BubblewrapSandbox.BuildArgs(Plan() with { WorkingDirectoryReadOnly = true }).ToList();
+
+        Triple(a, "--ro-bind", "/work/ws", "/work/ws").ShouldBeTrue("a read-only run's workspace is mounted read-only with a HARD bind — a missing workspace must fail the launch, not vanish");
+        Triple(a, "--bind", "/spool/agent-home", "/spool/agent-home").ShouldBeTrue("the config home stays writable — the CLI's own session and settings live there");
+
+        var readOnlyAt = IndexOfTriple(a, "--ro-bind", "/work/ws", "/work/ws");
+        readOnlyAt.ShouldBeGreaterThan(IndexOfTriple(a, "--bind", "/work/ws", "/work/ws"), "the read-only mount must come after the writable one, or the writable one wins");
+        readOnlyAt.ShouldBeGreaterThan(IndexOfTriple(a, "--bind", "/spool/agent-home", "/spool/agent-home"));
+        readOnlyAt.ShouldBeGreaterThan(a.IndexOf("--tmpfs"), "the workspace lives under /tmp, so its mount must land after the private /tmp or the tmpfs hides it");
+        Adjacent(a, "--chdir", "/work/ws").ShouldBeTrue("the command still starts in its workspace");
+    }
+
+    [Fact]
+    public void A_writable_working_directory_builds_exactly_the_argv_it_always_did() =>
+        BubblewrapSandbox.BuildArgs(Plan() with { WorkingDirectoryReadOnly = false }).ShouldBe(BubblewrapSandbox.BuildArgs(Plan()), "the flag off must add nothing");
+
+    [Fact]
+    public void A_read_only_plan_without_a_working_directory_mounts_nothing_read_only() =>
+        BubblewrapSandbox.BuildArgs(Plan(wd: null) with { WorkingDirectoryReadOnly = true }).ShouldNotContain("--ro-bind", customMessage: "there is no workspace to protect — and a hard bind of an empty path would kill the launch");
+
+    [Fact]
     public void Defaults_HOME_to_tmp_when_no_config_home_is_supplied() =>
         Triple(BubblewrapSandbox.BuildArgs(Plan(home: null)), "--setenv", "HOME", "/tmp")
             .ShouldBeTrue("with no config-home, HOME points at the writable tmpfs so ~-relative reads still miss operator dotfiles");
@@ -183,10 +208,12 @@ public sealed class BubblewrapSandboxTests
         return false;
     }
 
-    private static bool Triple(IReadOnlyList<string> a, string flag, string v1, string v2)
+    private static bool Triple(IReadOnlyList<string> a, string flag, string v1, string v2) => IndexOfTriple(a, flag, v1, v2) >= 0;
+
+    private static int IndexOfTriple(IReadOnlyList<string> a, string flag, string v1, string v2)
     {
         for (var i = 0; i + 2 < a.Count; i++)
-            if (a[i] == flag && a[i + 1] == v1 && a[i + 2] == v2) return true;
-        return false;
+            if (a[i] == flag && a[i + 1] == v1 && a[i + 2] == v2) return i;
+        return -1;
     }
 }

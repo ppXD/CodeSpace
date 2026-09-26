@@ -964,9 +964,9 @@ public sealed partial class LocalProcessRunner
 
     /// <summary>
     /// Append the agent command as the supervisor's <c>"$@"</c>: rewritten as a bubblewrap invocation
-    /// (filesystem + namespace confinement, the ONLY writable host paths being the workspace + config-home) when
-    /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
-    /// host without <c>bwrap</c>, or one that denies unprivileged user namespaces.
+    /// (filesystem + namespace confinement, see <see cref="PlanFor"/>) when <see cref="BubblewrapSandbox.Available"/>,
+    /// else the bare command — the unconfined fallback on macOS dev, a host without <c>bwrap</c>, or one that denies
+    /// unprivileged user namespaces.
     /// </summary>
     private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, CommandIsolationContext context)
     {
@@ -983,39 +983,7 @@ public sealed partial class LocalProcessRunner
         // 1. Filesystem + namespace confinement (bubblewrap), innermost.
         if (BubblewrapSandbox.Available is { } bwrap)
         {
-            var writable = new List<string>();
-            if (!string.IsNullOrEmpty(spec.WorkingDirectory)) writable.Add(spec.WorkingDirectory);
-            if (configHome is not null) writable.Add(configHome);
-
-            var readOnlyExtra = new List<string>(spec.ReadOnlyPaths);
-
-            // Bind the run's MCP socket writable so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a
-            // dir, so bind its PARENT dir — which is the DEDICATED <spool>/mcp/ subdir holding ONLY the socket (never
-            // the spool's out.log/err.log/exit/pid — design §3b / Attack 4). The bind target must exist when bwrap
-            // mounts; --unshare-net severs TCP but a bound UDS survives — the whole reason the transport is a socket.
-            // Also bind the proxy binary's dir READ-ONLY so the harness can spawn it at its absolute identity-bound
-            // path. No-op when the run has no tool fabric.
-            if (spec.Mcp is { SocketPath: { Length: > 0 } socketPath } && Path.GetDirectoryName(socketPath) is { Length: > 0 } socketDir)
-            {
-                writable.Add(socketDir);
-
-                if (Path.GetDirectoryName(McpProxyBinaryPath()) is { Length: > 0 } proxyDir) readOnlyExtra.Add(proxyDir);
-            }
-
-            args = BubblewrapSandbox.BuildArgs(new BwrapPlan
-            {
-                Command = command,
-                Args = args,
-                WorkingDirectory = spec.WorkingDirectory,
-                HomeDir = configHome,
-                WritablePaths = writable,
-                ReadOnlyExtraPaths = readOnlyExtra,
-                // In a filtered netns: share it (don't --unshare-net) so the agent inherits the allowlist-filtered
-                // egress; pass no allowlist (the netns enforces it). Otherwise: today's behaviour exactly. Both read
-                // the same helpers the launch stamps its confinement record from, so the two cannot disagree.
-                ShareNetwork = ShareNetwork(spec, egressExecPrefix),
-                EgressAllowlist = EgressAllowlist(spec, egressExecPrefix),
-            });
+            args = BubblewrapSandbox.BuildArgs(PlanFor(spec, args, configHome, egressExecPrefix));
             command = bwrap;
         }
 
@@ -1039,6 +1007,49 @@ public sealed partial class LocalProcessRunner
 
         argv.Add(command);
         foreach (var arg in args) argv.Add(arg);
+    }
+
+    /// <summary>
+    /// What bubblewrap confines this launch to: the ONLY writable host paths are the config home, the MCP socket's
+    /// dedicated dir, and — unless the spec may only read it — the workspace, which is otherwise mounted read-only.
+    /// Pure over its inputs, so the spec-to-mount mapping is testable on a host that cannot confine.
+    /// </summary>
+    internal static BwrapPlan PlanFor(SandboxSpec spec, IReadOnlyList<string> args, string? configHome, IReadOnlyList<string> egressExecPrefix)
+    {
+        var writable = new List<string>();
+        if (!string.IsNullOrEmpty(spec.WorkingDirectory) && !spec.ReadOnlyWorkingDirectory) writable.Add(spec.WorkingDirectory);
+        if (configHome is not null) writable.Add(configHome);
+
+        var readOnlyExtra = new List<string>(spec.ReadOnlyPaths);
+
+        // Bind the run's MCP socket writable so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a
+        // dir, so bind its PARENT dir — which is the DEDICATED <spool>/mcp/ subdir holding ONLY the socket (never
+        // the spool's out.log/err.log/exit/pid — design §3b / Attack 4). The bind target must exist when bwrap
+        // mounts; --unshare-net severs TCP but a bound UDS survives — the whole reason the transport is a socket.
+        // Also bind the proxy binary's dir READ-ONLY so the harness can spawn it at its absolute identity-bound
+        // path. No-op when the run has no tool fabric.
+        if (spec.Mcp is { SocketPath: { Length: > 0 } socketPath } && Path.GetDirectoryName(socketPath) is { Length: > 0 } socketDir)
+        {
+            writable.Add(socketDir);
+
+            if (Path.GetDirectoryName(McpProxyBinaryPath()) is { Length: > 0 } proxyDir) readOnlyExtra.Add(proxyDir);
+        }
+
+        return new BwrapPlan
+        {
+            Command = spec.Command,
+            Args = args,
+            WorkingDirectory = spec.WorkingDirectory,
+            WorkingDirectoryReadOnly = spec.ReadOnlyWorkingDirectory,
+            HomeDir = configHome,
+            WritablePaths = writable,
+            ReadOnlyExtraPaths = readOnlyExtra,
+            // In a filtered netns: share it (don't --unshare-net) so the agent inherits the allowlist-filtered
+            // egress; pass no allowlist (the netns enforces it). Otherwise: today's behaviour exactly. Both read
+            // the same helpers the launch stamps its confinement record from, so the two cannot disagree.
+            ShareNetwork = ShareNetwork(spec, egressExecPrefix),
+            EgressAllowlist = EgressAllowlist(spec, egressExecPrefix),
+        };
     }
 
     /// <summary>
