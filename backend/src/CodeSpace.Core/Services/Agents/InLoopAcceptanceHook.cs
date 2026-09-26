@@ -52,8 +52,17 @@ public static class InLoopAcceptanceHook
     public static int MaxBlocks =>
         int.TryParse(Environment.GetEnvironmentVariable(MaxBlocksEnvVar), out var n) && n >= 0 ? n : DefaultMaxBlocks;
 
-    /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands.</summary>
-    public static bool AppliesTo(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, Command.Count: > 0 } spec
+    /// <summary>
+    /// Whether the hook is wired: the task carries a runnable argv oracle (<see cref="HasRunnableOracle"/>) AND may
+    /// WRITE its workspace. The hook runs the check inside the sandbox, where a read-only run's workspace is mounted
+    /// read-only, so a check that builds would fail with EROFS and feed the agent a false failure it could not act on
+    /// anyway — a read-only agent cannot change the code the check grades. The control-plane grade, in its own
+    /// writable clone, is unaffected.
+    /// </summary>
+    public static bool AppliesTo(AgentTask task) => task.Permissions.WriteScope == AgentWriteScope.Workspace && HasRunnableOracle(task);
+
+    /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands. The shape alone, whatever the write scope — which is what a harness keys its settings pin on, so a read-only run keeps the pin it always had.</summary>
+    public static bool HasRunnableOracle(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, Command.Count: > 0 } spec
         && !string.IsNullOrWhiteSpace(spec.Command[0]) && spec.Command.All(value => value != null && !value.Contains('\0'));
 
     /// <summary>

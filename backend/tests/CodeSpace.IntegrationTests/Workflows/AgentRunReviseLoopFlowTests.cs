@@ -251,6 +251,29 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
+    public async Task Every_round_of_a_read_only_run_reaches_the_runner_read_only()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        // A revision is rebuilt from a new task, so the write scope has to be re-applied to it — a revise round that
+        // skipped the executor's hardening would hand a read-only run a writable workspace from round 1 onward. The
+        // rounds write nothing, so the loop runs the same on a host that enforces the mount and one that cannot.
+        var (teamId, userId) = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round fails, so round 1 runs
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { MaxReviseRounds = 1, Permissions = new AgentPermissions { WriteScope = AgentWriteScope.ReadOnly } });
+        var runner = new SpecRecordingRunner();
+
+        await ExecuteAsync(runId, new ReviseAwareHarness(first: "echo drafted", revised: "echo revised"), runner);
+
+        var rounds = runner.Launched.Where(spec => spec.Args.Contains("echo drafted") || spec.Args.Contains("echo revised")).ToList();
+        rounds.Select(spec => spec.Args[^1]).ShouldBe(new[] { "echo drafted", "echo revised" }, "the launch and its one revise round both reached the runner");
+        rounds.ShouldAllBe(spec => spec.ReadOnlyWorkingDirectory, "every round of a read-only run is handed its workspace read-only");
+    }
+
+    [Fact]
     public async Task A_minor_only_critic_flag_does_not_halt_a_gate_the_calibration_fix()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -686,14 +709,14 @@ public sealed class AgentRunReviseLoopFlowTests
 
     // ─── Execution ───────────────────────────────────────────────────────────
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, ISandboxRunner? runner = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
-            scope.Resolve<ISandboxRunnerRegistry>(),
+            runner is null ? scope.Resolve<ISandboxRunnerRegistry>() : new SandboxRunnerRegistry(new[] { runner }),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
@@ -858,6 +881,31 @@ public sealed class AgentRunReviseLoopFlowTests
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText }
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" });
+    }
+
+    /// <summary>The real local runner, recording every spec it is asked to launch — the ground truth for what each round was actually handed, after the executor's own hardening.</summary>
+    private sealed class SpecRecordingRunner : ISandboxRunner, ISandboxDurableRunner
+    {
+        private readonly LocalProcessRunner _inner = new();
+
+        public string Kind => _inner.Kind;
+
+        public List<SandboxSpec> Launched { get; } = new();
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) => _inner.RunAsync(spec, cancellationToken);
+
+        public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
+        {
+            Launched.Add(spec);
+            return _inner.LaunchAsync(spec, spoolKey, cancellationToken);
+        }
+
+        public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) =>
+            _inner.AttachAsync(handle, onStdoutFrame, cancellationToken, onCheckpoint);
+
+        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) => _inner.ProbeAsync(handle, cancellationToken);
+
+        public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => _inner.TerminateAsync(handle, cancellationToken);
     }
 
     private sealed class ReviseAwareHarness : IAgentHarness
