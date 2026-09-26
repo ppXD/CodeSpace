@@ -173,13 +173,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install bubblewrap + util-linux (prlimit)
+      - name: Install bubblewrap + util-linux (prlimit) + iproute2/nftables
         # The headline E2E spawns a REAL agent process through the production runner, which wraps it in
         # bubblewrap + prlimit (the production confinement posture). Running as root in the SDK container, so
-        # no sudo. ca-certificates so the container can fetch packages; util-linux for prlimit.
+        # no sudo. ca-certificates so the container can fetch packages; util-linux for prlimit; iproute2 and
+        # nftables so a network-off brokered agent is SEALED to its broker, as a confining host must, rather than
+        # refused as sandbox_sealed_egress_unavailable.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates
+          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates iproute2 nftables
           echo "bwrap: $(bwrap --version)"
           echo "prlimit: $(prlimit --version)"
 

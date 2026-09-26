@@ -484,6 +484,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 spec = BuildSpec(RunCold(effectiveTask));
             }
 
+            // A spec this runner could only launch with a network that leaves the agent unable to work — a network-off
+            // brokered run on a host that confines but cannot seal — is refused HERE, the last moment a refusal costs
+            // nothing: before the local acceptance is prepared, the spend admitted or a process started.
+            (runner as ISandboxEgressAdmission)?.EnsureEgressAdmissible(spec, brokeredCredential?.ReachableFromNamespace ?? false);
+
             // Verification is judged against the contract the envelope persisted — never a goal amended for the
             // dispatch alone (this cold hint, or an unreadable checkpoint's) — or the contract hash cannot match.
             var contract = effectiveTask with { Goal = task.Goal };
