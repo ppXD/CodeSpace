@@ -980,10 +980,12 @@ public sealed partial class LocalProcessRunner
         // absolute path below — so the path on the argv resolves inside the sandbox exactly as it does outside it.
         IReadOnlyList<string> args = ArgsWithMcpDeclaration(spec, mcpDeclarationPath);
 
-        // 1. Filesystem + namespace confinement (bubblewrap), innermost.
+        // 1. Filesystem + namespace confinement (bubblewrap), innermost. A CLI that brings an OS sandbox of its own has
+        //    it stood down HERE and nowhere else — the one decision that wraps the command — so it cannot lose its own
+        //    sandbox on a launch that did not get ours.
         if (BubblewrapSandbox.Available is { } bwrap)
         {
-            args = BubblewrapSandbox.BuildArgs(PlanFor(spec, args, configHome, egressExecPrefix));
+            args = BubblewrapSandbox.BuildArgs(PlanFor(spec, WithRunnerConfinement(args, spec.WhenRunnerConfines), configHome, egressExecPrefix));
             command = bwrap;
         }
 
@@ -1162,6 +1164,35 @@ public sealed partial class LocalProcessRunner
     /// </summary>
     private static string DeclarationFileName(SandboxSpec spec, McpServerWiring wiring) =>
         spec.McpDeclarationArgs.Count == 0 ? wiring.RelativeFileName : $"mcp-{Mcp.McpRunToken.MintPathId()}{Path.GetExtension(wiring.RelativeFileName)}";
+
+    /// <summary>
+    /// The child's argv under OUR confinement: the CLI's own sandbox fragment swapped for its stand-down
+    /// (<see cref="SandboxSpec.WhenRunnerConfines"/>), in place, everything else untouched. Returns
+    /// <paramref name="args"/> itself when the spec declares nothing to swap.
+    ///
+    /// <para>Throws unless the fragment occurs exactly once: a harness whose argv drifted from what it declared must stop
+    /// the launch loudly, never run with its own sandbox half-replaced or with two of them.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> WithRunnerConfinement(IReadOnlyList<string> args, ArgsSubstitution? substitution)
+    {
+        if (substitution is null) return args;
+
+        var at = IndexesOf(args, substitution.Replace).ToList();
+
+        if (at.Count != 1)
+            throw new InvalidOperationException($"The command declares its own sandbox as [{string.Join(' ', substitution.Replace)}] but its argv carries that {at.Count} times, not once; refusing to launch it with its sandbox half-replaced.");
+
+        return args.Take(at[0]).Concat(substitution.With).Concat(args.Skip(at[0] + substitution.Replace.Count)).ToList();
+    }
+
+    /// <summary>Every position at which <paramref name="run"/> starts as a contiguous run of <paramref name="args"/>.</summary>
+    private static IEnumerable<int> IndexesOf(IReadOnlyList<string> args, IReadOnlyList<string> run)
+    {
+        if (run.Count == 0) yield break;
+
+        for (var i = 0; i + run.Count <= args.Count; i++)
+            if (Enumerable.Range(0, run.Count).All(j => args[i + j] == run[j])) yield return i;
+    }
 
     /// <summary>
     /// The child's argv: the harness's <see cref="SandboxSpec.McpDeclarationArgs"/> — its own flags for LOADING the

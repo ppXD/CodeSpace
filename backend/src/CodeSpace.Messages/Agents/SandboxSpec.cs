@@ -207,6 +207,20 @@ public sealed record SandboxSpec
     public IReadOnlyList<string> McpDeclarationArgs { get; init; } = Array.Empty<string>();
 
     /// <summary>
+    /// The CLI's OWN OS-sandbox flags and what they become when the runner confines the command itself — a CLI whose
+    /// sandbox is a bubblewrap of its own (Codex) cannot start it inside ours, which has already dropped every
+    /// capability, so under our confinement it runs no command at all. The runner swaps <see cref="ArgsSubstitution.Replace"/>
+    /// for <see cref="ArgsSubstitution.With"/> in the argv ONLY where it confines, from the same decision that wraps the
+    /// command; <see cref="Args"/> itself always stays the argv an unconfined host runs. A runner that ignores this leaves
+    /// the CLI's own sandbox in place — never less confinement than it had.
+    ///
+    /// <para><c>null</c> (the default, and every CLI without an OS sandbox of its own) ⇒ nothing is swapped, and the
+    /// field is omitted from the JSON, so the spec serializes and hashes as it did before the field existed.</para>
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ArgsSubstitution? WhenRunnerConfines { get; init; }
+
+    /// <summary>
     /// Files the runner materializes into the per-run config home (<see cref="ConfigHomeEnvVars"/>) BEFORE launch — e.g.
     /// a projected skill's <c>skills/&lt;slug&gt;/SKILL.md</c>, which the harness's CLI then discovers natively. Unlike the
     /// run-scoped <see cref="Mcp"/> declaration (injected by the executor because it carries a minted token), these are a
@@ -215,6 +229,16 @@ public sealed record SandboxSpec
     /// writes a per-run config home; a bare-process runner with no config home ignores them.
     /// </summary>
     public IReadOnlyList<ConfigHomeFile> ConfigHomeFiles { get; init; } = Array.Empty<ConfigHomeFile>();
+}
+
+/// <summary>A contiguous run of argv elements and what replaces it — see <see cref="SandboxSpec.WhenRunnerConfines"/>.</summary>
+public sealed record ArgsSubstitution
+{
+    /// <summary>The elements to find, which must occur in the argv exactly once, in this order and adjacent.</summary>
+    public required IReadOnlyList<string> Replace { get; init; }
+
+    /// <summary>What they become, spliced in at the same position.</summary>
+    public required IReadOnlyList<string> With { get; init; }
 }
 
 /// <summary>One file to write into the per-run config home, its <see cref="RelativePath"/> joined onto the config-home dir.</summary>

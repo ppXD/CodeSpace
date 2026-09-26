@@ -729,6 +729,47 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void A_spec_with_nothing_to_swap_keeps_its_argv_instance() =>
+        LocalProcessRunner.WithRunnerConfinement(CodexArgs, null).ShouldBeSameAs(CodexArgs, "a CLI without an OS sandbox of its own launches with exactly the argv it built");
+
+    [Fact]
+    public void The_cli_s_sandbox_fragment_is_swapped_in_place_for_its_stand_down()
+    {
+        var swapped = LocalProcessRunner.WithRunnerConfinement(CodexArgs, new ArgsSubstitution { Replace = new[] { "--sandbox", "read-only" }, With = new[] { "--sandbox", "danger-full-access" } });
+
+        swapped.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.4", "--sandbox", "danger-full-access", "-c", "otel.exporter=none", "-" }, "only the declared fragment changes, at its own position, and the stdin `-` stays last");
+    }
+
+    [Theory]
+    [InlineData("--sandbox workspace-write", false)]   // not carried at all
+    [InlineData("--json --sandbox", false)]             // both carried, but not adjacent
+    [InlineData("--sandbox read-only", true)]           // carried twice
+    public void A_fragment_the_argv_does_not_carry_exactly_once_refuses_the_launch(string replace, bool duplicated)
+    {
+        // A harness whose argv drifted from what it declared must stop the launch loudly: running with its own sandbox
+        // half-replaced, or with a second copy left behind, is exactly the silent drift this seam exists to prevent.
+        var args = duplicated ? CodexArgs.Concat(new[] { "--sandbox", "read-only" }).ToList() : CodexArgs;
+
+        Should.Throw<InvalidOperationException>(() => LocalProcessRunner.WithRunnerConfinement(args, new ArgsSubstitution { Replace = replace.Split(' '), With = new[] { "--sandbox", "danger-full-access" } }));
+    }
+
+    [Fact]
+    public void A_durable_codex_launch_stands_its_sandbox_down_exactly_where_this_host_confines()
+    {
+        // Honest on either host: where bwrap confines, Codex's nested sandbox (which cannot start inside ours) is
+        // stood down; where it does not, Codex keeps its own — full access must never reach an unconfined child.
+        var spec = new CodexHarness().BuildInvocation(new AgentTask { Goal = "g", Harness = CodexHarness.HarnessKind, Model = "gpt-5.4", WorkspaceDirectory = TempDir(), Permissions = new AgentPermissions { WriteScope = AgentWriteScope.ReadOnly } });
+
+        var argv = LocalProcessRunner.BuildDurableStartInfo(spec, TempDir()).ArgumentList;
+        var confines = BubblewrapSandbox.Available is not null;
+
+        argv.Contains("danger-full-access").ShouldBe(confines, $"the stand-down must follow the one decision that wraps the command (confines={confines})");
+        argv.Contains("read-only").ShouldBe(!confines, "and Codex keeps its own read-only sandbox wherever ours is not there to replace it");
+    }
+
+    private static readonly IReadOnlyList<string> CodexArgs = new[] { "exec", "--json", "--model", "gpt-5.4", "--sandbox", "read-only", "-c", "otel.exporter=none", "-" };
+
+    [Fact]
     public void Supervisor_script_bounds_the_copiers_without_leaking_the_budget_to_the_child()
     {
         var info = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd" }, "/tmp/spool-script");

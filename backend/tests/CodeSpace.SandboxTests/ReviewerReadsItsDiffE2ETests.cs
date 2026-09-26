@@ -33,12 +33,13 @@ namespace CodeSpace.SandboxTests;
 /// arm answers the permission question the production posture would face. What the network-off arm finds is itself
 /// the finding: a Confined reviewer on a confining worker cannot reach its model today.</para>
 ///
-/// <para>What it found on Linux, pinned so that a fix has to flip it deliberately: Claude's plan mode reads the diff
-/// under our bubblewrap, over a workspace the kernel mounts read-only; Codex runs no command there at all, in
-/// read-only or workspace-write, because its own sandbox is a nested bubblewrap that cannot configure its network
-/// namespace's loopback once ours has dropped every capability. Unconfined (a dev host), Codex reads the diff like
-/// Claude. A Confined reviewer that tries to write its workspace is refused whichever layer gets there first — the
-/// CLI's plan mode or the read-only mount — and the workspace is left exactly as it was.</para>
+/// <para>What it found on Linux, pinned so that a fix has to flip it deliberately: both CLIs read the diff under our
+/// bubblewrap, over a workspace the kernel mounts read-only for a Confined run. Codex does so only because the runner
+/// stands its own sandbox down there (<see cref="CodexHarness.ConfinedSandboxMode"/>): that sandbox is a nested
+/// bubblewrap that cannot configure its network namespace's loopback once ours has dropped every capability, so left in
+/// place it ran no command at all. A Confined reviewer that tries to write its workspace is refused — for Codex, whose
+/// CLI now allows everything, by the read-only mount itself — and the workspace is left exactly as it was; a Standard
+/// Codex writes its workspace and nothing outside it.</para>
 ///
 /// <para>Armed by <see cref="RequireEnvVar"/> (the sandbox lane sets it after installing the pins, and then a missing
 /// or unpinned binary FAILS) or by a harness's own command override for a local run; otherwise it returns. Each arm
@@ -56,61 +57,41 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
     private readonly List<string> _directories = [];
 
     [Fact]
-    public Task A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git() => ReadsTheDiffAsync(ClaudeCodeHarness.HarnessKind);
-
-    [Fact]
-    public async Task A_read_only_codex_reviewer_reads_the_diff_where_nothing_else_confines_it()
-    {
-        // Under our bubblewrap Codex's own sandbox cannot start at all — pinned by the test below — so this arm is the
-        // dev-host (unconfined) answer only, and it is the answer a fix for that finding has to restore under confinement.
-        if (BubblewrapSandbox.Available is not null) return;
-
-        await ReadsTheDiffAsync(CodexHarness.HarnessKind);
-    }
+    public Task A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git() => ReadsTheDiffAsync(ClaudeCodeHarness.HarnessKind, AgentAutonomyLevel.Confined);
 
     [Theory]
-    [InlineData(AgentAutonomyLevel.Confined, "read-only")]
-    [InlineData(AgentAutonomyLevel.Standard, "workspace-write")]
-    public async Task Codex_cannot_run_a_command_in_its_own_sandbox_nested_inside_ours(AgentAutonomyLevel tier, string codexSandbox)
+    [InlineData(AgentAutonomyLevel.Confined)]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    public Task A_codex_reviewer_reads_the_diff_with_git_wherever_it_runs(AgentAutonomyLevel tier) => ReadsTheDiffAsync(CodexHarness.HarnessKind, tier);
+
+    [Fact]
+    public async Task The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down()
     {
-        // THE FINDING, pinned as observed on Linux: Codex's sandbox is a bubblewrap of its own, and it cannot set up
-        // the loopback of its network namespace inside ours ("bwrap: loopback: Failed RTM_NEWADDR: Operation not
-        // permitted" — our confinement drops every capability). So under confinement Codex runs no command at all, in
-        // read-only AND workspace-write. When this goes red because the command ran, the finding is fixed: flip it into
-        // a read arm like Claude's.
+        // `exec resume` rejects --sandbox, so a resumed Codex is stood down through `-c sandbox_mode=…` instead. The real
+        // runner applies the swap, and the pinned binary must get past its argument and config parsing to the rollout
+        // lookup ("no rollout found" for a thread that does not exist) — the control with a mode Codex does not know
+        // proves the lookup is not reached regardless.
         var harness = HarnessFor(CodexHarness.HarnessKind);
 
         if (!Armed(CodexHarness.HarnessKind) || OperatingSystem.IsWindows()) return;
 
-        if (BubblewrapSandbox.Available is null)
-        {
-            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove what confinement does here");
-            return;
-        }
-
         await RequirePinnedBinaryAsync(harness, CodexHarness.HarnessKind);
 
-        var repo = NewReviewRepository();
-        var upstream = new ScriptedModelUpstream([$"git diff {repo.Base} {repo.Head}"], $"REVIEW-DONE-{repo.Nonce}");
-        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
-        var brokered = await OpenLeaseAsync(broker);
+        // A real repository, as every production workspace is: Codex refuses an untrusted non-git directory before it gets anywhere near the rollout.
+        var task = new AgentTask { Goal = "resume", Harness = CodexHarness.HarnessKind, WorkspaceDirectory = NewReviewRepository().Directory, ResumeFromSessionId = Guid.NewGuid().ToString(), TimeoutSeconds = 60, Environment = new Dictionary<string, string> { [CodexHarness.ApiKeyEnvVar] = "sk-review-e2e-resume", ["HOME"] = NewDirectory("resume-home") } };
+        var spec = AgentRunExecutor.ApplyWriteScope(harness.BuildInvocation(task), task.Permissions);
+        var bogus = spec with { Args = spec.Args.Select(arg => arg.StartsWith("sandbox_mode=", StringComparison.Ordinal) ? "sandbox_mode=not-a-mode" : arg).ToList(), WhenRunnerConfines = null };
 
-        var task = ReviewTask(CodexHarness.HarnessKind, repo, AgentAutonomyPolicy.Derive(tier) with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered));
+        var accepted = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
+        var control = await new LocalProcessRunner().RunAsync(bogus, CancellationToken.None);
 
-        harness.BuildInvocation(task).Args.ShouldContain(codexSandbox, customMessage: $"fixture check: the {tier} tier must launch Codex with --sandbox {codexSandbox}");
+        (accepted.Stdout + accepted.Stderr).ShouldContain("no rollout found", Case.Insensitive, $"the pinned codex refused the resume argv the runner handed it (confined={BubblewrapSandbox.Available is not null}): {Tail(accepted.Stderr)}");
+        (control.Stdout + control.Stderr).ShouldNotContain("no rollout found", Case.Insensitive, $"control: an unknown sandbox mode must stop Codex before the rollout lookup, or reaching it proves nothing: {Tail(control.Stderr)}");
 
-        await RunAsync(harness, task);
-
-        var fedBack = ToolOutputs(upstream.Requests);
-
-        upstream.Requests.ShouldNotBeEmpty("fixture check: the network-on posture must reach the model, or this says nothing about the sandbox");
-        fedBack.ShouldNotContain($"MARKER-NEW-{repo.Nonce}", customMessage: "Codex's own sandbox ran the command inside ours — the finding is fixed; flip this test into a read arm");
-        fedBack.ShouldContain("bwrap:", customMessage: $"the command did not run, but not for the reason this test pins; what the CLI fed back: {Tail(fedBack, 1500)}");
-
-        output.WriteLine($"{RanMarker} codex-nested-sandbox {codexSandbox} fedBack={Tail(fedBack.ReplaceLineEndings(" "), 160)}");
+        output.WriteLine($"{RanMarker} codex-resume-stand-down confined={BubblewrapSandbox.Available is not null}");
     }
 
-    private async Task ReadsTheDiffAsync(string harnessKind)
+    private async Task ReadsTheDiffAsync(string harnessKind, AgentAutonomyLevel tier)
     {
         var harness = HarnessFor(harnessKind);
 
@@ -123,15 +104,15 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
         var brokered = await OpenLeaseAsync(broker);
 
-        var confined = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined);
-        var task = ReviewTask(harnessKind, repo, confined with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered));
+        var production = AgentAutonomyPolicy.Derive(tier);
+        var task = ReviewTask(harnessKind, repo, production with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered));
 
-        harness.BuildInvocation(task).Args.ShouldBe(harness.BuildInvocation(task with { Permissions = confined }).Args,
-            customMessage: "fixture check: the CLI must see the same argv with the network on as the production Confined posture gives it, or this arm answers a different question");
+        harness.BuildInvocation(task).Args.ShouldBe(harness.BuildInvocation(task with { Permissions = production }).Args,
+            customMessage: $"fixture check: the CLI must see the same argv with the network on as the production {tier} posture gives it, or this arm answers a different question");
 
         var run = await RunAsync(harness, task);
 
-        run.Spec.ReadOnlyWorkingDirectory.ShouldBeTrue("fixture check: a Confined reviewer must be launched over a read-only workspace, or this arm does not show git reads surviving the mount");
+        run.Spec.ReadOnlyWorkingDirectory.ShouldBe(production.WriteScope == AgentWriteScope.ReadOnly, $"fixture check: a {tier} reviewer must be launched over the workspace mount its write scope gives it, or this arm does not show git reads surviving it");
 
         run.Result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the {harnessKind} reviewer did not finish cleanly (exit {run.Result.ExitCode}); stderr: {Tail(run.Result.Stderr)}. Reproduce by hand from the argv: {string.Join(' ', run.Spec.Args)}");
 
@@ -149,13 +130,14 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         (await GitAsync(repo.Directory, "status --porcelain")).ShouldBeEmpty("a read-only reviewer must leave the workspace exactly as it found it");
         (await GitAsync(repo.Directory, "rev-parse HEAD")).Trim().ShouldBe(repo.Head, "and on the head it was given");
 
-        output.WriteLine($"{RanMarker} read-only-diff {harnessKind} confined={BubblewrapSandbox.Available is not null}");
+        output.WriteLine($"{RanMarker} read-diff {harnessKind} {tier} confined={BubblewrapSandbox.Available is not null} toldFullAccess={upstream.Requests.Any(r => r.Body.Contains(CodexHarness.ConfinedSandboxMode, StringComparison.Ordinal))}");
     }
 
-    [Fact]
-    public async Task A_confined_reviewer_cannot_write_its_workspace()
+    [Theory]
+    [InlineData(ClaudeCodeHarness.HarnessKind)]
+    [InlineData(CodexHarness.HarnessKind)]
+    public async Task A_confined_reviewer_cannot_write_its_workspace(string harnessKind)
     {
-        const string harnessKind = ClaudeCodeHarness.HarnessKind;
         var harness = HarnessFor(harnessKind);
 
         if (!Armed(harnessKind) || OperatingSystem.IsWindows()) return;
@@ -185,7 +167,54 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         (await GitAsync(repo.Directory, "status --porcelain")).ShouldBeEmpty("the workspace is exactly as the reviewer found it");
 
         var refusedBy = fedBack.Contains("Read-only file system", StringComparison.Ordinal) ? "read-only-mount" : "cli-permission-mode";
+
+        // Under our confinement Codex's own sandbox is stood down to full access, so the only thing left to refuse the
+        // write is the mount — which is the claim. Claude's plan mode may get there first; either layer is a refusal.
+        if (harnessKind == CodexHarness.HarnessKind) refusedBy.ShouldBe("read-only-mount", $"with its own sandbox stood down, the kernel's read-only mount must be what refused Codex's write; what the CLI fed back: {Tail(fedBack, 600)}");
+
         output.WriteLine($"{RanMarker} write-refused {harnessKind} by={refusedBy} fedBack={Tail(fedBack.ReplaceLineEndings(" "), 160)}");
+    }
+
+    [Fact]
+    public async Task A_standard_codex_writes_its_workspace_under_our_confinement_and_nothing_outside_it()
+    {
+        // The other half of standing Codex's sandbox down: a Standard run must still get its work done under ours —
+        // the workspace writable, the system root not. Whether it can plant a git hook is pinned as observed: the
+        // worker's own commit and push run in this workspace, so protecting .git is a deliberate later flip.
+        const string harnessKind = CodexHarness.HarnessKind;
+        var harness = HarnessFor(harnessKind);
+
+        if (!Armed(harnessKind) || OperatingSystem.IsWindows()) return;
+
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove what confinement does here");
+            return;
+        }
+
+        await RequirePinnedBinaryAsync(harness, harnessKind);
+
+        var repo = NewReviewRepository();
+        var systemProbe = $"/usr/cs-tamper-{repo.Nonce}";
+        var hookProbe = Path.Combine(repo.Directory, ".git", "hooks", $"cs-probe-{repo.Nonce}");
+        var upstream = new ScriptedModelUpstream([$"printf CHANGED-{repo.Nonce} > app.txt", $"printf x > {systemProbe}", $"touch {hookProbe}"], $"WORK-DONE-{repo.Nonce}");
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var brokered = await OpenLeaseAsync(broker);
+
+        var task = ReviewTask(harnessKind, repo, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard) with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered)) with { Goal = "Change app.txt." };
+
+        ReviewRun run;
+
+        try { run = await RunAsync(harness, task); }
+        finally { if (File.Exists(systemProbe)) File.Delete(systemProbe); }   // a failed refusal must not leave the probe behind for the next run
+
+        run.Result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the Standard Codex run did not finish cleanly (exit {run.Result.ExitCode}); stderr: {Tail(run.Result.Stderr)}; last tool output: {Tail(ToolOutputs(upstream.Requests), 600)}");
+        File.ReadAllText(Path.Combine(repo.Directory, "app.txt")).ShouldBe($"CHANGED-{repo.Nonce}", $"a Standard Codex must be able to write its workspace under our confinement; requests: {Describe(upstream.Requests)}");
+        ToolOutputs(upstream.Requests).ShouldNotBe("(none)", "fixture check: Codex must have run the commands and handed their outcome back to the model");
+        upstream.Requests.Any(r => r.Body.Contains("Read-only file system", StringComparison.Ordinal)).ShouldBeTrue($"the write under /usr must have been refused by the read-only root; requests: {Describe(upstream.Requests)}");
+        File.Exists(hookProbe).ShouldBeTrue("OBSERVED TODAY: a Standard agent can plant a file under .git/hooks, and the worker's own commit and push run in this workspace. When .git is protected, flip this deliberately.");
+
+        output.WriteLine($"{RanMarker} standard-codex-writes hooksWritable={File.Exists(hookProbe)}");
     }
 
     [Theory]
