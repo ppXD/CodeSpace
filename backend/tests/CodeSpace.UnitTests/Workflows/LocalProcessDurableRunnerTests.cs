@@ -986,14 +986,22 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     [Fact]
     public async Task Deadline_elapsing_terminates_the_process_and_reports_timed_out()
     {
+        // The deadline counts from the launch request, so the handshake spends it first: three bootstraps started one after
+        // another, 0.4 s on an idle host and 2.7 s at worst under deliberate heavy load. A deadline that elapses before the
+        // execution is released refuses the launch at the broker's input or guardian-identity stage instead of timing out a
+        // run, so it gets 10 s here, with a run that outlives it; the assertion below names any handshake that overran it.
         if (OperatingSystem.IsWindows()) return;
 
-        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 1 });
+        var handle = await LaunchAsync(ContractSpecs.Sleep(60) with { TimeoutSeconds = 10 });
+
+        handle.Deadline.ShouldBeGreaterThan(DateTimeOffset.UtcNow, $"the launch must be ready while its deadline is still ahead — one that elapsed before the release is refused there by the exec or stopped by the guardian, not timed out; {ProcessLiveness.DescribeBootstrap(handle.SpoolDirectory)}");
 
         var (result, _) = await AttachCollectAsync(handle);
+        for (var i = 0; i < 100 && ProcessIsAlive(handle.ProcessId); i++) await Task.Delay(50);
 
         result.Status.ShouldBe(SandboxStatus.TimedOut, Why(handle, result, "the observer enforces the handle's wall-clock deadline"));
         result.ExitCode.ShouldBe(-1);
+        ProcessIsAlive(handle.ProcessId).ShouldBeFalse(Why(handle, result, "the deadline kill must leave no live supervisor"));
     }
 
     [Fact]
