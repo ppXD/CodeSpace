@@ -206,6 +206,46 @@ public class RealHarnessExecutionTests
         }
     }
 
+    [Theory]
+    [InlineData(null, "--sandbox\nworkspace-write", "--sandbox\ndanger-full-access")]
+    [InlineData("prior-session-7c3", "-c\nsandbox_mode=workspace-write", "-c\nsandbox_mode=danger-full-access")]
+    public async Task Real_executor_stands_codexs_own_sandbox_down_only_where_the_runner_confines_it(string? resumeFromSessionId, string unconfined, string confined)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Codex's own sandbox is a nested bubblewrap that cannot start inside ours, so the runner swaps it for full
+        // access where — and only where — it confines the run. Honest on either host: the dumped argv is the spawned
+        // process's own, one element per line, and it must carry the mode for the confinement this host actually gave.
+        // The dump lands in the run's WORKSPACE, bound at its real path, because a confined child's /tmp is a private
+        // tmpfs the host never sees. The integration lane does not confine, so CI runs the unconfined rows here. Under
+        // confinement the swap itself is pinned by the runner's unit tests; the sandbox lane then shows the real Codex
+        // running a fresh exec in full access (the reviewer arms' toldFullAccess) and accepting the resume spelling
+        // (The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down).
+        var (commandEnvVar, fixture) = SessionCase(CodexHarness.HarnessKind);
+        using var cli = new FakeCli(commandEnvVar, fixture);
+
+        var workspaceDir = Directory.CreateTempSubdirectory("cs-standdown-ws-").FullName;
+        var argvDump = Path.Combine(workspaceDir, "argv.txt");
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_ARGV_OUT"] = argvDump };
+            var runId = await CreateRunAsync(teamId, CodexHarness.HarnessKind, env, resumeFromSessionId: resumeFromSessionId, workspaceDirectory: workspaceDir);
+
+            await ExecuteRealAsync(runId);
+
+            var argv = File.ReadAllText(argvDump);
+            var confines = CodeSpace.Core.Services.Agents.Sandbox.Isolation.BubblewrapSandbox.Available is not null;
+
+            argv.Contains(confined, StringComparison.Ordinal).ShouldBe(confines, $"full access must reach the process exactly where the runner confines it (confines={confines}); argv: {argv}");
+            argv.Contains(unconfined, StringComparison.Ordinal).ShouldBe(!confines, $"and Codex keeps its own sandbox wherever ours is not there to replace it; argv: {argv}");
+        }
+        finally
+        {
+            try { Directory.Delete(workspaceDir, recursive: true); } catch { /* best-effort cleanup of a temp directory */ }
+        }
+    }
+
     [Fact]
     public async Task Real_executor_skips_capturing_a_session_transcript_over_the_size_cap()
     {
@@ -320,6 +360,62 @@ public class RealHarnessExecutionTests
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
         result.SessionTranscript.ShouldBe(rolloutContent, "the executor GLOBBED CODEX_HOME/sessions for the id-bearing rollout the fake codex wrote and captured it — the search-based capture shape, no cwd-computed path");
+    }
+
+    [Fact]
+    public async Task Real_executor_refuses_a_fifo_planted_as_the_codex_rollout_and_still_completes_the_run()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The config home is the agent's to write. A named pipe planted where the rollout should be would block a plain
+        // open until a writer appears — which no token interrupts — and the run's completion behind it, forever. The
+        // capture must refuse it and move on: the run completes, just without a transcript to continue from.
+        const string sid = "thr-codex-realexec";
+        var relPath = $"{CodexHarness.SessionsRoot}/2026/07/02/rollout-2026-07-02T00-00-00-{sid}.jsonl";
+
+        using var cli = new FakeCli(CodexHarness.CommandEnvVar, CodexSessionFixture);
+        var teamId = await SeedTeamAsync();
+        var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_SESSION_FIFO"] = relPath };
+        var runId = await CreateRunAsync(teamId, "codex-cli", env);
+
+        await ExecuteRealAsync(runId).WaitAsync(TimeSpan.FromSeconds(90));   // a regression blocks forever: bound it so it fails instead of hanging the suite
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the run completes — a hostile session file costs it its resumability, never its result");
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.SessionTranscript.ShouldBe("", "a pipe is not a transcript — nothing captured, so a continue cold-starts");
+    }
+
+    [Theory]
+    [InlineData("gpt-5.4", "gpt-5.4")]   // dispatched with a model: that model, whatever the agent-writable rollout claims
+    [InlineData(null, "rollout-named-model")]   // model-less: the rollout is the only record of what ran
+    public async Task A_codex_run_records_the_model_it_was_dispatched_with_over_one_its_rollout_names(string? dispatched, string expected)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Codex's stream never names its model, so the rollout is read — a file the agent can append a turn_context to.
+        // A run this worker dispatched with --model ran that model; letting the rollout override it would let an agent
+        // pick the price its tokens are billed at and the identity its reviewer's independence is judged against.
+        const string sid = "thr-codex-realexec";
+        var relPath = $"{CodexHarness.SessionsRoot}/2026/07/02/rollout-2026-07-02T00-00-00-{sid}.jsonl";
+        const string rollout = "{\"type\":\"turn_context\",\"payload\":{\"model\":\"rollout-named-model\"}}\n";
+
+        using var cli = new FakeCli(CodexHarness.CommandEnvVar, CodexSessionFixture);
+        var teamId = await SeedTeamAsync();
+        var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_SESSION_REL"] = relPath, ["FAKE_SESSION_CONTENT"] = rollout };
+
+        Guid runId;
+        using (var seed = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId))
+            runId = (await seed.Resolve<IAgentRunService>().CreateAsync(new AgentTask { Goal = "fix the billing tests", Harness = "codex-cli", Model = dispatched, Environment = env, TimeoutSeconds = 1800 }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+
+        await ExecuteRealAsync(runId);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.SessionTranscript.ShouldBe(rollout, "fixture check: the rollout was captured, so the backfill had it to read");
+        result.Model.ShouldBe(expected);
     }
 
     [Fact]
@@ -606,8 +702,9 @@ public class RealHarnessExecutionTests
             // config-home-relative path — simulates the CLI persisting its resumable session file, so the REAL executor's
             // P3 capture has a real on-disk file to read. The config home is whichever env var the harness isolates
             // (CLAUDE_CONFIG_DIR for claude, CODEX_HOME for codex — exactly one is set per run), so one script serves both.
-            // Inert otherwise.
-            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\nCFG=\"${CLAUDE_CONFIG_DIR:-$CODEX_HOME}\"\n[ -n \"$FAKE_SESSION_REL\" ] && { mkdir -p \"$CFG/$(dirname \"$FAKE_SESSION_REL\")\"; printf '%s' \"$FAKE_SESSION_CONTENT\" > \"$CFG/$FAKE_SESSION_REL\"; }\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
+            // Inert otherwise. When FAKE_SESSION_FIFO is set, plant a NAMED PIPE at that config-home-relative path instead
+            // — what an agent with write access to its config home can leave where its session file should be.
+            File.WriteAllText(script, "#!/bin/sh\n[ -n \"$FAKE_ARGV_OUT\" ] && printf '%s\\n' \"$@\" > \"$FAKE_ARGV_OUT\"\nCFG=\"${CLAUDE_CONFIG_DIR:-$CODEX_HOME}\"\n[ -n \"$FAKE_SESSION_REL\" ] && { mkdir -p \"$CFG/$(dirname \"$FAKE_SESSION_REL\")\"; printf '%s' \"$FAKE_SESSION_CONTENT\" > \"$CFG/$FAKE_SESSION_REL\"; }\n[ -n \"$FAKE_SESSION_FIFO\" ] && { mkdir -p \"$CFG/$(dirname \"$FAKE_SESSION_FIFO\")\"; mkfifo \"$CFG/$FAKE_SESSION_FIFO\"; }\n[ -n \"$FAKE_SLEEP\" ] && sleep \"$FAKE_SLEEP\"\ncat \"$FAKE_FIXTURE\"\nexit \"${FAKE_EXIT:-0}\"\n");
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             _original = Environment.GetEnvironmentVariable(commandEnvVar);

@@ -1659,23 +1659,30 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             if (!File.Exists(path)) return result;   // the CLI wrote its session elsewhere (cwd mismatch) or not at all — cold-start on continue
 
-            var length = new FileInfo(path).Length;
+            // The config home is the AGENT's to write, so the path may name a FIFO it planted, whose blocking open no
+            // token interrupts. Opened non-blocking and refused unless it is a regular file, and read from THAT handle.
+            using var stream = OpenAgentWrittenFile(path);
             var cap = MaxSessionTranscriptBytes();
 
-            if (length > cap)   // a pathological session file — skip rather than read it whole into memory (cold-start >> OOM)
+            if (stream.Length > cap)   // a pathological session file — skip rather than read it whole into memory (cold-start >> OOM)
             {
-                _logger.LogWarning("Agent run {RunId}: session transcript is {Bytes} bytes (> {Cap} cap); skipping capture — a continue will cold-start", capture.RunId, length, cap);
+                _logger.LogWarning("Agent run {RunId}: session transcript is {Bytes} bytes (> {Cap} cap); skipping capture — a continue will cold-start", capture.RunId, stream.Length, cap);
                 return result;
             }
 
-            var transcript = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            using var reader = new StreamReader(stream);
+            var transcript = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
 
             return BackfillTranscriptModel(result, capture.Harness) with { SessionTranscript = transcript };
 
+            // A harness whose stream never names its model (Codex) is backfilled from the transcript — a file the agent
+            // can write. When this worker put the model on the argv itself, that is the model and the transcript adds
+            // nothing a forger could not; only a model-less dispatch has no other source.
             AgentRunResult BackfillTranscriptModel(AgentRunResult captured, IAgentHarness h) =>
-                string.IsNullOrEmpty(captured.Model) && h is IAgentTranscriptModelSource source && source.TryReadModelFromTranscript(transcript) is { Length: > 0 } model
-                    ? captured with { Model = model }
-                    : captured;
+                !string.IsNullOrEmpty(captured.Model) || h is not IAgentTranscriptModelSource source ? captured
+                : !string.IsNullOrEmpty(capture.Task.Model) ? captured with { Model = capture.Task.Model }
+                : source.TryReadModelFromTranscript(transcript) is { Length: > 0 } model ? captured with { Model = model }
+                : captured;
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -1785,6 +1792,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             };
         }
     }
+
+    /// <summary>
+    /// Open a file the agent can write — its session transcript, in the config home it has write access to — for
+    /// reading, WITHOUT trusting what kind of file it is: non-blocking and no-follow, and refused unless it is a regular
+    /// file. A plain open of a FIFO blocks until a writer appears, which no cancellation token can interrupt, so one
+    /// planted pipe would otherwise wedge the capture — and the run's completion behind it — forever.
+    /// </summary>
+    internal static FileStream OpenAgentWrittenFile(string path) =>
+        new(Workspace.LocalAcceptanceFileIdentity.Open(path, directory: false), FileAccess.Read);
 
     /// <summary>
     /// P3 (security): resolve a config-home-relative session-transcript path to an absolute path ONLY when it stays
