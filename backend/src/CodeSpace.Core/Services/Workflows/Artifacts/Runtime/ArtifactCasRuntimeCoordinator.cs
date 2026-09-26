@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
@@ -52,14 +53,14 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
     internal const int MaximumObservationAttempts = 3;
 
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
-    private readonly IStorageRuntimeDriverBroker _driverBroker;
+    private readonly ILifetimeScope _lifetimeScope;
     private readonly TimeProvider _clock;
     private readonly ILogger<ArtifactCasRuntimeCoordinator> _logger;
 
-    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, IStorageRuntimeDriverBroker driverBroker, TimeProvider clock, ILogger<ArtifactCasRuntimeCoordinator> logger)
+    public ArtifactCasRuntimeCoordinator(DbContextOptions<CodeSpaceDbContext> dbOptions, ILifetimeScope lifetimeScope, TimeProvider clock, ILogger<ArtifactCasRuntimeCoordinator> logger)
     {
         _dbOptions = dbOptions;
-        _driverBroker = driverBroker;
+        _lifetimeScope = lifetimeScope;
         _clock = clock;
         _logger = logger;
     }
@@ -1191,7 +1192,7 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
         Task<StorageRuntimeDriverResolution>? pending = null;
         try
         {
-            pending = _driverBroker.OpenAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, request.ProfileRevision, request.Eligibility), timeoutSource.Token).AsTask();
+            pending = OpenDriverInOwnScopeAsync(new StorageRuntimeDriverRequest(request.TeamId, request.ProfileId, request.ProfileRevision, request.Eligibility), timeoutSource.Token);
             var resolution = await pending.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
             if (resolution is not StorageRuntimeDriverResolution.Ready ready)
             {
@@ -1231,6 +1232,22 @@ public sealed partial class ArtifactCasRuntimeCoordinator : IArtifactCasRuntimeC
                 return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderTimeout, true));
             return new DriverCreation(null, Problem(ArtifactCasProblemCode.ProviderFailure, true));
         }
+    }
+
+    /// <summary>
+    /// Resolve the driver in a lifetime scope of its own. The broker's profile and credential readers take the SCOPED
+    /// <see cref="CodeSpaceDbContext"/>, and this coordinator is reached from work that runs BESIDE its scope's other
+    /// users — the agent-run log capture loop appends while the executor's drain tick writes events and offsets on the
+    /// same job scope — so resolving them there put two concurrent statements on one context. Every other statement
+    /// here already runs on its own context (<see cref="CreateDb"/>), and every caller resolves the profile revision
+    /// on one first, so the broker never needed the caller's transaction. A child of the owning scope keeps the
+    /// caller's bindings; the scope lives exactly as long as the resolution, including one abandoned on timeout.
+    /// </summary>
+    private async Task<StorageRuntimeDriverResolution> OpenDriverInOwnScopeAsync(StorageRuntimeDriverRequest request, CancellationToken cancellationToken)
+    {
+        await using var isolated = _lifetimeScope.BeginLifetimeScope();
+
+        return await isolated.Resolve<IStorageRuntimeDriverBroker>().OpenAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     internal static async Task<ArtifactCasProblem?> RequireCapabilitiesAsync(StorageRuntimeDriverLease lease, StorageProviderCapabilities requiredCapabilities)
