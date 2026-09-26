@@ -1996,6 +1996,7 @@ const POSTURE_LABEL: Record<RoomConfinementPosture, string> = {
   Unconfined: "unconfined",
   Confined: "confined",
   ConfinedNetworkSevered: "confined \u00b7 egress severed",
+  ConfinedEgressSealedToBroker: "confined \u00b7 egress sealed to its model broker",
 };
 
 /** A producer's own log health → the word the row shows. A producer that declared no stream renders none of this rather than a word that reads as settled. */

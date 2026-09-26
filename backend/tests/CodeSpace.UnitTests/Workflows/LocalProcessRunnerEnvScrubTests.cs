@@ -315,6 +315,69 @@ public sealed class LocalProcessRunnerEnvScrubTests
             customMessage: "a harness whose CLI ignores its base-URL env var carries that URL on the ARGV, and the token has to be resolved there too or the brokered run cannot reach the broker at all");
     }
 
+    [Theory]
+    [InlineData("10.63.12.1", "localhost,127.0.0.1", null, "localhost,127.0.0.1,10.63.12.1", "localhost,127.0.0.1,10.63.12.1")]   // a netns run: its gateway joins what is already exempt
+    [InlineData(null, "localhost", null, "localhost,127.0.0.1", "localhost,127.0.0.1")]                                           // a loopback broker a NO_PROXY happens to omit
+    [InlineData(null, "localhost,127.0.0.1", null, "localhost,127.0.0.1", "localhost,127.0.0.1")]                                 // already exempt: left as it was
+    [InlineData("10.63.12.1", ".corp.internal", null, ".corp.internal,10.63.12.1", ".corp.internal,10.63.12.1")]                   // only one spelling set: BOTH carry the operator's entries
+    [InlineData("10.63.12.1", null, "gitlab.corp", "gitlab.corp,10.63.12.1", "gitlab.corp,10.63.12.1")]
+    [InlineData("10.63.12.1", "a.corp", "b.corp", "a.corp,b.corp,10.63.12.1", "a.corp,b.corp,10.63.12.1")]                          // both set: their union, in both
+    [InlineData("10.63.12.1", "*", null, "*,10.63.12.1", "*")]                                                                       // bypass-everything: the uppercase readers still need the IP named
+    [InlineData(null, "a.corp", "*", "a.corp,*,127.0.0.1", "*")]
+    public void A_brokered_child_is_told_not_to_proxy_its_broker(string? gatewayIp, string? upper, string? lower, string expectedUpper, string expectedLower)
+    {
+        // The broker's address is one no operator's NO_PROXY can name ahead of time — a per-run gateway — so a CLI
+        // honouring the worker's proxy sent every model call to the proxy instead. Readers prefer different spellings,
+        // and a spelling created with the broker alone hid the operator's own entries. A `*` is the one entry the two
+        // families read differently: Codex's reqwest takes it as an entry that matches no IP address (its brokered
+        // calls went to the proxy with NO_PROXY=* alone), while curl, Python and undici honour it only as the whole value.
+        var environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", ["HTTPS_PROXY"] = "http://proxy.corp:3128" };
+        if (upper is not null) environment["NO_PROXY"] = upper;
+        if (lower is not null) environment["no_proxy"] = lower;
+
+        var resolved = WithWorkerProxyEnvironment(new Dictionary<string, string>(), () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, gatewayIp));
+
+        resolved.Environment["NO_PROXY"].ShouldBe(expectedUpper);
+        resolved.Environment["no_proxy"].ShouldBe(expectedLower);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("ALL_PROXY")]   // the worker's own ALL_PROXY: the scrub drops it, so the child has no proxy to be exempted from
+    [InlineData("all_proxy")]
+    public void A_brokered_child_with_no_proxy_keeps_its_environment(string? workerOnly)
+    {
+        // A NO_PROXY written into a child with no proxy exempts nothing, and on a macOS or Windows worker it turns off
+        // Python's lookup of the OS proxy — urllib reads the environment instead once any *_proxy variable is set.
+        var environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId" };
+        var worker = workerOnly is null ? new Dictionary<string, string>() : new Dictionary<string, string> { [workerOnly] = "socks5h://proxy.corp:1080" };
+
+        var resolved = WithWorkerProxyEnvironment(worker, () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, "10.63.12.1"));
+
+        resolved.Environment.Keys.ShouldBe(new[] { "ANTHROPIC_BASE_URL" }, customMessage: "only the broker host is substituted when the child has no proxy to exempt it from");
+    }
+
+    [Fact]
+    public void A_proxy_the_worker_passes_through_the_scrub_is_one_the_child_is_exempted_from()
+    {
+        var environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId" };
+
+        var resolved = WithWorkerProxyEnvironment(new Dictionary<string, string> { ["https_proxy"] = "http://proxy.corp:3128" }, () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, "10.63.12.1"));
+
+        resolved.Environment["NO_PROXY"].ShouldBe("10.63.12.1", "the worker's https_proxy survives the scrub and reaches the child, so the broker must be exempted from it");
+    }
+
+    /// <summary>Run <paramref name="resolve"/> with every proxy variable of this process cleared but <paramref name="worker"/>: the worker's own values are the fallback, and this host's must not leak in.</summary>
+    private static SandboxSpec WithWorkerProxyEnvironment(IReadOnlyDictionary<string, string> worker, Func<SandboxSpec> resolve)
+    {
+        var names = new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy" };
+        var prior = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, worker.GetValueOrDefault(name));
+        try { return resolve(); }
+        finally { foreach (var (name, value) in prior) Environment.SetEnvironmentVariable(name, value); }
+    }
+
     [Fact]
     public void A_command_carrying_the_broker_host_token_is_resolved_too()
     {

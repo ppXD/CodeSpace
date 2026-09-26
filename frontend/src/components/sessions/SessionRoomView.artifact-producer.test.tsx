@@ -59,6 +59,7 @@ describe("per-artifact producer truth (P21-8b)", () => {
     ["Unconfined", "unconfined"],
     ["Confined", "confined"],
     ["ConfinedNetworkSevered", "confined · egress severed"],
+    ["ConfinedEgressSealedToBroker", "confined · egress sealed to its model broker"],
   ])("names the posture %s as its own word", (confinement, expected) => {
     render(<ProducedFilesCard block={fileBlock(producer({ confinement }))} />);
 

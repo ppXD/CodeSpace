@@ -45,6 +45,21 @@ public sealed class BubblewrapSandboxTests
     }
 
     [Theory]
+    [InlineData("/usr/bin/bwrap", true, SandboxConfinementOutcome.Confined, true, true)]    // a sealed namespace IS severed, and says it kept its broker
+    [InlineData("/usr/bin/bwrap", false, SandboxConfinementOutcome.Confined, false, false)] // a plain shared network is neither
+    [InlineData(null, true, SandboxConfinementOutcome.Unconfined, false, false)]             // an unconfined run claims nothing, sealed or not
+    public void A_run_sealed_to_its_broker_is_recorded_severed_and_sealed(string? available, bool sealedToBroker, SandboxConfinementOutcome expectedOutcome, bool expectedSevered, bool expectedSealed)
+    {
+        // Inside the sealed namespace bwrap SHARES the network (it must not unshare the namespace it was placed in), so
+        // a record read off ShareNetwork alone would call a sealed run "egress NOT severed" — the flag is what says it.
+        var confinement = BubblewrapSandbox.DeriveConfinement(available, SandboxConfinement.ReasonNoBubblewrap, shareNetwork: true, egressAllowlist: null, sealedToBroker);
+
+        confinement.Outcome.ShouldBe(expectedOutcome);
+        confinement.NetworkSevered.ShouldBe(expectedSevered);
+        confinement.EgressSealedToBroker.ShouldBe(expectedSealed);
+    }
+
+    [Theory]
     // No allowlist — the two plain arms: shared host network, and the tier's Off.
     [InlineData(true, null)]
     [InlineData(false, null)]

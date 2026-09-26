@@ -29,6 +29,15 @@ public class RoomArtifactProducerFoldTests
 
     private static readonly Guid Agent = Guid.NewGuid();
 
+    [Fact]
+    public void A_producer_sealed_to_its_broker_is_named_sealed_never_severed()
+    {
+        // A sealed run kept one route; calling it severed on its card is the stronger claim, and contradicts the
+        // turn's own sentence for the same record.
+        RoomProjector.PostureOf(new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, EgressSealedToBroker = true })
+            .ShouldBe(RoomConfinementPosture.ConfinedEgressSealedToBroker);
+    }
+
     [Theory]
     [InlineData(SandboxConfinementOutcome.Confined, true, RoomConfinementPosture.ConfinedNetworkSevered)]
     [InlineData(SandboxConfinementOutcome.Confined, false, RoomConfinementPosture.Confined)]

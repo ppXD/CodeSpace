@@ -75,12 +75,83 @@ public sealed partial class LocalProcessRunner
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var record = await BindLaunchAsync(request, hash, directory, cancellationToken).ConfigureAwait(false);
 
-        // File existence is only a scheduling optimization. The independent bootstrap itself owns the create-only
-        // commitment, so two OS observers seeing "absent" cannot release two executions.
-        if (!File.Exists(NativeLaunchFiles.PathFor(directory, NativeLaunchProtocol.CommitmentFile)))
-            await StartBrokerAsync(new BrokerStart(request.SpoolKey, spec, spool, directory), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // File existence is only a scheduling optimization. The independent bootstrap itself owns the create-only
+            // commitment, so two OS observers seeing "absent" cannot release two executions.
+            if (!File.Exists(NativeLaunchFiles.PathFor(directory, NativeLaunchProtocol.CommitmentFile)))
+                await StartBrokerAsync(new BrokerStart(request.SpoolKey, spec, spool, directory), cancellationToken).ConfigureAwait(false);
 
-        return await DiscoverHandleAsync(record, directory, spool, LaunchPatience, cancellationToken).ConfigureAwait(false);
+            return await DiscoverHandleAsync(record, directory, spool, LaunchPatience, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A bootstrap that never released an execution leaves nothing to tear down the namespace and cgroup this
+            // slot was given: the launch fails before a handle exists, and every reaper keys on a handle. Only proof
+            // that nothing was released is enough — any other outcome may have run, and is left alone.
+            if (await LaunchProvedUnexecutedAsync(directory).ConfigureAwait(false)) await TearDownRejectedLaunchAsync(request.SpoolKey).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>How long a failed launch waits for the bootstrap's receipt before concluding it cannot prove a rejection. The bootstrap writes it as it exits, which is what failed the launch here, so it is normally already there.</summary>
+    private static readonly TimeSpan RejectionReceiptPatience = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Whether this slot provably never released an execution. The bootstrap writes its <c>ready</c> receipt BEFORE it
+    /// releases the exec bootstrap, and an exec bootstrap without a complete release exits without exec, so two states
+    /// prove it: a <c>rejected</c> verdict, and a receipt still <c>committed</c> whose broker is dead (killed, or unable
+    /// to write its verdict to a full disk). It waits while the receipt is missing or still <c>committed</c> by a live
+    /// broker, which replaces it with its verdict as it exits. False for anything else or when the patience runs out:
+    /// an uncertain launch keeps its isolation rather than risk tearing it out from under a live agent.
+    /// </summary>
+    internal static async Task<bool> LaunchProvedUnexecutedAsync(string directory)
+    {
+        var watch = Stopwatch.StartNew();
+
+        while (true)
+        {
+            var receipt = ReadReceipt(directory, out var unreadable);
+
+            if (unreadable) return false;
+            if (receipt?.State == "rejected") return true;
+            if (receipt is { State: "committed" } && BrokerDiedBeforeItsVerdict(directory, receipt.Broker)) return true;
+            if (receipt is not null && receipt.State != "committed" || watch.Elapsed >= RejectionReceiptPatience) return false;
+
+            await Task.Delay(20).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="broker"/> died leaving its receipt at <c>committed</c>. The two facts are sampled in the
+    /// order that makes them proof: death FIRST, then the receipt again. The broker is the receipt's only writer, so a
+    /// <c>committed</c> read after it is known dead is its last word — whereas a receipt read before the liveness check
+    /// leaves a window in which it could write <c>ready</c>, release, and die. Internal, with the liveness read as a seam
+    /// (<paramref name="isAlive"/>, <see cref="NativeProcess.IsAlive"/> by default), so a test can move the receipt at
+    /// the moment liveness is sampled and pin that order.
+    /// </summary>
+    internal static bool BrokerDiedBeforeItsVerdict(string directory, NativeProcessIdentity broker, Func<NativeProcessIdentity, bool>? isAlive = null)
+    {
+        if ((isAlive ?? NativeProcess.IsAlive)(broker)) return false;
+
+        return ReadReceipt(directory, out var unreadable) is { State: "committed" } after && !unreadable && NativeProcess.Same(after.Broker, broker);
+    }
+
+    /// <summary>The slot's receipt, null while there is none yet; <paramref name="unreadable"/> when one exists but cannot be read, which proves nothing.</summary>
+    private static NativeLaunchReceipt? ReadReceipt(string directory, out bool unreadable)
+    {
+        unreadable = false;
+
+        try { return NativeLaunchFiles.Read<NativeLaunchReceipt>(directory, NativeLaunchProtocol.ReceiptFile); }
+        catch (FileNotFoundException) { return null; }
+        catch (Exception error) when (error is JsonException or InvalidDataException or IOException or UnauthorizedAccessException) { unreadable = true; return null; }
+    }
+
+    private static async Task TearDownRejectedLaunchAsync(string spoolKey)
+    {
+        await FilteredEgressNetns.TeardownAsync(spoolKey, CancellationToken.None).ConfigureAwait(false);
+
+        if (CgroupResourceLimit.CgroupRoot is { } root) await CgroupResourceLimit.TeardownAsync(root, spoolKey, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -149,6 +220,11 @@ public sealed partial class LocalProcessRunner
     private async Task StartBrokerAsync(BrokerStart request, CancellationToken cancellationToken)
     {
         var binary = RunnerHostBinaryPath();
+
+        // The bootstrap's admission window opens at "owned" and must cover the whole cgroup + namespace setup below, so
+        // the one slow first-use cost — the seal probe — is paid before the window opens rather than inside it.
+        _ = SealableBrokerPort(request.Spec);
+
         var info = new ProcessStartInfo(binary) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         info.ArgumentList.Add("broker"); info.ArgumentList.Add(request.Directory);
         using var process = new Process { StartInfo = info };
@@ -176,7 +252,7 @@ public sealed partial class LocalProcessRunner
                 Spec = request.Spec, ReadOnlyPaths = request.Spec.ReadOnlyPaths, CaptureBudget = request.Spec.CaptureBudget,
                 Command = command.FileName, Args = command.ArgumentList.ToArray(), WorkingDirectory = command.WorkingDirectory,
                 Environment = command.Environment.ToDictionary(pair => pair.Key, pair => pair.Value), EgressNetnsKey = egressKey, CgroupRunKey = cgroupKey,
-                Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix)),
+                Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix), SealedEgress(request.Spec, egress.ExecPrefix)),
             };
             // Measured BEFORE transmission is marked started, so a frame no pipe can carry is refused while the catch
             // below can still tear the netns and cgroup down, and the broker reads EOF and releases its slot as rejected.

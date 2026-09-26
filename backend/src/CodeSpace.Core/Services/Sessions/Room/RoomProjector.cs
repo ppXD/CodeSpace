@@ -1000,12 +1000,12 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             .OrderBy(ConfinementRank).ThenBy(c => c.Reason ?? "", StringComparer.Ordinal)
             .FirstOrDefault();
 
-    /// <summary>Ascending strength: anything not confined is 0 (the reader's "yes, one of them could reach the network"), confinement without a severed netns 1, full severance 2.</summary>
+    /// <summary>Ascending strength: anything not confined is 0 (the reader's "yes, one of them could reach the network"), confinement without a severed netns 1, a namespace sealed to the run's model broker 2 — severed from everything but that one route, so weaker than — full severance 3.</summary>
     private static int ConfinementRank(SandboxConfinement confinement) =>
-        confinement.Outcome != SandboxConfinementOutcome.Confined ? 0 : confinement.NetworkSevered ? 2 : 1;
+        confinement.Outcome != SandboxConfinementOutcome.Confined ? 0 : confinement.EgressSealedToBroker ? 2 : confinement.NetworkSevered ? 3 : 1;
 
     /// <summary>
-    /// One producer's own posture, named at the SAME three strengths <see cref="ConfinementRank"/> orders the
+    /// One producer's own posture, named at the SAME four strengths <see cref="ConfinementRank"/> orders the
     /// run-level fold by — so the per-artifact word and the turn's sentence can never disagree about what a record
     /// means. An absent record is <see cref="RoomConfinementPosture.Unknown"/>, never the confined value a reader
     /// would take as safety nobody evidenced.
@@ -1014,6 +1014,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     {
         null => RoomConfinementPosture.Unknown,
         { Outcome: not SandboxConfinementOutcome.Confined } => RoomConfinementPosture.Unconfined,
+        { EgressSealedToBroker: true } => RoomConfinementPosture.ConfinedEgressSealedToBroker,
         { NetworkSevered: true } => RoomConfinementPosture.ConfinedNetworkSevered,
         _ => RoomConfinementPosture.Confined,
     };

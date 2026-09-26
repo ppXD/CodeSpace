@@ -42,8 +42,16 @@ public sealed record SandboxConfinement
     /// <summary>Why the host could not confine — one of the <c>Reason*</c> constants. Null for every outcome but <see cref="SandboxConfinementOutcome.Unconfined"/>.</summary>
     public string? Reason { get; init; }
 
-    /// <summary>Whether the launch put the agent in a fresh EMPTY net namespace (<c>--unshare-net</c>) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
+    /// <summary>Whether the launch severed the agent from the network — a fresh EMPTY net namespace (<c>--unshare-net</c>), or one SEALED to its model broker (<see cref="EgressSealedToBroker"/>, which says which) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
     public bool NetworkSevered { get; init; }
+
+    /// <summary>
+    /// Whether the run's severed network was a SEALED namespace rather than an empty one: no route, no NAT and no DNS,
+    /// with exactly one reachable destination — the run's own model-credential broker on the namespace's gateway. The
+    /// shape a network-off run with a brokered model gets where the host can build it, because an empty namespace
+    /// would cut that run off from its model too. Implies <see cref="NetworkSevered"/>; false for every other run.
+    /// </summary>
+    public bool EgressSealedToBroker { get; init; }
 
     /// <summary>
     /// Whether the run's model credential was BROKERED (true) or placed in the sandbox's environment as the tenant's

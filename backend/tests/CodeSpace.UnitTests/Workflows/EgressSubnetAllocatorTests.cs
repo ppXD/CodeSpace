@@ -46,6 +46,112 @@ public class EgressSubnetAllocatorTests : IDisposable
     }
 
     [Fact]
+    public void A_30_the_host_already_routes_is_never_handed_out()
+    {
+        // The lock proves no live WORKER holds a /30; it cannot see the host's own network or a run whose namespace
+        // outlived the worker that reserved it (its veth keeps the address, the lock died with the process). Here the
+        // host routes the first candidate as a surviving run's /30 and the second inside its own /31 of a LAN.
+        var routes = HostRoutedPrefixes.Parse("""[{"dst":"default","gateway":"172.17.0.1"},{"dst":"10.1.1.0/30","dev":"csh-survivor"},{"type":"local","dst":"10.1.1.5","dev":"eth9"}]""");
+
+        var lease = NewWorker().Acquire(Guid.NewGuid().ToString("N"), routes);
+
+        lease.Cidr.ShouldBe("10.1.1.8/30", "the surviving run's 10.1.1.0/30 and the /30 holding the host's own 10.1.1.5 are both skipped; the default route is no use of any one /30");
+    }
+
+    [Fact]
+    public void A_broad_route_over_the_first_range_moves_the_walk_on_instead_of_refusing()
+    {
+        // A worker in a 10.1.0.0/16 LAN routes every /30 the walk used to consider. Those must not count against the
+        // concurrency bound: 10.2.0.0/16 and beyond are free, and a launch refused there is a refusal nothing forced.
+        var routes = HostRoutedPrefixes.Parse("""[{"dst":"10.1.0.0/16","dev":"eth0"}]""");
+
+        var lease = NewWorker().Acquire(Guid.NewGuid().ToString("N"), routes);
+
+        lease.Cidr.ShouldBe("10.2.1.0/30");
+    }
+
+    [Fact]
+    public void The_walks_jump_inverts_the_candidate_order_at_every_octet_boundary()
+    {
+        // The walk moves past a routed range by computing the first candidate above it, so that computation must be
+        // the exact inverse of the order candidates are named in — a drift would skip free /30s or revisit routed ones.
+        // Sampled across every boundary CidrAt has: each /30 block, each third-octet wrap, each second-octet wrap.
+        var samples = new[] { 0, 1, 62, 63, 64, 65, 16255, 16256, 16257, 2_000_003, EgressSubnetAllocator.CandidateCount - 1 };
+
+        foreach (var index in samples)
+        {
+            var network = Address(EgressSubnetAllocator.CidrAt(index).Split('/')[0]);
+
+            EgressSubnetAllocator.IndexAtOrAbove(network).ShouldBe(index, $"candidate {index} ({EgressSubnetAllocator.CidrAt(index)}) is its own first candidate");
+            EgressSubnetAllocator.IndexAtOrAbove(network + 1).ShouldBe(index + 1, $"one address past candidate {index} is the next candidate");
+        }
+
+        EgressSubnetAllocator.IndexAtOrAbove(Address("10.254.254.253")).ShouldBe(EgressSubnetAllocator.CandidateCount, "nothing lies above the last candidate");
+    }
+
+    [Theory]
+    [InlineData("""[{"dst":"10.0.0.0/9","dev":"eth0"}]""", "10.128.1.0/30")]                 // a broad route over the lower half of the space
+    [InlineData("""[{"type":"blackhole","dst":"10.0.0.0/8"}]""", "10.1.1.0/30")]           // a null route discards traffic; it has no peers to shadow
+    [InlineData("""[{"type":"unreachable","dst":"10.1.1.0/24"}]""", "10.1.1.0/30")]
+    [InlineData("""[{"type":"unreachable","dst":"10.1.1.2"}]""", "10.1.1.4/30")]           // a banned /32 wins longest-prefix match over the run's /30 — it still occupies
+    [InlineData("""[{"type":"blackhole","dst":"10.1.1.0/30"}]""", "10.1.1.4/30")]
+    public void The_walk_passes_routed_ranges_whole_and_ignores_null_routes(string routesJson, string expected) =>
+        NewWorker().Acquire(Guid.NewGuid().ToString("N"), HostRoutedPrefixes.Parse(routesJson)).Cidr.ShouldBe(expected);
+
+    [Fact]
+    public void A_host_that_routes_everything_this_worker_does_not_hold_blames_the_routes_not_4096_live_runs()
+    {
+        // A worker holding one live /30 gains a route over all of 10/8 (a VPN connecting). The walk finds its own /30
+        // and nothing else it may try; the wall is the routes, and the message must say so rather than claim 4096.
+        // The live /30 sits past the first candidate, so the walk jumps over it — the count must still include it.
+        var allocator = NewWorker();
+        var live = allocator.Acquire(Guid.NewGuid().ToString("N"), HostRoutedPrefixes.Parse("""[{"dst":"10.1.1.0/30"}]"""));
+
+        var refusal = Should.Throw<InvalidOperationException>(() => allocator.Acquire(Guid.NewGuid().ToString("N"), HostRoutedPrefixes.Parse("""[{"dst":"10.0.0.0/8"}]""")));
+
+        refusal.Message.ShouldContain("does not already route");
+        refusal.Message.ShouldContain("this worker holds 1");
+    }
+
+    [Fact]
+    public void Running_out_of_30s_is_a_failed_setup_the_caller_can_type_not_an_exception_that_escapes_it()
+    {
+        // A sealed run types its setup failures as sandbox_sealed_egress_unavailable; an exhaustion thrown past the
+        // setup's own result would land as a bare executor-error the supervisor cannot steer on.
+        var (subnet, exhausted) = FilteredEgressNetns.Reserve(NewWorker(), Guid.NewGuid().ToString("N"), HostRoutedPrefixes.Parse("""[{"dst":"10.0.0.0/8"}]"""));
+
+        subnet.ShouldBeNull();
+        exhausted.ShouldNotBeNull().ShouldContain("does not already route", customMessage: "the setup failure carries the allocator's own account of why");
+    }
+
+    private static ulong Address(string ip) => System.Net.IPAddress.Parse(ip).GetAddressBytes().Aggregate(0UL, (value, octet) => value << 8 | octet);
+
+    [Theory]
+    [InlineData("0.0.0.0/1")]     // a VPN's default override — a default in all but name
+    [InlineData("128.0.0.0/1")]
+    public void A_route_broader_than_a_slash_8_is_a_default_not_a_network(string routed) =>
+        HostRoutedPrefixes.Parse($$"""[{"dst":"{{routed}}"}]""").Overlaps("10.1.1.0/30").ShouldBeFalse();
+
+    [Fact]
+    public void A_host_that_routes_every_candidate_says_so_instead_of_blaming_4096_live_runs()
+    {
+        var routes = HostRoutedPrefixes.Parse("""[{"dst":"10.0.0.0/8","dev":"vpn0"}]""");
+
+        var refusal = Should.Throw<InvalidOperationException>(() => NewWorker().Acquire(Guid.NewGuid().ToString("N"), routes));
+
+        refusal.Message.ShouldContain("does not already route", customMessage: "the wall is the host's own routes, not concurrency");
+    }
+
+    [Theory]
+    [InlineData("10.1.1.0/30", "10.1.1.0/30", true)]    // the same /30 — a survivor's
+    [InlineData("10.1.0.0/16", "10.1.1.4/30", true)]    // a LAN containing it
+    [InlineData("10.1.1.6", "10.1.1.4/30", true)]       // a single address inside it (no length ⇒ /32)
+    [InlineData("10.1.1.8/30", "10.1.1.4/30", false)]   // the next /30 over
+    [InlineData("192.168.0.0/16", "10.1.1.4/30", false)]
+    public void A_candidate_overlaps_any_prefix_sharing_an_address_with_it(string routed, string candidate, bool expected) =>
+        HostRoutedPrefixes.Parse($$"""[{"dst":"{{routed}}"}]""").Overlaps(candidate).ShouldBe(expected);
+
+    [Fact]
     public void Concurrent_runs_never_share_a_subnet_even_when_many_are_active()
     {
         // 500 simultaneously-held leases — the old 64k hash space birthday-collided at ~52% by 300; the allocator must
@@ -245,9 +351,14 @@ public class EgressSubnetAllocatorTests : IDisposable
     }
 
     [Theory]
-    [InlineData(true)]    // EACCES → UnauthorizedAccessException
-    [InlineData(false)]   // EROFS  → IOException (a remount-ro is NOT a rights error, and reading only for the rights error left the misreport reachable)
-    public void A_directory_that_turns_unwritable_after_the_probe_names_the_MOUNT_not_4096_live_runs(bool rightsError)
+    // EACCES → UnauthorizedAccessException; EROFS → IOException (a remount-ro is NOT a rights error, and reading only
+    // for the rights error left the misreport reachable). Each with and without the routes production always passes:
+    // a worker in 10.1.1.0/24 skips those /30s as routed, and must still be told it is the mount, not its routes.
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public void A_directory_that_turns_unwritable_after_the_probe_names_the_MOUNT_not_4096_live_runs(bool rightsError, bool lanRoutes)
     {
         // Every candidate lost the same way can be 4096 live /30s — or a mount that went read-only after the probe.
         // Indistinguishable from inside the loop, and guessing "contention" reported "this host already holds 4096
@@ -256,7 +367,9 @@ public class EgressSubnetAllocatorTests : IDisposable
         // that proves — for either errno, since a remount-ro arrives as EROFS rather than EACCES.
         var allocator = new EgressSubnetAllocator(_reservations, new OpenerThatBreaksAfterTheProbe(rightsError).Open, NeverAskedForAChild);
 
-        var refusal = Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N")));
+        var routes = lanRoutes ? HostRoutedPrefixes.Parse("""[{"dst":"10.1.1.0/24","dev":"eth0"},{"type":"local","dst":"10.1.1.20","dev":"eth0"}]""") : null;
+
+        var refusal = Should.Throw<EgressSubnetReservationUnavailableException>(() => allocator.Acquire(Guid.NewGuid().ToString("N"), routes));
 
         refusal.Reason.ShouldBe("the reservation directory cannot be written", "the cause named must be the mount, not imaginary contention");
         refusal.ReservationDirectory.ShouldBe(_reservations, "the actionable fact is WHICH directory an operator has to fix");

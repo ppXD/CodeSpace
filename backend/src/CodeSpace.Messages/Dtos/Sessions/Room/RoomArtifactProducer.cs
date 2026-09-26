@@ -68,4 +68,7 @@ public enum RoomConfinementPosture
 
     /// <summary>Confined AND handed a fresh empty net namespace — the strongest posture a producer can record.</summary>
     ConfinedNetworkSevered,
+
+    /// <summary>Confined, with a network namespace SEALED to the run's model broker: severed from everything but that one route, so between <see cref="Confined"/> and <see cref="ConfinedNetworkSevered"/> in strength. Declared last only so the earlier values keep their numbers.</summary>
+    ConfinedEgressSealedToBroker,
 }
