@@ -1774,6 +1774,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             "RETRY this exact subtask so it runs on a live worker; do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.",
         Messages.Failures.FailureCodes.ModelCredentialBrokerUnavailable =>
             "RETRY this exact subtask once, in case another worker can broker its model credential; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.",
+        Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable =>
+            "RETRY this exact subtask once, in case another worker can seal its network to its model broker; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.",
         _ => "This is an infrastructure fault with no recorded remedy: 'ask_human' to rule. Do NOT re-plan it and do NOT amend its check — neither is where the fault is.",
     };
 

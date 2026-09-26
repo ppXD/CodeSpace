@@ -34,7 +34,8 @@
 # The same namespace machinery SEALS a network-off run whose model is brokered to that broker (no route, no NAT, no
 # DNS, one gateway port). It is taken only where bubblewrap confines AND FilteredEgressNetns.CanSeal has proved, by
 # building a throwaway namespace, that this process may: root + CAP_NET_ADMIN + CAP_SYS_ADMIN, no sysctl needed. A
-# pod without them keeps severing such a run — which also severs it from its broker, so it reaches no model.
+# pod without them that DOES confine refuses such a run before it spends anything (sandbox_sealed_egress_unavailable),
+# because severing it instead would cut it off from its broker and leave it reaching no model.
 #
 # CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
 # Sandbox:RequireConfinement is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user

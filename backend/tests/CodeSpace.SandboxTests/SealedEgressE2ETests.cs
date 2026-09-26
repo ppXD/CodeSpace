@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -105,6 +106,44 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
         finally { await FilteredEgressNetns.TeardownAsync(key, CancellationToken.None); }
     }
 
+    [Fact]
+    public async Task A_sealed_setup_that_fails_on_this_host_refuses_the_launch_typed_and_leaks_nothing()
+    {
+        if (!Seals()) return;
+
+        // A host that proved it can seal can still fail one run's setup — a name collision, a kernel refusal. The launch
+        // must then refuse under the same typed wall the executor's pre-spend admission raises, naming the failed step,
+        // and tear down whatever the partial setup built. Occupying the host veth's name makes the plan's own
+        // `ip link add` fail exactly as a collision would.
+        var key = Guid.NewGuid().ToString("N");
+        var names = FilteredEgressPlan.BuildSealed(key, 9, new EgressSubnetAllocator.Lease { Cidr = "0.0.0.0/30", HostIp = "0.0.0.1", NsIp = "0.0.0.2" });
+
+        // A veth, not a dummy: the veth driver is what the plan itself needs, so it is loaded wherever sealing works at all.
+        (await RunHostExitAsync(["ip", "link", "add", names.VethHost, "type", "veth", "peer", "name", "csp-" + names.VethHost[4..]])).ShouldBe(0, $"fixture: could not occupy {names.VethHost}");
+
+        try
+        {
+            using var broker = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+            var brokered = (await broker.OpenAsync(Lease(), CancellationToken.None)).ShouldNotBeNull();
+            var spec = new SandboxSpec { Command = "/bin/true", AllowNetwork = false, ModelBrokerPort = brokered.RebindPort, TimeoutSeconds = 30 };
+            _spoolDirs.Add(LocalProcessRunner.SpoolDirectoryFor(key));
+
+            var thrown = await Should.ThrowAsync<Exception>(() => new LocalProcessRunner().LaunchAsync(spec, key, CancellationToken.None));
+            var refusal = (thrown as SealedEgressUnavailableException ?? thrown.InnerException as SealedEgressUnavailableException).ShouldNotBeNull($"the launch must refuse typed, not as {thrown.GetType().Name}: {thrown.Message}");
+
+            ((CodeSpace.Messages.Failures.IFailure)refusal).Code.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable);
+            refusal.Cause.ShouldContain("ip link add", customMessage: $"the refusal must name the setup step that failed: {refusal.Cause}");
+            (await NetnsExistsAsync(names.Namespace)).ShouldBeFalse("a failed setup must tear down the namespace it had already created");
+
+            output.WriteLine($"{RanMarker} setup-failure cause={refusal.Cause}");
+        }
+        finally
+        {
+            await RunHostExitAsync(["ip", "link", "del", names.VethHost]);   // best-effort: the failed setup's teardown may already have removed it (and its peer with it)
+            await FilteredEgressNetns.TeardownAsync(key, CancellationToken.None);
+        }
+    }
+
     public void Dispose()
     {
         foreach (var dir in _spoolDirs)
@@ -201,6 +240,17 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
 
     private static async Task<bool> NetnsExistsAsync(string ns) =>
         (await RunHostAsync(["ip", "netns", "list"])).Split('\n').Any(line => line.Trim().Split(' ').FirstOrDefault() == ns);
+
+    private static async Task<int> RunHostExitAsync(IReadOnlyList<string> argv)
+    {
+        var psi = new ProcessStartInfo { FileName = argv[0], UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in argv.Skip(1)) psi.ArgumentList.Add(arg);
+
+        using var process = Process.Start(psi)!;
+        await process.WaitForExitAsync();
+
+        return process.ExitCode;
+    }
 
     private static async Task<string> RunHostAsync(IReadOnlyList<string> argv)
     {
