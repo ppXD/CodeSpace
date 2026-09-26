@@ -173,7 +173,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         _logger.LogDebug("Model credential brokered for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
         WarnIfUnreachableFromNetns(lease, bound.Host);
 
-        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId });
+        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId, ReachableFromNamespace = bound.Host == AnyHost });
     }
 
     /// <summary>

@@ -33,4 +33,12 @@ public sealed record BrokeredModelCredential(string BaseUrl, string RunToken, Da
 
     /// <summary>The unguessable route segment of <see cref="BaseUrl"/>, for the same reason as <see cref="RebindPort"/>: a re-bind has to install the run's OWN route, never mint a fresh one, or the address the agent holds resolves to nothing. Null exactly when <see cref="RebindPort"/> is.</summary>
     public string? RebindRoute { get; init; }
+
+    /// <summary>
+    /// Whether the lease listens on every address, so a child inside a per-run network namespace — which reaches the
+    /// worker at its namespace gateway, never on loopback — can reach it. False (the default) is the fail-closed
+    /// answer: a broker that could only bind loopback, or one that does not say, cannot serve a sealed network-off run,
+    /// and such a run is refused before launch rather than left calling an address nothing answers.
+    /// </summary>
+    public bool ReachableFromNamespace { get; init; }
 }

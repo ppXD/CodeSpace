@@ -494,6 +494,7 @@ public class SupervisorDeciderTests
     [Theory]
     [InlineData(FailureCodes.ModelCredentialLeaseLost)]
     [InlineData(FailureCodes.ModelCredentialBrokerUnavailable)]
+    [InlineData(FailureCodes.SandboxSealedEgressUnavailable)]
     public void An_attempt_this_deployment_ended_is_steered_at_a_retry_never_at_re_planning_its_check(string exitReason)
     {
         // The contradiction this arm removes: the shared infra steer says "Do NOT retry the agent … Re-plan this
@@ -538,6 +539,10 @@ public class SupervisorDeciderTests
         // A future member with no arm must not silently inherit either remedy.
         LlmSupervisorDecider.EndedByDeploymentSteer("some_future_infra_exit")
             .ShouldBe("This is an infrastructure fault with no recorded remedy: 'ask_human' to rule. Do NOT re-plan it and do NOT amend its check — neither is where the fault is.");
+
+        // A host that cannot seal is the same kind of deployment answer as one that cannot broker, about the network.
+        LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.SandboxSealedEgressUnavailable)
+            .ShouldBe("RETRY this exact subtask once, in case another worker can seal its network to its model broker; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.");
 
         leaseLost.ShouldNotBe(brokerDown, "one remedy text for two different faults is how a bounded repair becomes an unbounded loop");
         leaseLost.ShouldNotContain("ask_human", Case.Sensitive, "a live worker is the whole repair — escalating a rolling restart to a human is noise");

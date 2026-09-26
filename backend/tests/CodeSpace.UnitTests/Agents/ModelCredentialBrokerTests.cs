@@ -109,6 +109,20 @@ public class ModelCredentialBrokerTests
     }
 
     [Fact]
+    public async Task A_lease_says_whether_a_per_run_namespace_can_reach_it()
+    {
+        // A sealed network-off run reaches the worker at its namespace gateway, never on loopback, so the lease has to
+        // say whether it took the wide bind. The wide bind is tried only where namespaces can exist; everywhere else
+        // it binds loopback and must say it is NOT reachable, which is what refuses a sealed launch before it spends.
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+
+        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+        if (brokered is null) return;   // this host cannot bind a listener at all — nothing to assert
+
+        brokered.ReachableFromNamespace.ShouldBe(FilteredEgressNetns.IsSupported, "reachable from a namespace exactly when the broker bound every address, which it tries only where a namespace can exist");
+    }
+
+    [Fact]
     public async Task A_revoked_lease_is_refused()
     {
         var upstream = new StubUpstream();
