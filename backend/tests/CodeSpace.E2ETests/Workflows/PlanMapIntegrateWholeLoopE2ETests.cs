@@ -279,7 +279,8 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         {
             Seed = new TaskLaunchSeed { Goal = SeedGoal, SurfaceKind = "test", TeamId = teamId },
             Route = new RoutePlan { RecipeKind = TaskRecipeKinds.MapFanout, ProjectionKind = TaskProjectionKinds.PlanMapSynth, Caps = new RouteCaps() },
-            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Confined", RepositoryId = repoId },
+            // Standard, not Confined: each item WRITES a file for the integration to merge, and a Confined agent's workspace is mounted read-only wherever the sandbox confines.
+            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Standard", RepositoryId = repoId },
             PlannerModelRowId = plannerRowId,
         };
 

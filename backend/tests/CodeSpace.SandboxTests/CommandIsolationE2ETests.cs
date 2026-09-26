@@ -36,6 +36,43 @@ public sealed class CommandIsolationE2ETests(CgroupArenaFixture fixture)
     [KernelTheory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Commands_given_a_read_only_workspace_can_read_and_git_diff_it_but_cannot_write_it(bool stream)
+    {
+        // A read-only reviewer reads the change under review with git: diff, log, show and status must all work over a
+        // workspace mounted read-only, while a write to the tree or to .git fails with EROFS — the kernel's refusal,
+        // not a CLI's permission mode.
+        var root = Directory.CreateTempSubdirectory("cs-command-readonly-").FullName;
+        try
+        {
+            var (workspace, baseCommit, headCommit) = TwoCommitRepository(root);
+            var script = string.Join('\n',
+                "fail() { printf '%s\\n' \"$1\" >&2; exit \"$2\"; }",
+                "git diff \"$1\" \"$2\" > /tmp/diff 2>/tmp/err || fail \"git diff failed: $(cat /tmp/err)\" 10",
+                "grep -q MARKER-NEW /tmp/diff || fail \"git diff did not show the change: $(cat /tmp/diff)\" 11",
+                "[ \"$(git log --oneline | wc -l)\" -eq 2 ] || fail \"git log did not list both commits\" 12",
+                "git show --stat HEAD > /dev/null 2>/tmp/err || fail \"git show failed: $(cat /tmp/err)\" 13",
+                "git status --porcelain > /tmp/status 2>/tmp/err || fail \"git status failed: $(cat /tmp/err)\" 14",
+                "[ ! -s /tmp/status ] || fail \"git status is not clean: $(cat /tmp/status)\" 15",
+                // Grouped: the shell's own `> tamper.txt` is what fails, before a `2>` on the same command would apply.
+                "if { printf x > tamper.txt; } 2>/tmp/err; then fail 'wrote a file into the read-only workspace' 20; fi",
+                "grep -q 'Read-only file system' /tmp/err || fail \"the workspace write failed, but not as EROFS: $(cat /tmp/err)\" 21",
+                "if touch .git/tamper 2>/tmp/err; then fail 'wrote into the read-only .git' 22; fi",
+                "grep -q 'Read-only file system' /tmp/err || fail \"the .git write failed, but not as EROFS: $(cat /tmp/err)\" 23",
+                "printf ok > /tmp/scratch || fail 'the private /tmp is not writable' 24");
+
+            var result = await RunAsync(stream, new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", script, "sh", baseCommit, headCommit }, WorkingDirectory = workspace, ReadOnlyWorkingDirectory = true, TimeoutSeconds = 30 });
+
+            result.Status.ShouldBe(SandboxStatus.Success, $"exit {result.ExitCode}: {result.Stderr}");
+            File.Exists(Path.Combine(workspace, "tamper.txt")).ShouldBeFalse("nothing written inside may reach the host workspace");
+            File.Exists(Path.Combine(workspace, ".git", "tamper")).ShouldBeFalse();
+            Git(workspace, "status", "--porcelain").ShouldBeEmpty("the workspace is exactly as the run found it");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [KernelTheory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Network_denial_blocks_a_real_host_listener_and_explicit_network_access_can_reach_it(bool stream)
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -82,6 +119,38 @@ public sealed class CommandIsolationE2ETests(CgroupArenaFixture fixture)
             result.Status.ShouldBe(over ? SandboxStatus.ResourceExhausted : SandboxStatus.Success, result.Stderr);
             Directory.GetDirectories(arena.Root).Order().ToArray().ShouldBe(before, "both successful and OOM command leaves must be reclaimed");
         }
+    }
+
+    /// <summary>A repository with a base and a head commit whose one file changes between them; returns its path and both SHAs.</summary>
+    private static (string Workspace, string Base, string Head) TwoCommitRepository(string root)
+    {
+        var workspace = Directory.CreateDirectory(Path.Combine(root, "workspace")).FullName;
+
+        Git(workspace, "init", "-q", "-b", "main");
+        File.WriteAllText(Path.Combine(workspace, "app.txt"), "MARKER-OLD\n");
+        Git(workspace, "add", "-A");
+        Git(workspace, "commit", "-q", "-m", "base");
+        var baseCommit = Git(workspace, "rev-parse", "HEAD");
+
+        File.WriteAllText(Path.Combine(workspace, "app.txt"), "MARKER-NEW\n");
+        Git(workspace, "commit", "-q", "-am", "head");
+
+        return (workspace, baseCommit, Git(workspace, "rev-parse", "HEAD"));
+    }
+
+    private static string Git(string directory, params string[] arguments)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var arg in new[] { "-c", "user.name=kernel-e2e", "-c", "user.email=kernel-e2e@codespace.test", "-c", "commit.gpgsign=false" }.Concat(arguments)) info.ArgumentList.Add(arg);
+
+        using var process = System.Diagnostics.Process.Start(info)!;
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        if (process.ExitCode != 0) throw new InvalidOperationException($"git {string.Join(' ', arguments)} failed ({process.ExitCode}): {stderr}");
+
+        return stdout.Trim();
     }
 
     private static Task<SandboxResult> RunAsync(bool stream, SandboxSpec spec)

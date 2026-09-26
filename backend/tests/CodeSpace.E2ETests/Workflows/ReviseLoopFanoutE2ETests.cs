@@ -183,7 +183,8 @@ public sealed class ReviseLoopFanoutE2ETests
             {
                 Harness = "codex-cli",
                 RunnerKind = "local",
-                AutonomyLevel = "Confined",
+                // Standard, not Confined: the branch agents WRITE the file the revise round heals, and a Confined agent's workspace is mounted read-only wherever the sandbox confines.
+                AutonomyLevel = "Standard",
                 RepositoryId = repoId,
                 OutputReviewMode = ReviewMode.Improve,
                 ReviewerModelId = criticRowId,
