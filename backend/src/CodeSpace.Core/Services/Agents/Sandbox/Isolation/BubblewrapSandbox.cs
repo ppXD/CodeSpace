@@ -78,13 +78,17 @@ public static class BubblewrapSandbox
     /// <see cref="EgressFor"/> derivation <see cref="BuildArgs"/> turns into <c>--unshare-net</c> — so the record can
     /// neither claim a severance the argv did not request NOR miss one it did (an unenforceable allowlist fails
     /// closed to severed even while the launch asked to share the network).</para>
+    ///
+    /// <para><paramref name="sealedToBroker"/> says the shared network IS a sealed namespace whose only destination is
+    /// the run's model broker: severed from everything else, so recorded as severed — and as sealed, so a reader knows
+    /// the one route it kept.</para>
     /// </summary>
-    public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork, IReadOnlyList<string>? egressAllowlist)
+    public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork, IReadOnlyList<string>? egressAllowlist, bool sealedToBroker = false)
     {
         if (available is null)
             return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = unavailableReason ?? SandboxConfinement.ReasonNoBubblewrap };
 
-        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = EgressFor(shareNetwork, egressAllowlist).Mode != SandboxEgressMode.Full };
+        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = sealedToBroker || EgressFor(shareNetwork, egressAllowlist).Mode != SandboxEgressMode.Full, EgressSealedToBroker = sealedToBroker };
     }
 
     /// <summary>

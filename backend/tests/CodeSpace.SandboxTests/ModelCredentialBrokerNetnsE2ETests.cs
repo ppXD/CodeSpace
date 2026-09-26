@@ -13,12 +13,12 @@ namespace CodeSpace.SandboxTests;
 /// for real ONLY in the privileged sandbox-isolation CI job; elsewhere
 /// <see cref="FilteredEgressNetns.IsSupported"/> is false and it degrade-skips.
 ///
-/// <para><b>The claim it settles.</b> A sealed run's whole point is that its egress allowlist is the only way out —
-/// so "the broker is reachable from inside" cannot be argued from the code, it has to be observed. The allowlist here
-/// is deliberately EMPTY: the namespace can reach nothing on the internet, and the broker still answers, because a
-/// packet addressed to the host's own veth address is delivered locally (INPUT) rather than FORWARDED, and the plan's
-/// filter is a forward hook. If that ever stops being true, every sealed brokered run loses its model and this test
-/// is where it shows.</para>
+/// <para><b>The claim it settles.</b> A sealed run's whole point is that its broker is the only way out — so "the
+/// broker is reachable from inside" cannot be argued from the code, it has to be observed. The namespace is the
+/// production sealed one (<see cref="FilteredEgressNetns.SetupSealedAsync"/>): no route, no NAT, no DNS, and an input
+/// filter admitting only the lease's own port on the gateway. The broker still answers, because a packet addressed to
+/// the host's own veth address is delivered locally (INPUT) and that one port is what the filter admits. If that ever
+/// stops being true, every sealed brokered run loses its model and this test is where it shows.</para>
 ///
 /// <para>The second claim is the flip side: the bearer the sandbox holds is NOT the tenant's key. Sent straight to the
 /// provider it buys nothing, so a token that escapes a run is not a credential.</para>
@@ -43,13 +43,13 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
 
         brokered.ShouldNotBeNull("the broker must be able to listen on a host that can build filtered-egress namespaces — a sealed run has no other route to a model");
 
-        // An EMPTY allowlist: this namespace can reach nothing on the internet. See the class remarks.
+        // The production sealed namespace: its one reachable destination is this lease's port. See the class remarks.
         var netnsKey = Guid.NewGuid().ToString("N");
-        var setup = await FilteredEgressNetns.SetupAsync(netnsKey, Array.Empty<string>(), timeoutSeconds: 20, CancellationToken.None);
+        var setup = await FilteredEgressNetns.SetupSealedAsync(netnsKey, brokered!.RebindPort!.Value, timeoutSeconds: 20, CancellationToken.None);
 
         try
         {
-            setup.SetupOk.ShouldBeTrue($"the filtered netns must set up cleanly; setup error: {setup.SetupError}");
+            setup.SetupOk.ShouldBeTrue($"the sealed netns must set up cleanly; setup error: {setup.SetupError}");
             setup.HostIp.ShouldNotBeNullOrWhiteSpace("the setup must report its gateway address — it is the only address a process inside the namespace can reach this worker at");
 
             // Resolve the broker's address through the PRODUCTION substitution the runner performs at launch, so the
@@ -57,7 +57,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
             var url = ReachableUrl(brokered!, setup.HostIp!) + "/v1/messages";
 
             (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered!.RunToken)).ShouldBe("200",
-                customMessage: $"a sealed run must reach its broker at {setup.HostIp} with an EMPTY egress allowlist — if this is not 200, check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`. A host-destined packet is INPUT, not FORWARD, so the allowlist must not be involved");
+                customMessage: $"a sealed run must reach its broker at {setup.HostIp} — if this is not 200, check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}` and `nft list table inet {FilteredEgressPlan.NamespaceFor(netnsKey)}`. A host-destined packet is INPUT, and the sealed input filter must admit exactly this lease's port");
 
             var relayedBeforeRevoke = upstream.Calls;
 
@@ -71,7 +71,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
             var (exit, status) = await CurlAsync(setup.ExecPrefix, url, brokered.RunToken);
 
             exit.ShouldBe(CurlCouldNotConnect,
-                customMessage: $"after a revoke nothing may answer at {url} from inside the namespace — curl must fail to connect (7), and got exit {exit} (status '{status}'). Exit 0 means something is STILL LISTENING on the revoked lease's port; exit 28 means the packet is being dropped rather than rejected, which is a netns/filter change, not a brokerage one. Check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`");
+                customMessage: $"after a revoke nothing may answer at {url} from inside the namespace — curl must fail to connect (7), and got exit {exit} (status '{status}'). Exit 0 means something is STILL LISTENING on the revoked lease's port; exit 28 means the packet is being dropped rather than rejected — the sealed filter admits this port, so that is a netns/filter change, not a brokerage one. Check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`");
 
             upstream.Calls.ShouldBe(relayedBeforeRevoke,
                 "and nothing may reach the provider after the withdrawal — that, not which error the sandbox sees, is what decides whether a cancelled run can still spend the tenant's key");
@@ -90,20 +90,23 @@ public sealed class ModelCredentialBrokerNetnsE2ETests
         var runId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
         var netnsKey = Guid.NewGuid().ToString("N");
-        var setup = await FilteredEgressNetns.SetupAsync(netnsKey, Array.Empty<string>(), timeoutSeconds: 20, CancellationToken.None);
 
         try
         {
-            setup.SetupOk.ShouldBeTrue($"the filtered netns must set up cleanly; setup error: {setup.SetupError}");
-            setup.HostIp.ShouldNotBeNullOrWhiteSpace("the setup must report its gateway address — it is the only address a process inside the namespace can reach this worker at");
-
             BrokeredModelCredential brokered;
+            FilteredEgressNetns.SetupResult setup;
             string url;
 
-            // Worker A mints the address, proves it works from inside the sealed namespace, and then GOES AWAY.
+            // Worker A mints the address, proves it works from inside the sealed namespace, and then GOES AWAY. The
+            // namespace is sealed to the port worker A's lease holds — the port the re-bind below must take again.
             using (var workerA = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()))
             {
                 brokered = (await workerA.OpenAsync(LeaseFor(runId, teamId), CancellationToken.None)).ShouldNotBeNull();
+                setup = await FilteredEgressNetns.SetupSealedAsync(netnsKey, brokered.RebindPort!.Value, timeoutSeconds: 20, CancellationToken.None);
+
+                setup.SetupOk.ShouldBeTrue($"the sealed netns must set up cleanly; setup error: {setup.SetupError}");
+                setup.HostIp.ShouldNotBeNullOrWhiteSpace("the setup must report its gateway address — it is the only address a process inside the namespace can reach this worker at");
+
                 url = ReachableUrl(brokered, setup.HostIp!) + "/v1/messages";
 
                 (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered.RunToken)).ShouldBe("200", "precondition: the sealed run reaches its broker while the worker that minted it holds the address");

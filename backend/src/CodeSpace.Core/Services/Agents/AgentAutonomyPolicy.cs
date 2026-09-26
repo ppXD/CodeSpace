@@ -179,6 +179,9 @@ public static class AgentAutonomyPolicy
         return WithModelCredentialPosture($"Network: off ({effective}){qualifier}", confinement);
     }
 
+    /// <summary>What an "off" run sealed to its model broker adds to the sentence: the one route it kept.</summary>
+    public const string SealedToBrokerQualifier = " — confined: egress sealed to the run's model broker";
+
     /// <summary>The write posture derived from the same permission row the process runner receives. Before launch there is no confinement record, so read-only is explicitly qualified rather than presented as an OS guarantee.</summary>
     public static string DescribeWrite(AgentAutonomyLevel effective) => Derive(effective).WriteScope switch
     {
@@ -230,11 +233,13 @@ public static class AgentAutonomyPolicy
     /// materially different fact from a severed namespace and must not read like a milder version of it.
     /// <see cref="SandboxConfinementOutcome.NotApplicable"/> is such a run too — no confinement was even attempted.
     /// Both unconfined verdicts also carry <see cref="UnconfinedIsolationCaveat"/>: egress is the loudest thing an
-    /// unconfined run loses, but not the only one.
+    /// unconfined run loses, but not the only one. A run sealed to its broker holds a per-run /30 exactly as an
+    /// allowlisted one does, so it carries the same host subnet caveat where this host has proved it.
     /// </summary>
     private static string OffQualifier(SandboxConfinement? confinement) => confinement switch
     {
         null => ConfinementCaveat,
+        { Outcome: SandboxConfinementOutcome.Confined, EgressSealedToBroker: true } => WithHostSubnetPosture(SealedToBrokerQualifier, EgressSubnetAllocator.ObservedHostDegradation),
         { Outcome: SandboxConfinementOutcome.Confined, NetworkSevered: true } => " — confined: egress severed",
         { Outcome: SandboxConfinementOutcome.Confined } => " — confined, but egress was NOT severed",
         { Outcome: SandboxConfinementOutcome.Unconfined } c => $" — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress ({c.Reason ?? "unknown"}){UnconfinedIsolationCaveat}",

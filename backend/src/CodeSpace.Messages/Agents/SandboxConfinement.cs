@@ -46,6 +46,14 @@ public sealed record SandboxConfinement
     public bool NetworkSevered { get; init; }
 
     /// <summary>
+    /// Whether the run's severed network was a SEALED namespace rather than an empty one: no route, no NAT and no DNS,
+    /// with exactly one reachable destination — the run's own model-credential broker on the namespace's gateway. The
+    /// shape a network-off run with a brokered model gets where the host can build it, because an empty namespace
+    /// would cut that run off from its model too. Implies <see cref="NetworkSevered"/>; false for every other run.
+    /// </summary>
+    public bool EgressSealedToBroker { get; init; }
+
+    /// <summary>
     /// Whether the run's model credential was BROKERED (true) or placed in the sandbox's environment as the tenant's
     /// own provider key (false). Null when the launch injected no credential at all — a harness that authenticates
     /// some other way, or a run for which none resolved — because there is then nothing to disclose either way.

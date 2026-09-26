@@ -176,7 +176,7 @@ public sealed partial class LocalProcessRunner
                 Spec = request.Spec, ReadOnlyPaths = request.Spec.ReadOnlyPaths, CaptureBudget = request.Spec.CaptureBudget,
                 Command = command.FileName, Args = command.ArgumentList.ToArray(), WorkingDirectory = command.WorkingDirectory,
                 Environment = command.Environment.ToDictionary(pair => pair.Key, pair => pair.Value), EgressNetnsKey = egressKey, CgroupRunKey = cgroupKey,
-                Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix)),
+                Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix), SealedEgress(request.Spec, egress.ExecPrefix)),
             };
             // Measured BEFORE transmission is marked started, so a frame no pipe can carry is refused while the catch
             // below can still tear the netns and cgroup down, and the broker reads EOF and releases its slot as rejected.

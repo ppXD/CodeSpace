@@ -31,6 +31,11 @@
 # CAP_NET_ADMIN (and run the egress path privileged enough to write the sysctl) on any deployment that relies on
 # allowlisted egress; a pod that does not is still correct, it just gets Denied instead of Filtered.
 #
+# The same namespace machinery SEALS a network-off run whose model is brokered to that broker (no route, no NAT, no
+# DNS, one gateway port). It is taken only where bubblewrap confines AND FilteredEgressNetns.CanSeal has proved, by
+# building a throwaway namespace, that this process may: root + CAP_NET_ADMIN + CAP_SYS_ADMIN, no sysctl needed. A
+# pod without them keeps severing such a run — which also severs it from its broker, so it reaches no model.
+#
 # CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
 # Sandbox:RequireConfinement is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
 # namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns

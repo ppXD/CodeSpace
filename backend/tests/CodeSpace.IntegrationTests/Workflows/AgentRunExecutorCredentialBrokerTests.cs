@@ -103,6 +103,71 @@ public partial class AgentRunExecutorTests
             .ShouldNotContain(AgentAutonomyPolicy.DirectModelCredentialCaveat, customMessage: "a brokered run must not disclose a direct injection it did not do");
     }
 
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard, true)]    // network off: the port a confining runner seals the run to its broker with
+    [InlineData(AgentAutonomyLevel.Trusted, false)]    // network on already reaches its broker; nothing to seal
+    public async Task A_brokered_network_off_launch_carries_its_lease_port_to_the_runner(AgentAutonomyLevel autonomy, bool expectPort)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The WIRING pin: ApplySealedEgress's unit tests would pass even if HardenSpec never fed it the lease, and a
+        // network-off brokered run would then be severed from its broker on every host that confines.
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-sealed-port-fixture");
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = credId, Autonomy = autonomy, Permissions = AgentAutonomyPolicy.Derive(autonomy) });
+        var runner = new SpecRecordingDurableRunner();
+
+        using var broker = new LoopbackModelCredentialBroker();
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo done");
+
+        await ExecuteAsync(runId, harness, runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), credentialBroker: broker);
+
+        var launched = runner.Launched.ShouldNotBeNull("the executor must have launched — a null spec means it failed before reaching the runner");
+        var leasePort = new Uri(harness.BuiltTask!.Environment["SCRIPTED_BASE_URL"].Replace(SandboxSpec.ModelBrokerHostToken, "127.0.0.1", StringComparison.Ordinal)).Port;
+
+        launched.ModelBrokerPort.ShouldBe(expectPort ? leasePort : null, $"a {autonomy} brokered run must {(expectPort ? "" : "not ")}hand the runner the port of the lease its CLI was pointed at");
+    }
+
+    [Fact]
+    public async Task An_unbrokered_network_off_launch_carries_no_broker_port()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var runner = new SpecRecordingDurableRunner();
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'one\\n'"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
+
+        runner.Launched.ShouldNotBeNull().ModelBrokerPort.ShouldBeNull("a run with no broker lease has nothing to be sealed to, so it stays severed");
+    }
+
+    [Fact]
+    public async Task A_sealed_launch_s_record_survives_the_column_and_reads_back_as_sealed()
+    {
+        // The record is written by the runner and read back by the journal and the Room off agent_run.sandbox_confinement;
+        // the sealed fact has to survive that column, or a sealed run reads as a merely severed one.
+        var sealedRecord = new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, EgressSealedToBroker = true, ModelCredentialBrokered = true };
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        using (var write = _fixture.BeginScope())
+        {
+            var db = write.Resolve<CodeSpaceDbContext>();
+            var row = await db.AgentRun.SingleAsync(r => r.Id == runId);
+            row.SandboxConfinementJson = JsonSerializer.Serialize(sealedRecord, AgentJson.Options);
+            await db.SaveChangesAsync();
+        }
+
+        using var read = _fixture.BeginScope();
+        var stored = await read.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.SandboxConfinementJson).SingleAsync();
+        var roundTripped = JsonSerializer.Deserialize<SandboxConfinement>(stored!, AgentJson.Options).ShouldNotBeNull();
+
+        roundTripped.EgressSealedToBroker.ShouldBeTrue("jsonb normalizes what it stores; the sealed fact must come back out of it");
+        AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Unleashed, roundTripped)
+            .ShouldBe("Network: off (Standard) — confined: egress sealed to the run's model broker");
+    }
+
     [Fact]
     public async Task A_run_whose_credential_cannot_be_brokered_discloses_the_direct_injection()
     {
