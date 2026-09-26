@@ -33,6 +33,11 @@ namespace CodeSpace.SandboxTests;
 /// arm answers the permission question the production posture would face. What the network-off arm finds is itself
 /// the finding: a Confined reviewer on a confining worker cannot reach its model today.</para>
 ///
+/// <para>What it found on Linux, pinned so that a fix has to flip it deliberately: Claude's plan mode reads the diff
+/// under our bubblewrap; Codex runs no command there at all, in read-only or workspace-write, because its own sandbox
+/// is a nested bubblewrap that cannot configure its network namespace's loopback once ours has dropped every
+/// capability. Unconfined (a dev host), Codex reads the diff like Claude.</para>
+///
 /// <para>Armed by <see cref="RequireEnvVar"/> (the sandbox lane sets it after installing the pins, and then a missing
 /// or unpinned binary FAILS) or by a harness's own command override for a local run; otherwise it returns. Each arm
 /// that ran prints <see cref="RanMarker"/>, which the lane requires, so a silent return can never pass for coverage.</para>
@@ -48,10 +53,62 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
 
     private readonly List<string> _directories = [];
 
+    [Fact]
+    public Task A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git() => ReadsTheDiffAsync(ClaudeCodeHarness.HarnessKind);
+
+    [Fact]
+    public async Task A_read_only_codex_reviewer_reads_the_diff_where_nothing_else_confines_it()
+    {
+        // Under our bubblewrap Codex's own sandbox cannot start at all — pinned by the test below — so this arm is the
+        // dev-host (unconfined) answer only, and it is the answer a fix for that finding has to restore under confinement.
+        if (BubblewrapSandbox.Available is not null) return;
+
+        await ReadsTheDiffAsync(CodexHarness.HarnessKind);
+    }
+
     [Theory]
-    [InlineData(ClaudeCodeHarness.HarnessKind)]
-    [InlineData(CodexHarness.HarnessKind)]
-    public async Task A_read_only_reviewer_reads_the_diff_between_two_commits_with_git(string harnessKind)
+    [InlineData(AgentAutonomyLevel.Confined, "read-only")]
+    [InlineData(AgentAutonomyLevel.Standard, "workspace-write")]
+    public async Task Codex_cannot_run_a_command_in_its_own_sandbox_nested_inside_ours(AgentAutonomyLevel tier, string codexSandbox)
+    {
+        // THE FINDING, pinned as observed on Linux: Codex's sandbox is a bubblewrap of its own, and it cannot set up
+        // the loopback of its network namespace inside ours ("bwrap: loopback: Failed RTM_NEWADDR: Operation not
+        // permitted" — our confinement drops every capability). So under confinement Codex runs no command at all, in
+        // read-only AND workspace-write. When this goes red because the command ran, the finding is fixed: flip it into
+        // a read arm like Claude's.
+        var harness = HarnessFor(CodexHarness.HarnessKind);
+
+        if (!Armed(CodexHarness.HarnessKind) || OperatingSystem.IsWindows()) return;
+
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove what confinement does here");
+            return;
+        }
+
+        await RequirePinnedBinaryAsync(harness, CodexHarness.HarnessKind);
+
+        var repo = NewReviewRepository();
+        var upstream = new ScriptedModelUpstream([$"git diff {repo.Base} {repo.Head}"], $"REVIEW-DONE-{repo.Nonce}");
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var brokered = await OpenLeaseAsync(broker);
+
+        var task = ReviewTask(CodexHarness.HarnessKind, repo, AgentAutonomyPolicy.Derive(tier) with { Network = AgentNetworkAccess.On }, Brokered(harness, brokered));
+
+        harness.BuildInvocation(task).Args.ShouldContain(codexSandbox, customMessage: $"fixture check: the {tier} tier must launch Codex with --sandbox {codexSandbox}");
+
+        await RunAsync(harness, task);
+
+        var fedBack = ToolOutputs(upstream.Requests);
+
+        upstream.Requests.ShouldNotBeEmpty("fixture check: the network-on posture must reach the model, or this says nothing about the sandbox");
+        fedBack.ShouldNotContain($"MARKER-NEW-{repo.Nonce}", customMessage: "Codex's own sandbox ran the command inside ours — the finding is fixed; flip this test into a read arm");
+        fedBack.ShouldContain("bwrap:", customMessage: $"the command did not run, but not for the reason this test pins; what the CLI fed back: {Tail(fedBack, 1500)}");
+
+        output.WriteLine($"{RanMarker} codex-nested-sandbox {codexSandbox} fedBack={Tail(fedBack.ReplaceLineEndings(" "), 160)}");
+    }
+
+    private async Task ReadsTheDiffAsync(string harnessKind)
     {
         var harness = HarnessFor(harnessKind);
 
