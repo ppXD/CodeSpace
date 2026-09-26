@@ -28,10 +28,44 @@ public sealed record FilteredEgressPlan
     public required string HostAddrCidr { get; init; }
     public required string NsAddrCidr { get; init; }
     public required string HostIp { get; init; }
+    public required string NsIp { get; init; }
     public required string NsSubnetCidr { get; init; }
 
     /// <summary>The argv sequences (each an executable + args) that build the filtered netns, in order — run BEFORE <see cref="NftRuleset"/> is applied.</summary>
     public required IReadOnlyList<IReadOnlyList<string>> SetupCommands { get; init; }
+
+    /// <summary>
+    /// The argv that asks the kernel how the host reaches the namespace's end — the lookup every reply the host itself
+    /// sends there makes, the broker's included. Run after <see cref="SetupCommands"/>: the /30 was chosen from the
+    /// routes the host lists (<see cref="HostRoutedPrefixes"/>), but only the kernel's own lookup accounts for a policy
+    /// rule, or the null route in a table one consults before <c>main</c>, that would discard those replies after a
+    /// clean setup. It is an output lookup, so it does not see an allowlist run's NAT'd replies, which are routed on
+    /// input: a rule keyed on the uplink (<c>iif</c>) can still divert those.
+    /// </summary>
+    public IReadOnlyList<string> RouteCheckArgv => new[] { "ip", "route", "get", NsIp, "from", HostIp };
+
+    /// <summary>Why <see cref="RouteCheckArgv"/>'s answer does not take the namespace's traffic through its own host veth, or null when it does.</summary>
+    internal string? RouteCheckFailure(int exit, string output)
+    {
+        var asked = string.Join(' ', RouteCheckArgv);
+
+        if (exit != 0) return $"{asked} → exit {exit}: {output.Trim()} — this host cannot route replies back to {NsSubnetCidr} (a null route or a policy rule discards them), so the run could never be answered";
+
+        return RoutedDevice(output) == VethHost ? null : $"{asked} → {output.Trim()} — this host routes {NsIp} through something other than the run's own veth {VethHost}, so the run could never be answered";
+    }
+
+    /// <summary>
+    /// The device <c>ip route get</c> answered with — the word after its one <c>dev</c> — or null for anything else.
+    /// Read from the text answer, not <c>-j</c>: <c>route get</c> learned JSON only in iproute2 5.0, three releases
+    /// after the route listing the allocator reads, and on those releases it prints text under <c>-j</c> too.
+    /// </summary>
+    private static string? RoutedDevice(string output)
+    {
+        var words = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var dev = Array.IndexOf(words, "dev");
+
+        return dev >= 0 && dev == Array.LastIndexOf(words, "dev") && dev + 1 < words.Length ? words[dev + 1] : null;
+    }
 
     /// <summary>The nftables ruleset (NAT masquerade + the scoped default-drop forward allowlist) applied via <c>nft -f -</c> on STDIN after <see cref="SetupCommands"/>. Kept off the argv (multi-line) so it pipes cleanly.</summary>
     public required string NftRuleset { get; init; }
@@ -66,19 +100,9 @@ public sealed record FilteredEgressPlan
 
         var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps);
 
-        var setup = new List<IReadOnlyList<string>>
-        {
-            new[] { "ip", "netns", "add", ns },
-            new[] { "ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNs },
-            new[] { "ip", "link", "set", vethNs, "netns", ns },
-            new[] { "ip", "addr", "add", $"{hostIp}/30", "dev", vethHost },
-            new[] { "ip", "link", "set", vethHost, "up" },
-            new[] { "ip", "netns", "exec", ns, "ip", "addr", "add", $"{nsIp}/30", "dev", vethNs },
-            new[] { "ip", "netns", "exec", ns, "ip", "link", "set", vethNs, "up" },
-            new[] { "ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up" },
-            new[] { "ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", hostIp },
-            new[] { "sysctl", "-w", "net.ipv4.ip_forward=1" },
-        };
+        var setup = NamespaceSetup(ns, vethHost, vethNs, subnet);
+        setup.Add(new[] { "ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", hostIp });
+        setup.Add(new[] { "sysctl", "-w", "net.ipv4.ip_forward=1" });
 
         return new FilteredEgressPlan
         {
@@ -88,6 +112,7 @@ public sealed record FilteredEgressPlan
             HostAddrCidr = $"{hostIp}/30",
             NsAddrCidr = $"{nsIp}/30",
             HostIp = hostIp,
+            NsIp = nsIp,
             NsSubnetCidr = subnetCidr,
             SetupCommands = setup,
             NftRuleset = nftRuleset,
@@ -95,6 +120,52 @@ public sealed record FilteredEgressPlan
             TeardownCommands = TeardownCommandsFor(runId),
         };
     }
+
+    /// <summary>
+    /// Build the plan for a network-off run whose model is reached through its broker: the same per-run namespace and
+    /// /30, but SEALED — no default route (a packet to anywhere but the /30 fails with ENETUNREACH at once), no
+    /// forwarding, no NAT and no DNS, and an input filter on the host veth that admits exactly one destination, the
+    /// broker's <paramref name="brokerPort"/> on the gateway. Everything else the worker listens on — its own API,
+    /// every other run's broker port — is dropped, which the allowlist plan, with no input filter at all, leaves
+    /// reachable through the gateway. The table is <c>inet</c> so the veth's IPv6 link-local address is covered too.
+    /// Teardown is the same <see cref="TeardownCommandsFor"/>, reconstructed from the run id alone.
+    /// </summary>
+    public static FilteredEgressPlan BuildSealed(string runId, int brokerPort, EgressSubnetAllocator.Lease subnet)
+    {
+        var ns = NamespaceFor(runId);
+        var slug = Slug(runId);
+        var vethHost = $"csh-{slug}";
+        var vethNs = $"csn-{slug}";
+
+        return new FilteredEgressPlan
+        {
+            Namespace = ns,
+            VethHost = vethHost,
+            VethNs = vethNs,
+            HostAddrCidr = $"{subnet.HostIp}/30",
+            NsAddrCidr = $"{subnet.NsIp}/30",
+            HostIp = subnet.HostIp,
+            NsIp = subnet.NsIp,
+            NsSubnetCidr = subnet.Cidr,
+            SetupCommands = NamespaceSetup(ns, vethHost, vethNs, subnet),
+            NftRuleset = BuildSealedNftRuleset(ns, vethHost, subnet.HostIp, brokerPort),
+            ExecPrefix = new[] { "ip", "netns", "exec", ns },
+            TeardownCommands = TeardownCommandsFor(runId),
+        };
+    }
+
+    /// <summary>The namespace, its veth pair and the /30 on both ends, with loopback up — what both plans share. Routing and forwarding are each plan's own.</summary>
+    private static List<IReadOnlyList<string>> NamespaceSetup(string ns, string vethHost, string vethNs, EgressSubnetAllocator.Lease subnet) => new()
+    {
+        new[] { "ip", "netns", "add", ns },
+        new[] { "ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNs },
+        new[] { "ip", "link", "set", vethNs, "netns", ns },
+        new[] { "ip", "addr", "add", $"{subnet.HostIp}/30", "dev", vethHost },
+        new[] { "ip", "link", "set", vethHost, "up" },
+        new[] { "ip", "netns", "exec", ns, "ip", "addr", "add", $"{subnet.NsIp}/30", "dev", vethNs },
+        new[] { "ip", "netns", "exec", ns, "ip", "link", "set", vethNs, "up" },
+        new[] { "ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up" },
+    };
 
     /// <summary>The per-run netns / nft-table name — derived PURELY from <paramref name="runId"/>, so a reaper / teardown reconstructs it with no setup-time state.</summary>
     public static string NamespaceFor(string runId) => $"cs-egr-{Slug(runId)}";
@@ -114,6 +185,7 @@ public sealed record FilteredEgressPlan
             new[] { "ip", "netns", "del", ns },          // removes the ns + its veth end
             new[] { "ip", "link", "del", vethHost },     // best-effort: del may already be gone with the ns
             new[] { "nft", "delete", "table", "ip", ns },
+            new[] { "nft", "delete", "table", "inet", ns },   // the sealed plan's table; best-effort, absent for an allowlist run
         };
     }
 
@@ -145,6 +217,35 @@ public sealed record FilteredEgressPlan
 
         return string.Join("\n", lines) + "\n";
     }
+
+    /// <summary>
+    /// The sealed ruleset fed to <c>nft -f -</c>: on the INPUT hook, traffic arriving from this run's host veth may
+    /// reach only <paramref name="hostIp"/>:<paramref name="brokerPort"/> over TCP (plus the replies to it); on the
+    /// FORWARD hook it is dropped outright. Keyed on the veth, never on the subnet, so another run's namespace — even
+    /// one handed the same /30 by a degraded allocator — is untouched by this table.
+    ///
+    /// <para>It REPLACES any table of the same name rather than adding to it: every revise round of a run gets the same
+    /// names, so a round whose teardown failed to delete its table would otherwise have the next round's rules appended
+    /// after its own drop, cutting that round off from its broker. Declared, deleted and redefined in one <c>nft -f</c>
+    /// transaction, which the kernel applies atomically.</para>
+    /// </summary>
+    internal static string BuildSealedNftRuleset(string table, string vethHost, string hostIp, int brokerPort) => string.Join("\n", new[]
+    {
+        $"table inet {table} {{}}",
+        $"delete table inet {table}",
+        $"table inet {table} {{",
+        "  chain input {",
+        "    type filter hook input priority 0;",
+        $"    iifname \"{vethHost}\" ct state established,related accept",
+        $"    iifname \"{vethHost}\" ip daddr {hostIp} tcp dport {brokerPort} accept",
+        $"    iifname \"{vethHost}\" drop",
+        "  }",
+        "  chain forward {",
+        "    type filter hook forward priority 0;",
+        $"    iifname \"{vethHost}\" drop",
+        "  }",
+        "}",
+    }) + "\n";
 
     private static string Slug(string runId)
     {

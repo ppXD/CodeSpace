@@ -34,6 +34,127 @@ public sealed partial class NativeLaunchRegistryTests
         NativeLaunchProtocol.SpecHash(frozen with { Environment = environment }).ShouldNotBe(hash);
     }
 
+    [Theory]
+    [InlineData("rejected", true, true)]         // a verdict that nothing was released
+    [InlineData("committed", false, true)]       // the broker died before any verdict — the ready receipt comes before release, so nothing ran
+    [InlineData("committed", true, false)]       // a live broker still deciding, and the patience ran out — proves nothing
+    [InlineData("indeterminate", false, false)]  // may have run — keep its isolation
+    [InlineData("ready", false, false)]
+    [InlineData(null, false, false)]             // no receipt within the patience — cannot prove anything
+    public async Task Only_proof_that_nothing_was_released_lets_a_failed_launch_tear_down_its_isolation(string? state, bool brokerAlive, bool expected)
+    {
+        // A failed launch that tore down a namespace its agent is still using would cut a live run off from its model;
+        // one that never tears down a rejected slot leaks a namespace, a host nft table and a /30 nothing else reaps.
+        var directory = Directory.CreateTempSubdirectory("cs-rejected-").FullName;
+        try
+        {
+            if (state is not null)
+                await PublishReceiptAsync(directory, state, brokerAlive ? NativeProcess.Current : DeadBroker);
+
+            (await LocalProcessRunner.LaunchProvedUnexecutedAsync(directory)).ShouldBe(expected);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public async Task A_receipt_still_committed_is_waited_for_until_the_bootstrap_rejects_it()
+    {
+        // The bootstrap writes "committed" first and replaces it with its verdict as it exits — which can land just
+        // after the launch that failed here asks. Reading a live broker's "committed" as final would leak the slot.
+        var directory = Directory.CreateTempSubdirectory("cs-rejected-late-").FullName;
+        try
+        {
+            await PublishReceiptAsync(directory, "committed", NativeProcess.Current);
+
+            var asked = LocalProcessRunner.LaunchProvedUnexecutedAsync(directory);
+            await Task.Delay(200);
+            await PublishReceiptAsync(directory, "rejected", NativeProcess.Current);
+
+            (await asked).ShouldBeTrue("a verdict that lands inside the patience is the verdict");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("ready")]           // it wrote ready, released, then died
+    [InlineData("indeterminate")]   // it failed after the release
+    public async Task A_dead_broker_proves_nothing_once_its_receipt_moved_past_committed(string state)
+    {
+        // The launch read "committed" and then asks whether the broker died. Between those two reads the broker can
+        // write "ready", release the agent and die, so its death alone proves nothing: only a receipt read AFTER the
+        // death, still "committed", is its last word. The file below is that later read; a check that stopped at the
+        // death would tear the namespace and cgroup out from under a released agent.
+        var directory = Directory.CreateTempSubdirectory("cs-broker-death-").FullName;
+        try
+        {
+            await PublishReceiptAsync(directory, state, DeadBroker);
+
+            LocalProcessRunner.BrokerDiedBeforeItsVerdict(directory, DeadBroker).ShouldBeFalse($"a receipt at '{state}' after the broker died means it got past its verdict");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public async Task The_receipt_is_read_after_the_broker_is_known_dead_not_before()
+    {
+        // The window the order closes: the receipt still reads "committed", then — while liveness is being sampled —
+        // the broker writes "ready", releases the agent and dies. A check that read the receipt first would hold that
+        // stale "committed" and a death, and tear the isolation out from under a released agent.
+        var directory = Directory.CreateTempSubdirectory("cs-broker-order-").FullName;
+        try
+        {
+            await PublishReceiptAsync(directory, "committed", DeadBroker);
+
+            bool ReleasedThenDied(NativeProcessIdentity _)
+            {
+                PublishReceipt(directory, "ready", DeadBroker);
+                return false;
+            }
+
+            LocalProcessRunner.BrokerDiedBeforeItsVerdict(directory, DeadBroker, ReleasedThenDied).ShouldBeFalse("the receipt read after the death says the broker got past its verdict");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public async Task A_committed_receipt_left_by_another_broker_proves_nothing()
+    {
+        var directory = Directory.CreateTempSubdirectory("cs-broker-other-").FullName;
+        try
+        {
+            await PublishReceiptAsync(directory, "committed", DeadBroker with { StartKey = "another-broker" });
+
+            LocalProcessRunner.BrokerDiedBeforeItsVerdict(directory, DeadBroker).ShouldBeFalse("only the broker that was asked about can have left its own last word");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    /// <summary>A broker identity no live process has — the shape a killed broker leaves in its receipt.</summary>
+    private static readonly NativeProcessIdentity DeadBroker = NativeProcess.Current with { StartKey = "a-start-no-process-has" };
+
+    /// <summary>Publish a receipt the way the bootstrap does — whole, by rename — so the poller can never read it half-written.</summary>
+    private static Task PublishReceiptAsync(string directory, string state, NativeProcessIdentity broker)
+    {
+        PublishReceipt(directory, state, broker);
+        return Task.CompletedTask;
+    }
+
+    private static void PublishReceipt(string directory, string state, NativeProcessIdentity broker)
+    {
+        var staging = Path.Combine(directory, $"receipt-{Guid.NewGuid():N}.tmp");
+        File.WriteAllText(staging, JsonSerializer.Serialize(new NativeLaunchReceipt { SpecHash = "h", Broker = broker, State = state }, NativeLaunchProtocol.Json));
+        File.Move(staging, Path.Combine(directory, NativeLaunchProtocol.ReceiptFile), overwrite: true);
+    }
+
+    [Fact]
+    public void A_broker_port_binds_the_launch_and_a_spec_without_one_serializes_as_before()
+    {
+        var spec = NativeLaunchProtocol.Freeze(new SandboxSpec { Command = "/bin/sh" });
+
+        NativeLaunchProtocol.SpecHash(spec with { ModelBrokerPort = 43121 }).ShouldNotBe(NativeLaunchProtocol.SpecHash(spec), "a launch sealed to a broker is a different execution from one severed from everything");
+        JsonSerializer.Serialize(spec, NativeLaunchProtocol.Json).ShouldNotContain("modelBrokerPort", customMessage: "an unbrokered spec must serialize, and hash, exactly as it did before the field existed");
+    }
+
     [Fact]
     public void A_sandbox_stand_down_binds_the_launch_and_is_frozen_with_it()
     {

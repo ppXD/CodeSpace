@@ -314,14 +314,17 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist, set up the per-run netns and
-    /// return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the teardown key. None/Full need no
-    /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner that cannot enforce it degrades
-    /// to None (no netns) via <see cref="SandboxEgressPolicy"/>, and a netns whose setup fails throws.
+    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist or a Sealed broker route, set
+    /// up the per-run netns and return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the
+    /// teardown key. None/Full need no netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner
+    /// that cannot enforce it degrades to None (no netns) via <see cref="SandboxEgressPolicy"/>, a network-off run this
+    /// host cannot seal stays severed, and a netns whose setup fails throws.
     /// </summary>
     private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
     {
-        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported);
+        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported, SealableBrokerPort(spec));
+
+        if (policy.Mode == SandboxEgressMode.Sealed) return await SetupSealedNetnsAsync(policy.BrokerPort!.Value, spoolKey, ct).ConfigureAwait(false);
 
         if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null, null);
 
@@ -335,6 +338,24 @@ public sealed partial class LocalProcessRunner
 
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
+
+        return (setup.ExecPrefix, spoolKey, setup.HostIp);
+    }
+
+    /// <summary>
+    /// The broker port a network-off run may be sealed to — only where bubblewrap confines the command (exactly where
+    /// it would otherwise sever it with <c>--unshare-net</c>) and this host has proved it can build a namespace. Null
+    /// everywhere else, so an unconfined host keeps the launch it always had and a host that cannot seal keeps severing.
+    /// </summary>
+    private static int? SealableBrokerPort(SandboxSpec spec) =>
+        spec.ModelBrokerPort is { } port && BubblewrapSandbox.Available is not null && FilteredEgressNetns.CanSeal ? port : null;
+
+    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupSealedNetnsAsync(int brokerPort, string spoolKey, CancellationToken ct)
+    {
+        var setup = await FilteredEgressNetns.SetupSealedAsync(spoolKey, brokerPort, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
+
+        if (!setup.SetupOk)
+            throw new InvalidOperationException($"Sealed-egress netns setup failed (fail-closed — run aborted rather than launched with a network it was not given): {setup.SetupError}");
 
         return (setup.ExecPrefix, spoolKey, setup.HostIp);
     }
@@ -877,6 +898,7 @@ public sealed partial class LocalProcessRunner
         AppendChildCommand(info.ArgumentList, new CommandIsolationContext(spec, configHome, mcpDeclarationPath, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>()));
 
         ApplyEnvironment(info, spec);
+        WithoutProxiesWhenSealed(info.Environment, spec, egressExecPrefix ?? Array.Empty<string>());
 
         // Added AFTER ApplyEnvironment so they survive the scrub-driven Clear(); they are spool paths, not secrets.
         info.Environment["CSP_OUT"] = Path.Combine(spoolDir, StdoutFile);
@@ -915,8 +937,10 @@ public sealed partial class LocalProcessRunner
     /// <para>Returns the spec UNCHANGED when nothing mentions the token, which is every run whose credential was
     /// not brokered — byte-identical command, argv and env, and no allocation.</para>
     ///
-    /// <para>A network-severed run (no netns, no shared network) resolves to loopback and cannot reach the broker —
-    /// nor could it reach the provider directly, so brokerage neither adds nor removes anything for it.</para>
+    /// <para>A network-off brokered run on a host that seals runs inside a namespace SEALED to its broker, and resolves
+    /// to that namespace's gateway like any other netns run. One that is severed instead (no netns, no shared network —
+    /// a host that cannot seal) resolves to loopback and cannot reach the broker — nor could it reach the provider
+    /// directly, so brokerage neither adds nor removes anything for it.</para>
     ///
     /// <para><see cref="MentionsModelBrokerHost(SandboxSpec)"/> scans only <see cref="SandboxSpec.Command"/>,
     /// <see cref="SandboxSpec.Args"/> and <see cref="SandboxSpec.Environment"/> — a harness that instead wrote the
@@ -928,14 +952,51 @@ public sealed partial class LocalProcessRunner
         if (!MentionsModelBrokerHost(spec)) return spec;
 
         var host = gatewayIp is { Length: > 0 } reachable ? reachable : "127.0.0.1";
+        var environment = spec.Environment.ToDictionary(entry => entry.Key, entry => WithModelBrokerHost(entry.Value, host), StringComparer.Ordinal);
+
+        ExemptBrokerFromProxies(environment, host);
 
         return spec with
         {
             Command = WithModelBrokerHost(spec.Command, host),
             Args = spec.Args.Select(arg => WithModelBrokerHost(arg, host)).ToList(),
-            Environment = spec.Environment.ToDictionary(entry => entry.Key, entry => WithModelBrokerHost(entry.Value, host), StringComparer.Ordinal),
+            Environment = environment,
         };
     }
+
+    private static readonly string[] NoProxyVariables = { "NO_PROXY", "no_proxy" };
+
+    /// <summary>
+    /// Keep a child that was handed a proxy from sending its model calls there. The broker is reached at an address no
+    /// operator's NO_PROXY can name ahead of time — a per-run gateway, or a loopback a NO_PROXY may simply omit. Both
+    /// spellings get the union of what the task or the worker set, because readers prefer different ones (curl, Python
+    /// and Claude Code lowercase; reqwest and Go uppercase) and a spelling created with the broker alone would hide the
+    /// operator's own exemptions from half of them. A child with no proxy is left as it was: a NO_PROXY written there
+    /// exempts nothing, and turns off Python's lookup of the OS proxy on a macOS or Windows worker.
+    /// </summary>
+    private static void ExemptBrokerFromProxies(Dictionary<string, string> environment, string host)
+    {
+        if (!ProxyVariables.Any(name => ChildValue(environment, name) is { Length: > 0 })) return;
+
+        var exempt = BrokerExempt(NoProxyVariables.Select(name => ChildValue(environment, name)), host);
+
+        environment["NO_PROXY"] = exempt;
+        environment["no_proxy"] = LowercaseExempt(exempt);
+    }
+
+    /// <summary>What the child sees for <paramref name="name"/>: the task's own value, else the worker's — but only a worker variable the scrub keeps (<see cref="EnvAllowlist"/>). The worker's <c>ALL_PROXY</c> never reaches the child, so it must not count as a proxy the child was handed.</summary>
+    private static string? ChildValue(IReadOnlyDictionary<string, string> environment, string name) => environment.TryGetValue(name, out var own) ? own : EnvAllowlist.Contains(name) ? Environment.GetEnvironmentVariable(name) : null;
+
+    /// <summary>The exemption list: every entry either spelling already carried, plus the broker's host — kept beside a <c>*</c>, which the uppercase readers honour as an entry but never match an IP address against.</summary>
+    internal static string BrokerExempt(IEnumerable<string?> spellings, string host)
+    {
+        var entries = spellings.SelectMany(value => (value ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        return string.Join(",", entries.Contains(host, StringComparer.OrdinalIgnoreCase) ? entries : entries.Append(host));
+    }
+
+    /// <summary>What <c>no_proxy</c> gets: a lone <c>*</c> when the list holds one, because its lowercase-first readers honour "bypass everything" only as the WHOLE value — which already covers the broker — and would proxy every other host once an entry joined it.</summary>
+    internal static string LowercaseExempt(string exempt) => exempt.Split(',').Contains("*") ? "*" : exempt;
 
     /// <summary>Whether any carrier in this spec still holds the broker-host token — the one read that decides whether a launch pays for the substitution at all.</summary>
     private static bool MentionsModelBrokerHost(SandboxSpec spec) =>
@@ -952,6 +1013,25 @@ public sealed partial class LocalProcessRunner
     /// recorded <see cref="SandboxConfinement.NetworkSevered"/>, so the record and the command line cannot disagree.
     /// </summary>
     private static bool ShareNetwork(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => egressExecPrefix.Count > 0 || spec.AllowNetwork;
+
+    /// <summary>The proxy variables a child inherits from the worker (and may be handed by its task) to reach a model API through an egress proxy.</summary>
+    private static readonly string[] ProxyVariables = { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" };
+
+    /// <summary>
+    /// Drop the proxy variables from a SEALED launch's environment. Its only destination is its broker, on the
+    /// namespace's own gateway — a proxy is unreachable from there, and a CLI that honours the variables would send its
+    /// every model call to it and fail as if the provider were down. The per-run gateway is never in an operator's
+    /// NO_PROXY, so the variables must go rather than be amended. The worker's own hop to the provider keeps its proxy.
+    /// </summary>
+    internal static void WithoutProxiesWhenSealed(IDictionary<string, string?> environment, SandboxSpec spec, IReadOnlyList<string> egressExecPrefix)
+    {
+        if (!SealedEgress(spec, egressExecPrefix)) return;
+
+        foreach (var name in ProxyVariables) environment.Remove(name);
+    }
+
+    /// <summary>Whether this launch runs inside a SEALED netns: a namespace prefix for a run whose network is off can only be the sealed one, since an allowlist is read only when network is granted. Read by the launch's confinement record, beside <see cref="ShareNetwork"/>.</summary>
+    private static bool SealedEgress(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => !spec.AllowNetwork && egressExecPrefix.Count > 0;
 
     /// <summary>
     /// The allowlist bwrap's OWN egress policy sees. Inside a filtered netns the namespace IS the enforcement, so the

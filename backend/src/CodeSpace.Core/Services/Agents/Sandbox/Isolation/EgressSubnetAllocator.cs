@@ -97,8 +97,11 @@ public sealed class EgressSubnetAllocator
     private const int Octet3Count = 254;
     private const int Block4Count = 64;
 
-    /// <summary>How far the probe walks before failing closed. Bounds the worst-case syscall count of one acquire, and is far above any plausible per-host concurrency (the /30 space itself holds ≈4.1M).</summary>
+    /// <summary>How many candidates one acquire may find held by this worker or TRY to reserve before failing closed. Bounds the worst-case syscall count of one acquire, and is far above any plausible per-host concurrency (the /30 space itself holds ≈4.1M). Candidates the host already routes are passed over without counting against it.</summary>
     internal const int MaxConcurrentReservations = 4096;
+
+    /// <summary>Every /30 <see cref="CidrAt"/> can name — the space a walk may pass through when the host routes the start of it.</summary>
+    internal const int CandidateCount = Octet2Count * Octet3Count * Block4Count;
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Reservation> _byRun = new(StringComparer.Ordinal);
@@ -166,7 +169,7 @@ public sealed class EgressSubnetAllocator
     /// concurrency. Nothing inside the loop decides it: a single unopenable file is somebody else's reservation until
     /// a fresh probe file says otherwise.</para>
     /// </summary>
-    public Lease Acquire(string runId)
+    public Lease Acquire(string runId, HostRoutedPrefixes? hostRoutes = null)
     {
         lock (_lock)
         {
@@ -174,11 +177,31 @@ public sealed class EgressSubnetAllocator
 
             EnsureHostCanReserve();
 
-            for (var index = 0; index < MaxConcurrentReservations; index++)
+            // Up to MaxConcurrentReservations candidates are held here or TRIED — that bound is about concurrency —
+            // while ranges the host already routes are passed over whole, without counting against it, so a broad
+            // route over the first range moves the walk on through 10.0.0.0/8 instead of refusing while unrouted /30s
+            // remain, and costs one step rather than one per /30 it covers.
+            var heldHere = 0;
+            var tried = 0;
+            var routed = 0;
+
+            for (var index = 0; index < CandidateCount && heldHere + tried < MaxConcurrentReservations; index++)
             {
                 var cidr = CidrAt(index);
 
-                if (_inUse.Contains(cidr)) continue;
+                if (_inUse.Contains(cidr)) { heldHere++; continue; }
+
+                // The lock says no live WORKER holds it; the host's routes say nothing ELSE does — its own network, or a
+                // run whose namespace outlived the worker that reserved it. Neither alone is enough.
+                if (hostRoutes?.OverlapEnd(cidr) is { } routedEnd)
+                {
+                    var past = Math.Max(IndexAtOrAbove((ulong)routedEnd + 1), index + 1);
+                    routed += past - index;
+                    index = past - 1;
+                    continue;
+                }
+
+                tried++;
 
                 if (!TryReserve(cidr, runId, out var handle)) continue;
 
@@ -187,6 +210,11 @@ public sealed class EgressSubnetAllocator
 
                 return LeaseFor(cidr);
             }
+
+            // Only when nothing could even be TRIED is it the routes; otherwise the directory or real concurrency is
+            // the wall, and ExhaustionOrRefusal re-probes to say which.
+            if (tried == 0 && routed > 0)
+                throw new InvalidOperationException($"EgressSubnetAllocator: no /30 in 10.0.0.0/8 is free that this host does not already route — this worker holds {_inUse.Count}, and every other candidate overlaps a route or address the host holds (its own network, or a namespace that outlived its worker).");
 
             throw ExhaustionOrRefusal();
         }
@@ -431,12 +459,30 @@ public sealed class EgressSubnetAllocator
     /// <summary>Where <see cref="Host"/> reserves: a fixed leaf under the agent-run spool root, resolved through the SAME <c>DurableRoots</c> the spool itself uses, so every worker process sharing that root resolves the same directory and an operator who relocates the spool relocates the reservations. Resolved per acquire rather than at type init, so it reads the settings the deployment bound rather than whatever was current when this class was first touched.</summary>
     internal string ReservationDirectory => _directory ?? Path.Combine(DurableRoots.AgentRunSpool(RuntimeSettings.Current.AgentRunSpoolDirectory), ReservationLeaf);
 
-    private static string CidrAt(int index)
+    internal static string CidrAt(int index)
     {
         var block4 = index % Block4Count;                                 // 0..63  → octet4 = block4*4
         var octet3 = index / Block4Count % Octet3Count;                   // 0..253 → +1
         var octet2 = index / Block4Count / Octet3Count % Octet2Count;     // 0..253 → +1
         return $"10.{octet2 + 1}.{octet3 + 1}.{block4 * 4}/30";
+    }
+
+    /// <summary>The first candidate index whose /30 starts at or above <paramref name="address"/> — the inverse of <see cref="CidrAt"/>, which walks 10.1.1.0 up to 10.254.254.252 skipping the <c>.0</c> and <c>.255</c> second and third octets. <see cref="CandidateCount"/> when none does.</summary>
+    internal static int IndexAtOrAbove(ulong address)
+    {
+        if (address > 0x0AFEFEFC) return CandidateCount;   // past 10.254.254.252
+        if (address < 0x0A010100) return 0;                // before 10.1.1.0
+
+        var octet2 = (int)(address >> 16 & 0xFF);
+        var octet3 = (int)(address >> 8 & 0xFF);
+        var block4 = (int)((address & 0xFF) + 3) / 4;
+
+        if (octet3 == 0) (octet3, block4) = (1, 0);
+        if (octet3 == 255) (octet2, octet3, block4) = (octet2 + 1, 1, 0);
+        if (block4 == Block4Count) (octet3, block4) = (octet3 + 1, 0);
+        if (octet3 == 255) (octet2, octet3) = (octet2 + 1, 1);
+
+        return octet2 > Octet2Count ? CandidateCount : ((octet2 - 1) * Octet3Count + (octet3 - 1)) * Block4Count + block4;
     }
 
     private static Lease LeaseFor(string cidr)

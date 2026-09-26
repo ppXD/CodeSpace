@@ -341,7 +341,7 @@ export type RoomAgentLogStatus = "Verified" | "Captured" | "Finalizing" | "Incom
 
 /// What the sandbox actually did to one producer. `Unknown` is a real absence (nothing recorded it), never a
 /// confinement to render as safety — the renderer must say "posture unknown" rather than show a confined glyph.
-export type RoomConfinementPosture = "Unknown" | "Unconfined" | "Confined" | "ConfinedNetworkSevered";
+export type RoomConfinementPosture = "Unknown" | "Unconfined" | "Confined" | "ConfinedNetworkSevered" | "ConfinedEgressSealedToBroker";
 
 /// WHO produced one delivered artifact and under what conditions (P21-8b). Every field is recorded fact or an
 /// explicit absence: a null `costUsd` means UNPRICEABLE (never free), a null `logs` means no stream was declared

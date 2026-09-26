@@ -767,6 +767,22 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         argv.Contains("read-only").ShouldBe(!confines, "and Codex keeps its own read-only sandbox wherever ours is not there to replace it");
     }
 
+    [Theory]
+    [InlineData(false, true, false)]   // network off inside a namespace: the sealed launch — its proxy is unreachable, so it goes
+    [InlineData(false, false, true)]   // network off with no namespace: severed, nothing to route — left as it always was
+    [InlineData(true, true, true)]     // network on inside a namespace: an allowlist run, which may well reach its proxy
+    public void A_sealed_launch_carries_no_proxy_its_namespace_cannot_reach(bool allowNetwork, bool inNamespace, bool keepsProxy)
+    {
+        var spec = new SandboxSpec { Command = "agent", AllowNetwork = allowNetwork, Environment = new Dictionary<string, string> { ["HTTPS_PROXY"] = "http://proxy.corp:3128", ["http_proxy"] = "http://proxy.corp:3128", ["NO_PROXY"] = "localhost" } };
+        var prefix = inNamespace ? new[] { "ip", "netns", "exec", "cs-egr-deadbeef" } : Array.Empty<string>();
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(spec, TempDir(), prefix);
+
+        info.Environment.ContainsKey("HTTPS_PROXY").ShouldBe(keepsProxy, "a sealed child's one destination is its broker on the gateway; a CLI honouring a proxy would send every model call where the namespace cannot reach");
+        info.Environment.ContainsKey("http_proxy").ShouldBe(keepsProxy, "both spellings");
+        info.Environment.ContainsKey("NO_PROXY").ShouldBeTrue("NO_PROXY is harmless and left alone");
+    }
+
     private static readonly IReadOnlyList<string> CodexArgs = new[] { "exec", "--json", "--model", "gpt-5.4", "--sandbox", "read-only", "-c", "otel.exporter=none", "-" };
 
     [Fact]

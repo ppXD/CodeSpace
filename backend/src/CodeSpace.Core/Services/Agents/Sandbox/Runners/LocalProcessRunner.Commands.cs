@@ -30,6 +30,7 @@ public sealed partial class LocalProcessRunner
             // command below. A no-op for every run that does not mention the token: the values are identical.
             var launched = ResolveModelBrokerHost(spec, egress.GatewayIp);
             foreach (var (name, value) in launched.Environment) invocation.StartInfo.Environment[name] = value;
+            WithoutProxiesWhenSealed(invocation.StartInfo.Environment, spec, egress.ExecPrefix);
 
             if (spec.ConfigHomeEnvVars.Count > 0)
             {

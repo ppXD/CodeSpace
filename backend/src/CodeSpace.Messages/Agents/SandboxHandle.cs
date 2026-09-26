@@ -200,7 +200,8 @@ public sealed record SandboxHandle
 
     /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
-    /// deny-by-default allowlist was enforceable and a netns was set up. It is the teardown handle: the netns / veth /
+    /// deny-by-default allowlist was enforceable, or a network-off run was sealed to its model broker, and a netns was
+    /// set up. It is the teardown handle: the netns / veth /
     /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, from a DIFFERENT worker
     /// process on the same host) tears the namespace down with no setup-time state — the tools it drives are local, so
     /// the same-host boundary in the type remarks applies. Null when the run had no allowlist or the runner couldn't

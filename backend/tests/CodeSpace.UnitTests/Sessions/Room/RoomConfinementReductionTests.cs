@@ -53,6 +53,20 @@ public sealed class RoomConfinementReductionTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_sealed_agent_outranks_a_severed_one_whatever_order_they_arrive_in(bool sealedFirst)
+    {
+        // A sealed agent kept a route to its broker, so a turn holding one is only as severed as THAT agent — and the
+        // rows arrive unordered, so the pick must not depend on which one came first.
+        var sealedRecord = JsonSerializer.Serialize(new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, EgressSealedToBroker = true }, AgentJson.Options);
+        var severed = Json(SandboxConfinementOutcome.Confined, severed: true);
+
+        RoomProjector.LeastConfined(sealedFirst ? new[] { sealedRecord, severed } : new[] { severed, sealedRecord })!
+            .EgressSealedToBroker.ShouldBeTrue("the weaker of the two decides the turn's sentence");
+    }
+
+    [Theory]
     // An unconfined agent vs a runner that confines nothing — the rank ties them at "yes, something here could reach
     // the network", but the two print DIFFERENT causes, so the tie must not be broken by arrival order.
     [InlineData(SandboxConfinement.ReasonNoBubblewrap, null, null)]
