@@ -18,6 +18,19 @@ public class SandboxEgressPolicyTests
         SandboxEgressPolicy.Derive(allowNetwork: false, allowlist: new[] { "api.anthropic.com" }, canEnforceAllowlist: true).Mode.ShouldBe(SandboxEgressMode.None);
     }
 
+    [Theory]
+    [InlineData(false, 43121, SandboxEgressMode.Sealed)]   // network off + a broker it can be sealed to → sealed to that port
+    [InlineData(false, null, SandboxEgressMode.None)]      // network off, nothing to seal to → severed, as always
+    [InlineData(true, 43121, SandboxEgressMode.Full)]      // network on already reaches its broker — a port never narrows or widens it
+    public void A_network_off_run_is_sealed_only_to_a_broker_it_was_given(bool allowNetwork, int? sealablePort, SandboxEgressMode expected)
+    {
+        var policy = SandboxEgressPolicy.Derive(allowNetwork, allowlist: null, canEnforceAllowlist: true, sealablePort);
+
+        policy.Mode.ShouldBe(expected);
+        policy.BrokerPort.ShouldBe(expected == SandboxEgressMode.Sealed ? sealablePort : null, "the sealed port is carried only by the sealed mode");
+        policy.AllowedHosts.ShouldBeEmpty("a sealed run resolves no hosts — its one destination is an address, not a name");
+    }
+
     [Fact]
     public void Network_without_an_allowlist_is_Full_todays_behaviour()
     {

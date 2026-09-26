@@ -6,7 +6,8 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// <summary>
 /// The privileged executor of a <see cref="FilteredEgressPlan"/> (B3.2 enforcement) — sets up a per-run filtered
 /// network namespace, runs a command INSIDE it (so its only egress is the nftables allowlist), and tears the
-/// namespace down. Needs <c>ip</c> + <c>nft</c> + <c>CAP_NET_ADMIN</c>/root, so it runs for real only in the
+/// namespace down. A network-off run whose model is brokered gets the SEALED variant instead
+/// (<see cref="SetupSealedAsync"/>), whose only reachable destination is that broker. Needs <c>ip</c> + <c>nft</c> + <c>CAP_NET_ADMIN</c>/root, so it runs for real only in the
 /// privileged sandbox-isolation CI job; <see cref="IsSupported"/> gates it everywhere else. Teardown is BEST-EFFORT
 /// and ALWAYS runs (even on a setup failure mid-way), so a failed run never leaks a netns / veth / nft table.
 /// </summary>
@@ -14,8 +15,18 @@ public static class FilteredEgressNetns
 {
     private static readonly Lazy<bool> _supported = new(ProbeSupported);
 
+    private static readonly Lazy<bool> _canSeal = new(ProbeCanSeal);
+
     /// <summary>True when <c>ip</c> + <c>nft</c> are present (the binaries the plan drives). Actual privilege to create a netns is exercised at run time — a setup failure fails closed.</summary>
     public static bool IsSupported => _supported.Value;
+
+    /// <summary>
+    /// True when this process has PROVED it can build a namespace: the binaries are present AND one throwaway
+    /// namespace was created and deleted, and nftables answered. The binaries alone are not enough — an image can ship
+    /// them to a worker that runs without the privilege to use them — and a network-off run is sealed only where this
+    /// holds, severed everywhere else. Probed once per process, on first use.
+    /// </summary>
+    public static bool CanSeal => _canSeal.Value;
 
     /// <summary>The outcome of running a command inside the filtered netns: the command's exit code + its combined output, plus whether the netns setup itself succeeded.</summary>
     public sealed record Outcome
@@ -59,8 +70,21 @@ public static class FilteredEgressNetns
         // Reserve a COLLISION-FREE /30 so no other run ON THIS HOST — this worker process or any other — shares a
         // subnet (a host-global nft-chain hazard). Released in TeardownAsync; the netns/table NAMES stay runId-derived
         // so teardown needs no setup-time state.
-        var plan = FilteredEgressPlan.Build(runId, allowedIps, EgressSubnetAllocator.Host.Acquire(runId));
+        return await ApplyAsync(runId, FilteredEgressPlan.Build(runId, allowedIps, EgressSubnetAllocator.Host.Acquire(runId)), timeoutSeconds, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Set up a SEALED netns for a network-off run whose model is brokered (<see cref="FilteredEgressPlan.BuildSealed"/>):
+    /// its only reachable destination is <paramref name="brokerPort"/> on the returned <see cref="SetupResult.HostIp"/>.
+    /// The same fail-closed contract as <see cref="SetupAsync"/>, the same /30 reservation, and the same
+    /// <see cref="TeardownAsync"/> — the names are the run id's either way.
+    /// </summary>
+    public static async Task<SetupResult> SetupSealedAsync(string runId, int brokerPort, int timeoutSeconds, CancellationToken cancellationToken) =>
+        await ApplyAsync(runId, FilteredEgressPlan.BuildSealed(runId, brokerPort, EgressSubnetAllocator.Host.Acquire(runId)), timeoutSeconds, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Run a plan's setup and ruleset, tearing down whatever was created the moment any step fails or throws.</summary>
+    private static async Task<SetupResult> ApplyAsync(string runId, FilteredEgressPlan plan, int timeoutSeconds, CancellationToken cancellationToken)
+    {
         try
         {
             foreach (var argv in plan.SetupCommands)
@@ -131,6 +155,22 @@ public static class FilteredEgressNetns
         {
             await TeardownAsync(runId, CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    private static bool ProbeCanSeal()
+    {
+        if (!IsSupported) return false;
+
+        var probe = $"cs-seal-probe-{Guid.NewGuid():N}"[..24];
+
+        try
+        {
+            var created = RunHostAsync(new[] { "ip", "netns", "add", probe }, null, 10, CancellationToken.None).GetAwaiter().GetResult().Exit == 0;
+
+            try { return created && RunHostAsync(new[] { "nft", "list", "tables" }, null, 10, CancellationToken.None).GetAwaiter().GetResult().Exit == 0; }
+            finally { if (created) RunHostAsync(new[] { "ip", "netns", "del", probe }, null, 10, CancellationToken.None).GetAwaiter().GetResult(); }
+        }
+        catch { return false; }
     }
 
     private static bool ProbeSupported()

@@ -224,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 59 ]; then
-            echo "::error::Expected >=59 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a read-only reviewer reading its diff with the real CLIs), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 62 ]; then
+            echo "::error::Expected >=62 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run sealed to its broker + a read-only reviewer reading its diff with the real CLIs), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -249,13 +249,21 @@ jobs:
           # The reviewer E2E returns early when it is not armed, and an early return reads as Passed — so a passing
           # outcome is not evidence it ran. Each arm prints a marker when it really did; require every one.
           text = open('backend/TestResults/sandbox.trx', encoding='utf-8').read()
-          arms = ('read-diff claude-code Confined', 'read-diff codex-cli Confined', 'read-diff codex-cli Standard', 'codex-resume-stand-down', 'write-refused claude-code', 'write-refused codex-cli', 'standard-codex-writes', 'network-off claude-code', 'network-off codex-cli')
+          arms = ('read-diff claude-code Confined', 'read-diff codex-cli Confined', 'read-diff codex-cli Standard', 'codex-resume-stand-down', 'write-refused claude-code', 'write-refused codex-cli', 'standard-codex-writes', 'network-off-sealed claude-code', 'network-off-sealed codex-cli')
           for arm in arms:
               assert f'[review-diff-e2e] ran {arm}' in text, f'reviewer E2E arm "{arm}" did not run — check CODESPACE_REQUIRE_REVIEW_CLIS and the CLI install step'
-          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('A_codex_reviewer_reads_the_diff_with_git_wherever_it_runs', 2), ('The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down', 1), ('A_confined_reviewer_cannot_write_its_workspace', 2), ('A_standard_codex_writes_its_workspace_under_our_confinement_and_nothing_outside_it', 1), ('A_network_off_reviewer_under_confinement_cannot_reach_its_model', 2)):
+          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('A_codex_reviewer_reads_the_diff_with_git_wherever_it_runs', 2), ('The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down', 1), ('A_confined_reviewer_cannot_write_its_workspace', 2), ('A_standard_codex_writes_its_workspace_under_our_confinement_and_nothing_outside_it', 1), ('A_network_off_reviewer_reaches_its_model_through_the_sealed_namespace', 2)):
               cases = [r for r in results if 'ReviewerReadsItsDiffE2ETests.' + method in r.get('testName', '')]
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
           print(f'All {len(arms)} reviewer E2E arms ran and passed.')
+
+          # The sealed-egress E2E returns early on a host that cannot seal, which reads as Passed; require each arm's marker.
+          for arm in ('durable', 'non-durable', 'ipv6'):
+              assert f'[sealed-egress-e2e] ran {arm}' in text, f'sealed-egress E2E arm "{arm}" did not run — this lane is root with bwrap, ip and nft, so it must seal'
+          for method, rows in (('A_network_off_brokered_run_reaches_its_broker_and_nothing_else', 2), ('A_sealed_namespace_drops_the_gateway_over_ipv6_link_local_too', 1)):
+              cases = [r for r in results if 'SealedEgressE2ETests.' + method in r.get('testName', '')]
+              assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
+          print('All 3 sealed-egress arms ran and passed.')
 
           print('All 10 batch/stream kernel cases passed.')
           PY

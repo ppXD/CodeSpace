@@ -26,6 +26,35 @@ public class FilteredEgressPlanTests
         a.ExecPrefix.ShouldBe(new[] { "ip", "netns", "exec", a.Namespace }, "the command runs inside this run's netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "del", a.Namespace }), "teardown deletes the netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "ip", a.Namespace }), "teardown deletes the nft table");
+        a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "inet", a.Namespace }), "teardown deletes a sealed run's inet table too — every reaper knows only the run id");
+    }
+
+    [Fact]
+    public void A_sealed_plan_has_no_route_no_forwarding_and_no_nat()
+    {
+        var plan = FilteredEgressPlan.BuildSealed("run-5ea1ed01", 43121, Subnet);
+
+        plan.SetupCommands.ShouldNotContain(c => c.Contains("route"), "no default route: a packet to anywhere but the /30 fails with ENETUNREACH at once");
+        plan.SetupCommands.ShouldNotContain(c => c[0] == "sysctl", "nothing is forwarded, so the host's forwarding switch is left alone");
+        plan.SetupCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "exec", plan.Namespace, "ip", "addr", "add", $"{Subnet.NsIp}/30", "dev", plan.VethNs }), "the namespace still holds its /30, so the gateway is on-link");
+        plan.HostIp.ShouldBe(Subnet.HostIp, "the gateway the child reaches its broker at");
+        plan.ExecPrefix.ShouldBe(new[] { "ip", "netns", "exec", plan.Namespace });
+        plan.TeardownCommands.Select(c => string.Join(' ', c)).ShouldBe(FilteredEgressPlan.TeardownCommandsFor("run-5ea1ed01").Select(c => string.Join(' ', c)), "a sealed namespace is torn down by the same run-id-only commands every reaper already runs");
+    }
+
+    [Fact]
+    public void A_sealed_ruleset_admits_only_the_broker_port_on_the_gateway()
+    {
+        var plan = FilteredEgressPlan.BuildSealed("run-5ea1ed02", 43121, Subnet);
+        var rs = plan.NftRuleset;
+
+        rs.ShouldStartWith($"table inet {plan.Namespace} {{", customMessage: "inet, not ip: the veth's IPv6 link-local address must be covered by the same drop");
+        rs.ShouldContain("type filter hook input priority 0;", customMessage: "the input hook is where the worker's own listeners are reached from — the allowlist plan has no such filter");
+        rs.ShouldContain($"iifname \"{plan.VethHost}\" ip daddr {Subnet.HostIp} tcp dport 43121 accept", customMessage: "the broker's one port on the gateway is the only destination");
+        rs.ShouldContain($"iifname \"{plan.VethHost}\" drop", customMessage: "everything else from this run's veth is dropped");
+        rs.ShouldNotContain("dport 53", customMessage: "no DNS — a resolver is a tunnel");
+        rs.ShouldNotContain("masquerade", customMessage: "no NAT — nothing leaves the host");
+        rs.ShouldNotContain("saddr", customMessage: "keyed on the veth, never on a subnet a degraded allocator might hand another run too");
     }
 
     [Fact]

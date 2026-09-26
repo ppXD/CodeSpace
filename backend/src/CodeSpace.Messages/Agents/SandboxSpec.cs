@@ -82,8 +82,9 @@ public sealed record SandboxSpec
 
     /// <summary>
     /// Whether the command may reach the network. <c>false</c> (the DEFAULT) → the sandbox runner severs egress
-    /// entirely (a fresh network namespace with only loopback), so a confined agent cannot reach cloud-metadata, the
-    /// LAN, or exfiltrate over the internet. <c>true</c> → the host network is shared, UNLESS
+    /// entirely (a fresh network namespace with only loopback — or, for a run whose model is brokered, one sealed to
+    /// that broker: see <see cref="ModelBrokerPort"/>), so a confined agent cannot reach cloud-metadata, the LAN, or
+    /// exfiltrate over the internet. <c>true</c> → the host network is shared, UNLESS
     /// <see cref="EgressAllowlist"/> narrows it. Enforced only by a sandboxing runner; a bare-process runner cannot
     /// honour it.
     ///
@@ -104,6 +105,19 @@ public sealed record SandboxSpec
     /// "any host". The host filtering itself (netns + nftables / proxy) is enforced by a later sandbox slice.
     /// </summary>
     public IReadOnlyList<string>? EgressAllowlist { get; init; }
+
+    /// <summary>
+    /// The port of this run's model-credential broker lease, set only for a run whose network is OFF and whose model
+    /// is reached through that broker. Such a run cannot be severed from everything the way <see cref="AllowNetwork"/>
+    /// otherwise asks — the broker would be cut off with the rest, and the agent could reach no model at all — so a
+    /// confining runner able to build one runs it in a SEALED namespace instead: no route, no NAT, no DNS, and exactly
+    /// one reachable destination, this port on the namespace's gateway. A runner that cannot seal keeps severing.
+    ///
+    /// <para>Set by <c>AgentRunExecutor.ApplySealedEgress</c> at the executor's one spec choke point. Null (every other
+    /// spec) ⇒ omitted from the JSON, so the spec serializes and hashes as it did before the field existed.</para>
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public int? ModelBrokerPort { get; init; }
 
     /// <summary>
     /// Max processes the command + its descendants may spawn (RLIMIT_NPROC) — a fork-bomb cap so a runaway agent

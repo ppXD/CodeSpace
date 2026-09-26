@@ -27,6 +27,20 @@ public class AgentRunExecutorEgressTests
         result.EgressAllowlist.ShouldBeNull();
     }
 
+    [Theory]
+    [InlineData(AgentNetworkAccess.Off, 43121, 43121)]   // network off + a brokered model → the port a confining runner seals it to
+    [InlineData(AgentNetworkAccess.Off, null, null)]     // network off, unbrokered → nothing to seal to; severed as always
+    [InlineData(AgentNetworkAccess.On, 43121, null)]     // network on reaches its broker already; its egress is the allowlist's business
+    public void Only_a_network_off_brokered_run_carries_its_broker_port(AgentNetworkAccess network, int? brokerPort, int? expected)
+    {
+        var spec = new SandboxSpec { Command = "agent" };
+
+        var result = AgentRunExecutor.ApplySealedEgress(spec, new AgentPermissions { Network = network }, brokerPort);
+
+        result.ModelBrokerPort.ShouldBe(expected);
+        if (expected is null) result.ShouldBeSameAs(spec, "nothing to stamp — the spec is returned untouched");
+    }
+
     [Fact]
     public void Allowlist_pins_the_model_and_extra_hosts()
     {

@@ -460,7 +460,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
             // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
             // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
-            SandboxSpec BuildSpec(AgentTask built) => HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(built, mcp, mcpWiring)) with { Mcp = mcpWiring }, built, modelBaseUrl, modelProvider, workspaceProvision);
+            var hardening = new SpecHardening(modelBaseUrl, modelProvider, workspaceProvision, brokeredCredential?.RebindPort);
+
+            SandboxSpec BuildSpec(AgentTask built) => HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(built, mcp, mcpWiring)) with { Mcp = mcpWiring }, built, hardening);
 
             var spec = BuildSpec(effectiveTask);
 
@@ -3748,9 +3750,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
         // in the egress allowlist (B3.3b) — the UPSTREAM ones even under brokerage, deliberately: the allowlist is
-        // enforced inside the run's netns, the broker reaches the provider from the host outside it, and narrowing
-        // the allowlist to just the broker is a separate change (a brokered run keeping the provider host reachable
-        // loses nothing — the token it holds is refused there). DefaultModel flows out so a model-less ("auto") run
+        // enforced inside the run's netns, the broker reaches the provider from the host outside it, and a brokered
+        // run keeping the provider host reachable loses nothing — the token it holds is refused there. (A network-OFF
+        // brokered run is the one sealed to just its broker; see ApplySealedEgress.) DefaultModel flows out so a model-less ("auto") run
         // falls back to one of the credential's own models instead of the CLI default. All null when no credential
         // resolved. CredentialId names the ROW whose key this run authenticates with (null for the operator-global
         // key, which has no row) — D3 bounds an escalation's candidate models to exactly that row.
@@ -4030,9 +4032,25 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static SandboxSpec ApplyWriteScope(SandboxSpec spec, AgentPermissions permissions) =>
         spec with { ReadOnlyWorkingDirectory = permissions.WriteScope != AgentWriteScope.Workspace };
 
-    /// <summary>The harness invocation with every one of the executor's own spec post-processings applied — the egress posture, the write scope and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
-    private static SandboxSpec HardenSpec(SandboxSpec spec, AgentTask task, string? modelBaseUrl, string? modelProvider, WorkspaceProvisionRequest? workspace) =>
-        ApplyResourceCeilings(ApplyWriteScope(ApplyEgressPolicy(spec, task.Permissions, modelBaseUrl, modelProvider, workspace), task.Permissions), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
+    /// <summary>
+    /// Stamp a network-off run's broker port onto its spec, so a confining runner able to build one runs it in a
+    /// namespace SEALED to that broker instead of severing it from everything — the broker included, which left such a
+    /// run unable to reach any model. Only network-off runs: a run with network reaches its broker already, and its
+    /// egress is <see cref="ApplyEgressPolicy"/>'s business. Returns the spec itself when there is nothing to stamp.
+    /// </summary>
+    internal static SandboxSpec ApplySealedEgress(SandboxSpec spec, AgentPermissions permissions, int? brokerPort) =>
+        permissions.Network == AgentNetworkAccess.Off && brokerPort is { } port ? spec with { ModelBrokerPort = port } : spec;
+
+    /// <summary>What the executor's hardening reads beyond the task itself: the model endpoint and the workspace the egress allowlist is built from, and the port of the run's brokered model lease, if it has one.</summary>
+    private readonly record struct SpecHardening(string? ModelBaseUrl, string? ModelProvider, WorkspaceProvisionRequest? Workspace, int? ModelBrokerPort);
+
+    /// <summary>The harness invocation with every one of the executor's own spec post-processings applied — the egress posture, the broker seal, the write scope and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
+    private static SandboxSpec HardenSpec(SandboxSpec spec, AgentTask task, SpecHardening hardening)
+    {
+        var egress = ApplySealedEgress(ApplyEgressPolicy(spec, task.Permissions, hardening.ModelBaseUrl, hardening.ModelProvider, hardening.Workspace), task.Permissions, hardening.ModelBrokerPort);
+
+        return ApplyResourceCeilings(ApplyWriteScope(egress, task.Permissions), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
+    }
 
     /// <summary>The git clone URLs of every repo in the run's workspace provision (empty for a no-repo run) — the source of the allowlist's git hosts.</summary>
     private static IReadOnlyList<string> CloneUrlsOf(WorkspaceProvisionRequest? workspace) =>

@@ -314,14 +314,17 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist, set up the per-run netns and
-    /// return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the teardown key. None/Full need no
-    /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner that cannot enforce it degrades
-    /// to None (no netns) via <see cref="SandboxEgressPolicy"/>, and a netns whose setup fails throws.
+    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist or a Sealed broker route, set
+    /// up the per-run netns and return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the
+    /// teardown key. None/Full need no netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner
+    /// that cannot enforce it degrades to None (no netns) via <see cref="SandboxEgressPolicy"/>, a network-off run this
+    /// host cannot seal stays severed, and a netns whose setup fails throws.
     /// </summary>
     private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
     {
-        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported);
+        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported, SealableBrokerPort(spec));
+
+        if (policy.Mode == SandboxEgressMode.Sealed) return await SetupSealedNetnsAsync(policy.BrokerPort!.Value, spoolKey, ct).ConfigureAwait(false);
 
         if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null, null);
 
@@ -335,6 +338,24 @@ public sealed partial class LocalProcessRunner
 
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
+
+        return (setup.ExecPrefix, spoolKey, setup.HostIp);
+    }
+
+    /// <summary>
+    /// The broker port a network-off run may be sealed to — only where bubblewrap confines the command (exactly where
+    /// it would otherwise sever it with <c>--unshare-net</c>) and this host has proved it can build a namespace. Null
+    /// everywhere else, so an unconfined host keeps the launch it always had and a host that cannot seal keeps severing.
+    /// </summary>
+    private static int? SealableBrokerPort(SandboxSpec spec) =>
+        spec.ModelBrokerPort is { } port && BubblewrapSandbox.Available is not null && FilteredEgressNetns.CanSeal ? port : null;
+
+    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupSealedNetnsAsync(int brokerPort, string spoolKey, CancellationToken ct)
+    {
+        var setup = await FilteredEgressNetns.SetupSealedAsync(spoolKey, brokerPort, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
+
+        if (!setup.SetupOk)
+            throw new InvalidOperationException($"Sealed-egress netns setup failed (fail-closed — run aborted rather than launched with a network it was not given): {setup.SetupError}");
 
         return (setup.ExecPrefix, spoolKey, setup.HostIp);
     }
@@ -915,8 +936,10 @@ public sealed partial class LocalProcessRunner
     /// <para>Returns the spec UNCHANGED when nothing mentions the token, which is every run whose credential was
     /// not brokered — byte-identical command, argv and env, and no allocation.</para>
     ///
-    /// <para>A network-severed run (no netns, no shared network) resolves to loopback and cannot reach the broker —
-    /// nor could it reach the provider directly, so brokerage neither adds nor removes anything for it.</para>
+    /// <para>A network-off brokered run on a host that seals runs inside a namespace SEALED to its broker, and resolves
+    /// to that namespace's gateway like any other netns run. One that is severed instead (no netns, no shared network —
+    /// a host that cannot seal) resolves to loopback and cannot reach the broker — nor could it reach the provider
+    /// directly, so brokerage neither adds nor removes anything for it.</para>
     ///
     /// <para><see cref="MentionsModelBrokerHost(SandboxSpec)"/> scans only <see cref="SandboxSpec.Command"/>,
     /// <see cref="SandboxSpec.Args"/> and <see cref="SandboxSpec.Environment"/> — a harness that instead wrote the
@@ -952,6 +975,9 @@ public sealed partial class LocalProcessRunner
     /// recorded <see cref="SandboxConfinement.NetworkSevered"/>, so the record and the command line cannot disagree.
     /// </summary>
     private static bool ShareNetwork(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => egressExecPrefix.Count > 0 || spec.AllowNetwork;
+
+    /// <summary>Whether this launch runs inside a SEALED netns: a namespace prefix for a run whose network is off can only be the sealed one, since an allowlist is read only when network is granted. Read by the launch's confinement record, beside <see cref="ShareNetwork"/>.</summary>
+    private static bool SealedEgress(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => !spec.AllowNetwork && egressExecPrefix.Count > 0;
 
     /// <summary>
     /// The allowlist bwrap's OWN egress policy sees. Inside a filtered netns the namespace IS the enforcement, so the
