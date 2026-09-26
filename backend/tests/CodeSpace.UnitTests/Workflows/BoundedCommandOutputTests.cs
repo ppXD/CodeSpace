@@ -38,9 +38,14 @@ public sealed class BoundedCommandOutputTests
     [Fact]
     public async Task Large_production_is_drained_while_only_the_bounded_prefix_is_retained()
     {
+        // Every byte passes through `tr`, which is CPU-bound, so the run lasts as long as the host's spare share of a core
+        // makes it: 2 s idle, past the default 30 s on a loaded host. The deadline sits far beyond any scheduling delay;
+        // what proves the drain is the command's own exit after EOF on both pipes, never the clock.
         const int produced = 64 * 1024 * 1024;
-        var result = await RunAsync($"head -c {produced} /dev/zero | tr '\\000' x; printf committed >&2; exit 9", new SandboxCaptureBudget { StdoutBytes = 32768, StderrBytes = 32 });
-        result.Status.ShouldBe(SandboxStatus.Failed);
+        const int deadlineSeconds = 300;
+        var spec = Spec($"head -c {produced} /dev/zero | tr '\\000' x; printf committed >&2; exit 9", new SandboxCaptureBudget { StdoutBytes = 32768, StderrBytes = 32 }) with { TimeoutSeconds = deadlineSeconds };
+        var result = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
+        result.Status.ShouldBe(SandboxStatus.Failed, $"only the command's exit after EOF on both pipes may end this run; {result.Observation?.Stdout?.ObservedBytes} of {produced} bytes were drained when it ended — time `head -c {produced} /dev/zero | tr '\\000' x >/dev/null` here to see how long the producer alone takes against the {deadlineSeconds}s deadline");
         result.ExitCode.ShouldBe(9);
         result.Stdout.Length.ShouldBe(32768);
         result.Stderr.ShouldBe("committed");

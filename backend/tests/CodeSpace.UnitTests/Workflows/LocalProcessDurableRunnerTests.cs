@@ -792,9 +792,15 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     [Fact]
     public async Task Deadline_elapsing_terminates_the_process_and_reports_timed_out()
     {
+        // The deadline counts from the launch request, so the handshake spends it first: three bootstraps started one after
+        // another, 0.4 s on an idle host and past 2.5 s on a loaded one. A deadline that elapses mid-handshake refuses the
+        // launch (input:TimeoutException or guardian-identity:IOException) instead of timing out a run, so this uses the
+        // default 30 s the other launches in this class already rely on to cover a handshake, with a run that outlives it.
         if (OperatingSystem.IsWindows()) return;
 
-        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 1 });
+        var handle = await LaunchAsync(ContractSpecs.Sleep(60) with { TimeoutSeconds = 30 });
+
+        handle.Deadline.ShouldBeGreaterThan(DateTimeOffset.UtcNow, "the launch must be ready while its deadline is still ahead; launch-v1/bootstrap.err in its spool names the controller that saw it elapse");
 
         var (result, _) = await AttachCollectAsync(handle);
 
