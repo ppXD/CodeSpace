@@ -117,6 +117,9 @@ public static class FailureCodes
     /// <summary>This host cannot reserve a filtered-egress run's own /30 subnet, so the run is refused rather than handed one nothing reserved. Remedy: make the reservation directory under the agent-run spool root writable by the worker — a retry on the same host cannot help.</summary>
     public const string SandboxEgressReservationUnavailable = "sandbox_egress_reservation_unavailable";
 
+    /// <summary>A network-off run whose model is brokered was refused before it spent anything, because this host would confine it but cannot seal its network to that broker — no <c>ip</c>/<c>nft</c>, no privilege to build a namespace, or a broker that could only listen on loopback — and severing it instead would leave its agent unable to reach any model. Remedy: grant the worker what a sealed namespace needs (root with CAP_NET_ADMIN and CAP_SYS_ADMIN, <c>ip</c> and <c>nft</c>; see backend/Dockerfile.worker) — a retry on the same host cannot help.</summary>
+    public const string SandboxSealedEgressUnavailable = "sandbox_sealed_egress_unavailable";
+
     /// <summary>A run's model credential could not be brokered on a deployment that requires confinement, so the run is refused rather than handed the tenant's long-lived provider key. Remedy: make the worker able to bind a broker listener, use a harness that honours a base-URL override, or store an upstream endpoint on the credential — a retry on the same host cannot help.</summary>
     public const string ModelCredentialBrokerUnavailable = "model_credential_broker_unavailable";
 
@@ -125,7 +128,8 @@ public static class FailureCodes
 
     /// <summary>
     /// The codes that, worn as an agent attempt's <c>AgentRunResult.ExitReason</c>, say the attempt died on OUR
-    /// INFRASTRUCTURE — the worker went away, the broker could not bind — rather than on anything the agent did or
+    /// INFRASTRUCTURE — the worker went away, the broker could not bind, the host could not seal a network-off run to
+    /// its broker — rather than on anything the agent did or
     /// the model answered. A post-hoc grader that meets one of these is grading an attempt whose check never ran and
     /// never could have, so no further agent pass can change its verdict.
     ///
@@ -134,12 +138,13 @@ public static class FailureCodes
     /// answers about the work. Membership here is the narrower claim that the run never got to be about the work at
     /// all. Pinned member-by-member by a unit test — adding or removing one changes what a post-hoc grade can be.</para>
     ///
-    /// <para><b>Membership settles the CLASSIFICATION, never the REMEDY</b>, and the two members already differ on
+    /// <para><b>Membership settles the CLASSIFICATION, never the REMEDY</b>, and the members already differ on
     /// the second. <see cref="ModelCredentialLeaseLost"/> is a worker that went away mid-run: the identical attempt
     /// on a live worker simply succeeds, so its repair is a retry and nothing else. <see cref="ModelCredentialBrokerUnavailable"/>
     /// is a worker that could not broker at all on a deployment mandating confinement — a retry helps only if it
     /// lands somewhere that CAN broker, and if the deployment itself is misconfigured no number of attempts will
-    /// (its own remedy line above says as much). Both are equally "not about the work", which is all this set
+    /// (its own remedy line above says as much); <see cref="SandboxSealedEgressUnavailable"/> is the same kind of
+    /// deployment answer about the network. All are equally "not about the work", which is all this set
     /// claims; what to DO about each is the prompt renderer's question, and
     /// <c>LlmSupervisorDecider.EndedByDeploymentSteer</c> answers it per exit reason rather than per class.</para>
     ///
@@ -152,6 +157,7 @@ public static class FailureCodes
     {
         ModelCredentialLeaseLost,
         ModelCredentialBrokerUnavailable,
+        SandboxSealedEgressUnavailable,
     };
 
     /// <summary>

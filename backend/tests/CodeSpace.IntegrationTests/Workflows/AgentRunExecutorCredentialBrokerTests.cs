@@ -169,6 +169,57 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_network_off_brokered_run_its_runner_cannot_seal_is_refused_before_it_spends_or_launches()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The ORDER is the claim: the runner is asked while a refusal still costs nothing. A run owned by a workflow run
+        // records a spend row the moment it is admitted — even with no cap — so an absent row proves the refusal came
+        // first; a null launch proves no process started; and the lease must be withdrawn like any finished run's.
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-unsealable-fixture");
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: null);
+        var runId = await CreateTaskRunInWorkflowAsync(teamId, workflowRunId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "claude-opus-4-8", ModelCredentialId = credId, MaxCostUsd = 5m });
+        var runner = new SealRefusingRunner();
+
+        using var broker = new LoopbackModelCredentialBroker();
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo done");
+
+        await ExecuteAsync(runId, harness, runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), credentialBroker: broker);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        var leasePort = new Uri(harness.BuiltTask!.Environment["SCRIPTED_BASE_URL"].Replace(SandboxSpec.ModelBrokerHostToken, "127.0.0.1", StringComparison.Ordinal)).Port;
+
+        run.Status.ShouldBe(AgentRunStatus.Failed);
+        result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable, "the refusal lands under its own code, which the supervisor steers on");
+        runner.Asked.ShouldHaveSingleItem().Port.ShouldBe(leasePort, "the runner is asked about the spec the run would have launched, lease port and all");
+        runner.Asked[0].Reachable.ShouldBe(CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported, "and is told whether the lease bound where a namespace can reach it");
+        runner.Launched.ShouldBeNull("a refused run starts no process");
+        (await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().Where(r => r.TeamId == teamId).ToListAsync())
+            .ShouldBeEmpty("a refusal before admission claims nothing — an admitted run here would have recorded an unbudgeted row");
+        broker.HasLease(runId).ShouldBeFalse("the lease is withdrawn when the refused run ends, like any other");
+    }
+
+    [Fact]
+    public async Task An_unbrokered_network_off_run_is_admitted_by_a_runner_that_cannot_seal()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Nothing to seal, nothing to refuse: a run with no broker lease — model-less, or keyless — launches exactly as
+        // it did before, even where a brokered one would be refused.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        var runner = new SealRefusingRunner();
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'one\\n'"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
+
+        runner.Asked.ShouldHaveSingleItem().Port.ShouldBeNull();
+        runner.Launched.ShouldNotBeNull("an unbrokered network-off run is launched, not refused");
+    }
+
+    [Fact]
     public async Task A_run_whose_credential_cannot_be_brokered_discloses_the_direct_injection()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1369,6 +1420,51 @@ public partial class AgentRunExecutorTests
     /// Its variable names are deliberately its own — the assertion is about which KIND of value lands, not about
     /// Anthropic's or OpenAI's spellings, which their own harness pin tests own.
     /// </summary>
+    private async Task<Guid> CreateTaskRunInWorkflowAsync(Guid teamId, Guid workflowRunId, AgentTask task)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, workflowRunId, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    /// <summary>A durable runner that refuses admission to any spec carrying a broker port — the shape the local runner takes on a host that confines but cannot seal — recording what it was asked and what it launched.</summary>
+    private sealed class SealRefusingRunner : ISandboxRunner, ISandboxDurableRunner, ISandboxEgressAdmission
+    {
+        public string Kind => LocalProcessRunner.LocalKind;
+
+        public List<(int? Port, bool Reachable)> Asked { get; } = new();
+
+        public SandboxSpec? Launched { get; private set; }
+
+        public void EnsureEgressAdmissible(SandboxSpec spec, bool modelBrokerReachableFromNamespace)
+        {
+            Asked.Add((spec.ModelBrokerPort, modelBrokerReachableFromNamespace));
+
+            if (spec.ModelBrokerPort is not null) throw new CodeSpace.Core.Services.Agents.Sandbox.Exceptions.SealedEgressUnavailableException(CodeSpace.Core.Services.Agents.Sandbox.Exceptions.SealedEgressUnavailableException.CauseNoPrivilege);
+        }
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("The executor must take the durable path.");
+
+        public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
+        {
+            Launched = spec;
+
+            var spoolDirectory = LocalProcessRunner.SpoolDirectoryFor(spoolKey);
+            Directory.CreateDirectory(spoolDirectory);
+
+            return Task.FromResult(new SandboxHandle { Kind = Kind, ProcessId = System.Environment.ProcessId, SpoolDirectory = spoolDirectory, Deadline = DateTimeOffset.UtcNow.AddMinutes(5) });
+        }
+
+        public Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<SandboxOutputFrame, CancellationToken, Task> onStdoutFrame, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null) =>
+            Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+
+        public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken) =>
+            Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = 0 });
+
+        public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => Task.FromResult(SandboxTerminateResult.Killed);
+    }
+
     private sealed class BrokerableScriptedHarness(string provider, string script) : IAgentHarness, IModelCredentialProjector, IBrokeredModelCredentialProjector
     {
         public const string KeyEnvVar = "SCRIPTED_MODEL_KEY";

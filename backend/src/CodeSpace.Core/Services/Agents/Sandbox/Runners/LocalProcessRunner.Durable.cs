@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 using CodeSpace.NativeLaunch;
@@ -354,11 +355,33 @@ public sealed partial class LocalProcessRunner
     {
         var setup = await FilteredEgressNetns.SetupSealedAsync(spoolKey, brokerPort, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
 
+        // The same refusal EnsureEgressAdmissible raises before any spend, for the rarer case the probe could not
+        // foresee — a setup step that fails on a host that proved it can seal (a name collision, a kernel refusal).
         if (!setup.SetupOk)
-            throw new InvalidOperationException($"Sealed-egress netns setup failed (fail-closed — run aborted rather than launched with a network it was not given): {setup.SetupError}");
+            throw new SealedEgressUnavailableException($"the sealed namespace's setup failed: {setup.SetupError}");
 
         return (setup.ExecPrefix, spoolKey, setup.HostIp);
     }
+
+    /// <summary>
+    /// Refuse, before anything is spent, a network-off brokered run this host would confine but cannot seal — the
+    /// mirror of <see cref="SealableBrokerPort"/>, which would otherwise quietly sever it from its broker. A spec with
+    /// no broker port, or a host that does not confine, is admitted untouched: nothing about its launch changes.
+    /// </summary>
+    public void EnsureEgressAdmissible(SandboxSpec spec, bool modelBrokerReachableFromNamespace)
+    {
+        if (spec.ModelBrokerPort is null || BubblewrapSandbox.Available is null) return;
+
+        if (SealRefusal(FilteredEgressNetns.IsSupported, FilteredEgressNetns.CanSeal, modelBrokerReachableFromNamespace) is { } cause)
+            throw new SealedEgressUnavailableException(cause);
+    }
+
+    /// <summary>Why a confining host cannot seal a brokered network-off run, or null when it can. Pure over the host's three facts, so every cause is testable on a host that has none of them.</summary>
+    internal static string? SealRefusal(bool haveTools, bool canSeal, bool brokerReachableFromNamespace) =>
+        !haveTools ? SealedEgressUnavailableException.CauseMissingTools
+        : !canSeal ? SealedEgressUnavailableException.CauseNoPrivilege
+        : !brokerReachableFromNamespace ? SealedEgressUnavailableException.CauseBrokerLoopbackOnly
+        : null;
 
     /// <summary>
     /// Create this run's cgroup-v2 resource-cap leaf (B4) when a memory/cpu cap is requested AND the operator delegated
