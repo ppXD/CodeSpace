@@ -304,6 +304,33 @@ public class CodexHarnessTests
         }
     }
 
+    [Theory]
+    [InlineData(AgentWriteScope.Workspace, false, "--sandbox", "workspace-write", "danger-full-access")]
+    [InlineData(AgentWriteScope.ReadOnly, false, "--sandbox", "read-only", "danger-full-access")]
+    [InlineData(AgentWriteScope.Workspace, true, "-c", "sandbox_mode=workspace-write", "sandbox_mode=danger-full-access")]
+    [InlineData(AgentWriteScope.ReadOnly, true, "-c", "sandbox_mode=read-only", "sandbox_mode=danger-full-access")]
+    public void Declares_the_sandbox_it_carries_and_the_stand_down_our_confinement_swaps_it_for(AgentWriteScope scope, bool resume, string flag, string unconfined, string confined)
+    {
+        // Codex's own sandbox cannot start inside ours, so where the runner confines the run it swaps this fragment for
+        // full access. The fragment it names must be exactly the one in Args — the runner refuses to launch otherwise —
+        // and the stand-down keeps the spelling this subcommand accepts (`exec resume` rejects --sandbox).
+        var task = Task(scope: scope) with { ResumeFromSessionId = resume ? "thr-x" : null };
+
+        var spec = Harness.BuildInvocation(task);
+        var standDown = spec.WhenRunnerConfines.ShouldNotBeNull("Codex brings an OS sandbox of its own, so it must say how our runner stands it down");
+
+        standDown.Replace.ShouldBe(new[] { flag, unconfined });
+        standDown.With.ShouldBe(new[] { flag, confined });
+        spec.Args.ShouldContain(unconfined, customMessage: "Args itself stays the argv an unconfined host runs — the swap happens only in the runner");
+        spec.Args.ShouldNotContain(confined, customMessage: "full access must never reach a launch that did not get our confinement");
+        spec.Args[^1].ShouldBe("-", "the stdin positional stays last");
+    }
+
+    [Fact]
+    public void ConfinedSandboxMode_is_pinned() =>
+        // The mode Codex runs in under our confinement; widening or renaming it is a reviewed security decision.
+        CodexHarness.ConfinedSandboxMode.ShouldBe("danger-full-access");
+
     [Fact]
     public void Omits_the_resume_subcommand_when_no_prior_session()
     {

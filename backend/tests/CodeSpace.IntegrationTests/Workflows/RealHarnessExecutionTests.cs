@@ -206,6 +206,40 @@ public class RealHarnessExecutionTests
         }
     }
 
+    [Theory]
+    [InlineData(null, "--sandbox\nworkspace-write", "--sandbox\ndanger-full-access")]
+    [InlineData("prior-session-7c3", "-c\nsandbox_mode=workspace-write", "-c\nsandbox_mode=danger-full-access")]
+    public async Task Real_executor_stands_codexs_own_sandbox_down_only_where_the_runner_confines_it(string? resumeFromSessionId, string unconfined, string confined)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Codex's own sandbox is a nested bubblewrap that cannot start inside ours, so the runner swaps it for full
+        // access where — and only where — it confines the run. Honest on either host: the dumped argv is the spawned
+        // process's own, one element per line, and it must carry the mode for the confinement this host actually gave.
+        var (commandEnvVar, fixture) = SessionCase(CodexHarness.HarnessKind);
+        using var cli = new FakeCli(commandEnvVar, fixture);
+
+        var argvDump = Path.Combine(Path.GetTempPath(), "cs-argv-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            var teamId = await SeedTeamAsync();
+            var env = new Dictionary<string, string>(cli.Env()) { ["FAKE_ARGV_OUT"] = argvDump };
+            var runId = await CreateRunAsync(teamId, CodexHarness.HarnessKind, env, resumeFromSessionId: resumeFromSessionId);
+
+            await ExecuteRealAsync(runId);
+
+            var argv = File.ReadAllText(argvDump);
+            var confines = CodeSpace.Core.Services.Agents.Sandbox.Isolation.BubblewrapSandbox.Available is not null;
+
+            argv.Contains(confined, StringComparison.Ordinal).ShouldBe(confines, $"full access must reach the process exactly where the runner confines it (confines={confines}); argv: {argv}");
+            argv.Contains(unconfined, StringComparison.Ordinal).ShouldBe(!confines, $"and Codex keeps its own sandbox wherever ours is not there to replace it; argv: {argv}");
+        }
+        finally
+        {
+            if (File.Exists(argvDump)) File.Delete(argvDump);
+        }
+    }
+
     [Fact]
     public async Task Real_executor_skips_capturing_a_session_transcript_over_the_size_cap()
     {
