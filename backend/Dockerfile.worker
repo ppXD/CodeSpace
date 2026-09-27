@@ -22,26 +22,65 @@
 # CodexHarness / ClaudeCodeHarness default to `codex` / `claude` on PATH, so no env wiring is needed; an operator
 # can still repoint CODESPACE_CODEX_CLI_PATH / CODESPACE_CLAUDE_CODE_PATH at a different binary.
 #
-# EGRESS FILTERING needs more than these packages. FilteredEgressNetns probes `ip -Version` + `nft --version` and,
-# when either is missing, reports IsSupported=false — at which point SandboxEgressPolicy.Derive turns a run that asked
-# for an EGRESS ALLOWLIST into Denied (NO network at all), never into Full. That is fail-closed and safe, but it means
-# a worker image without these packages silently makes the allowlist feature unusable rather than loud. Installing
-# them is necessary, NOT sufficient: `ip netns add` and `sysctl -w net.ipv4.ip_forward=1` need root + CAP_NET_ADMIN,
-# and the runtime user below is non-root — so on a pod without those the probe may pass while setup fails. Grant
-# CAP_NET_ADMIN (and run the egress path privileged enough to write the sysctl) on any deployment that relies on
-# allowlisted egress; a pod that does not is still correct, it just gets Denied instead of Filtered.
+# CONFINEMENT POSTURE. The worker logs one "Sandbox posture:" line at boot — whether bubblewrap confines and why not,
+# whether the codespace-mcp helper is present, whether the namespace probe (FilteredEgressNetns.CanSeal) holds and why
+# not. Read it before the first run; what each tier needs from the deployment is below.
 #
-# The same namespace machinery SEALS a network-off run whose model is brokered to that broker (no route, no NAT, no
-# DNS, one gateway port). It is taken only where bubblewrap confines AND FilteredEgressNetns.CanSeal has proved, by
-# building a throwaway namespace, that this process may: root + CAP_NET_ADMIN + CAP_SYS_ADMIN, no sysctl needed. A
-# pod without them that DOES confine refuses such a run before it spends anything (sandbox_sealed_egress_unavailable),
-# because severing it instead would cut it off from its broker and leave it reaching no model.
+# BUBBLEWRAP (every tier) needs no root and no capability: the non-root user below confines through UNPRIVILEGED user
+# namespaces, which a container runtime's defaults deny. Grant them, without --privileged or --cap-add:
+#   • Docker / Compose (Compose v2.15+, which first accepts systempaths) — the commented block in docker-compose.yml:
+#       --security-opt seccomp=backend/deploy/seccomp/codespace-worker.json  moby's v20.10.20 default as it applies to
+#                                                  a container with no capabilities, plus clone/clone3/unshare with
+#                                                  namespace flags, setns, mount, umount2, pivot_root (the default
+#                                                  reserves those for CAP_SYS_ADMIN; pivot_root it denies). It is in
+#                                                  the OCI form with no capability or architecture conditions, so
+#                                                  Docker, containerd and CRI-O apply the same filter, and a
+#                                                  capability the container holds adds no call. Regenerate it with
+#                                                  derive-codespace-worker.sh beside it, never by hand.
+#       --security-opt apparmor=unconfined         the runtime's AppArmor profile denies mount
+#       --security-opt systempaths=unconfined      bubblewrap mounts a fresh /proc, which the kernel refuses over a
+#                                                  masked one ("Can't mount proc on /newroot/proc")
+#   • Kubernetes 1.33+ (user namespaces and ProcMountType on by default; node kernel 6.3+, containerd 2.0+ or CRI-O 1.25+):
+#       spec:
+#         hostUsers: false
+#         containers:
+#           - name: worker
+#             securityContext:
+#               runAsNonRoot: true
+#               runAsUser: 1654
+#               allowPrivilegeEscalation: false
+#               capabilities: { drop: ["ALL"] }
+#               procMount: Unmasked
+#               seccompProfile: { type: Localhost, localhostProfile: codespace-worker.json }  # in each node's kubelet seccomp dir
+#               appArmorProfile: { type: Unconfined }                                       # on AppArmor nodes
+#     Older clusters: securityContext { privileged: true, runAsUser: 1654 }. That confines too, but it lifts the
+#     container's own seccomp, AppArmor and capability bounds, so prefer the form above. Pod Security baseline and
+#     restricted reject AppArmor Unconfined, and whether they admit procMount: Unmasked for a hostUsers: false pod
+#     depends on the cluster version; check yours before labelling the worker's namespace.
+#   • Nodes: user.max_user_namespaces above 0 (EKS Auto Mode sets 0, so nothing confines there); Ubuntu 23.10+ nodes
+#     also need kernel.apparmor_restrict_unprivileged_userns=0 or an AppArmor profile that lets bwrap create userns.
+# Where user namespaces or mounts are denied the bubblewrap probe fails and runs are UNCONFINED, recorded as such on
+# every run. A masked /proc is different: the probe mounts no /proc, so with every grant but systempaths=unconfined /
+# procMount: Unmasked the boot line reads "bubblewrap confines True" while every launch fails with "Can't mount proc on
+# /newroot/proc"; check that the first run's agent actually starts. The image does not arm
+# Sandbox:RequireConfinement, because that would refuse every run on such a host; a deployment that grants the above
+# arms it (Sandbox__RequireConfinement=true), so a lost grant refuses runs instead of unconfining them.
 #
-# CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
-# Sandbox:RequireConfinement is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
-# namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns
-# is not configured. The non-root user below runs bubblewrap via UNPRIVILEGED user namespaces — validate that the
-# target host/pod permits unprivileged userns for this uid (else arm RequireConfinement only where it does).
+# NETWORK-OFF runs (Confined and Standard, the default tier) are severed by bubblewrap (--unshare-net: loopback only).
+# One whose model is brokered still has to reach its broker. Once the model-broker relay ships (`codespace-mcp relay`),
+# it does so through a per-run Unix socket bound read-only into the sandbox, which needs no root and nothing beyond
+# the grants above. Without the relay it is SEALED to the broker through a per-run namespace instead (no route, no NAT,
+# no DNS, one gateway port), which needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN (FilteredEgressNetns.CanSeal); a worker
+# that confines but cannot seal refuses such a run before it spends anything (sandbox_sealed_egress_unavailable).
+#
+# EGRESS FILTERING (an allowlist run) needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN + a writable net.ipv4.ip_forward on
+# top of these packages: FilteredEgressPlan runs `ip netns add` (CAP_SYS_ADMIN: it unshares a network namespace and
+# bind-mounts it), builds a veth and an nftables ruleset, and `sysctl -w net.ipv4.ip_forward=1`. With `ip` or `nft`
+# missing, FilteredEgressNetns.IsSupported is false and SandboxEgressPolicy.Derive turns the allowlist into Denied (NO
+# network at all), never into Full. With them installed but the privilege missing — this image as shipped, since the
+# user below is non-root — that probe still passes, so the run is planned Filtered and its launch aborts when setup is
+# refused ("Filtered-egress netns setup failed"): it is never launched unfiltered, but it is not quietly Denied either.
+# Grant the privilege on any deployment that relies on allowlisted egress.
 #
 # global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
 # base-image digest pinning is a deferred follow-up — it needs the manifest-LIST digest + a Renovate bump (a

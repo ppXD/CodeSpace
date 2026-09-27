@@ -2,6 +2,7 @@ using CodeSpace.Core.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Jobs;
 using Hangfire;
 using Microsoft.Extensions.DependencyInjection;
@@ -72,6 +73,10 @@ public class WorkerHangfireRegistrar : HangfireRegistrarBase
         // enabled but the codespace-mcp proxy is missing (fail-closed → tool-less runs), so it's caught at boot, not
         // hours later. No-op + never-throws when the endpoint is off.
         AgentRunExecutor.LogMcpProxyReadiness(app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger<AgentRunExecutor>());
+
+        // WORKER-ONLY for the same reason: the confinement posture (bubblewrap, the in-sandbox helper, the namespace
+        // probe) decides how every run here launches, so an operator reads it at boot instead of from the first run.
+        LocalProcessRunner.LogSandboxPosture(app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger<LocalProcessRunner>());
 
         // A non-processing pod must NOT own recurring-job scheduling/execution.
         ScanHangfireRecurringJobs(app);

@@ -40,6 +40,9 @@ namespace CodeSpace.E2ETests.Jobs;
 /// relaxes the production boot guards), and it binds the host's own Serilog logger so the log assertion can read
 /// what the pipeline wrote. It also sets one process-wide environment variable at init, like its sibling fixtures.</para>
 ///
+/// <para>Because this is the one fixture that boots the Worker role, it also pins the worker's boot "Sandbox posture:"
+/// line (<see cref="The_worker_host_logs_its_sandbox_posture_once_at_boot"/>).</para>
+///
 /// <para>Deliberately NOT covered: cron TIMING (whether a cadence is right), job payloads, and what any individual
 /// sweep does to rows. Cron-fired EXECUTIONS are covered — they land in the same database and are judged by
 /// <see cref="AssertNoJobInThisDatabaseFailed"/>. Per-sweep behaviour belongs with each sweep's own tests, which can
@@ -91,6 +94,33 @@ public sealed class RecurringJobWorkerSmokeE2ETests
         AssertNoJobInThisDatabaseFailed(storage);
         AssertNothingRolledBack(sink);
     }
+
+    /// <summary>
+    /// The worker's boot line naming its confinement posture: Dockerfile.worker and docker-compose.yml tell an
+    /// operator to read it before the first run, so a registrar refactor that stops emitting it must go red here,
+    /// where the real <c>WorkerHangfireRegistrar.ApplyHangfire</c> runs. What each value says is pinned by
+    /// <c>RootlessWorkerPostureTests</c>; this pins that the worker host says it, once.
+    /// </summary>
+    [Fact]
+    public async Task The_worker_host_logs_its_sandbox_posture_once_at_boot()
+    {
+        var sink = new CapturedLogLines();
+
+        await using var factory = new RecurringJobWorkerHostFactory(sink);
+        await factory.InitializeAsync();
+
+        _ = factory.Services;   // builds and starts the host, which runs ApplyHangfire
+
+        var line = sink.Events().Where(IsSandboxPostureLine).ToList().ShouldHaveSingleItem(
+            customMessage: "the worker host must log exactly one 'Sandbox posture:' line at boot. None means WorkerHangfireRegistrar.ApplyHangfire "
+                + "no longer calls LocalProcessRunner.LogSandboxPosture (or calls it after an early return); more than one means it is called twice.");
+
+        line.Level.ShouldBe(LogEventLevel.Information);
+        new[] { "BubblewrapConfines", "BubblewrapUnavailableReason", "McpProxyPresent", "CanSeal", "SealUnavailableReason" }.Except(line.Properties.Keys).ShouldBeEmpty(
+            customMessage: "the posture line must carry each probe a launch reads, by the property names operators filter on");
+    }
+
+    private static bool IsSandboxPostureLine(LogEvent logEvent) => logEvent.MessageTemplate.Text.StartsWith("Sandbox posture:", StringComparison.Ordinal);
 
     /// <summary>
     /// A storage handle the test OWNS, built over the fixture's own connection string with the production options
@@ -282,13 +312,15 @@ public sealed class RecurringJobWorkerSmokeE2ETests
     /// <summary>One triggered execution: which schedule asked for it, which background job carried it, and the last state observed.</summary>
     private sealed record TickOutcome(string RecurringJobId, string BackgroundJobId, StateData? State);
 
-    /// <summary>Serilog sink that keeps every rendered line the host writes at Warning or above, so the test can assert on what the pipeline logged.</summary>
+    /// <summary>Serilog sink that keeps every event the host's logger lets through (see <c>RecurringJobWorkerHostFactory.CreateHost</c>), so the test can assert on what the pipeline logged.</summary>
     private sealed class CapturedLogLines : ILogEventSink
     {
-        private readonly ConcurrentQueue<string> _lines = new();
+        private readonly ConcurrentQueue<LogEvent> _events = new();
 
-        public void Emit(LogEvent logEvent) => _lines.Enqueue(logEvent.RenderMessage());
+        public void Emit(LogEvent logEvent) => _events.Enqueue(logEvent);
 
-        public IReadOnlyList<string> Lines() => _lines.ToArray();
+        public IReadOnlyList<LogEvent> Events() => _events.ToArray();
+
+        public IReadOnlyList<string> Lines() => _events.Select(logEvent => logEvent.RenderMessage()).ToList();
     }
 }

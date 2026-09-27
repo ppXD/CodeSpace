@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -91,6 +92,21 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
     internal static readonly TimeSpan TerminationDrainTimeout = TimeSpan.FromSeconds(2);
 
     public string Kind => LocalKind;
+
+    /// <summary>
+    /// A BOOT diagnostic the worker host logs once, so the confinement posture runs will get is readable before the
+    /// first run rather than reconstructed from a refused or unconfined one: whether bubblewrap confines and why not,
+    /// whether the <c>codespace-mcp</c> helper that runs inside every sandbox is at <see cref="McpProxyBinaryPath"/>,
+    /// and whether this process may build a network namespace (<see cref="FilteredEgressNetns.CanSeal"/>) and why not.
+    /// These are the probes a launch reads, cached exactly as a launch caches them (bubblewrap's for the process, a
+    /// failed namespace probe for <see cref="FilteredEgressNetns.SealProbeRetryInterval"/>), so this line is their first
+    /// caller, not a second opinion. Never throws: each probe already turns its own failure into a reason.
+    /// </summary>
+    public static void LogSandboxPosture(ILogger logger) => LogSandboxPosture(logger, McpProxyBinaryPath());
+
+    /// <summary><see cref="LogSandboxPosture(ILogger)"/> with the helper path passed in, so a test pins both answers without mutating the process-wide override.</summary>
+    internal static void LogSandboxPosture(ILogger logger, string helperPath) =>
+        logger.LogInformation("Sandbox posture: bubblewrap confines {BubblewrapConfines} (unavailable reason: {BubblewrapUnavailableReason}); codespace-mcp helper present {McpProxyPresent} at {McpProxyPath}; namespace probe CanSeal {CanSeal} (unavailable reason: {SealUnavailableReason})", BubblewrapSandbox.Available is not null, BubblewrapSandbox.UnavailableReason ?? "none", File.Exists(helperPath), helperPath, FilteredEgressNetns.CanSeal, FilteredEgressNetns.SealUnavailableReason ?? "none");
 
     public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
     {
