@@ -20,9 +20,10 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// syscall filtering is the remaining hardening.</para>
 ///
 /// <para><b>Availability is probed, never assumed</b> (<see cref="Available"/>): Linux + a <c>bwrap</c> binary +
-/// a WORKING unprivileged user namespace (a real confined <c>true</c> must exit 0). When unavailable — macOS dev,
-/// no <c>bwrap</c>, or a host that forbids unprivileged userns — the caller runs the command UNCONFINED. That is
-/// an honestly-degraded trust mode that must be surfaced, never silently presented as isolation.</para>
+/// the argv a launch builds actually running (a confined <c>true</c> under <see cref="BuildArgs"/> must exit 0). When
+/// unavailable — macOS dev, no <c>bwrap</c>, a host that forbids unprivileged userns, or one that denies the launch's
+/// mounts or network namespace — the caller runs the command UNCONFINED. That is an honestly-degraded trust mode that
+/// must be surfaced, never silently presented as isolation.</para>
 /// </summary>
 public static class BubblewrapSandbox
 {
@@ -46,10 +47,10 @@ public static class BubblewrapSandbox
 
     private static readonly Lazy<BwrapProbeResult> LazyProbe = new(Probe);
 
-    /// <summary>The resolved <c>bwrap</c> path when this host can confine (Linux + bwrap + working userns), else <c>null</c>.</summary>
+    /// <summary>The resolved <c>bwrap</c> path when this host can confine (Linux + bwrap + the launch argv runs), else <c>null</c>.</summary>
     public static string? Available => LazyProbe.Value.Path;
 
-    /// <summary>WHY this host cannot confine — one of <c>SandboxConfinement</c>'s reason constants — or null when it can. The probe already distinguishes the three cases; keeping the distinction is what lets a run's record say which wall it hit instead of an unactionable "unavailable".</summary>
+    /// <summary>WHY this host cannot confine — one of <c>SandboxConfinement</c>'s reason constants — or null when it can. The probe already distinguishes the four cases; keeping the distinction is what lets a run's record say which wall it hit instead of an unactionable "unavailable".</summary>
     public static string? UnavailableReason => LazyProbe.Value.Reason;
 
     /// <summary>Whether this deployment mandates confinement (<c>Sandbox:RequireConfinement</c>) — read live off the bound settings so it tracks configuration, not a captured copy.</summary>
@@ -65,7 +66,7 @@ public static class BubblewrapSandbox
         if (required && available is null)
             throw new InvalidOperationException(
                 "Sandbox isolation is required (Sandbox:RequireConfinement) but bubblewrap is unavailable on this host " +
-                "(not Linux, bwrap not installed, or unprivileged user namespaces denied). Refusing to run the agent unconfined.");
+                "(not Linux, bwrap not installed, unprivileged user namespaces denied, or the launch's mounts or network namespace denied). Refusing to run the agent unconfined.");
     }
 
     /// <summary>
@@ -208,48 +209,100 @@ public static class BubblewrapSandbox
     }
 
     /// <summary>
-    /// Resolve bwrap only on Linux, and only if a TRIVIAL confined process actually runs — a host that forbids
-    /// unprivileged user namespaces (restrictive sysctl / seccomp) has bwrap on PATH but cannot confine, so we must
-    /// fall back to unconfined rather than fail every run. Result is cached for the process lifetime.
+    /// The plan the availability probe confines: the default tier's own launch shape, network severed, running
+    /// <c>true</c>. The probe runs <see cref="BuildArgs"/> of it rather than a hand-picked subset of flags, so
+    /// "available" means a launch's argv runs here. A host that masks <c>/proc</c> lets a bare user namespace through
+    /// and then refuses every launch's fresh <c>--proc</c>.
+    ///
+    /// <para>The price of probing the default tier rather than the loosest one: a host that grants user namespaces but
+    /// denies network namespaces fails this argv too, reads as <see cref="SandboxConfinement.ReasonMountsDenied"/>, and
+    /// runs even its network-sharing launches unconfined, though those would have confined there.</para>
     /// </summary>
-    private static BwrapProbeResult Probe()
+    internal static readonly BwrapPlan ProbePlan = new() { Command = "true", ShareNetwork = false };
+
+    /// <summary>
+    /// Run only after <see cref="ProbePlan"/>'s argv was refused, to name the wall it hit: a user namespace with the
+    /// flags a launch depends on (<c>--cap-drop</c>, <c>--unshare-cgroup-try</c>, so a bwrap too old for them still
+    /// fails here) but none of the launch's own mounts. Passing is <see cref="SandboxConfinement.ReasonMountsDenied"/>;
+    /// failing too is <see cref="SandboxConfinement.ReasonNoUserNamespaces"/>. Told apart by which argv ran, never by
+    /// reading bwrap's stderr.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> UserNamespaceProbeArgs = ["--unshare-user", "--unshare-pid", "--unshare-cgroup-try", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--", "true"];
+
+    /// <summary>
+    /// Resolve bwrap only on Linux, and only if the argv a launch builds actually runs a confined <c>true</c>. A host
+    /// that forbids unprivileged user namespaces, or masks the <c>/proc</c> a launch mounts, has bwrap on PATH but
+    /// cannot confine, so we must fall back to unconfined rather than fail every run. Result is cached for the process
+    /// lifetime.
+    /// </summary>
+    private static BwrapProbeResult Probe() =>
+        OperatingSystem.IsLinux() ? ProbeAt(ConfiguredCommand()) : BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNotLinux);
+
+    private static string ConfiguredCommand() => Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } p ? p : DefaultCommand;
+
+    /// <summary>Probe the bwrap at <paramref name="path"/> now, uncached. <see cref="Available"/> is this, run once per process; internal so a real-kernel test can probe a host posture it staged.</summary>
+    internal static BwrapProbeResult ProbeAt(string path) => Classify(path, args => RunProbe(path, args));
+
+    /// <summary>
+    /// The probe's decision, pure over <paramref name="run"/>: the launch argv first, and only when bwrap started and
+    /// refused it, <see cref="UserNamespaceProbeArgs"/> to say why. The reasons are distinct because the fixes are:
+    /// "install bwrap", "allow user namespaces", "unmask /proc".
+    /// </summary>
+    internal static BwrapProbeResult Classify(string path, Func<IReadOnlyList<string>, ProbeOutcome> run) => run(BuildArgs(ProbePlan)) switch
     {
-        if (!OperatingSystem.IsLinux()) return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNotLinux);
+        ProbeOutcome.Ran => BwrapProbeResult.Confining(path),
+        ProbeOutcome.Missing => BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoBubblewrap),
+        _ => BwrapProbeResult.Unavailable(WallTheLaunchHit(run)),
+    };
 
-        var path = Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } p ? p : DefaultCommand;
+    private static string WallTheLaunchHit(Func<IReadOnlyList<string>, ProbeOutcome> run) =>
+        run(UserNamespaceProbeArgs) == ProbeOutcome.Ran ? SandboxConfinement.ReasonMountsDenied : SandboxConfinement.ReasonNoUserNamespaces;
 
+    /// <summary>Run bwrap once with <paramref name="args"/>. A start that fails is <see cref="ProbeOutcome.Missing"/>; a non-zero exit or a hang past the timeout is bwrap refusing to confine.</summary>
+    private static ProbeOutcome RunProbe(string path, IReadOnlyList<string> args)
+    {
         try
         {
-            // Exercise the flags the real run depends on (--cap-drop, --unshare-cgroup-try), not just userns: a bwrap
-            // too old to know them must report UNAVAILABLE (→ unconfined fallback / fail-closed) rather than pass here
-            // and then die on every real launch with "unknown option". --unshare-cgroup-try is best-effort, so a host
-            // without cgroup namespaces still probes clean.
-            var psi = new ProcessStartInfo { FileName = path, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (var arg in new[] { "--unshare-user", "--unshare-pid", "--unshare-cgroup-try", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--", "true" })
-                psi.ArgumentList.Add(arg);
+            using var proc = Process.Start(ProbeStartInfo(path, args));
 
-            using var proc = Process.Start(psi);
-            if (proc is null) return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoBubblewrap);
+            if (proc is null) return ProbeOutcome.Missing;
 
-            if (!proc.WaitForExit(ProbeTimeoutMs))
-            {
-                try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-                return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoUserNamespaces);
-            }
+            if (proc.WaitForExit(ProbeTimeoutMs)) return proc.ExitCode == 0 ? ProbeOutcome.Ran : ProbeOutcome.Refused;
 
-            // A NON-ZERO exit means bwrap ran and REFUSED to confine — denied unprivileged userns, or flags this
-            // build doesn't know. Distinct from the binary not being there at all, and the distinction is the whole
-            // point of recording a reason: one is "install bwrap", the other "allow user namespaces".
-            return proc.ExitCode == 0 ? BwrapProbeResult.Confining(path) : BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoUserNamespaces);
+            try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+
+            return ProbeOutcome.Refused;
         }
         catch
         {
-            return BwrapProbeResult.Unavailable(SandboxConfinement.ReasonNoBubblewrap);   // bwrap absent / not executable → unconfined fallback
+            return ProbeOutcome.Missing;   // bwrap absent / not executable → unconfined fallback
         }
     }
 
+    private static ProcessStartInfo ProbeStartInfo(string path, IReadOnlyList<string> args)
+    {
+        var psi = new ProcessStartInfo { FileName = path, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+
+        foreach (var arg in args) psi.ArgumentList.Add(arg);
+
+        return psi;
+    }
+
+    /// <summary>What one probe run of bwrap showed.</summary>
+    internal enum ProbeOutcome
+    {
+        /// <summary>The confined <c>true</c> exited 0.</summary>
+        Ran,
+
+        /// <summary>bwrap started and refused to confine: a non-zero exit, or a hang past the probe's timeout.</summary>
+        Refused,
+
+        /// <summary>bwrap could not be started at all: absent, or not executable.</summary>
+        Missing,
+    }
+
     /// <summary>The probe's two facts kept together — the resolved path when this host confines, else the reason it does not. Cached once, so the reason costs nothing beyond the probe already run.</summary>
-    private readonly record struct BwrapProbeResult(string? Path, string? Reason)
+    internal readonly record struct BwrapProbeResult(string? Path, string? Reason)
     {
         public static BwrapProbeResult Confining(string path) => new(path, null);
 

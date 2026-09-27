@@ -63,6 +63,11 @@
       "line": "Network: clamped off by policy (ceiling Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns); cross-team isolation not enforced"
     },
     {
+      "effective": "Standard", "ceiling": "Trusted", "deployment": "Unleashed",
+      "confinement": { "outcome": "Unconfined", "reason": "mounts-denied", "networkSevered": false },
+      "line": "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (mounts-denied); cross-team isolation not enforced"
+    },
+    {
       "effective": "Standard", "ceiling": "Standard", "deployment": "Unleashed",
       "confinement": { "outcome": "Confined", "networkSevered": true },
       "line": "Network: clamped off by policy (ceiling Standard) — confined: egress severed"
