@@ -539,7 +539,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 Harness = harness, Runner = runner, Spec = spec, Task = effectiveTask, McpToken = mcpToken, McpSocketPath = mcpToken is null ? null : socketPath, Redactor = redactor,
                 ModelBrokerRunToken = brokeredCredential?.RunToken, ModelCredentialBrokered = brokeredPosture,
                 ModelBrokerPort = brokeredCredential?.RebindPort, ModelBrokerRoute = brokeredCredential?.RebindRoute,
-                ModelBrokerCredentialId = brokeredCredential is null ? null : modelCredentialId, ModelBrokerProvider = brokeredCredential is null ? null : modelProvider,
+                ModelBrokerCredentialId = brokeredCredential is null ? null : modelCredentialId, ModelBrokerProvider = brokeredCredential is null ? null : modelProvider, ModelBrokerSocketPath = brokeredCredential?.SocketPath,
                 SpoolKey = ReviseSpoolKey(agentRunId, round: 0), Transcript = transcript,
                 WorkspaceDirectory = workspaceDirectory, WorkspaceBaseSha = workspaceBaseSha,
                 ResumedFromCheckpointAt = effectiveTask.ResumedFromCheckpointAt,
@@ -4568,7 +4568,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (!LocalProcessRunner.PidAnswerableHere(handle)) return null;
         if (upstream is not { } resolved || !FrontsTheSameCredential(handle, resolved)) return null;
 
-        return new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = resolved, Ttl = Credentials.ModelCredentialLease.Ttl };
+        return new()
+        {
+            RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = resolved, Ttl = Credentials.ModelCredentialLease.Ttl,
+            SocketPath = handle.ModelBrokerSocketPath, ChildInNetworkNamespace = handle.EgressNetnsKey is { Length: > 0 },
+        };
     }
 
     /// <summary>
@@ -5176,7 +5180,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var handle = (await LaunchBoundAsync(durable, context, identity, cancellationToken).ConfigureAwait(false)) with
         {
             InjectedKeyFingerprint = context.Redactor.Fingerprint, McpRunToken = context.McpToken, McpSocketPath = context.McpSocketPath, ModelBrokerRunToken = context.ModelBrokerRunToken,
-            ModelBrokerPort = context.ModelBrokerPort, ModelBrokerRoute = context.ModelBrokerRoute, ModelBrokerCredentialId = context.ModelBrokerCredentialId, ModelBrokerProvider = context.ModelBrokerProvider,
+            ModelBrokerPort = context.ModelBrokerPort, ModelBrokerRoute = context.ModelBrokerRoute, ModelBrokerCredentialId = context.ModelBrokerCredentialId, ModelBrokerProvider = context.ModelBrokerProvider, ModelBrokerSocketPath = context.ModelBrokerSocketPath,
             WorkspaceDirectory = context.WorkspaceDirectory, WorkspaceBaseSha = context.WorkspaceBaseSha,
             ProgressLeaseDirectory = LocalProcessRunner.ProgressLeaseDirectoryFor(context.RunId),
         };
@@ -5841,6 +5845,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public string? ModelBrokerRoute { get; init; }
         public Guid? ModelBrokerCredentialId { get; init; }
         public string? ModelBrokerProvider { get; init; }
+
+        /// <summary>The Unix socket this run's lease was also served on (null when it had none) — stamped on the handle so a re-attach re-opens the same path.</summary>
+        public string? ModelBrokerSocketPath { get; init; }
 
         /// <summary>Whether this launch's model credential was brokered — null when it injected none. Carried so the run's confinement RECORD can state it, which is what makes the posture sentence able to disclose a directly-injected key.</summary>
         public bool? ModelCredentialBrokered { get; init; }

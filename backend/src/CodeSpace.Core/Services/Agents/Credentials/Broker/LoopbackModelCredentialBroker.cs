@@ -119,8 +119,15 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// <summary>Reclaims the sockets of leases nobody withdrew — see <see cref="SweepLapsedLeases"/>. Disposed with the broker, so a torn-down worker leaves no callback behind.</summary>
     private readonly ITimer _sweep;
 
+    /// <summary>
+    /// Test seam: runs inside <see cref="CloseLease"/> after the socket is gone and before the port is released — the
+    /// one instant the order of those two steps decides, which no timing-based test can land in. Null in production;
+    /// set only through <see cref="ForTest"/>.
+    /// </summary>
+    private readonly Action<Guid>? _betweenCloseStepsForTest;
+
     public LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger = null, TimeProvider? timeProvider = null)
-        : this(logger, timeProvider, null) { }
+        : this(logger, timeProvider, null, null) { }
 
     /// <summary>
     /// Test seam: a broker whose UPSTREAM transport is the test's, so it can assert the request the PROVIDER receives
@@ -128,7 +135,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// constructor deliberately — a bare <see cref="HttpMessageHandler"/> registration appearing in the container
     /// later must not silently become the path every tenant's model traffic takes.
     /// </summary>
-    internal static LoopbackModelCredentialBroker ForTest(HttpMessageHandler upstream, TimeProvider? timeProvider = null, ILogger<LoopbackModelCredentialBroker>? logger = null) => new(logger, timeProvider, upstream);
+    internal static LoopbackModelCredentialBroker ForTest(HttpMessageHandler upstream, TimeProvider? timeProvider = null, ILogger<LoopbackModelCredentialBroker>? logger = null, Action<Guid>? betweenCloseSteps = null) => new(logger, timeProvider, upstream, betweenCloseSteps);
 
     /// <summary>
     /// Test seam: kill the listener behind a LIVE lease without going through a revoke — the platform failure this
@@ -142,10 +149,17 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         if (_byRun.TryGetValue(runId, out var lease)) CloseQuietly(lease.Listener);
     }
 
-    private LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger, TimeProvider? timeProvider, HttpMessageHandler? upstreamHandler)
+    /// <summary>Test seam: kill the Unix-socket acceptor behind a LIVE lease without going through a revoke — <see cref="BreakListenerForTest"/>'s counterpart for the lease's other door, whose failure must end the claim just the same.</summary>
+    internal void BreakSocketForTest(Guid runId)
+    {
+        if (_byRun.TryGetValue(runId, out var lease)) lease.Channel?.BreakAcceptorForTest();
+    }
+
+    private LoopbackModelCredentialBroker(ILogger<LoopbackModelCredentialBroker>? logger, TimeProvider? timeProvider, HttpMessageHandler? upstreamHandler, Action<Guid>? betweenCloseStepsForTest)
     {
         _logger = logger ?? NullLogger<LoopbackModelCredentialBroker>.Instance;
         _time = timeProvider ?? TimeProvider.System;
+        _betweenCloseStepsForTest = betweenCloseStepsForTest;
         _upstream = new HttpClient(upstreamHandler ?? DefaultUpstreamHandler(), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
         _sweep = _time.CreateTimer(_ => SweepLapsedLeases(), null, SweepInterval, SweepInterval);
     }
@@ -158,7 +172,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return Task.FromResult<BrokeredModelCredential?>(null);
 
-        if (BindFresh(out var bindFailure) is not { } bound)
+        var hosts = CandidateHosts(request.SocketPath);
+
+        if (BindFresh(hosts, out var bindFailure) is not { } bound)
         {
             _logger.LogWarning(bindFailure, "Agent run {RunId}: the model-credential broker could not bind a listener on this worker after {Attempts} fresh ports, so the run falls back to whatever its deployment's confinement policy permits", request.RunId, BindAttempts);
             return Task.FromResult<BrokeredModelCredential?>(null);
@@ -167,14 +183,60 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         var lease = Install(new Lease
         {
             RunId = request.RunId, TeamId = request.TeamId, Epoch = request.Epoch, Token = McpRunToken.Mint(), PathId = McpRunToken.MintPathId(),
-            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port,
+            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port, Channel = OpenChannelOrWarn(request.RunId, request.SocketPath, bound.Port),
         }, request.Ttl);
 
         _logger.LogDebug("Model credential brokered for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
-        WarnIfUnreachableFromNetns(lease, bound.Host);
+        WarnIfUnreachableFromNetns(lease, hosts, bound.Host);
 
-        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId, ReachableFromNamespace = bound.Host == AnyHost });
+        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId, ReachableFromNamespace = bound.Host == AnyHost, SocketPath = lease.SocketPath });
     }
+
+    /// <summary>
+    /// The lease's socket, or null when none was asked for — or when it could not be bound, which is a Warning and not a
+    /// failed lease: the TCP listener still serves any child on the host's own network, and a child that could only
+    /// have come in through the socket is a launch the caller refuses, seeing no socket on the lease it got back.
+    /// </summary>
+    private BrokerSocketChannel? OpenChannelOrWarn(Guid runId, string? socketPath, int port)
+    {
+        if (socketPath is null) return null;
+
+        if (TryOpenChannel(runId, socketPath, port, out var failure) is { } channel) return channel;
+
+        _logger.LogWarning(failure, "Agent run {RunId}: the model-credential broker could not bind its socket {SocketPath}, so the lease serves loopback TCP only and a child that can reach it only through that socket cannot make a model call", runId, socketPath);
+
+        return null;
+    }
+
+    /// <summary>Bind a lease's socket, or null plus the reason it could not — refused outright for a path a live lease here still serves (<see cref="SocketServedHere"/>). Every exception counts as "did not bind", for the reason <see cref="TryBind"/> gives: which exception a host raises is not something to enumerate from one OS.</summary>
+    private BrokerSocketChannel? TryOpenChannel(Guid runId, string socketPath, int port, out Exception? failure)
+    {
+        failure = null;
+
+        if (SocketServedHere(socketPath))
+        {
+            failure = new InvalidOperationException($"A live model-credential lease on this worker already serves the socket {socketPath}; a socket path belongs to one lease at a time.");
+            return null;
+        }
+
+        try { return BrokerSocketChannel.Open(socketPath, port, runId, _logger); }
+        catch (Exception exception)
+        {
+            failure = exception;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether a live lease on this worker already serves <paramref name="socketPath"/> — a path this worker then never
+    /// binds again. Binding it would delete that lease's live socket file, and closing that lease later (a supersede
+    /// closes it right after the new lease opens) deletes whatever file then sits at its path, which would be the new
+    /// one: the new lease would report a socket that no longer exists. So a path serves one lease at a time, and a
+    /// caller mints a fresh one per open. Not a lock — two opens racing on one path are a caller that broke that rule
+    /// concurrently — but it turns the sequential reuse, the one a revise or a relaunch could make, into a Warning.
+    /// </summary>
+    private bool SocketServedHere(string socketPath) =>
+        _byRun.Values.Any(lease => string.Equals(lease.SocketPath, socketPath, StringComparison.Ordinal));
 
     /// <summary>
     /// Re-open a run's recorded address — see <see cref="IModelCredentialBroker.RebindAsync"/> for why nothing here is
@@ -203,23 +265,65 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
             if (IsSameAddress(held, request)) return AdoptHeldLease(held, request);
         }
 
-        if (BindPort(request.Port, out var bindFailure) is not { } bound) return RefuseRebind(request, "its port could not be bound here — something else is holding it, or this host refused the bind", bindFailure);
+        // The PORT first, the socket only once it holds: the port is the lock between two workers on one host. A worker
+        // still serving this run holds it, so this re-bind is refused here — before anything at the socket's path is
+        // touched — and the live worker's sandboxed children keep their door.
+        var hosts = CandidateHosts(request.SocketPath);
+
+        if (BindPort(request.Port, hosts, out var bindFailure) is not { } bound) return RefuseRebind(request, "its port could not be bound here — something else is holding it, or this host refused the bind", bindFailure);
+
+        if (!TryReopenChannel(request, bound.Port, out var channel, out var socketFailure))
+        {
+            CloseQuietly(bound.Listener);
+            return RefuseRebind(request, $"its socket {request.SocketPath} could not be re-opened here, so a child that reaches the broker through it would still have no model", socketFailure);
+        }
 
         var lease = Install(new Lease
         {
             RunId = request.RunId, TeamId = request.TeamId, Epoch = request.Epoch, Token = request.RunToken, PathId = request.PathId,
-            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port,
+            Upstream = request.Upstream, UpstreamRoot = upstreamRoot, Listener = bound.Listener, Port = bound.Port, Channel = channel,
         }, request.Ttl);
 
         _logger.LogInformation("Model credential RE-BOUND for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}; its detached agent's next model call is answered here", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
-        WarnIfUnreachableFromNetns(lease, bound.Host);
+        LogIfLegacyRebind(request);
+        WarnIfUnreachableFromNetns(lease, hosts, bound.Host);
 
         return Task.FromResult(true);
     }
 
-    /// <summary>Whether a lease this worker already holds IS the address the request is asking for — same port, same route, same bearer. All three, because any one of them differing means the child would be talking to something other than what the handle recorded.</summary>
+    /// <summary>Re-open the socket a re-bind names, on the port it now holds — true with no channel for a handle that recorded none (the legacy re-bind, TCP alone as before), false when the socket could not be bound.</summary>
+    private bool TryReopenChannel(ModelCredentialRebindRequest request, int port, out BrokerSocketChannel? channel, out Exception? failure)
+    {
+        channel = null;
+        failure = null;
+
+        if (request.SocketPath is not { } socketPath) return true;
+
+        channel = TryOpenChannel(request.RunId, socketPath, port, out failure);
+
+        return channel is not null;
+    }
+
+    /// <summary>The fixed words of the line a legacy re-bind logs — pinned by a test, because retiring the gateway path to the broker waits on this line going quiet.</summary>
+    internal const string LegacyRebindMarker = "legacy model-broker re-bind";
+
+    /// <summary>
+    /// Say so when a re-bind restored a child in a network namespace of its own that has no socket to come in through
+    /// (<see cref="ModelCredentialRebindRequest.ChildInNetworkNamespace"/> without a
+    /// <see cref="ModelCredentialRebindRequest.SocketPath"/>): it reaches this worker at its namespace's gateway, the
+    /// only reason a lease still binds wide. The line is how a deployment learns that no such run is left, so that the
+    /// wide bind can go — which is why a run on the worker's own network, calling loopback, never logs it.
+    /// </summary>
+    private void LogIfLegacyRebind(ModelCredentialRebindRequest request)
+    {
+        if (request.SocketPath is not null || !request.ChildInNetworkNamespace) return;
+
+        _logger.LogInformation("Agent run {RunId}: " + LegacyRebindMarker + " on port {Port} — its handle records a network namespace and no broker socket, so its child still reaches this worker at that namespace's gateway", request.RunId, request.Port);
+    }
+
+    /// <summary>Whether a lease this worker already holds IS the address the request is asking for — same port, same route, same bearer, same socket. All four, because any one of them differing means the child would be talking to something other than what the handle recorded.</summary>
     private static bool IsSameAddress(Lease held, ModelCredentialRebindRequest request) =>
-        held.Port == request.Port && string.Equals(held.PathId, request.PathId, StringComparison.Ordinal) && McpRunToken.Matches(held.Token, request.RunToken);
+        held.Port == request.Port && string.Equals(held.PathId, request.PathId, StringComparison.Ordinal) && McpRunToken.Matches(held.Token, request.RunToken) && string.Equals(held.SocketPath, request.SocketPath, StringComparison.Ordinal);
 
     /// <summary>
     /// Take over a lease this worker is ALREADY serving at the re-attach's epoch, without touching its listener. The
@@ -265,13 +369,14 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         _byRun[lease.RunId] = lease;
 
-        if (superseded is not null) CloseQuietly(superseded.Listener);
+        if (superseded is not null) CloseLease(superseded);
 
         // CALLED, not handed to Task.Run: an async method runs synchronously up to its first await, so the loop's first
         // wait is registered on the listener before this returns. The managed HttpListener fails only the waits it
         // already holds when it closes; a close that lands while a pool thread is still registering the first one is
         // never delivered, and that loop then waits for the life of the worker on a listener that no longer exists.
         _ = AcceptAsync(lease);
+        lease.Channel?.Serve(exception => DropIfStillServing(lease, SocketDoor, exception));
 
         return lease;
     }
@@ -322,7 +427,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         // The listener goes with the lease, not merely the routing entry: leaving it bound would hold one port per
         // finished run for the life of the worker, and a worker serves thousands.
-        CloseQuietly(lease.Listener);
+        CloseLease(lease);
 
         _logger.LogInformation("Model credential lease revoked for agent run {RunId}: {Reason}", runId, reason);
 
@@ -361,7 +466,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
             {
                 if (lease.ExpiresAt > now || !_byRun.TryRemove(new KeyValuePair<Guid, Lease>(runId, lease))) continue;
 
-                CloseQuietly(lease.Listener);
+                CloseLease(lease);
 
                 _logger.LogInformation("Model credential lease for agent run {RunId} lapsed without being withdrawn; its port {Port} is reclaimed", runId, lease.Port);
             }
@@ -383,9 +488,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// out loud because the failure it produces is a model call that times out, which reads like a provider problem
     /// rather than a bind that fell back.
     /// </summary>
-    private void WarnIfUnreachableFromNetns(Lease lease, string host)
+    private void WarnIfUnreachableFromNetns(Lease lease, IReadOnlyList<string> candidateHosts, string host)
     {
-        if (!FilteredEgressNetns.IsSupported || host == AnyHost) return;
+        if (host == candidateHosts[0]) return;   // it bound what it wanted: the wide bind where one can be needed, loopback where nothing needs more
 
         _logger.LogWarning("Agent run {RunId}: its model-credential broker fell back to a loopback-only bind on a host that builds filtered-egress namespaces; a deny-by-default egress run cannot reach it there", lease.RunId);
     }
@@ -395,11 +500,11 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// (their children reach the worker on a per-run gateway IP, not on loopback), loopback otherwise. The wider bind
     /// is TRIED FIRST and falls back, so a host that refuses it still brokers its shared-network runs.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? BindFresh(out Exception? failure)
+    private static (HttpListener Listener, int Port, string Host)? BindFresh(IReadOnlyList<string> candidateHosts, out Exception? failure)
     {
         failure = null;
 
-        foreach (var host in CandidateHosts())
+        foreach (var host in candidateHosts)
             for (var attempt = 0; attempt < BindAttempts; attempt++)
             {
                 var port = ReserveEphemeralPort();
@@ -416,11 +521,11 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// same candidate hosts as <see cref="BindFresh"/>, because the run whose port this is was launched on a host of
     /// the same shape and its child reaches the worker the same way.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? BindPort(int port, out Exception? failure)
+    private static (HttpListener Listener, int Port, string Host)? BindPort(int port, IReadOnlyList<string> candidateHosts, out Exception? failure)
     {
         failure = null;
 
-        foreach (var host in CandidateHosts())
+        foreach (var host in candidateHosts)
             if (TryBind(host, port, out failure) is { } listener) return (listener, port, host);
 
         return null;
@@ -431,9 +536,13 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
     private const string LoopbackHost = "127.0.0.1";
 
-    /// <summary>Bind addresses in order of preference — see <see cref="BindFresh"/>. Every address first only where a per-run network namespace can exist to need it.</summary>
-    private static IReadOnlyList<string> CandidateHosts() =>
-        FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
+    /// <summary>
+    /// Bind addresses in order of preference — see <see cref="BindFresh"/>. Every address first only where a per-run
+    /// network namespace can exist to need it, and never for a lease served over a socket: its namespaced children come
+    /// in through the socket, spliced to loopback, so a wide bind would only hand its port to the host's neighbours.
+    /// </summary>
+    private static IReadOnlyList<string> CandidateHosts(string? socketPath) =>
+        socketPath is null && FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
 
     /// <summary>
     /// Bind ONE prefix, or null plus the reason it could not. EVERY exception counts as "did not bind" — deliberately
@@ -510,7 +619,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
             // (checked on .NET 10 by stranding a loop this way: its lease's weak reference cleared, while a lease a
             // table still held stayed alive).
             try { context = await lease.Listener.GetContextAsync().ConfigureAwait(false); }
-            catch (Exception exception) { DropIfStillServing(lease, exception); return; }
+            catch (Exception exception) { DropIfStillServing(lease, ListenerDoor, exception); return; }
 
             _ = Task.Run(() => ServeQuietlyAsync(context, lease), CancellationToken.None);
         }
@@ -526,17 +635,27 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     /// <para>Removed only while it is STILL this lease. A revoke or a supersede reached the table first in every
     /// ordinary case — that is WHY this loop woke — and dropping their replacement would withdraw a live run's
     /// address by way of tidying up after its predecessor.</para>
+    ///
+    /// <para>Either door stopping drops the lease: the TCP <see cref="ListenerDoor"/>, or the <see cref="SocketDoor"/>,
+    /// which a lease is given only for a child whose network is its own — so for that child the socket is the whole
+    /// address, and a lease still claimed without it is the same lie.</para>
     /// </summary>
-    private void DropIfStillServing(Lease lease, Exception? reason)
+    private void DropIfStillServing(Lease lease, string door, Exception? reason)
     {
         if (!_byRun.TryRemove(new KeyValuePair<Guid, Lease>(lease.RunId, lease))) return;   // already revoked or superseded — that path owns the close
 
-        CloseQuietly(lease.Listener);
+        CloseLease(lease);
 
         if (_stopping.IsCancellationRequested) return;   // the broker is going away and every lease ends with it; none of that is news
 
-        _logger.LogWarning(reason, "Agent run {RunId}: its brokered model listener on port {Port} stopped accepting, so the lease was dropped rather than left claiming an address nothing answers", lease.RunId, lease.Port);
+        _logger.LogWarning(reason, "Agent run {RunId}: the {Door} of its brokered model lease on port {Port} stopped accepting, so the lease was dropped rather than left claiming an address nothing answers", lease.RunId, door, lease.Port);
     }
+
+    /// <summary>The lease's door on <c>127.0.0.1:&lt;port&gt;</c> (or every address, for a legacy wide bind), as <see cref="DropIfStillServing"/> names it.</summary>
+    private const string ListenerDoor = "TCP listener";
+
+    /// <summary>The lease's per-run Unix socket (<see cref="BrokerSocketChannel"/>), as <see cref="DropIfStillServing"/> names it.</summary>
+    private const string SocketDoor = "Unix socket";
 
     // ── One request ───────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -806,12 +925,25 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         _sweep.Dispose();
 
-        foreach (var lease in _byRun.Values) CloseQuietly(lease.Listener);
+        foreach (var lease in _byRun.Values) CloseLease(lease);
 
         _byRun.Clear();
 
         _upstream.Dispose();
         _stopping.Dispose();
+    }
+
+    /// <summary>
+    /// Close ONE lease, whichever path is closing it — supersede, revoke, sweep, drop, dispose. The socket goes first
+    /// (its acceptor closed and its FILE deleted; never its directory, which a running sandbox's bind pins) and the TCP
+    /// port last, because the port is the lock a re-binding worker takes before it touches the socket: released first,
+    /// another worker could bind the socket anew between the two steps and then lose it to this delete.
+    /// </summary>
+    private void CloseLease(Lease lease)
+    {
+        lease.Channel?.Close();
+        _betweenCloseStepsForTest?.Invoke(lease.RunId);
+        CloseQuietly(lease.Listener);
     }
 
     /// <summary>Close one lease's listener, releasing its port. Best-effort against EVERY failure — the port being gone is the outcome this wanted, and it now runs on every revoke (once per finished run) and on every failed bind, so it is no place to discover which exception a platform raises for a listener that is already closed.</summary>
@@ -861,6 +993,12 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
 
         /// <summary>The port <see cref="Listener"/> is bound to. Handed back to the caller so it reaches the run's durable handle, which is the only place a later worker can learn the address from.</summary>
         public required int Port { get; init; }
+
+        /// <summary>This lease's per-run Unix socket, spliced to <see cref="Port"/> on loopback — null for a lease served over TCP alone.</summary>
+        public BrokerSocketChannel? Channel { get; init; }
+
+        /// <summary>The socket <see cref="Channel"/> serves, or null — part of the lease's ADDRESS, so a re-attach adopts this lease only when it names the same one.</summary>
+        public string? SocketPath => Channel?.Path;
 
         public DateTimeOffset ExpiresAt => new(Interlocked.Read(ref _expiresAtUtcTicks), TimeSpan.Zero);
 

@@ -877,15 +877,119 @@ public partial class AgentRunExecutorTests
             $"the agent (pid {handle.ProcessId}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {handle.ProcessId} -o pid,stat,etime,command`");
     }
 
+    [Theory]
+    [InlineData(true)]    // the lease was served over a socket: the handle records it, and the re-attach re-opens it
+    [InlineData(false)]   // it was not: the handle is exactly a pre-field handle, and the re-attach takes the legacy re-bind
+    public async Task A_reattach_re_opens_the_broker_socket_its_handle_recorded_and_a_handle_without_one_takes_the_legacy_rebind(bool socket)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-socket-rebind-fixture");
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        // Nothing in production mints a broker socket yet, so the launch's lease is asked for one here — at the path the
+        // production layout gives it — which is the one thing this test substitutes. Everything after the open is the
+        // real executor: the handle it stamps, the jsonb column it persists to, and the re-attach that reads it back.
+        var socketPath = socket ? LocalProcessRunner.ModelBrokerSocketPathFor(runId.ToString("N"), CodeSpace.Core.Services.Agents.Mcp.McpRunToken.MintPathId()) : null;
+
+        using var release = new TempDir();
+        var releaseFile = Path.Combine(release.Path, "release");
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, $"while [ ! -f '{releaseFile}' ]; do sleep 0.2; done; echo done");
+
+        try
+        {
+            var (handle, childBaseUrl) = await DrainLeavingTheAgentRunningAsync(runId, harness, socketPath);
+            var runToken = handle.ModelBrokerRunToken.ShouldNotBeNull();
+
+            handle.ModelBrokerSocketPath.ShouldBe(socketPath, "the durable handle is the only record of the lease's socket a later worker has — it must carry exactly the path the lease bound, and nothing for a lease that bound none");
+            if (!socket) RunnerHandleJsonOf(runId).ShouldNotContain("modelBrokerSocketPath", customMessage: "a handle whose lease had no socket must be stored exactly as one written before the field existed");
+
+            using var workerB = new RecordingBroker(LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()));
+            var reservation = await ReserveReattachAfterLapseAsync(runId);
+            var reattach = ReattachUntilStoppedAsync(reservation, harness, workerB);
+
+            await WaitUntilAsync(() => workerB.HasLease(runId), TimeSpan.FromSeconds(60), "the re-attaching worker never re-bound the run's brokered address");
+
+            var rebind = workerB.Rebinds.ShouldHaveSingleItem();
+
+            rebind.SocketPath.ShouldBe(socketPath,
+                customMessage: "the re-attach read the handle back from the row and must ask for the socket it recorded — or, for a handle that recorded none, for none, which is what keeps a gateway-addressed child on the wide legacy re-bind");
+            rebind.ChildInNetworkNamespace.ShouldBeFalse(
+                "this run shares the worker's network and its child calls loopback, so its re-bind is not the legacy gateway kind — reading it as one would keep the line the gateway path's retirement waits on firing for every shared-network run, forever");
+            (await ReachesUpstreamAsync(childBaseUrl, runToken)).ShouldBeTrue("the original loopback address answers again on worker B");
+
+            if (socketPath is not null)
+                (await ReachesUpstreamOverSocketAsync(socketPath, childBaseUrl, runToken)).ShouldBeTrue("and so does the socket, at the path the handle recorded — the only door a sandboxed child has");
+
+            await File.WriteAllTextAsync(releaseFile, "go");
+            await AwaitWithinAsync(reattach, TimeSpan.FromSeconds(120), "the re-attaching executor never returned after its agent was released");
+        }
+        finally { if (socketPath is not null) { try { Directory.Delete(Path.GetDirectoryName(socketPath)!, recursive: true); } catch { /* best-effort */ } } }
+    }
+
+    /// <summary>The run's durable handle exactly as the <c>runner_handle</c> column holds it.</summary>
+    private string RunnerHandleJsonOf(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.RunnerHandleJson).Single().ShouldNotBeNull();
+    }
+
+    /// <summary>Whether a call on this address + bearer reaches the broker's upstream THROUGH the lease's Unix socket, addressed as a sandboxed child addresses it.</summary>
+    private static async Task<bool> ReachesUpstreamOverSocketAsync(string socketPath, string childBaseUrl, string runToken)
+    {
+        var handler = new SocketsHttpHandler
+        {
+            ConnectCallback = async (_, cancellationToken) =>
+            {
+                var unix = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.Unix, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Unspecified);
+                try { await unix.ConnectAsync(new System.Net.Sockets.UnixDomainSocketEndPoint(socketPath), cancellationToken); return new System.Net.Sockets.NetworkStream(unix, ownsSocket: true); }
+                catch { unix.Dispose(); throw; }
+            },
+        };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, childBaseUrl + "/v1/messages") { Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {runToken}");
+
+        try { return (await client.SendAsync(request)).StatusCode == HttpStatusCode.OK; }
+        catch (HttpRequestException) { return false; }
+    }
+
+    /// <summary>
+    /// The production broker, with the two things the socket test needs from its side of the seam: a socket asked for
+    /// on the lease the launch opens (production mints none yet — so the helper's path fills in only where the executor
+    /// asked for none, and never overwrites one it did ask for), and a record of every re-bind the re-attach asks for —
+    /// which is the executor's reading of the stored handle, observed exactly where it leaves the executor.
+    /// </summary>
+    private sealed class RecordingBroker(LoopbackModelCredentialBroker inner, string? socketPath = null) : IModelCredentialBroker, IDisposable
+    {
+        public List<ModelCredentialRebindRequest> Rebinds { get; } = [];
+
+        public Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken) => inner.OpenAsync(request with { SocketPath = socketPath ?? request.SocketPath }, cancellationToken);
+
+        public Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken)
+        {
+            Rebinds.Add(request);
+            return inner.RebindAsync(request, cancellationToken);
+        }
+
+        public Task<bool> RenewAsync(Guid runId, long epoch, CancellationToken cancellationToken) => inner.RenewAsync(runId, epoch, cancellationToken);
+        public Task RevokeAsync(Guid runId, string reason, long? fencedToEpoch, CancellationToken cancellationToken) => inner.RevokeAsync(runId, reason, fencedToEpoch, cancellationToken);
+        public bool HasLease(Guid runId) => inner.HasLease(runId);
+        public void Dispose() => inner.Dispose();
+    }
+
     /// <summary>
     /// Worker A's whole life, through production: launch the run, broker its credential, then take the host's SIGTERM
     /// while the agent is still working — and dispose the broker, because a worker's listeners go with its process.
     /// What comes back is what genuinely survives it: the durable handle, and the base URL the CHILD was handed (host
-    /// token resolved exactly as the runner resolves it at launch).
+    /// token resolved exactly as the runner resolves it at launch). A <paramref name="socketPath"/> asks the launch's
+    /// lease to be served over that socket too.
     /// </summary>
-    private async Task<(SandboxHandle Handle, string ChildBaseUrl)> DrainLeavingTheAgentRunningAsync(Guid runId, BrokerableScriptedHarness harness)
+    private async Task<(SandboxHandle Handle, string ChildBaseUrl)> DrainLeavingTheAgentRunningAsync(Guid runId, BrokerableScriptedHarness harness, string? socketPath = null)
     {
-        var workerA = new LoopbackModelCredentialBroker();
+        var workerA = new RecordingBroker(new LoopbackModelCredentialBroker(), socketPath);
         try
         {
             using var shutdown = new CancellationTokenSource();

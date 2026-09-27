@@ -41,4 +41,13 @@ public sealed record BrokeredModelCredential(string BaseUrl, string RunToken, Da
     /// and such a run is refused before launch rather than left calling an address nothing answers.
     /// </summary>
     public bool ReachableFromNamespace { get; init; }
+
+    /// <summary>
+    /// The per-run Unix socket this lease is ALSO served on — the path the request asked for, once bound — or null when
+    /// none was asked for or it was not bound: its bind failed, or another live lease on this worker still serves that
+    /// path. The lease then serves TCP alone, and the broker says so in a Warning.
+    /// Stamped on the durable handle beside <see cref="RebindPort"/>, so a re-attaching worker re-opens the same path.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? SocketPath { get; init; }
 }

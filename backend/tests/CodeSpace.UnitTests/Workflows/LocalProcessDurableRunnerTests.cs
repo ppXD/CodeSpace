@@ -2072,6 +2072,37 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void Model_broker_socket_layout_names_are_pinned()
+    {
+        // The per-run socket layout gives a lease's socket its own root beside MCP's, not a share of it: the two sockets
+        // are opened and closed on different lifetimes. The socket endpoint restricts a directory to 0700 only when it
+        // bears one of these names, so a rename is a decision about which directory lists every run's unguessable
+        // socket segment — pinned here so it cannot happen as a refactor.
+        LocalProcessRunner.ModelBrokerSocketDir.ShouldBe("broker");
+        LocalProcessRunner.ModelBrokerShortSocketRoot.ShouldBe("cs-broker");
+    }
+
+    [Theory]
+    [InlineData(false)]   // a short spool root: the canonical path under the run's spool directory
+    [InlineData(true)]    // a spool root long enough to overflow the AF_UNIX cap: the short temp fallback
+    public void A_broker_socket_takes_the_mcp_layout_under_its_own_directory_names(bool overflow)
+    {
+        var spoolRoot = overflow ? "/" + new string('x', 120) : "/tmp/cs";
+        using var settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = spoolRoot });
+
+        var key = Guid.NewGuid().ToString("N");
+        var socketId = McpRunToken.MintPathId();
+        var (mcpRoot, brokerRoot) = overflow ? (Path.Combine(Path.GetTempPath(), "cs-mcp"), Path.Combine(Path.GetTempPath(), "cs-broker")) : (Path.Combine(spoolRoot, key, "mcp"), Path.Combine(spoolRoot, key, "broker"));
+
+        // The two share one layout rule; this pins that sharing it changed nothing about MCP's address, which every
+        // in-flight run's handle and declaration file already name.
+        LocalProcessRunner.McpSocketPathFor(key, socketId).ShouldBe(Path.Combine(mcpRoot, socketId, "s"), "the MCP socket's address must be byte-identical to what it always was");
+        LocalProcessRunner.ModelBrokerSocketPathFor(key, socketId).ShouldBe(Path.Combine(brokerRoot, socketId, "s"),
+            customMessage: "a lease's socket sits in a directory of its own that holds only the socket — so a sandbox's bind of that directory exposes nothing else — named by the unguessable id, under the broker's own root");
+        LocalProcessRunner.ModelBrokerSocketPathFor(key, socketId).Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
+    }
+
+    [Fact]
     public void Mcp_socket_path_cap_admits_a_bindable_path_and_one_byte_over_overflows()
     {
         if (!Socket.OSSupportsUnixDomainSockets) return;
