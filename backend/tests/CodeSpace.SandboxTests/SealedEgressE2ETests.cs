@@ -153,8 +153,10 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
         finally { await FilteredEgressNetns.TeardownAsync(survivor, CancellationToken.None); }
     }
 
-    [Fact]
-    public async Task A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]   // a rule that only TCP from the broker port meets — the lookup the broker's replies make, and so the one the check must ask
+    public async Task A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing(bool keyedOnTheBrokerReply)
     {
         if (!Seals()) return;
 
@@ -165,7 +167,7 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
         var third = RandomNumberGenerator.GetInt32(0, 64) * 4;
         var lease = new EgressSubnetAllocator.Lease { Cidr = $"192.0.2.{third}/30", HostIp = $"192.0.2.{third + 1}", NsIp = $"192.0.2.{third + 2}" };
         var table = RandomNumberGenerator.GetInt32(10_000, 1_000_000).ToString(CultureInfo.InvariantCulture);
-        var rule = new[] { "pref", "100", "to", lease.Cidr, "lookup", table };
+        string[] rule = keyedOnTheBrokerReply ? ["pref", "100", "to", lease.Cidr, "ipproto", "6", "sport", "9", "lookup", table] : ["pref", "100", "to", lease.Cidr, "lookup", table];
         var runId = Guid.NewGuid().ToString("N");
         var plan = FilteredEgressPlan.BuildSealed(runId, brokerPort: 9, lease);
 
@@ -189,7 +191,7 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
             (await NetnsExistsAsync(plan.Namespace)).ShouldBeFalse("a setup that failed its route check tears its namespace down");
             (await RunHostExitAsync(["ip", "link", "show", plan.VethHost])).ShouldNotBe(0, "and the host end of its veth, with the address on it");
 
-            output.WriteLine($"{RanMarker} policy-route-discard {refused.SetupError}");
+            output.WriteLine($"{RanMarker} policy-route-discard-{(keyedOnTheBrokerReply ? "l4" : "dst")} {refused.SetupError}");
         }
         finally
         {
@@ -226,6 +228,7 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
 
             ((CodeSpace.Messages.Failures.IFailure)refusal).Code.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable);
             refusal.Cause.ShouldContain("ip link add", customMessage: $"the refusal must name the setup step that failed: {refusal.Cause}");
+            refusal.Message.ShouldContain("fix what that step names", customMessage: $"a host that can seal is told to fix the failed step, not to grant privileges and wait for a re-probe: {refusal.Message}");
             (await NetnsExistsAsync(names.Namespace)).ShouldBeFalse("a failed setup must tear down the namespace it had already created");
 
             output.WriteLine($"{RanMarker} setup-failure cause={refusal.Cause}");
