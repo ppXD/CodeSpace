@@ -26,47 +26,7 @@ public class FilteredEgressPlanTests
         a.ExecPrefix.ShouldBe(new[] { "ip", "netns", "exec", a.Namespace }, "the command runs inside this run's netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "del", a.Namespace }), "teardown deletes the netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "ip", a.Namespace }), "teardown deletes the nft table");
-        a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "inet", a.Namespace }), "teardown deletes a sealed run's inet table too — every reaper knows only the run id");
-    }
-
-    [Fact]
-    public void A_sealed_plan_has_no_route_no_forwarding_and_no_nat()
-    {
-        var plan = FilteredEgressPlan.BuildSealed("run-5ea1ed01", 43121, Subnet);
-
-        plan.SetupCommands.ShouldNotContain(c => c.Contains("route"), "no default route: a packet to anywhere but the /30 fails with ENETUNREACH at once");
-        plan.SetupCommands.ShouldNotContain(c => c[0] == "sysctl", "nothing is forwarded, so the host's forwarding switch is left alone");
-        plan.SetupCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "exec", plan.Namespace, "ip", "addr", "add", $"{Subnet.NsIp}/30", "dev", plan.VethNs }), "the namespace still holds its /30, so the gateway is on-link");
-        plan.HostIp.ShouldBe(Subnet.HostIp, "the gateway the child reaches its broker at");
-        plan.ExecPrefix.ShouldBe(new[] { "ip", "netns", "exec", plan.Namespace });
-        plan.TeardownCommands.Select(c => string.Join(' ', c)).ShouldBe(FilteredEgressPlan.TeardownCommandsFor("run-5ea1ed01").Select(c => string.Join(' ', c)), "a sealed namespace is torn down by the same run-id-only commands every reaper already runs");
-    }
-
-    [Fact]
-    public void A_sealed_ruleset_admits_only_the_broker_port_on_the_gateway()
-    {
-        // Pinned whole, because every line is load-bearing and a membership assertion is satisfied by the wrong chain:
-        // inet (the veth's IPv6 link-local must be covered by the same drop), replace-not-append (a revise round reuses
-        // the name), an INPUT filter admitting only the broker's port on the gateway (the worker's own listeners and
-        // every other run's broker are reached through that hook), and a FORWARD drop. No DNS, no NAT, and keyed on the
-        // veth — never a subnet a degraded allocator might hand another run too.
-        var plan = FilteredEgressPlan.BuildSealed("run-5ea1ed02", 43121, Subnet);
-
-        plan.NftRuleset.ShouldBe(
-            $"table inet {plan.Namespace} {{}}\n" +
-            $"delete table inet {plan.Namespace}\n" +
-            $"table inet {plan.Namespace} {{\n" +
-            "  chain input {\n" +
-            "    type filter hook input priority 0;\n" +
-            $"    iifname \"{plan.VethHost}\" ct state established,related accept\n" +
-            $"    iifname \"{plan.VethHost}\" ip daddr {Subnet.HostIp} tcp dport 43121 accept\n" +
-            $"    iifname \"{plan.VethHost}\" drop\n" +
-            "  }\n" +
-            "  chain forward {\n" +
-            "    type filter hook forward priority 0;\n" +
-            $"    iifname \"{plan.VethHost}\" drop\n" +
-            "  }\n" +
-            "}\n");
+        a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "inet", a.Namespace }), "teardown still deletes the inet table a network-off run sealed to its broker before the relay left behind — every reaper knows only the run id");
     }
 
     [Fact]
@@ -129,10 +89,7 @@ public class FilteredEgressPlanTests
     [Fact]
     public void The_route_check_asks_the_kernel_how_the_host_reaches_the_namespace_end()
     {
-        var plan = FilteredEgressPlan.BuildSealed("run-ffff6666", 43121, Subnet);
-
-        plan.RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17", "ipproto", "6", "sport", "43121" }, "what a reply from the broker carries — to the namespace's end, from the gateway, TCP from its port — so a rule keyed on the protocol or the source port is seen too; as text, which every iproute2 prints");
-        FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet).RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17" }, "an allowlist run has no one port its replies come from");
+        FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet).RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17" }, "to the namespace's end, from the gateway — an allowlist run has no one port its replies come from; as text, which every iproute2 prints");
     }
 
     [Theory]
@@ -149,10 +106,10 @@ public class FilteredEgressPlanTests
     public void Only_a_route_through_the_run_s_own_veth_passes_the_check(int exit, string output, string? failure)
     {
         // The /30 was chosen from the routes the host lists, but a policy rule consults its tables in rule order, not
-        // by prefix length: a blackhole 10.0.0.0/8 in a table checked before main discards the broker's replies to a
+        // by prefix length: a blackhole 10.0.0.0/8 in a table checked before main discards the replies to a
         // cleanly set-up namespace. Only the kernel's own lookup sees that, so anything but a route through the run's
         // own veth fails the setup instead of admitting a run that can never be answered.
-        var plan = FilteredEgressPlan.BuildSealed("run-ffff6666", 43121, Subnet);
+        var plan = FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet);
 
         var reason = plan.RouteCheckFailure(exit, output);
 

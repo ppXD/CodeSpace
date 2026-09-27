@@ -233,13 +233,13 @@ public static class AgentAutonomyPolicy
     /// materially different fact from a severed namespace and must not read like a milder version of it.
     /// <see cref="SandboxConfinementOutcome.NotApplicable"/> is such a run too — no confinement was even attempted.
     /// Both unconfined verdicts also carry <see cref="UnconfinedIsolationCaveat"/>: egress is the loudest thing an
-    /// unconfined run loses, but not the only one. A run sealed to its broker holds a per-run /30 exactly as an
-    /// allowlisted one does, so it carries the same host subnet caveat where this host has proved it.
+    /// unconfined run loses, but not the only one. A run sealed to its broker reaches it through the relay and holds no
+    /// per-run /30, so it carries no host subnet caveat.
     /// </summary>
     private static string OffQualifier(SandboxConfinement? confinement) => confinement switch
     {
         null => ConfinementCaveat,
-        { Outcome: SandboxConfinementOutcome.Confined, EgressSealedToBroker: true } => WithHostSubnetPosture(SealedToBrokerQualifier, EgressSubnetAllocator.ObservedHostDegradation),
+        { Outcome: SandboxConfinementOutcome.Confined, EgressSealedToBroker: true } => SealedToBrokerQualifier,
         { Outcome: SandboxConfinementOutcome.Confined, NetworkSevered: true } => " — confined: egress severed",
         { Outcome: SandboxConfinementOutcome.Confined } => " — confined, but egress was NOT severed",
         { Outcome: SandboxConfinementOutcome.Unconfined } c => $" — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress ({c.Reason ?? "unknown"}){UnconfinedIsolationCaveat}",

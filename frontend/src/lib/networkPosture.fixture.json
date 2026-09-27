@@ -14,7 +14,7 @@
     { "effective": "Standard", "ceiling": "Standard", "deployment": "Standard", "line": "Network: clamped off by deployment ceiling (Standard) — severed only where the sandbox confines" },
     { "effective": "Trusted", "ceiling": "Trusted", "deployment": "Standard", "line": "Network: on (Trusted)" }
   ],
-  "_sealedDoc": "egressSealedToBroker marks a network-off run whose brokered model was reached through a namespace sealed to that broker (no route, no NAT, no DNS, one gateway port). It is severed from everything else, so networkSevered is true too, and the sentence names the one route it kept.",
+  "_sealedDoc": "egressSealedToBroker marks a network-off run whose brokered model was still reached: through the codespace-mcp relay in its sandbox and the lease's socket bound read-only into it (runs launched before the relay reached it through a namespace sealed to that broker instead). It is severed from everything else, so networkSevered is true too, and the sentence names the one route it kept.",
   "_credentialDoc": "A confinement record also carries what the launch did about the MODEL CREDENTIAL (modelCredentialBrokered). Absent/null means the run injected none and the sentence says nothing; false means the tenant's own provider key went into the sandbox and the line discloses it (AgentAutonomyPolicy.DirectModelCredentialCaveat), on EVERY posture branch including 'on' — that is the run whose agent can spend the key. true says nothing, because for a brokered run the sentence would be false.",
   "confinementCases": [
     {

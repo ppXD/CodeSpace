@@ -542,7 +542,7 @@ public class SupervisorDeciderTests
 
         // A host that cannot seal is the same kind of deployment answer as one that cannot broker, about the network.
         LlmSupervisorDecider.EndedByDeploymentSteer(FailureCodes.SandboxSealedEgressUnavailable)
-            .ShouldBe("RETRY this exact subtask once, in case another worker can seal its network to its model broker; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.");
+            .ShouldBe("RETRY this exact subtask once, in case another worker can relay its sandbox to its model broker; if it ends the same way again, 'ask_human' — that is a deployment setting only an operator can change. Either way do NOT re-plan it and do NOT amend its check — there is nothing wrong with either.");
 
         leaseLost.ShouldNotBe(brokerDown, "one remedy text for two different faults is how a bounded repair becomes an unbounded loop");
         leaseLost.ShouldNotContain("ask_human", Case.Sensitive, "a live worker is the whole repair — escalating a rolling restart to a human is noise");

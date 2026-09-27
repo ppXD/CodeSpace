@@ -1815,6 +1815,7 @@ public partial class AgentRunExecutorTests
 
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, CancellationToken cancellationToken = default, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false)
     {
+        using var relay = credentialBroker is null ? null : RelayHelper.UseBuilt();
         using var scope = _fixture.BeginScope();
 
         await NewExecutor(scope, harness, logCapture, notifier, runners, credentialBroker, critic, lifetime, productionCapturePlanes).ExecuteAsync(runId, cancellationToken);
@@ -1823,9 +1824,51 @@ public partial class AgentRunExecutorTests
     /// <summary>Drive the RE-ATTACH entry point with the same executor wiring <see cref="ExecuteAsync"/> uses — the terminal a run reaches when it finishes on a worker that never saw its launch. The broker is the NEXT worker's, never the launching one's: a re-attach that shared a broker with the launch would never exercise the re-bind at all.</summary>
     private async Task ReattachAsync(AgentRunReattachReservation reservation, IAgentHarness harness, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CancellationToken cancellationToken = default)
     {
+        using var relay = credentialBroker is null ? null : RelayHelper.UseBuilt();
         using var scope = _fixture.BeginScope();
 
         await NewExecutor(scope, harness, credentialBroker: credentialBroker).ReattachAsync(reservation, cancellationToken);
+    }
+
+    /// <summary>
+    /// Points the runner at the codespace-mcp helper this build produced for as long as a brokered run executes, and
+    /// restores what was there. On a host that confines, a brokered run whose network is its own reaches its broker
+    /// through that helper's relay, as production does with the helper beside the worker's assembly — and this
+    /// assembly's bin deliberately carries no helper (see the csproj), so without this the admission would refuse every
+    /// such run here. Nothing changes on a host that does not confine, where no run is relayed. The collection runs its
+    /// tests one at a time, so the process-wide variable is this test's alone while it is set; within one test a
+    /// launch and a re-attach can overlap in any order, so the variable is set by the first user and restored by the
+    /// last.
+    /// </summary>
+    private sealed class RelayHelper : IDisposable
+    {
+        private static readonly object Gate = new();
+        private static int _users;
+        private static string? _previous;
+
+        private RelayHelper() { }
+
+        public static RelayHelper UseBuilt()
+        {
+            var built = BuiltMcpProxy.ExecutablePathOrNull() ?? throw new InvalidOperationException("The codespace-mcp apphost was not built beside its dll; the build-only ProjectReference in CodeSpace.IntegrationTests.csproj builds it, and a brokered run on a confining host cannot reach its broker without it.");
+
+            lock (Gate)
+            {
+                if (_users++ == 0) _previous = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
+
+                Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, built);
+            }
+
+            return new RelayHelper();
+        }
+
+        public void Dispose()
+        {
+            lock (Gate)
+            {
+                if (--_users == 0) Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, _previous);
+            }
+        }
     }
 
     private AgentRunExecutor NewExecutor(Autofac.ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunCompletionNotifier? notifier = null, ISandboxRunnerRegistry? runners = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, bool productionCapturePlanes = false, IAgentRunService? runs = null, CodeSpace.Core.Services.RunData.IRunDataCompletenessWriter? completeness = null, TimeProvider? clock = null)

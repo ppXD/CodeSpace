@@ -80,17 +80,25 @@ public static class BubblewrapSandbox
     /// neither claim a severance the argv did not request NOR miss one it did (an unenforceable allowlist fails
     /// closed to severed even while the launch asked to share the network).</para>
     ///
-    /// <para><paramref name="sealedToBroker"/> says the shared network IS a sealed namespace whose only destination is
-    /// the run's model broker: severed from everything else, so recorded as severed — and as sealed, so a reader knows
-    /// the one route it kept.</para>
+    /// <para><paramref name="sealedToBroker"/> says the run's network is off but its model broker is still reached,
+    /// through the relay inside its sandbox: severed from everything else, so recorded as severed — and as sealed, so a
+    /// reader knows the one route it kept.</para>
     /// </summary>
     public static SandboxConfinement DeriveConfinement(string? available, string? unavailableReason, bool shareNetwork, IReadOnlyList<string>? egressAllowlist, bool sealedToBroker = false)
     {
         if (available is null)
             return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Unconfined, Reason = unavailableReason ?? SandboxConfinement.ReasonNoBubblewrap };
 
-        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = sealedToBroker || EgressFor(shareNetwork, egressAllowlist).Mode != SandboxEgressMode.Full, EgressSealedToBroker = sealedToBroker };
+        return new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = sealedToBroker || SeversNetwork(shareNetwork, egressAllowlist), EgressSealedToBroker = sealedToBroker };
     }
+
+    /// <summary>
+    /// Whether a launch with this network intent gets a fresh network namespace (<c>--unshare-net</c>) rather than the
+    /// one it was started in — the network off, or an allowlist this sandbox cannot enforce. <see cref="EgressFor"/>
+    /// exposed as the one question every reader of it asks, so the argv, the record and the runner's broker relay
+    /// cannot disagree about whether a child's network is its own.
+    /// </summary>
+    internal static bool SeversNetwork(bool shareNetwork, IReadOnlyList<string>? egressAllowlist) => EgressFor(shareNetwork, egressAllowlist).Mode != SandboxEgressMode.Full;
 
     /// <summary>
     /// The ONE egress derivation for a launch's network intent — read by both the argv (<see cref="BuildArgs"/>) and
@@ -128,7 +136,7 @@ public static class BubblewrapSandbox
         // FAIL CLOSED to --unshare-net (a fresh net namespace, loopback only — no cloud-metadata / LAN / internet).
         // Only Full shares the host network (the agent reaches its model API). Byte-identical for a run with no
         // allowlist: ShareNetwork true → Full → shared; false → None → severed.
-        if (EgressFor(plan.ShareNetwork, plan.EgressAllowlist).Mode != SandboxEgressMode.Full) args.Add("--unshare-net");
+        if (SeversNetwork(plan.ShareNetwork, plan.EgressAllowlist)) args.Add("--unshare-net");
 
         // Read-only minimal root: the runtime + harness binary are reachable, the rest of the host FS is invisible.
         foreach (var dir in ReadOnlyRootDirs)
@@ -141,7 +149,7 @@ public static class BubblewrapSandbox
         // If the command is an absolute path outside the standard roots (an operator binary override), bind its dir
         // read-only so it stays reachable inside the otherwise-minimal root — unless the command is itself one of the
         // files bound below, whose directory must stay unbound (the codespace-mcp helper's is the worker's own app dir).
-        if (Path.IsPathRooted(plan.Command) && Path.GetDirectoryName(plan.Command) is { Length: > 0 } cmdDir && !IsUnderReadOnlyRoot(cmdDir) && !plan.ReadOnlyExtraPaths.Contains(plan.Command))
+        if (CommandDirectoryToBind(plan.Command) is { } cmdDir && !plan.ReadOnlyExtraPaths.Contains(plan.Command))
         {
             args.Add("--ro-bind-try");
             args.Add(cmdDir);
@@ -199,6 +207,10 @@ public static class BubblewrapSandbox
 
         return args;
     }
+
+    /// <summary>The directory an absolute command outside <see cref="ReadOnlyRootDirs"/> must have bound to stay reachable inside the minimal root, or null for a bare name or a command under those roots.</summary>
+    internal static string? CommandDirectoryToBind(string command) =>
+        Path.IsPathRooted(command) && Path.GetDirectoryName(command) is { Length: > 0 } directory && !IsUnderReadOnlyRoot(directory) ? directory : null;
 
     private static bool IsUnderReadOnlyRoot(string dir) =>
         ReadOnlyRootDirs.Any(root => dir == root || dir.StartsWith(root + "/", StringComparison.Ordinal));

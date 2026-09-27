@@ -224,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 74 ]; then
-            echo "::error::Expected >=74 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run sealed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 76 ]; then
+            echo "::error::Expected >=76 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run reaching its broker through the relay and nothing else + an allowlist run relayed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart + a pre-relay namespaced run re-bound at its gateway and torn down with its seal), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -249,21 +249,35 @@ jobs:
           # The reviewer E2E returns early when it is not armed, and an early return reads as Passed — so a passing
           # outcome is not evidence it ran. Each arm prints a marker when it really did; require every one.
           text = open('backend/TestResults/sandbox.trx', encoding='utf-8').read()
-          arms = ('read-diff claude-code Confined', 'read-diff codex-cli Confined', 'read-diff codex-cli Standard', 'codex-resume-stand-down', 'write-refused claude-code', 'write-refused codex-cli', 'standard-codex-writes', 'network-off-sealed claude-code', 'network-off-sealed codex-cli')
+          arms = ('read-diff claude-code Confined', 'read-diff codex-cli Confined', 'read-diff codex-cli Standard', 'codex-resume-stand-down', 'write-refused claude-code', 'write-refused codex-cli', 'standard-codex-writes', 'network-off-relayed claude-code', 'network-off-relayed codex-cli')
           for arm in arms:
               assert f'[review-diff-e2e] ran {arm}' in text, f'reviewer E2E arm "{arm}" did not run — check CODESPACE_REQUIRE_REVIEW_CLIS and the CLI install step'
-          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('A_codex_reviewer_reads_the_diff_with_git_wherever_it_runs', 2), ('The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down', 1), ('A_confined_reviewer_cannot_write_its_workspace', 2), ('A_standard_codex_writes_its_workspace_under_our_confinement_but_not_the_system_root', 1), ('A_network_off_reviewer_reaches_its_model_through_the_sealed_namespace', 2)):
+          for method, rows in (('A_read_only_claude_reviewer_reads_the_diff_between_two_commits_with_git', 1), ('A_codex_reviewer_reads_the_diff_with_git_wherever_it_runs', 2), ('The_pinned_codex_accepts_the_resume_spelling_of_its_stand_down', 1), ('A_confined_reviewer_cannot_write_its_workspace', 2), ('A_standard_codex_writes_its_workspace_under_our_confinement_but_not_the_system_root', 1), ('A_network_off_reviewer_reaches_its_model_through_the_relay', 2)):
               cases = [r for r in results if 'ReviewerReadsItsDiffE2ETests.' + method in r.get('testName', '')]
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
           print(f'All {len(arms)} reviewer E2E arms ran and passed.')
 
-          # The sealed-egress E2E returns early on a host that cannot seal, which reads as Passed; require each arm's marker.
-          for arm in ('durable', 'non-durable', 'ipv6', 'restart-reissue', 'policy-route-discard-dst', 'policy-route-discard-l4', 'setup-failure'):
-              assert f'[sealed-egress-e2e] ran {arm}' in text, f'sealed-egress E2E arm "{arm}" did not run — this lane is root with bwrap, ip and nft, so it must seal'
-          for method, rows in (('A_network_off_brokered_run_reaches_its_broker_and_nothing_else', 2), ('A_sealed_namespace_drops_the_gateway_over_ipv6_link_local_too', 1), ('A_30_still_held_by_a_run_that_outlived_its_worker_is_not_handed_to_the_next_run', 1), ('A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing', 2), ('A_sealed_setup_that_fails_on_this_host_refuses_the_launch_typed_and_leaks_nothing', 1)):
+          # The sealed-egress E2E returns early on a host that cannot confine, which reads as Passed; require each arm's marker.
+          for arm in ('durable', 'non-durable', 'relay-ipv6', 'restart', 'relay-refused', 'relay-policy-route'):
+              assert f'[sealed-egress-e2e] ran {arm}' in text, f'sealed-egress E2E arm "{arm}" did not run — this lane is root with bwrap and the relay helper, so it must relay'
+          for method, rows in (('A_network_off_brokered_run_reaches_its_broker_and_nothing_else', 2), ('A_relayed_run_has_no_ipv6_path_to_the_worker_either', 1), ('The_same_live_agent_reaches_the_next_worker_through_its_socket_after_a_restart', 1), ('A_brokered_child_the_worker_cannot_relay_is_refused_and_would_have_reached_nothing', 1), ('A_host_policy_rule_that_discards_replies_from_the_broker_port_cannot_reach_a_relayed_run', 1)):
               cases = [r for r in results if 'SealedEgressE2ETests.' + method in r.get('testName', '')]
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
-          print('All 7 sealed-egress arms ran and passed.')
+          print('All 6 sealed-egress arms ran and passed.')
+
+          # The allowlist plan's host-routing arms, and the relayed allowlist launch, return early without ip and nft; require their markers.
+          for marker in ('[filtered-egress-e2e] ran restart-reissue', '[filtered-egress-e2e] ran policy-route-discard-dst', '[durable-egress-e2e] ran allowlist-relay'):
+              assert marker in text, f'"{marker}" is missing — this lane is root with ip and nft, so the allowlist plan must run'
+          for method in ('FilteredEgressNetnsE2ETests.A_30_still_held_by_a_run_that_outlived_its_worker_is_not_handed_to_the_next_run', 'FilteredEgressNetnsE2ETests.A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing', 'DurableLaunchEgressE2ETests.An_allowlist_run_reaches_its_broker_through_the_relay_and_its_allowlist_still_holds'):
+              cases = [r for r in results if method in r.get('testName', '')]
+              assert len(cases) == 1 and cases[0].get('outcome') == 'Passed', f'{method}: must pass'
+          print('All 3 allowlist-plan arms ran and passed.')
+
+          # The broker's socket, relay-revoke and legacy-gateway arms return early without bwrap or ip/nft; require each
+          # marker, the legacy survivor's teardown of the seal it carried included.
+          for arm in ('socket-channel', 'revoke-network-off', 'revoke-allowlist', 'legacy-gateway-rebind', 'legacy-sealed-teardown'):
+              assert f'[broker-socket-e2e] ran {arm}' in text, f'broker E2E arm "{arm}" did not run — this lane is root with bwrap, ip and nft'
+          print('All 5 broker arms ran.')
 
           # The bwrap probe E2E returns early off root, which reads as Passed; require each arm's marker.
           for arm in ('masked-proc', 'unmasked-proc'):
@@ -310,10 +324,60 @@ jobs:
           print('All 4 bounded command capture kernel cases passed.')
           PY
 
+      - name: Test the non-root worker posture (uid 1654, no capabilities)
+        # The shipped worker runs as uid 1654 with no capabilities and may not build a network namespace of its own,
+        # and every step above runs as root. Category=SandboxNonRoot runs the relay's arms again as that uid; each one
+        # first asserts geteuid() != 0, that bubblewrap confines, and that no namespace can be built, so the lane cannot
+        # pass as root or on a host that could fall back to a veth namespace. RequireConfinement stays set. The runner's
+        # kernel restricts unprivileged user namespaces through AppArmor where it has that switch; lifting it is the
+        # same node setting operators give the worker. The root arms above leave their short-path socket roots behind
+        # owner-only, which uid 1654 could not enter, so those go first.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          rm -rf /tmp/cs-broker /tmp/cs-mcp
+          home=/tmp/nonroot-home
+          results=backend/TestResults/nonroot
+          mkdir -p "$home" "$results"
+          chown 1654:1654 "$home" "$results"
+          # The restore above ran as root under the job's HOME (/github/home in a container job, not /root): ask NuGet
+          # where it put the packages, and let uid 1654 traverse every directory down to them and read them.
+          packages=$(dotnet nuget locals global-packages --list | sed -E 's/^global-packages: *//; s:/+$::')
+          test -d "$packages"
+          dir=$(dirname "$packages"); while [ "$dir" != / ]; do chmod a+x "$dir"; dir=$(dirname "$dir"); done
+          chmod -R a+rX "$packages"
+          chmod -R a+rwX backend/tests/CodeSpace.SandboxTests/bin backend/tests/CodeSpace.SandboxTests/obj
+          setpriv --reuid 1654 --regid 1654 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
+            env HOME="$home" DOTNET_CLI_HOME="$home" NUGET_PACKAGES="$packages" \
+            dotnet test backend/tests/CodeSpace.SandboxTests/CodeSpace.SandboxTests.csproj \
+              --no-build \
+              --filter "Category=SandboxNonRoot" \
+              --logger "console;verbosity=detailed" \
+              --logger "trx;LogFileName=sandbox-nonroot.trx" \
+              --results-directory "$results"
+
+      - name: Assert the non-root arms actually ran as uid 1654
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          path = 'backend/TestResults/nonroot/sandbox-nonroot.trx'
+          root = ET.parse(path).getroot()
+          counters = root.find('.//{*}Counters')
+          executed, passed = int(counters.get('executed')), int(counters.get('passed'))
+          assert executed >= 9 and passed == executed, f'expected all 9 non-root arms to run and pass, got executed={executed} passed={passed}'
+          text = open(path, encoding='utf-8').read()
+          for marker in ('[non-root-e2e] ran admission uid=1654', '[sealed-egress-e2e] ran non-root durable uid=1654', '[sealed-egress-e2e] ran non-root non-durable uid=1654', '[sealed-egress-e2e] ran non-root restart uid=1654', '[sealed-egress-e2e] ran non-root relay-refused uid=1654', '[sealed-egress-e2e] ran non-root relay-ipv6', '[broker-socket-e2e] ran non-root socket-channel uid=1654', '[review-diff-e2e] ran non-root network-off-relayed claude-code uid=1654', '[review-diff-e2e] ran non-root network-off-relayed codex-cli uid=1654'):
+              assert marker in text, f'non-root arm marker "{marker}" is missing — the arm returned early or did not run as the worker uid'
+          print(f'All {executed} non-root arms ran as uid 1654 and passed.')
+          PY
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-isolation-trx
-          path: backend/TestResults/*.trx
+          path: |
+            backend/TestResults/*.trx
+            backend/TestResults/nonroot/*.trx
           if-no-files-found: ignore

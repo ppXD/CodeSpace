@@ -715,7 +715,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     {
         var spec = new SandboxSpec { Command = "/bin/sh", WorkingDirectory = "/work/ws", ReadOnlyWorkingDirectory = readOnly };
 
-        var plan = LocalProcessRunner.PlanFor(spec, spec.Args, "/spool/agent-home", Array.Empty<string>());
+        var plan = LocalProcessRunner.PlanFor(spec, spec.Command, spec.Args, "/spool/agent-home", Array.Empty<string>());
 
         plan.WorkingDirectoryReadOnly.ShouldBe(readOnly);
         plan.WritablePaths.Contains("/work/ws").ShouldBe(!readOnly, "a read-only run's workspace is never offered as a writable path");
@@ -737,7 +737,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         // unlinking the socket or planting a file beside it.
         var spec = new SandboxSpec { Command = "/usr/local/bin/claude", WorkingDirectory = "/work/ws", Mcp = Wiring("/spool/k/mcp/seg/s") };
 
-        var plan = LocalProcessRunner.PlanFor(spec, spec.Args, "/spool/k/agent-home", Array.Empty<string>());
+        var plan = LocalProcessRunner.PlanFor(spec, spec.Command, spec.Args, "/spool/k/agent-home", Array.Empty<string>());
         var argv = BubblewrapSandbox.BuildArgs(plan).ToList();
 
         plan.WritablePaths.ShouldNotContain("/spool/k/mcp/seg", "the socket's directory is never offered as a writable path");
@@ -857,19 +857,47 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false, true, false)]   // network off inside a namespace: the sealed launch — its proxy is unreachable, so it goes
-    [InlineData(false, false, true)]   // network off with no namespace: severed, nothing to route — left as it always was
-    [InlineData(true, true, true)]     // network on inside a namespace: an allowlist run, which may well reach its proxy
-    public void A_sealed_launch_carries_no_proxy_its_namespace_cannot_reach(bool allowNetwork, bool inNamespace, bool keepsProxy)
+    [InlineData(false, true, false, true, false)]    // network off, relayed under bwrap: the sealed launch — its proxy is unreachable, so it goes
+    [InlineData(false, true, false, false, true)]    // network off on a host that does not confine: it shares the worker's network, left as it always was
+    [InlineData(false, false, false, true, true)]    // network off with no socket on its lease: not relayed (the admission refuses it) — nothing is stripped
+    [InlineData(true, true, true, true, true)]       // an allowlist run relayed inside its namespace: its allowlist may well admit its proxy
+    [InlineData(true, true, false, true, true)]      // network on with no allowlist: the worker's own network
+    public void A_sealed_launch_carries_no_proxy_its_namespace_cannot_reach(bool allowNetwork, bool socket, bool inNamespace, bool confines, bool keepsProxy)
     {
-        var spec = new SandboxSpec { Command = "agent", AllowNetwork = allowNetwork, Environment = new Dictionary<string, string> { ["HTTPS_PROXY"] = "http://proxy.corp:3128", ["http_proxy"] = "http://proxy.corp:3128", ["NO_PROXY"] = "localhost" } };
-        var prefix = inNamespace ? new[] { "ip", "netns", "exec", "cs-egr-deadbeef" } : Array.Empty<string>();
+        var spec = new SandboxSpec { Command = "agent", AllowNetwork = allowNetwork, EgressAllowlist = inNamespace ? ["api.anthropic.com"] : null, ModelBrokerPort = 43121, ModelBrokerSocketPath = socket ? "/spool/k/broker/seg/s" : null };
 
-        var info = LocalProcessRunner.BuildDurableStartInfo(spec, TempDir(), prefix);
+        LocalProcessRunner.SealedEgress(spec, inNamespace, confines).ShouldBe(!keepsProxy, "only a network-off run the relay carries to its broker is sealed: its one destination is that broker, and a CLI honouring a proxy would send every call it does not exempt where the child cannot reach");
+    }
 
-        info.Environment.ContainsKey("HTTPS_PROXY").ShouldBe(keepsProxy, "a sealed child's one destination is its broker on the gateway; a CLI honouring a proxy would send every model call where the namespace cannot reach");
-        info.Environment.ContainsKey("http_proxy").ShouldBe(keepsProxy, "both spellings");
+    [Fact]
+    public void A_durable_network_off_brokered_launch_drops_its_proxies_exactly_where_this_host_relays_it()
+    {
+        // Honest on either host: where bwrap confines, the child is severed and relayed, so its proxies go; where it does
+        // not, the child shares the worker's network, and its proxies stay exactly as they were.
+        var spec = new SandboxSpec { Command = "agent", ModelBrokerPort = 43121, ModelBrokerSocketPath = "/spool/k/broker/seg/s", Environment = new Dictionary<string, string> { ["HTTPS_PROXY"] = "http://proxy.corp:3128", ["http_proxy"] = "http://proxy.corp:3128", ["NO_PROXY"] = "localhost" } };
+        var relayed = BubblewrapSandbox.Available is not null;
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(spec, TempDir());
+
+        info.Environment.ContainsKey("HTTPS_PROXY").ShouldBe(!relayed, $"the proxy strip reads the same predicate as the relay (confines={relayed})");
+        info.Environment.ContainsKey("http_proxy").ShouldBe(!relayed, "both spellings");
         info.Environment.ContainsKey("NO_PROXY").ShouldBeTrue("NO_PROXY is harmless and left alone");
+    }
+
+    [Fact]
+    public void An_allowlist_launch_keeps_its_proxy_and_exempts_the_relay_on_its_loopback()
+    {
+        var spec = new SandboxSpec
+        {
+            Command = "agent", AllowNetwork = true, EgressAllowlist = ["api.anthropic.com"], ModelBrokerPort = 43121, ModelBrokerSocketPath = "/spool/k/broker/seg/s",
+            Environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:43121/route", ["HTTPS_PROXY"] = "http://proxy.corp:3128", ["NO_PROXY"] = "localhost" },
+        };
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(LocalProcessRunner.ResolveModelBrokerHost(spec), TempDir(), ["ip", "netns", "exec", "cs-egr-deadbeef"]);
+
+        info.Environment["HTTPS_PROXY"].ShouldBe("http://proxy.corp:3128", "an allowlist run's network is filtered, not off: its proxy may be exactly what the allowlist admits");
+        info.Environment["NO_PROXY"].ShouldNotBeNull().Split(',').ShouldContain("127.0.0.1", "its broker is the relay on its own loopback, which must never be sent through that proxy");
+        info.Environment["ANTHROPIC_BASE_URL"].ShouldBe("http://127.0.0.1:43121/route", "the relay answers the CLI's loopback address inside the namespace");
     }
 
     private static readonly IReadOnlyList<string> CodexArgs = new[] { "exec", "--json", "--model", "gpt-5.4", "--sandbox", "read-only", "-c", "otel.exporter=none", "-" };

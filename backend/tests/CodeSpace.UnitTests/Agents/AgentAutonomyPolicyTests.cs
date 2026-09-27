@@ -238,9 +238,9 @@ public class AgentAutonomyPolicyTests
             AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, Unbounded)
                 .ShouldNotContain(AgentAutonomyPolicy.ProcessLocalSubnetCaveat, customMessage: "a severed run reserves no /30 at all, so the sentence must not carry a caveat about one");
 
-            // A network-off run SEALED to its broker does hold a /30, so it carries the caveat a severed one must not.
+            // A network-off run SEALED to its broker reaches it through the relay and its socket, and holds no /30 either.
             AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Trusted, Unbounded, new SandboxConfinement { Outcome = SandboxConfinementOutcome.Confined, NetworkSevered = true, EgressSealedToBroker = true })
-                .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.SealedToBrokerQualifier + AgentAutonomyPolicy.ProcessLocalSubnetCaveat, "a sealed run's /30 is only unique inside one worker here too");
+                .ShouldBe("Network: off (Standard)" + AgentAutonomyPolicy.SealedToBrokerQualifier, "a sealed run reserves no /30, so the sentence must not carry a caveat about one");
         }
 
         AgentAutonomyPolicy.DescribeNetwork(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Trusted, Unbounded)

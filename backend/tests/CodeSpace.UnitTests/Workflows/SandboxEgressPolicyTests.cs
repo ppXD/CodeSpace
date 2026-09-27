@@ -19,16 +19,14 @@ public class SandboxEgressPolicyTests
     }
 
     [Theory]
-    [InlineData(false, 43121, SandboxEgressMode.Sealed)]   // network off + a broker it can be sealed to → sealed to that port
-    [InlineData(false, null, SandboxEgressMode.None)]      // network off, nothing to seal to → severed, as always
-    [InlineData(true, 43121, SandboxEgressMode.Full)]      // network on already reaches its broker — a port never narrows or widens it
-    public void A_network_off_run_is_sealed_only_to_a_broker_it_was_given(bool allowNetwork, int? sealablePort, SandboxEgressMode expected)
+    [InlineData(false, SandboxEgressMode.None)]   // network off, a brokered run included: it reaches its broker through the relay and its socket, never through a network
+    [InlineData(true, SandboxEgressMode.Full)]    // network on already reaches its broker — having one never narrows or widens it
+    public void A_network_off_run_is_severed_whatever_reaches_its_broker(bool allowNetwork, SandboxEgressMode expected)
     {
-        var policy = SandboxEgressPolicy.Derive(allowNetwork, allowlist: null, canEnforceAllowlist: true, sealablePort);
+        var policy = SandboxEgressPolicy.Derive(allowNetwork, allowlist: null, canEnforceAllowlist: true);
 
-        policy.Mode.ShouldBe(expected);
-        policy.BrokerPort.ShouldBe(expected == SandboxEgressMode.Sealed ? sealablePort : null, "the sealed port is carried only by the sealed mode");
-        policy.AllowedHosts.ShouldBeEmpty("a sealed run resolves no hosts — its one destination is an address, not a name");
+        policy.Mode.ShouldBe(expected, "there is no mode between severed and full for a run with no allowlist — the broker is not a network destination");
+        policy.AllowedHosts.ShouldBeEmpty("no allowlist, so no hosts to resolve");
     }
 
     [Fact]

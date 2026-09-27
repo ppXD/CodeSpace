@@ -45,8 +45,8 @@ public sealed record ModelCredentialRebindRequest
     /// The Unix socket the launch's lease was also served on, read off the same handle, or null when it recorded none.
     /// With a path, <see cref="Port"/> is bound on LOOPBACK FIRST and the socket re-opened at this exact path only once
     /// that bind holds: the port is the lock between two workers on one host, so a worker that loses it never touches
-    /// the other's socket. Null is the legacy re-bind, unchanged — the recorded port on every candidate host, wide
-    /// first, for a child that reaches this worker at its namespace gateway.
+    /// the other's socket. Null binds loopback too, unless <see cref="ChildInNetworkNamespace"/> holds: that is the
+    /// legacy re-bind — the recorded port wide first, for a child that reaches this worker at its namespace gateway.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? SocketPath { get; init; }
@@ -54,9 +54,10 @@ public sealed record ModelCredentialRebindRequest
     /// <summary>
     /// Whether the same handle recorded a per-run network namespace for the child (<c>SandboxHandle.EgressNetnsKey</c>).
     /// Without a <see cref="SocketPath"/>, such a child reaches this worker at its namespace's gateway rather than on
-    /// loopback — the one kind of run that still needs the legacy re-bind, so the broker names exactly these re-binds in
-    /// a fixed log line that the retirement of the gateway path waits on. A run on the worker's own network calls
-    /// loopback and is not one of them, whatever its handle lacks.
+    /// loopback — the one kind of run that still needs the legacy re-bind, so the broker binds wide for exactly these
+    /// re-binds and names them in a fixed log line that the retirement of the gateway path waits on. A run on the
+    /// worker's own network calls loopback and is not one of them, whatever its handle lacks: its re-bind binds
+    /// loopback alone.
     /// </summary>
     public bool ChildInNetworkNamespace { get; init; }
 }

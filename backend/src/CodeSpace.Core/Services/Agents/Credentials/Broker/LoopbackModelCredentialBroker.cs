@@ -30,17 +30,16 @@ namespace CodeSpace.Core.Services.Agents.Credentials.Broker;
 /// withdrawn bearer presents either way depending on timing — refused while something is still bound, unanswered once
 /// it is not — and both say the same thing, which is that the bearer buys nothing. Nothing is relayed either way.</para>
 ///
-/// <para><b>Where it listens, and why it cannot simply be loopback.</b> A deny-by-default egress run executes inside
-/// a per-run network namespace, so <c>127.0.0.1</c> there is the NAMESPACE's loopback — a broker bound only to the
-/// host's would be unreachable by exactly the runs that most need one. The namespace does reach the worker: its
-/// default route is the veth gateway (<c>FilteredEgressPlan</c>'s <c>.1</c>), and a packet addressed to the host's
-/// own address is delivered locally (INPUT) rather than FORWARDED, so the run's nftables allowlist — a forward-hook
-/// filter — never sees it and no allowlist entry is needed. But that /30 is reserved DURING the launch, after this
-/// lease was opened and its base URL projected, so the listener cannot be bound to it up front: on a host that can
-/// build such namespaces it binds every address (<c>http://+:port/</c>, which also matches any Host header) and the
-/// runner substitutes <see cref="SandboxSpec.ModelBrokerHostToken"/> with the address that particular child can
-/// reach. On a host that cannot (macOS development, a container with no <c>ip</c>/<c>nft</c>) it stays on loopback,
-/// where nothing needs the wider bind.</para>
+/// <para><b>Where it listens.</b> On loopback. A child in a network namespace of its own — network off, or an
+/// allowlist — cannot reach the host's <c>127.0.0.1</c>, so such a lease is also served on a per-run Unix socket
+/// (<see cref="BrokerSocketChannel"/>) whose directory is bound into the sandbox, and the <c>codespace-mcp relay</c>
+/// inside answers the CLI's <c>127.0.0.1:&lt;port&gt;</c> and carries each call to that socket. The runner resolves
+/// <see cref="SandboxSpec.ModelBrokerHostToken"/> to loopback for every child. The one exception is the re-bind of a
+/// handle written before the socket existed whose child is in a network namespace of its own: that child reaches this
+/// worker at its namespace's veth gateway, so on a host that can build such namespaces that re-bind binds every
+/// address (<c>http://+:port/</c>, which also matches any Host header), and the broker logs
+/// <see cref="LegacyRebindMarker"/> for each one. A handle without a socket whose child shares the worker's network is
+/// re-bound on loopback, where that child calls.</para>
 ///
 /// <para><b>What guards it.</b> The 256-bit bearer, checked in constant time, is the capability; the run's route
 /// segment is a 128-bit CSPRNG id, so a caller cannot even find another run's route by holding its id; the lease
@@ -149,6 +148,9 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         if (_byRun.TryGetValue(runId, out var lease)) CloseQuietly(lease.Listener);
     }
 
+    /// <summary>Test seam: the prefix a LIVE lease's listener is bound to (<c>http://127.0.0.1:&lt;port&gt;/</c>, or <c>http://+:&lt;port&gt;/</c> for a wide bind), or null for a run with no lease — the one observation that says which addresses a lease exposes, on a host that has no second address to call it from.</summary>
+    internal string? ListenerPrefixForTest(Guid runId) => _byRun.TryGetValue(runId, out var lease) ? lease.Listener.Prefixes.Single() : null;
+
     /// <summary>Test seam: kill the Unix-socket acceptor behind a LIVE lease without going through a revoke — <see cref="BreakListenerForTest"/>'s counterpart for the lease's other door, whose failure must end the claim just the same.</summary>
     internal void BreakSocketForTest(Guid runId)
     {
@@ -172,9 +174,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     {
         if (UpstreamRootFor(request.Upstream) is not { } upstreamRoot) return Task.FromResult<BrokeredModelCredential?>(null);
 
-        var hosts = CandidateHosts(request.SocketPath);
-
-        if (BindFresh(hosts, out var bindFailure) is not { } bound)
+        if (BindFresh(out var bindFailure) is not { } bound)
         {
             _logger.LogWarning(bindFailure, "Agent run {RunId}: the model-credential broker could not bind a listener on this worker after {Attempts} fresh ports, so the run falls back to whatever its deployment's confinement policy permits", request.RunId, BindAttempts);
             return Task.FromResult<BrokeredModelCredential?>(null);
@@ -187,9 +187,8 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         }, request.Ttl);
 
         _logger.LogDebug("Model credential brokered for agent run {RunId} on port {Port} (team {TeamId}, epoch {Epoch}) until {ExpiresAt:O}", lease.RunId, lease.Port, lease.TeamId, lease.Epoch, lease.ExpiresAt);
-        WarnIfUnreachableFromNetns(lease, hosts, bound.Host);
 
-        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId, ReachableFromNamespace = bound.Host == AnyHost, SocketPath = lease.SocketPath });
+        return Task.FromResult<BrokeredModelCredential?>(new(BaseUrlFor(lease), lease.Token, lease.ExpiresAt) { RebindPort = lease.Port, RebindRoute = lease.PathId, SocketPath = lease.SocketPath });
     }
 
     /// <summary>
@@ -268,7 +267,7 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
         // The PORT first, the socket only once it holds: the port is the lock between two workers on one host. A worker
         // still serving this run holds it, so this re-bind is refused here — before anything at the socket's path is
         // touched — and the live worker's sandboxed children keep their door.
-        var hosts = CandidateHosts(request.SocketPath);
+        var hosts = CandidateHosts(request.SocketPath, request.ChildInNetworkNamespace);
 
         if (BindPort(request.Port, hosts, out var bindFailure) is not { } bound) return RefuseRebind(request, "its port could not be bound here — something else is holding it, or this host refused the bind", bindFailure);
 
@@ -483,10 +482,10 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     private static string BaseUrlFor(Lease lease) => $"http://{SandboxSpec.ModelBrokerHostToken}:{lease.Port}/{lease.PathId}";
 
     /// <summary>
-    /// A host that CAN build per-run network namespaces but refused the wide bind can serve only its shared-network
-    /// runs: a sealed run's child reaches this worker at its namespace gateway, and nothing is listening there. Said
-    /// out loud because the failure it produces is a model call that times out, which reads like a provider problem
-    /// rather than a bind that fell back.
+    /// A legacy re-bind on a host that CAN build per-run network namespaces, but that refused the wide bind, serves
+    /// only a child on the worker's own network: a namespaced child with no socket reaches this worker at its namespace
+    /// gateway, and nothing is listening there. Said out loud because the failure it produces is a model call that
+    /// times out, which reads like a provider problem rather than a bind that fell back.
     /// </summary>
     private void WarnIfUnreachableFromNetns(Lease lease, IReadOnlyList<string> candidateHosts, string host)
     {
@@ -496,30 +495,29 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     }
 
     /// <summary>
-    /// Bind a FRESH ephemeral port for a new lease: every address on a host that can build filtered-egress namespaces
-    /// (their children reach the worker on a per-run gateway IP, not on loopback), loopback otherwise. The wider bind
-    /// is TRIED FIRST and falls back, so a host that refuses it still brokers its shared-network runs.
+    /// Bind a FRESH ephemeral port for a new lease, on loopback only. A child on the worker's own network calls it
+    /// there; a child in a network of its own reaches it through the lease's socket, spliced to this same loopback
+    /// listener, so no new lease ever hands its port to the host's neighbours.
     /// </summary>
-    private static (HttpListener Listener, int Port, string Host)? BindFresh(IReadOnlyList<string> candidateHosts, out Exception? failure)
+    private static (HttpListener Listener, int Port)? BindFresh(out Exception? failure)
     {
         failure = null;
 
-        foreach (var host in candidateHosts)
-            for (var attempt = 0; attempt < BindAttempts; attempt++)
-            {
-                var port = ReserveEphemeralPort();
+        for (var attempt = 0; attempt < BindAttempts; attempt++)
+        {
+            var port = ReserveEphemeralPort();
 
-                if (TryBind(host, port, out failure) is { } listener) return (listener, port, host);
-            }
+            if (TryBind(LoopbackHost, port, out failure) is { } listener) return (listener, port);
+        }
 
         return null;
     }
 
     /// <summary>
     /// Bind ONE GIVEN port — a re-bind's whole job. No fresh-port retry, deliberately: the address is not this
-    /// process's to choose, it is the one a detached agent already holds, so a substitute would answer nobody. The
-    /// same candidate hosts as <see cref="BindFresh"/>, because the run whose port this is was launched on a host of
-    /// the same shape and its child reaches the worker the same way.
+    /// process's to choose, it is the one a detached agent already holds, so a substitute would answer nobody. On the
+    /// hosts <see cref="CandidateHosts"/> names for the request, because the child whose port this is still reaches the
+    /// worker the way it did when it was launched.
     /// </summary>
     private static (HttpListener Listener, int Port, string Host)? BindPort(int port, IReadOnlyList<string> candidateHosts, out Exception? failure)
     {
@@ -537,12 +535,15 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     private const string LoopbackHost = "127.0.0.1";
 
     /// <summary>
-    /// Bind addresses in order of preference — see <see cref="BindFresh"/>. Every address first only where a per-run
-    /// network namespace can exist to need it, and never for a lease served over a socket: its namespaced children come
-    /// in through the socket, spliced to loopback, so a wide bind would only hand its port to the host's neighbours.
+    /// Where a RE-BIND binds, in order of preference. A request with a socket path binds loopback: its namespaced child
+    /// comes in through the socket, spliced to loopback, so a wide bind would only hand its port to the host's
+    /// neighbours. So does one whose child shares the worker's network, which calls loopback. Only the legacy re-bind —
+    /// a child in a network namespace of its own on a handle written before the socket existed — keeps the wide bind
+    /// first where a per-run network namespace can exist, because such a child reaches this worker at its namespace
+    /// gateway. That branch goes once no such handle is left in flight (<see cref="LegacyRebindMarker"/>).
     /// </summary>
-    private static IReadOnlyList<string> CandidateHosts(string? socketPath) =>
-        socketPath is null && FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
+    private static IReadOnlyList<string> CandidateHosts(string? socketPath, bool childInNetworkNamespace) =>
+        socketPath is null && childInNetworkNamespace && FilteredEgressNetns.IsSupported ? new[] { AnyHost, LoopbackHost } : new[] { LoopbackHost };
 
     /// <summary>
     /// Bind ONE prefix, or null plus the reason it could not. EVERY exception counts as "did not bind" — deliberately
