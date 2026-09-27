@@ -1,5 +1,11 @@
 using System.Net.Sockets;
 using CodeSpace.Mcp;
+using CodeSpace.Mcp.Relay;
+
+// `codespace-mcp relay <port> <socket> -- <cli> [args...]`: the sandbox-side end of a run's model broker (see
+// BrokerRelay). Dispatched on argv[0] before anything below runs; the proxy is always started with `--proxy`, so every
+// other argv reaches the proxy exactly as before.
+if (args is [BrokerRelay.Verb, .. var relayArgs]) return BrokerRelay.Run(relayArgs);
 
 // The `codespace mcp --proxy` forwarder: a tiny, zero-dependency stdio<->UDS bridge the CLI harness launches INSIDE
 // the sandbox. It reads the run's socket path + token from the env (the runner stages them before exec), connects the

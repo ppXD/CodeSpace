@@ -224,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 70 ]; then
-            echo "::error::Expected >=70 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run sealed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 73 ]; then
+            echo "::error::Expected >=73 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run sealed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -271,6 +271,14 @@ jobs:
           cases = [r for r in results if 'BubblewrapProbeE2ETests.The_probe_runs_the_launch_argv_so_a_masked_proc_is_reported_unavailable' in r.get('testName', '')]
           assert len(cases) == 2 and all(r.get('outcome') == 'Passed' for r in cases), 'both bwrap probe arms must pass'
           print('Both bwrap probe arms ran and passed.')
+
+          # The broker relay E2E returns early on a host without bwrap, which reads as Passed; require each arm's marker.
+          for arm in ('exit-7', 'sigterm', 'immediate-call'):
+              assert f'[broker-relay-e2e] ran {arm}' in text, f'broker relay E2E arm "{arm}" did not run — this lane has bwrap and python3, so it must'
+          for method, rows in (('A_cli_behind_the_relay_streams_from_the_broker_socket_and_its_stdio_and_status_pass_through', 2), ('The_cli_reaches_the_relay_on_its_very_first_call', 1)):
+              cases = [r for r in results if 'BrokerRelayE2ETests.' + method in r.get('testName', '')]
+              assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
+          print('All 3 broker relay arms ran and passed.')
 
           print('All 10 batch/stream kernel cases passed.')
           PY
