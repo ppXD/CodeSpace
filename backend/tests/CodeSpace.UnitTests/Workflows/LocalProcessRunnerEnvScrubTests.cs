@@ -357,14 +357,32 @@ public sealed class LocalProcessRunnerEnvScrubTests
         resolved.Environment.Keys.ShouldBe(new[] { "ANTHROPIC_BASE_URL" }, customMessage: "only the broker host is substituted when the child has no proxy to exempt it from");
     }
 
-    [Fact]
-    public void A_proxy_the_worker_passes_through_the_scrub_is_one_the_child_is_exempted_from()
+    [Theory]
+    [InlineData(null, "10.63.12.1")]
+    [InlineData(".corp.internal,gitlab.corp", ".corp.internal,gitlab.corp,10.63.12.1")]   // the worker's own exemptions survive into the list, or the agent's git and pip to internal hosts go through the proxy
+    public void A_proxy_the_worker_passes_through_the_scrub_is_one_the_child_is_exempted_from(string? workerNoProxy, string expected)
     {
         var environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId" };
+        var worker = new Dictionary<string, string> { ["https_proxy"] = "http://proxy.corp:3128" };
+        if (workerNoProxy is not null) worker["NO_PROXY"] = workerNoProxy;
 
-        var resolved = WithWorkerProxyEnvironment(new Dictionary<string, string> { ["https_proxy"] = "http://proxy.corp:3128" }, () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, "10.63.12.1"));
+        var resolved = WithWorkerProxyEnvironment(worker, () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, "10.63.12.1"));
 
-        resolved.Environment["NO_PROXY"].ShouldBe("10.63.12.1", "the worker's https_proxy survives the scrub and reaches the child, so the broker must be exempted from it");
+        resolved.Environment["NO_PROXY"].ShouldBe(expected, "the worker's https_proxy survives the scrub and reaches the child, so the broker must be exempted from it");
+        resolved.Environment["no_proxy"].ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_proxy_the_task_hands_its_child_is_one_the_child_is_exempted_from()
+    {
+        // The task's own variables reach the child unfiltered, ALL_PROXY included — which Codex and curl honour — so the
+        // gate must count them whether or not the scrub would keep the worker's copy of the name.
+        var environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = $"http://{SandboxSpec.ModelBrokerHostToken}:41234/r0uteId", ["ALL_PROXY"] = "socks5h://proxy.corp:1080" };
+
+        var resolved = WithWorkerProxyEnvironment(new Dictionary<string, string>(), () => LocalProcessRunner.ResolveModelBrokerHost(EnvSpec() with { Environment = environment }, "10.63.12.1"));
+
+        resolved.Environment["NO_PROXY"].ShouldBe("10.63.12.1", "a brokered call sent to the task's proxy fails like a provider outage");
+        resolved.Environment["no_proxy"].ShouldBe("10.63.12.1");
     }
 
     /// <summary>Run <paramref name="resolve"/> with every proxy variable of this process cleared but <paramref name="worker"/>: the worker's own values are the fallback, and this host's must not leak in.</summary>

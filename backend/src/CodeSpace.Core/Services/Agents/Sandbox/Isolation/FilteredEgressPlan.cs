@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 
 /// <summary>
@@ -35,14 +37,16 @@ public sealed record FilteredEgressPlan
     public required IReadOnlyList<IReadOnlyList<string>> SetupCommands { get; init; }
 
     /// <summary>
-    /// The argv that asks the kernel how the host reaches the namespace's end — the lookup every reply the host itself
-    /// sends there makes, the broker's included. Run after <see cref="SetupCommands"/>: the /30 was chosen from the
-    /// routes the host lists (<see cref="HostRoutedPrefixes"/>), but only the kernel's own lookup accounts for a policy
-    /// rule, or the null route in a table one consults before <c>main</c>, that would discard those replies after a
-    /// clean setup. It is an output lookup, so it does not see an allowlist run's NAT'd replies, which are routed on
-    /// input: a rule keyed on the uplink (<c>iif</c>) can still divert those.
+    /// The argv that asks the kernel how the host reaches the namespace's end. Run after <see cref="SetupCommands"/>:
+    /// the /30 was chosen from the routes the host lists (<see cref="HostRoutedPrefixes"/>), but only the kernel's own
+    /// lookup accounts for a policy rule, or the null route in a table one consults before <c>main</c>, that would
+    /// discard the run's replies after a clean setup. A sealed plan names what its broker's replies carry — TCP from the
+    /// broker port — so a rule keyed on the protocol or the source port is seen too. It cannot name the rest: each reply
+    /// goes to the agent's own ephemeral port and may carry a mark, so a rule keyed on the destination port or a mark
+    /// still gets past it. An allowlist plan has no one port to name, and its NAT'd replies are routed on input, so a
+    /// rule keyed on those selectors or on the uplink (<c>iif</c>) can still divert them.
     /// </summary>
-    public IReadOnlyList<string> RouteCheckArgv => new[] { "ip", "route", "get", NsIp, "from", HostIp };
+    public required IReadOnlyList<string> RouteCheckArgv { get; init; }
 
     /// <summary>Why <see cref="RouteCheckArgv"/>'s answer does not take the namespace's traffic through its own host veth, or null when it does.</summary>
     internal string? RouteCheckFailure(int exit, string output)
@@ -56,8 +60,9 @@ public sealed record FilteredEgressPlan
 
     /// <summary>
     /// The device <c>ip route get</c> answered with — the word after its one <c>dev</c> — or null for anything else.
-    /// Read from the text answer, not <c>-j</c>: <c>route get</c> learned JSON only in iproute2 5.0, three releases
-    /// after the route listing the allocator reads, and on those releases it prints text under <c>-j</c> too.
+    /// Read from the text answer, not <c>-j</c>: <c>route get</c> learned JSON only in iproute2 5.0, while the route
+    /// listing the allocator reads already parses on some 4.x builds (Debian 10's 4.20), where <c>route get</c> prints
+    /// text under <c>-j</c> too.
     /// </summary>
     private static string? RoutedDevice(string output)
     {
@@ -113,6 +118,7 @@ public sealed record FilteredEgressPlan
             NsAddrCidr = $"{nsIp}/30",
             HostIp = hostIp,
             NsIp = nsIp,
+            RouteCheckArgv = RouteCheck(nsIp, hostIp),
             NsSubnetCidr = subnetCidr,
             SetupCommands = setup,
             NftRuleset = nftRuleset,
@@ -146,6 +152,7 @@ public sealed record FilteredEgressPlan
             NsAddrCidr = $"{subnet.NsIp}/30",
             HostIp = subnet.HostIp,
             NsIp = subnet.NsIp,
+            RouteCheckArgv = RouteCheck(subnet.NsIp, subnet.HostIp, "ipproto", "6", "sport", brokerPort.ToString(CultureInfo.InvariantCulture)),
             NsSubnetCidr = subnet.Cidr,
             SetupCommands = NamespaceSetup(ns, vethHost, vethNs, subnet),
             NftRuleset = BuildSealedNftRuleset(ns, vethHost, subnet.HostIp, brokerPort),
@@ -166,6 +173,9 @@ public sealed record FilteredEgressPlan
         new[] { "ip", "netns", "exec", ns, "ip", "link", "set", vethNs, "up" },
         new[] { "ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up" },
     };
+
+    /// <summary>The route lookup to the namespace's end from the gateway, narrowed by <paramref name="selectors"/>. The protocol is named by number: the name <c>tcp</c> needs <c>/etc/protocols</c>, which minimal images lack.</summary>
+    private static IReadOnlyList<string> RouteCheck(string nsIp, string hostIp, params string[] selectors) => ["ip", "route", "get", nsIp, "from", hostIp, .. selectors];
 
     /// <summary>The per-run netns / nft-table name — derived PURELY from <paramref name="runId"/>, so a reaper / teardown reconstructs it with no setup-time state.</summary>
     public static string NamespaceFor(string runId) => $"cs-egr-{Slug(runId)}";

@@ -131,7 +131,8 @@ public class FilteredEgressPlanTests
     {
         var plan = FilteredEgressPlan.BuildSealed("run-ffff6666", 43121, Subnet);
 
-        plan.RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17" }, "the lookup a reply from the broker makes: to the namespace's end, from the gateway — as text, which every iproute2 prints");
+        plan.RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17", "ipproto", "6", "sport", "43121" }, "what a reply from the broker carries — to the namespace's end, from the gateway, TCP from its port — so a rule keyed on the protocol or the source port is seen too; as text, which every iproute2 prints");
+        FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet).RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17" }, "an allowlist run has no one port its replies come from");
     }
 
     [Theory]
