@@ -729,6 +729,95 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void An_mcp_launch_binds_its_socket_directory_read_only_and_the_helper_file_by_file()
+    {
+        // The helper's directory is the worker's own /app: appsettings.json (the JWT key, the DB password) and every
+        // override an operator mounts sit beside it. The sandbox gets the helper's own files and nothing else. The
+        // socket's directory is bound read-only: connect() needs no write, and read-only is what stops an agent
+        // unlinking the socket or planting a file beside it.
+        var spec = new SandboxSpec { Command = "/usr/local/bin/claude", WorkingDirectory = "/work/ws", Mcp = Wiring("/spool/k/mcp/seg/s") };
+
+        var plan = LocalProcessRunner.PlanFor(spec, spec.Args, "/spool/k/agent-home", Array.Empty<string>());
+        var argv = BubblewrapSandbox.BuildArgs(plan).ToList();
+
+        plan.WritablePaths.ShouldNotContain("/spool/k/mcp/seg", "the socket's directory is never offered as a writable path");
+        BoundAs(argv, "/spool/k/mcp/seg").ShouldBe("--ro-bind-try", "the socket's directory is mounted once, read-only");
+
+        var helper = plan.ReadOnlyExtraPaths.Except(new[] { "/spool/k/mcp/seg" }).ToList();
+
+        helper.ShouldBe(LocalProcessRunner.McpProxyFiles(helper[0]), "the helper is exposed as exactly its own files");
+        foreach (var file in helper) BoundAs(argv, file).ShouldBe("--ro-bind-try", $"{file} is bound read-only at its own path");
+        BoundAs(argv, Path.GetDirectoryName(helper[0])!).ShouldBeEmpty("the helper's directory, the worker's own /app, is never bound");
+    }
+
+    [Theory]
+    // The shipped layout: the path every in-flight run's declaration already names.
+    [InlineData("/app/codespace-mcp", "/app")]
+    // An apphost renamed at a mirror (CODESPACE_MCP_PROXY_PATH) still loads the codespace-mcp.dll baked into it, so its sidecars keep the assembly's name.
+    [InlineData("/mirror/bin/cs-proxy", "/mirror/bin")]
+    public void The_mcp_helper_is_its_apphost_and_the_three_files_it_starts_from(string proxyPath, string directory) =>
+        LocalProcessRunner.McpProxyFiles(proxyPath).ShouldBe(new[] { proxyPath, $"{directory}/codespace-mcp.dll", $"{directory}/codespace-mcp.deps.json", $"{directory}/codespace-mcp.runtimeconfig.json" });
+
+    [Fact]
+    public void A_bare_mcp_helper_name_binds_nothing() =>
+        LocalProcessRunner.McpProxyFiles("codespace-mcp").ShouldBeEmpty("a name with no directory has no sidecars to find — exactly what the directory bind it replaces bound for it");
+
+    [Fact]
+    public void The_mcp_helper_depends_on_nothing_beyond_its_own_files()
+    {
+        // Drift pin for the file-by-file bind. The sandbox sees only McpProxyFiles, so anything the helper grows a
+        // dependency on (a package, a project, a native or satellite asset) is a file beside it the sandbox cannot see:
+        // a proxy that dies at startup and a run that silently goes tool-less. This goes red first.
+        var files = LocalProcessRunner.McpProxyFiles(Path.Combine(AppContext.BaseDirectory, "codespace-mcp"));
+
+        foreach (var file in files) File.Exists(file).ShouldBeTrue($"the helper's build output has no {file}: the file set the sandbox binds no longer matches what the build produces");
+
+        using var deps = System.Text.Json.JsonDocument.Parse(File.ReadAllText(files.Single(f => f.EndsWith(".deps.json", StringComparison.Ordinal))));
+
+        var libraries = deps.RootElement.GetProperty("libraries").EnumerateObject().Select(l => l.Name).ToList();
+        var targets = deps.RootElement.GetProperty("targets").EnumerateObject().SelectMany(t => t.Value.EnumerateObject()).ToList();
+
+        libraries.ShouldHaveSingleItem().ShouldStartWith("codespace-mcp/", customMessage: "the helper references nothing but itself");
+        targets.Select(t => t.Name).ShouldBe(libraries, "every target lists the helper alone");
+        targets.Single().Value.EnumerateObject().Select(a => a.Name).ShouldBe(new[] { "runtime" }, "no native, resources or runtimeTargets assets beside the helper");
+        targets.Single().Value.GetProperty("runtime").EnumerateObject().Select(a => a.Name).ShouldBe(new[] { "codespace-mcp.dll" }, "its one runtime asset is the dll it binds");
+
+        LocalProcessRunner.McpProxyNeedsItsDirectory(files[0]).ShouldBeFalse("the shipped helper names its shared framework, so the runtime comes from /usr and not from files beside it");
+    }
+
+    [Theory]
+    // A framework-dependent build, the shipped layout: it names its shared framework, which the image installs under /usr.
+    [InlineData("codespace-mcp", """{"runtimeOptions":{"tfm":"net10.0","framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}""", false)]
+    // An app on several shared frameworks names them as a list, and is framework-dependent all the same.
+    [InlineData("codespace-mcp", """{"runtimeOptions":{"frameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.0"}]}}""", false)]
+    // A single-file publish carries its runtimeconfig inside the apphost, so none sits beside it.
+    [InlineData("codespace-mcp", null, false)]
+    // A self-contained publish of several files names no framework: its runtime is the libraries beside the apphost, which are never bound.
+    [InlineData("codespace-mcp", """{"runtimeOptions":{"tfm":"net10.0","includedFrameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.8"}]}}""", true)]
+    // An apphost renamed at a mirror still starts from the runtimeconfig named for the codespace-mcp assembly baked into it.
+    [InlineData("cs-proxy", """{"runtimeOptions":{"tfm":"net10.0","includedFrameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.8"}]}}""", true)]
+    // A runtimeconfig the worker cannot parse, or one that is not an object, is left for the host to report when the helper starts.
+    [InlineData("codespace-mcp", "{ not json", false)]
+    [InlineData("codespace-mcp", "[]", false)]
+    public void Only_a_self_contained_mcp_helper_of_several_files_needs_its_directory(string apphost, string? runtimeConfig, bool needsDirectory)
+    {
+        // The sandbox binds the helper file by file (McpProxyFiles), so a helper that loads its runtime from files beside
+        // it exits inside the sandbox before it connects. This is the host's own test for running an app self-contained.
+        var directory = Path.Combine(Path.GetTempPath(), "codespace-mcp-layout-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(directory);
+        Directory.CreateDirectory(directory);
+
+        File.WriteAllText(Path.Combine(directory, apphost), "apphost");
+        if (runtimeConfig is not null) File.WriteAllText(Path.Combine(directory, "codespace-mcp.runtimeconfig.json"), runtimeConfig);
+
+        LocalProcessRunner.McpProxyNeedsItsDirectory(Path.Combine(directory, apphost)).ShouldBe(needsDirectory);
+    }
+
+    /// <summary>The flags that mount <paramref name="path"/> onto itself, joined; empty when nothing does.</summary>
+    private static string BoundAs(IReadOnlyList<string> argv, string path) =>
+        string.Join(" ", Enumerable.Range(0, argv.Count - 2).Where(i => argv[i + 1] == path && argv[i + 2] == path).Select(i => argv[i]));
+
+    [Fact]
     public void A_spec_with_nothing_to_swap_keeps_its_argv_instance() =>
         LocalProcessRunner.WithRunnerConfinement(CodexArgs, null).ShouldBeSameAs(CodexArgs, "a CLI without an OS sandbox of its own launches with exactly the argv it built");
 
@@ -1728,26 +1817,28 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     [Fact]
     public void AppendChildCommand_binds_a_dedicated_socket_dir_NOT_the_spool_dir_so_no_spool_artifacts_leak()
     {
-        if (BubblewrapSandbox.Available is null) return;   // bwrap-only: the writable --bind only exists under confinement
+        if (BubblewrapSandbox.Available is null) return;   // bwrap-only: the binds only exist under confinement
 
         var spool = Path.Combine(Path.GetTempPath(), "codespace-mcp-bind-" + Guid.NewGuid().ToString("N"));
         _spoolDirs.Add(spool);
 
         // The socket lives in the DEDICATED <spool>/mcp/ subdir (FIX 1) — its parent is that subdir, never the spool dir
-        // (which holds out.log/err.log/exit/pid the agent must not read or forge — design §3b / Attack 4).
+        // (which holds out.log/err.log/exit/pid the agent must not read or forge — design §3b / Attack 4). The workspace
+        // is its own dir, as in production: a workspace AT the spool would be bound writable over all of it.
         var socketPath = Path.Combine(spool, "mcp", "mcp.sock");
+        var workspace = Path.Combine(Path.GetTempPath(), "codespace-mcp-bind-ws-" + Guid.NewGuid().ToString("N"));
 
         var info = LocalProcessRunner.BuildDurableStartInfo(
-            new SandboxSpec { Command = "claude", WorkingDirectory = spool, ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring(socketPath) }, spool);
+            new SandboxSpec { Command = "claude", WorkingDirectory = workspace, ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring(socketPath) }, spool);
 
         var args = info.ArgumentList.ToList();
-        var binds = args.Select((a, i) => (a, i)).Where(t => t.a == "--bind").Select(t => args[t.i + 1]).ToList();
 
         var boundSocketDir = Path.GetDirectoryName(socketPath)!;
 
-        // (a) the socket's dir IS bound writable (so the proxy connects), but it is NOT the spool dir.
-        binds.ShouldContain(boundSocketDir, customMessage: "the dedicated MCP socket dir must be bound writable so the proxy can reach it");
-        binds.ShouldNotContain(spool, customMessage: "the spool dir itself must NOT be a writable bind — that would expose out.log/err.log/exit/pid to the agent");
+        // (a) the socket's dir is mounted exactly once and READ-ONLY (the proxy connects; the agent cannot unlink the
+        //     socket or plant a file beside it), and the spool dir is not mounted at all.
+        BoundAs(args, boundSocketDir).ShouldBe("--ro-bind-try", "the dedicated MCP socket dir is mounted once, read-only, and never by a writable --bind");
+        BoundAs(args, spool).ShouldBeEmpty("the spool dir itself must NOT be bound — that would expose out.log/err.log/exit/pid to the agent");
 
         // (b) none of the spool artifacts live under the bound dir.
         foreach (var artifact in new[] { "out.log", "err.log", "exit", "pid" })

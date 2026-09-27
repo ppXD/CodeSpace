@@ -923,6 +923,32 @@ public class AgentMcpEndpointFlowTests
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, customMessage: "the tool fabric is optional infra; a missing proxy binary does not fail the run");
     }
 
+    [Theory]
+    [InlineData(true)]    // a framework-dependent build at the override: the sandbox starts it from its own files → wired
+    [InlineData(false)]   // a self-contained publish of several files: its runtime sits beside it, unbound → fail closed
+    public async Task A_proxy_override_is_wired_only_when_the_sandbox_can_start_it_from_its_own_files(bool namesItsFramework)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        // The sandbox binds the proxy file by file, so a proxy that EXISTS can still be one that cannot start inside it.
+        // Wiring a run to it hands the CLI a server that dies before it connects; the honest degradation is no wiring.
+        using var mirror = new TempDir();
+        var proxyPath = Path.Combine(mirror.Path, "codespace-mcp");
+        await File.WriteAllTextAsync(proxyPath, "apphost");   // only inspected host-side: the scripted harness never spawns it
+        await File.WriteAllTextAsync(Path.Combine(mirror.Path, "codespace-mcp.runtimeconfig.json"), namesItsFramework ? """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"10.0.0"}}}""" : """{"runtimeOptions":{"includedFrameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.8"}]}}""");
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), proxyPath: proxyPath);
+
+        var declarationPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "agent-home", ".mcp.json");
+        File.Exists(declarationPath).ShouldBe(namesItsFramework, namesItsFramework ? "a framework-dependent proxy starts from the files the sandbox binds, so the run is wired to it" : "a self-contained proxy of several files cannot start inside the sandbox — no declaration pointing at it");
+
+        (await ReadAgentRunStatusAsync(runId)).ShouldBe(AgentRunStatus.Succeeded, "the tool fabric is optional infra; a proxy the sandbox cannot start does not fail the run");
+    }
+
     // ── Driving the REAL executor ───────────────────────────────────────────
 
     /// <summary>Resolve the connect-registry SINGLETON from the fixture; it is the same instance the executor's MCP scope registers into.</summary>

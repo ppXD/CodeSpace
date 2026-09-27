@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
@@ -76,10 +77,14 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Operator override for the <c>codespace-mcp</c> proxy binary's ABSOLUTE path (e.g. an air-gapped mirror, a
-    /// self-contained publish elsewhere). Default: <c>codespace-mcp</c> next to the running assembly
-    /// (<see cref="AppContext.BaseDirectory"/>). Pinned by a test (Rule 8) — renaming it silently breaks an operator who
-    /// pinned a custom proxy path.
+    /// Operator override for the <c>codespace-mcp</c> proxy binary's ABSOLUTE path (e.g. an air-gapped mirror). Default:
+    /// <c>codespace-mcp</c> next to the running assembly (<see cref="AppContext.BaseDirectory"/>). Pinned by a test
+    /// (Rule 8) — renaming it silently breaks an operator who pinned a custom proxy path.
+    ///
+    /// <para>The sandbox binds the proxy file by file (<see cref="McpProxyFiles"/>), so the override must be a
+    /// framework-dependent build output (the apphost beside its <c>.dll</c>, <c>.deps.json</c> and
+    /// <c>.runtimeconfig.json</c>) or a single-file publish. A self-contained publish of several files cannot start
+    /// inside the sandbox, and the executor refuses it with a Warning (<see cref="McpProxyNeedsItsDirectory"/>).</para>
     /// </summary>
     public const string McpProxyPathEnvVar = "CODESPACE_MCP_PROXY_PATH";
 
@@ -1117,9 +1122,10 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// What bubblewrap confines this launch to: the ONLY writable host paths are the config home, the MCP socket's
-    /// dedicated dir, and — unless the spec may only read it — the workspace, which is otherwise mounted read-only.
-    /// Pure over its inputs, so the spec-to-mount mapping is testable on a host that cannot confine.
+    /// What bubblewrap confines this launch to: the ONLY writable host paths are the config home and — unless the spec
+    /// may only read it — the workspace, which is otherwise mounted read-only. The MCP socket's dedicated dir and the
+    /// helper's own files are read-only. Pure over its inputs, so the spec-to-mount mapping is testable on a host that
+    /// cannot confine.
     /// </summary>
     internal static BwrapPlan PlanFor(SandboxSpec spec, IReadOnlyList<string> args, string? configHome, IReadOnlyList<string> egressExecPrefix)
     {
@@ -1129,17 +1135,18 @@ public sealed partial class LocalProcessRunner
 
         var readOnlyExtra = new List<string>(spec.ReadOnlyPaths);
 
-        // Bind the run's MCP socket writable so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a
-        // dir, so bind its PARENT dir — which is the DEDICATED <spool>/mcp/ subdir holding ONLY the socket (never
-        // the spool's out.log/err.log/exit/pid — design §3b / Attack 4). The bind target must exist when bwrap
-        // mounts; --unshare-net severs TCP but a bound UDS survives — the whole reason the transport is a socket.
-        // Also bind the proxy binary's dir READ-ONLY so the harness can spawn it at its absolute identity-bound
-        // path. No-op when the run has no tool fabric.
+        // Bind the run's MCP socket so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a dir, so bind
+        // its PARENT dir — the DEDICATED <spool>/mcp/<segment>/ holding ONLY the socket (never the spool's
+        // out.log/err.log/exit/pid — design §3b / Attack 4). READ-ONLY: connect() needs no write, and a read-only mount
+        // is what stops the agent unlinking the socket or planting a file beside it. The directory, not the file, so a
+        // restarted worker's new socket inode at the same path is still reached. --unshare-net severs TCP but a bound
+        // UDS survives — the whole reason the transport is a socket. The proxy is bound FILE BY FILE at its absolute
+        // identity-bound path, never its directory: that is the worker's own app dir, appsettings.json and all. No-op
+        // when the run has no tool fabric.
         if (spec.Mcp is { SocketPath: { Length: > 0 } socketPath } && Path.GetDirectoryName(socketPath) is { Length: > 0 } socketDir)
         {
-            writable.Add(socketDir);
-
-            if (Path.GetDirectoryName(McpProxyBinaryPath()) is { Length: > 0 } proxyDir) readOnlyExtra.Add(proxyDir);
+            readOnlyExtra.Add(socketDir);
+            readOnlyExtra.AddRange(McpProxyFiles(McpProxyBinaryPath()));
         }
 
         return new BwrapPlan
@@ -1163,10 +1170,61 @@ public sealed partial class LocalProcessRunner
     /// The ABSOLUTE host path of the <c>codespace-mcp</c> proxy binary: the <see cref="McpProxyPathEnvVar"/> override
     /// when set (an air-gapped mirror), else <c>codespace-mcp</c> next to the running assembly. Identity-bound into the
     /// sandbox, so this is also the in-sandbox command the harness declares — single source of truth for both the
-    /// executor's <c>McpDeclarationContext.ProxyCommand</c> and the runner's read-only bind of its dir.
+    /// executor's <c>McpDeclarationContext.ProxyCommand</c> and the runner's read-only binds of its files.
     /// </summary>
     public static string McpProxyBinaryPath() =>
         Environment.GetEnvironmentVariable(McpProxyPathEnvVar) is { Length: > 0 } p ? p : Path.Combine(AppContext.BaseDirectory, McpProxyFile);
+
+    /// <summary>
+    /// The files the <c>codespace-mcp</c> helper at <paramref name="proxyPath"/> starts from: its apphost, and beside it
+    /// the dll the apphost loads plus the <c>.deps.json</c> and <c>.runtimeconfig.json</c> the host reads for it. The
+    /// sidecars carry the ASSEMBLY's name, not the apphost's, because the apphost has <c>codespace-mcp.dll</c> baked in.
+    /// The runtime comes from the shared framework, which the image installs under the read-only <c>/usr</c> root. A
+    /// test pins that the helper's <c>.deps.json</c> lists nothing beyond itself, so this set is everything it needs. A
+    /// bare name has no directory to find the sidecars in, so it yields nothing, as the directory bind it replaces did.
+    /// </summary>
+    internal static IReadOnlyList<string> McpProxyFiles(string proxyPath)
+    {
+        if (Path.GetDirectoryName(proxyPath) is not { Length: > 0 } directory) return Array.Empty<string>();
+
+        return new[] { proxyPath, Path.Combine(directory, McpProxyFile + ".dll"), Path.Combine(directory, McpProxyFile + ".deps.json"), McpProxyRuntimeConfig(directory) };
+    }
+
+    /// <summary>
+    /// Whether the helper at <paramref name="proxyPath"/> is a self-contained publish of several files, which starts only
+    /// from its whole directory: its <c>.runtimeconfig.json</c> names no shared framework, so the host loads the runtime
+    /// from the libraries beside the apphost, and <see cref="McpProxyFiles"/> binds none of them. Inside the sandbox such
+    /// a helper exits before it connects, so the executor refuses to wire a run to it. A framework-dependent build names
+    /// its framework, and a single-file publish carries its runtimeconfig inside the apphost; both start from the files
+    /// bound. A runtimeconfig the worker cannot read or parse is not refused here: the host reports it when the helper
+    /// starts, as it did before.
+    /// </summary>
+    internal static bool McpProxyNeedsItsDirectory(string proxyPath)
+    {
+        if (Path.GetDirectoryName(proxyPath) is not { Length: > 0 } directory) return false;
+
+        var runtimeConfig = McpProxyRuntimeConfig(directory);
+
+        if (!File.Exists(runtimeConfig)) return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(runtimeConfig));
+
+            return !NamesSharedFramework(document.RootElement);
+        }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The helper's <c>.runtimeconfig.json</c> in <paramref name="directory"/>, named for the <c>codespace-mcp</c> assembly the apphost has baked in, whatever the apphost itself is called.</summary>
+    private static string McpProxyRuntimeConfig(string directory) => Path.Combine(directory, McpProxyFile + ".runtimeconfig.json");
+
+    /// <summary>The host's own test for a framework-dependent app: <c>runtimeOptions</c> names a <c>framework</c> or <c>frameworks</c>. Without either, the host runs the app self-contained.</summary>
+    private static bool NamesSharedFramework(JsonElement runtimeConfig) =>
+        runtimeConfig.TryGetProperty("runtimeOptions", out var options) && (options.TryGetProperty("framework", out _) || options.TryGetProperty("frameworks", out _));
 
     /// <summary>The spool root: <c>Agents:RunSpoolDirectory</c> when configured, else where <see cref="CodeSpace.Core.Settings.DurableRoots"/> puts it — the path the container image already creates, or a per-user one off a container. Surviving a pod restart is what re-attach needs, so a deployment whose pods are replaced points this at a volume.</summary>
     internal static string SpoolRoot() =>

@@ -187,6 +187,21 @@ public sealed class BubblewrapSandboxTests
         Triple(b, "--ro-bind-try", "/snap/bin", "/snap/bin").ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData(true)]    // the command is itself one of the files bound read-only → its directory stays unbound
+    [InlineData(false)]   // the command is not → its directory is bound, exactly as for any operator binary
+    public void A_command_already_bound_read_only_does_not_bind_its_directory(bool commandIsBound)
+    {
+        // The helper's directory is the worker's own /app, appsettings.json and all. When the command IS the helper, the
+        // file binds already make it reachable, and binding its directory too would expose everything beside it.
+        var extras = commandIsBound ? new[] { "/app/codespace-mcp", "/app/codespace-mcp.dll" } : new[] { "/app/codespace-mcp.dll" };
+
+        var a = BubblewrapSandbox.BuildArgs(Plan() with { Command = "/app/codespace-mcp", ReadOnlyExtraPaths = extras });
+
+        Triple(a, "--ro-bind-try", "/app", "/app").ShouldBe(!commandIsBound, commandIsBound ? "a command bound file by file must not drag its whole directory in" : "an absolute command outside the roots still has its directory bound");
+        Triple(a, "--ro-bind-try", "/app/codespace-mcp.dll", "/app/codespace-mcp.dll").ShouldBeTrue("the extras are bound either way");
+    }
+
     [Fact]
     public void ReadOnlyExtraPaths_each_emit_a_ro_bind_try_and_an_empty_list_emits_none()
     {

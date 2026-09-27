@@ -3554,7 +3554,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// A BOOT diagnostic the worker host calls once at startup so a mis-configured tool fabric is VISIBLE at deploy time,
     /// not silently discovered as a tool-less run hours later. The MCP endpoint now opens for EVERY run (serving the
     /// read-only tools by default, the full fabric on opt-in), so the <c>codespace-mcp</c> proxy is needed by every run:
-    /// when it can't be resolved at <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, log a clear Warning naming the
+    /// when it can't be resolved at <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, or resolves to a layout the
+    /// sandbox cannot start (<see cref="LocalProcessRunner.McpProxyNeedsItsDirectory"/>), log a clear Warning naming the
     /// resolved path + the override env var (every run will degrade to TOOL-LESS); otherwise log a confirming
     /// Information line that also notes whether the full side-effecting fabric is enabled deployment-wide
     /// (<see cref="FullToolCatalogByDefault"/>). Pure logging — never throws, never fails boot (the fabric is optional infra).
@@ -3565,13 +3566,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         var proxyPath = LocalProcessRunner.McpProxyBinaryPath();
 
-        if (File.Exists(proxyPath))
+        if (!File.Exists(proxyPath))
         {
-            logger.LogInformation("MCP tool fabric ready; codespace-mcp proxy resolved at '{ProxyPath}'. Read-only tools (get_context + git reads) serve by default; the full side-effecting fabric is {FabricState}.", proxyPath, FullToolCatalogByDefault ? "ENABLED by default" : "opt-in per run");
+            logger.LogWarning("The codespace-mcp proxy binary was NOT found at '{ProxyPath}'. Agent runs will fail closed to a TOOL-LESS run (no MCP wiring written) — including the read-only tools served by default. Publish the proxy alongside the worker or set {OverrideEnvVar} to its absolute path.", proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
             return;
         }
 
-        logger.LogWarning("The codespace-mcp proxy binary was NOT found at '{ProxyPath}'. Agent runs will fail closed to a TOOL-LESS run (no MCP wiring written) — including the read-only tools served by default. Publish the proxy alongside the worker or set {OverrideEnvVar} to its absolute path.", proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+        if (LocalProcessRunner.McpProxyNeedsItsDirectory(proxyPath))
+        {
+            logger.LogWarning("The codespace-mcp proxy at '{ProxyPath}' is a self-contained publish of several files. The sandbox binds only the proxy's own files, so it cannot start there, and agent runs will fail closed to a TOOL-LESS run (no MCP wiring written). Point {OverrideEnvVar} at a framework-dependent build output or a single-file publish (-p:PublishSingleFile=true).", proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+            return;
+        }
+
+        logger.LogInformation("MCP tool fabric ready; codespace-mcp proxy resolved at '{ProxyPath}'. Read-only tools (get_context + git reads) serve by default; the full side-effecting fabric is {FabricState}.", proxyPath, FullToolCatalogByDefault ? "ENABLED by default" : "opt-in per run");
     }
 
     /// <summary>
@@ -3676,7 +3683,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <para>Fail-CLOSED (A10): the proxy binary the declaration points at must EXIST host-side; if it doesn't (a
     /// mis-configured deployment, a missing publish artifact), write NO declaration + log a Warning — handing the agent
     /// a config pointing at a missing binary would surface as a confusingly-broken MCP init, so a tool-less run is the
-    /// honest degradation. The harness owns its format: it renders the file Content from the run-scoped context (socket +
+    /// honest degradation. The same holds for a proxy that exists but is a self-contained publish of several files
+    /// (<see cref="LocalProcessRunner.McpProxyNeedsItsDirectory"/>): the sandbox binds only its own files, so it would
+    /// die before it connects. The harness owns its format: it renders the file Content from the run-scoped context (socket +
     /// token + the absolute proxy command), so the declaration the agent reads matches the listener by construction.</para>
     /// </summary>
     /// <summary>P0-B2: the seven fabric facts, composed from the live endpoint + the wiring the spec carried — configuration beside observation, so "the tools were available" is a recorded fact, not an inference.</summary>
@@ -3703,6 +3712,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (!File.Exists(proxyPath))
         {
             _logger.LogWarning("Agent run {RunId}: the codespace-mcp proxy binary was not found at '{ProxyPath}'; proceeding WITHOUT the tool fabric (set {EnvVar} to its absolute path)", runId, proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+            return null;
+        }
+
+        if (LocalProcessRunner.McpProxyNeedsItsDirectory(proxyPath))
+        {
+            _logger.LogWarning("Agent run {RunId}: the codespace-mcp proxy at '{ProxyPath}' is a self-contained publish of several files, which the sandbox cannot start from the proxy's own files; proceeding WITHOUT the tool fabric (point {EnvVar} at a framework-dependent build output or a single-file publish)", runId, proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
             return null;
         }
 

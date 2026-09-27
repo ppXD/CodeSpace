@@ -24,6 +24,26 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\CodeSpace.Core\CodeSpace.Core.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />
+    <!-- Build-only: McpHelperBindE2ETests runs the real proxy inside bwrap, and CopyMcpProxyToOutput below lands it where
+         LocalProcessRunner.McpProxyBinaryPath() looks. Referenced the way the API references it — a standalone process,
+         never linked. -->
+    <ProjectReference Include="..\..\src\CodeSpace.Mcp\CodeSpace.Mcp.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
   </ItemGroup>
+
+  <!-- Land the codespace-mcp proxy next to the test assembly, at AppContext.BaseDirectory/codespace-mcp: the same place
+       the API's publish lands it beside CodeSpace.Api.dll, so the sandbox sees the helper where production does. -->
+  <Target Name="CopyMcpProxyToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <McpProxyOutDir>$(MSBuildThisFileDirectory)..\..\src\CodeSpace.Mcp\bin\$(Configuration)\$(TargetFramework)\</McpProxyOutDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
+    </ItemGroup>
+    <Error Condition="'@(McpProxyFiles)' == ''" Text="MCP proxy build output not found under $(McpProxyOutDir) (glob codespace-mcp*) — codespace-mcp would be missing from $(OutDir). Check the build-only ProjectReference to CodeSpace.Mcp." />
+    <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
+  </Target>
 
 </Project>

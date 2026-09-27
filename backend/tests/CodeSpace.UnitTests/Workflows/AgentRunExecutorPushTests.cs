@@ -82,6 +82,41 @@ public sealed class AgentRunExecutorPushTests
     }
 
     [Fact]
+    public void LogMcpProxyReadiness_warns_clearly_when_the_proxy_is_a_self_contained_publish_of_several_files()
+    {
+        // The sandbox binds the proxy file by file, so a self-contained publish (its runtime in libraries beside the
+        // apphost) exits inside it before it connects. The proxy EXISTS, so without this the boot line would say "ready"
+        // and every run would go tool-less with no word of why.
+        var directory = Path.Combine(Path.GetTempPath(), "codespace-mcp-sc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var proxyPath = Path.Combine(directory, "codespace-mcp");
+            File.WriteAllText(proxyPath, "apphost");
+            File.WriteAllText(Path.Combine(directory, "codespace-mcp.runtimeconfig.json"), """{"runtimeOptions":{"tfm":"net10.0","includedFrameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.8"}]}}""");
+
+            WithMcpEnv(proxyPath, () =>
+            {
+                var logger = new CapturingLogger();
+
+                AgentRunExecutor.LogMcpProxyReadiness(logger);
+
+                var warning = logger.Entries.ShouldHaveSingleItem();
+                warning.Level.ShouldBe(LogLevel.Warning, customMessage: "a proxy the sandbox cannot start is a fail-closed Warning, not a confirming line");
+                warning.Message.ShouldContain(proxyPath, customMessage: "the diagnostic names the resolved path the operator must fix");
+                warning.Message.ShouldContain(LocalProcessRunner.McpProxyPathEnvVar, customMessage: "the diagnostic names the override the operator set");
+                warning.Message.ShouldContain("TOOL-LESS", customMessage: "the diagnostic states the consequence (runs fail closed to a tool-less run)");
+                warning.Message.ShouldContain("single-file", customMessage: "the diagnostic names a layout that works");
+            });
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LogMcpProxyReadiness_confirms_at_information_when_the_proxy_resolves()
     {
         // /bin/sh always exists on the POSIX CI; on Windows fall back to any present file so the test is cross-host.
