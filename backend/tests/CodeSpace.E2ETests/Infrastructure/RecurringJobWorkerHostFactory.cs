@@ -1,4 +1,5 @@
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Enums;
 using Microsoft.AspNetCore.Hosting;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Npgsql;
 using Serilog;
 using Serilog.Core;
+using Serilog.Events;
 
 namespace CodeSpace.E2ETests.Infrastructure;
 
@@ -142,11 +144,12 @@ public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSp
     /// Appended AFTER <c>Program.CreateHostBuilder</c>'s own <c>UseSerilog()</c>, so this host's
     /// <c>ILoggerFactory</c> registration is the last one and wins — every <c>ILogger&lt;T&gt;</c> the pipeline
     /// resolves (including <c>TransactionalBehavior</c>'s) writes to the sink. The test proves that wiring with a
-    /// canary line before it trusts the absence of anything.
+    /// canary line before it trusts the absence of anything. Warning and above, except <see cref="LocalProcessRunner"/>
+    /// at Information, which is the level of the worker's boot "Sandbox posture:" line.
     /// </summary>
     protected override IHost CreateHost(IHostBuilder builder)
     {
-        builder.UseSerilog(new LoggerConfiguration().MinimumLevel.Warning().WriteTo.Sink(_logSink).CreateLogger(), dispose: true);
+        builder.UseSerilog(new LoggerConfiguration().MinimumLevel.Warning().MinimumLevel.Override(typeof(LocalProcessRunner).FullName!, LogEventLevel.Information).WriteTo.Sink(_logSink).CreateLogger(), dispose: true);
 
         return base.CreateHost(builder);
     }

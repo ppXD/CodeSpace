@@ -89,9 +89,11 @@ services:
   #
   # SAFETY: read-only tools are served UNCONDITIONALLY (McpRequestHandler short-circuits IsReadOnly BEFORE the
   # governance ledger); side-effecting tools route through the exactly-once ToolCallLedger + AgentToolGate matrix
-  # (fail-closed). CONFINEMENT: bubblewrap is in the image, but Sandbox:RequireConfinement is NOT armed here — running
-  # bubblewrap inside an unprivileged container needs userns/privileged settings, so a prod k8s pod that grants
-  # user namespaces sets Sandbox__RequireConfinement=true (fail-closed); local dev runs agents unconfined-in-container.
+  # (fail-closed). CONFINEMENT: bubblewrap is in the image, but Docker's default seccomp and AppArmor profiles deny it
+  # the user namespaces and mounts it needs, and Docker's masked /proc blocks the fresh /proc it mounts, so by default
+  # local dev runs agents unconfined-in-container and Sandbox:RequireConfinement is NOT armed. The commented
+  # security_opt block below grants all three without --privileged or any capability (Dockerfile.worker has the same
+  # posture for Kubernetes).
   worker:
     profiles: ["app"]
     build:
@@ -99,6 +101,15 @@ services:
       dockerfile: Dockerfile.worker
     container_name: codespace-worker
     restart: unless-stopped
+    # Confine agent runs as the image's uid 1654 with no capabilities: uncomment on a host that allows unprivileged
+    # user namespaces (Compose v2.15+ for systempaths), then arm Sandbox__RequireConfinement below. The worker's boot
+    # line then reads "Sandbox posture: bubblewrap confines True", but that probe mounts no /proc: without the
+    # systempaths line it still reads True while every launch fails with bubblewrap's "Can't mount proc on
+    # /newroot/proc" in the run's stderr, so check that the first run's agent actually starts.
+    # security_opt:
+    #   - seccomp=./backend/deploy/seccomp/codespace-worker.json
+    #   - apparmor=unconfined
+    #   - systempaths=unconfined
     depends_on:
       postgres:
         condition: service_healthy
@@ -125,7 +136,8 @@ services:
       # The codespace-mcp proxy is published next to the API by the csproj target, so the default path resolves;
       # set this only to point at an air-gapped mirror or a custom location.
       CODESPACE_MCP_PROXY_PATH: "${CODESPACE_MCP_PROXY_PATH:-}"
-      # Prod (userns-capable pod) arms the fail-closed isolation guard; left off for local dev (see comment above).
+      # Arm the fail-closed isolation guard wherever confinement is granted (the security_opt block above, or a prod pod
+      # with the same posture), so a lost grant refuses runs instead of running them unconfined; off for local dev.
       # Sandbox__RequireConfinement: "true"
     volumes:
       - codespace-artifacts:/var/lib/codespace/artifacts
