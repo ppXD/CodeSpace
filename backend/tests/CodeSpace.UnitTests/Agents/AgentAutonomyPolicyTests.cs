@@ -165,6 +165,7 @@ public class AgentAutonomyPolicyTests
     [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux); cross-team isolation not enforced")]
     [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-bwrap); cross-team isolation not enforced")]
     [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns); cross-team isolation not enforced")]
+    [InlineData(SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonMountsDenied, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (mounts-denied); cross-team isolation not enforced")]
     // A runner that attempts no confinement at all is in the same honest bucket as one that could not.
     [InlineData(SandboxConfinementOutcome.NotApplicable, null, false, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this runner applies no confinement; cross-team isolation not enforced")]
     public void DescribeNetwork_resolves_the_hedge_from_the_runs_own_confinement_record(SandboxConfinementOutcome outcome, string? reason, bool severed, string expected)

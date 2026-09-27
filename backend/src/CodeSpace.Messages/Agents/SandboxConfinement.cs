@@ -34,8 +34,11 @@ public sealed record SandboxConfinement
     /// <summary>Linux, but no runnable <c>bwrap</c> binary (absent, or not executable).</summary>
     public const string ReasonNoBubblewrap = "no-bwrap";
 
-    /// <summary>Linux with <c>bwrap</c> present, but the confinement probe failed — unprivileged user namespaces denied, or a bwrap too old for the flags a real launch needs.</summary>
+    /// <summary>Linux with <c>bwrap</c> present, but even a bare user namespace failed to confine — unprivileged user namespaces denied, or a bwrap too old for the flags a real launch needs.</summary>
     public const string ReasonNoUserNamespaces = "no-userns";
+
+    /// <summary>Linux with <c>bwrap</c> and a working user namespace, but the launch's own argv is refused: its fresh <c>/proc</c>, <c>/dev</c> or network namespace. Typically a masked <c>/proc</c> (Docker's default masked paths, a Kubernetes pod's default <c>procMount</c>) or a profile that denies mounts.</summary>
+    public const string ReasonMountsDenied = "mounts-denied";
 
     public required SandboxConfinementOutcome Outcome { get; init; }
 

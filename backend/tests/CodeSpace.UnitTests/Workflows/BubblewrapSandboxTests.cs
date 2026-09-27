@@ -27,6 +27,7 @@ public sealed class BubblewrapSandboxTests
     [InlineData(null, SandboxConfinement.ReasonNotLinux, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNotLinux, false)]
     [InlineData(null, SandboxConfinement.ReasonNoBubblewrap, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false)]
     [InlineData(null, SandboxConfinement.ReasonNoUserNamespaces, true, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoUserNamespaces, false)]
+    [InlineData(null, SandboxConfinement.ReasonMountsDenied, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonMountsDenied, false)]
     // An unconfined run NEVER records a severed egress, whatever the tier asked for — that is the entire dishonesty
     // this record ends, so a network-off request on an unconfinable host must still come back NetworkSevered:false.
     [InlineData(null, null, false, SandboxConfinementOutcome.Unconfined, SandboxConfinement.ReasonNoBubblewrap, false)]
@@ -214,6 +215,77 @@ public sealed class BubblewrapSandboxTests
     [Fact]
     public void CommandEnvVar_is_pinned() =>
         BubblewrapSandbox.CommandEnvVar.ShouldBe("CODESPACE_BWRAP_PATH");
+
+    [Fact]
+    public void The_probe_runs_the_argv_a_network_off_launch_builds()
+    {
+        // A hand-picked subset of flags passed on hosts that mask /proc and then refused every real launch's fresh
+        // --proc. The probe must ask the SAME builder a launch does, for the default tier's shape: network severed.
+        var runs = new List<IReadOnlyList<string>>();
+
+        BubblewrapSandbox.Classify("/usr/bin/bwrap", args => { runs.Add(args); return Outcome("Ran"); });
+
+        var probed = runs.ShouldHaveSingleItem("a launch argv that runs needs no second opinion");
+
+        probed.ShouldBe(BubblewrapSandbox.BuildArgs(BubblewrapSandbox.ProbePlan), "the probe argv must be the launch builder's own output, not a copy of some of its flags");
+        Adjacent(probed, "--proc", "/proc").ShouldBeTrue("a fresh /proc is the mount a masked host refuses");
+        Adjacent(probed, "--dev", "/dev").ShouldBeTrue();
+        probed.ShouldContain("--unshare-net", customMessage: "the default tier severs the network, so the probe must build a network namespace too");
+    }
+
+    [Theory]
+    // The launch argv ran: the host confines, and nothing else is asked.
+    [InlineData("Ran", null, true, null, 1)]
+    // bwrap could not even start: there is no binary to confine with.
+    [InlineData("Missing", null, false, SandboxConfinement.ReasonNoBubblewrap, 1)]
+    // bwrap refused the launch but ran a bare user namespace: the launch's own mounts are this host's wall.
+    [InlineData("Refused", "Ran", false, SandboxConfinement.ReasonMountsDenied, 2)]
+    // bwrap refused both: no working user namespace, or a bwrap too old for the flags a launch needs.
+    [InlineData("Refused", "Refused", false, SandboxConfinement.ReasonNoUserNamespaces, 2)]
+    public void The_probe_names_the_wall_a_refused_launch_hit(string launch, string? userNamespace, bool confines, string? expectedReason, int expectedRuns)
+    {
+        var runs = new List<IReadOnlyList<string>>();
+        var answers = new Queue<string?>(new[] { launch, userNamespace });
+
+        var probe = BubblewrapSandbox.Classify("/usr/bin/bwrap", args => { runs.Add(args); return Outcome(answers.Dequeue()!); });
+
+        probe.Path.ShouldBe(confines ? "/usr/bin/bwrap" : null);
+        probe.Reason.ShouldBe(expectedReason, "the reason is read off WHICH argv ran, never off bwrap's stderr");
+        runs.Count.ShouldBe(expectedRuns, "the bare user-namespace argv runs only to name the wall of a launch bwrap refused");
+
+        if (expectedRuns == 2) runs[1].ShouldBe(BubblewrapSandbox.UserNamespaceProbeArgs);
+    }
+
+    [Fact]
+    public void The_fallback_probe_asks_for_a_user_namespace_and_none_of_the_launch_mounts()
+    {
+        // Its passing is what names mounts-denied, so it must hold none of the mounts a launch adds, and still the
+        // flags a launch depends on — or a bwrap too old for them would read as a host that denies mounts.
+        var fallback = BubblewrapSandbox.UserNamespaceProbeArgs;
+
+        fallback.ShouldContain("--unshare-user");
+        Adjacent(fallback, "--cap-drop", "ALL").ShouldBeTrue();
+        fallback.ShouldContain("--unshare-cgroup-try");
+        fallback.ShouldNotContain("--proc");
+        fallback.ShouldNotContain("--dev");
+        fallback.ShouldNotContain("--unshare-net");
+    }
+
+    [Theory]
+    [InlineData("not Linux")]                                          // not-linux
+    [InlineData("bwrap not installed")]                                // no-bwrap
+    [InlineData("unprivileged user namespaces denied")]                // no-userns
+    // mounts-denied: the refused launch argv also builds a network namespace, so a host that denies only that lands here too.
+    [InlineData("the launch's mounts or network namespace denied")]
+    public void The_refusal_names_every_wall_the_probe_can_report(string cause)
+    {
+        var refusal = Should.Throw<InvalidOperationException>(() => BubblewrapSandbox.EnsureSatisfiable(available: null, required: true));
+
+        refusal.Message.ShouldContain(cause, customMessage: "the refusal is the operator's only clue under RequireConfinement, so it must name the wall the probe could have hit");
+    }
+
+    /// <summary>The probe outcome a row names. Carried through <c>InlineData</c> as its NAME because the enum is internal to the assembly under test and cannot appear in a public test signature; a typo throws here rather than passing something else.</summary>
+    private static BubblewrapSandbox.ProbeOutcome Outcome(string name) => Enum.Parse<BubblewrapSandbox.ProbeOutcome>(name);
 
 
     private static bool Adjacent(IReadOnlyList<string> a, string flag, string value)

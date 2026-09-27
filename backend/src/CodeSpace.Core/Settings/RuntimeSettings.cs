@@ -26,8 +26,9 @@ public sealed record RuntimeSettings
 {
     /// <summary>
     /// Whether this deployment MANDATES sandbox confinement. On, an agent run refuses to start rather than run
-    /// unconfined when bubblewrap or unprivileged user namespaces are unavailable. Off is the default because a host
-    /// that cannot confine — macOS development, a container without userns — would otherwise fail every run.
+    /// unconfined when bubblewrap, unprivileged user namespaces, or the launch's own /proc, /dev or network namespace
+    /// are unavailable (for example a masked /proc). Off is the default because a host that cannot confine — macOS
+    /// development, a container without userns — would otherwise fail every run.
     /// </summary>
     public bool RequireSandboxConfinement { get; init; }
 

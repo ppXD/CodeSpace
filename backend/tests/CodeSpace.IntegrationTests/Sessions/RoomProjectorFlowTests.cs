@@ -2431,6 +2431,7 @@ public class RoomProjectorFlowTests
     // says the rest of the loss with it, because an unconfined agent keeps the worker's own filesystem view.
     [InlineData(SandboxConfinementOutcome.Unconfined, false, SandboxConfinement.ReasonNoUserNamespaces, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (no-userns)" + AgentAutonomyPolicy.UnconfinedIsolationCaveat)]
     [InlineData(SandboxConfinementOutcome.Unconfined, false, SandboxConfinement.ReasonNotLinux, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (not-linux)" + AgentAutonomyPolicy.UnconfinedIsolationCaveat)]
+    [InlineData(SandboxConfinementOutcome.Unconfined, false, SandboxConfinement.ReasonMountsDenied, "Network: off (Standard) — OFF REQUESTED BUT UNCONFINED: this host cannot sever egress (mounts-denied)" + AgentAutonomyPolicy.UnconfinedIsolationCaveat)]
     public async Task The_room_states_the_posture_the_runs_own_agents_recorded(SandboxConfinementOutcome outcome, bool severed, string? reason, string expected)
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

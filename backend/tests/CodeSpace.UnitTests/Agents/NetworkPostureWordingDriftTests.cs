@@ -73,11 +73,11 @@ public class NetworkPostureWordingDriftTests
     [Fact]
     public void The_shared_fixture_covers_every_unconfinable_reason()
     {
-        // A fixture that only sampled one reason would let the other two drift into an unhelpful "unavailable". The
-        // reason IS the actionable half of an unconfined verdict ("install bwrap" vs "allow user namespaces").
+        // A fixture that only sampled one reason would let the others drift into an unhelpful "unavailable". The
+        // reason IS the actionable half of an unconfined verdict ("install bwrap" vs "allow user namespaces" vs "unmask /proc").
         var lines = ReadConfinementFixture().Select(c => c.Line).ToList();
 
-        foreach (var reason in new[] { SandboxConfinement.ReasonNotLinux, SandboxConfinement.ReasonNoBubblewrap, SandboxConfinement.ReasonNoUserNamespaces })
+        foreach (var reason in new[] { SandboxConfinement.ReasonNotLinux, SandboxConfinement.ReasonNoBubblewrap, SandboxConfinement.ReasonNoUserNamespaces, SandboxConfinement.ReasonMountsDenied })
             lines.ShouldContain(l => l.Contains($"({reason})"), $"no case pins the '{reason}' wording");
     }
 
