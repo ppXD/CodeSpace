@@ -232,7 +232,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     /// governs its CHILDREN; its name is listed by its parent. So 0700 on the leaf stops another local user entering
     /// the run's directory or reaching the socket, but only 0700 on the parent (<c>&lt;spool&gt;/&lt;key&gt;/mcp/</c>,
     /// or <c>&lt;temp&gt;/cs-mcp/</c> on the short-path fallback) stops them reading the segment out of a listing —
-    /// and the segment is on bubblewrap's <c>--bind</c> argv, so it is not secret from a same-uid reader either way.
+    /// and the segment is on bubblewrap's <c>--ro-bind-try</c> argv, so it is not secret from a same-uid reader either way.
     /// The parent is restricted ONLY when it is one of those two directories the layout mints, never an arbitrary
     /// ancestor: the system temp root is somebody else's.
     ///

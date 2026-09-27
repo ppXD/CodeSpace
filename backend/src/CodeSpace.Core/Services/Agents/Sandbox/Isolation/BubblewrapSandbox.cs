@@ -139,22 +139,24 @@ public static class BubblewrapSandbox
         }
 
         // If the command is an absolute path outside the standard roots (an operator binary override), bind its dir
-        // read-only so it stays reachable inside the otherwise-minimal root.
-        if (Path.IsPathRooted(plan.Command) && Path.GetDirectoryName(plan.Command) is { Length: > 0 } cmdDir && !IsUnderReadOnlyRoot(cmdDir))
+        // read-only so it stays reachable inside the otherwise-minimal root — unless the command is itself one of the
+        // files bound below, whose directory must stay unbound (the codespace-mcp helper's is the worker's own app dir).
+        if (Path.IsPathRooted(plan.Command) && Path.GetDirectoryName(plan.Command) is { Length: > 0 } cmdDir && !IsUnderReadOnlyRoot(cmdDir) && !plan.ReadOnlyExtraPaths.Contains(plan.Command))
         {
             args.Add("--ro-bind-try");
             args.Add(cmdDir);
             args.Add(cmdDir);
         }
 
-        // Extra read-only dirs reachable inside the sandbox (the codespace-mcp proxy binary's dir, so the harness can
-        // spawn it at its absolute identity-bound path). --ro-bind-try (not a hard bind) so a missing dir never crashes
-        // bwrap. Empty by default → no extra ro-bind, byte-identical to a run without the tool fabric.
-        foreach (var dir in DistinctNonEmpty(plan.ReadOnlyExtraPaths))
+        // Extra read-only paths reachable inside the sandbox: the codespace-mcp helper's own files, so the harness can
+        // spawn it at its absolute identity-bound path, and the dir of the MCP socket it connects to. --ro-bind-try (not
+        // a hard bind) so a missing path never crashes bwrap. Empty by default → no extra ro-bind, byte-identical to a
+        // run without the tool fabric.
+        foreach (var path in DistinctNonEmpty(plan.ReadOnlyExtraPaths))
         {
             args.Add("--ro-bind-try");
-            args.Add(dir);
-            args.Add(dir);
+            args.Add(path);
+            args.Add(path);
         }
 
         // The ONLY writable host paths: this run's config-home and, when it may write it, its workspace, bound at
@@ -329,7 +331,7 @@ public sealed record BwrapPlan
     /// <summary>Host paths bound READ-WRITE into the sandbox (this run's config-home, and its workspace unless that is read-only) — the only writable host paths.</summary>
     public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
 
-    /// <summary>Host dirs bound READ-ONLY (<c>--ro-bind-try</c>) so a needed binary stays reachable at its absolute path — the <c>codespace-mcp</c> proxy's dir. Init-only, defaulted empty → non-breaking.</summary>
+    /// <summary>Host paths bound READ-ONLY (<c>--ro-bind-try</c>) at their own paths — the <c>codespace-mcp</c> proxy's files, so it stays reachable at its absolute path, and the dir of the MCP socket it connects to. Init-only, defaulted empty → non-breaking.</summary>
     public IReadOnlyList<string> ReadOnlyExtraPaths { get; init; } = Array.Empty<string>();
 
     /// <summary>Whether to SHARE the host network. <c>false</c> → <c>--unshare-net</c> (only loopback; no egress).</summary>
