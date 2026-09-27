@@ -51,6 +51,12 @@ public sealed partial class LocalProcessRunner
     /// <summary>The short-path fallback's socket root under the system temp dir. Shared by every run that overflows the canonical path, so — like <see cref="McpSocketDir"/> — it is the directory that LISTS the per-run segments and the one the endpoint restricts to the owner.</summary>
     internal const string McpShortSocketRoot = "cs-mcp";
 
+    /// <summary>The socket-only subdir holding each model-broker lease's own socket directory (<c>&lt;spool&gt;/&lt;key&gt;/broker/&lt;id&gt;/s</c>) — a sibling of <see cref="McpSocketDir"/> rather than a share of it, because the two sockets open and close on different lifetimes. Like it, it LISTS per-run segments, so the socket endpoint restricts it to the owner.</summary>
+    internal const string ModelBrokerSocketDir = "broker";
+
+    /// <summary>The short-path fallback's root for model-broker sockets under the system temp dir — <see cref="McpShortSocketRoot"/>'s sibling, for the same reason <see cref="ModelBrokerSocketDir"/> is <see cref="McpSocketDir"/>'s.</summary>
+    internal const string ModelBrokerShortSocketRoot = "cs-broker";
+
     /// <summary>The usable <c>AF_UNIX</c> path maximum — 103 on macOS/BSD, 107 on Linux; use the LOWER so the short-path fallback fires on every host that would overflow either. Pinned by a test: a spool path longer than this would overflow <c>Bind</c> (empirically, .NET's <c>UnixDomainSocketEndPoint</c> binds at length 103 and throws at 104 on macOS), so <see cref="McpSocketPathFor"/> falls back to a short temp path.</summary>
     internal const int UnixSocketPathCap = 103;
 
@@ -1251,16 +1257,28 @@ public sealed partial class LocalProcessRunner
     /// (<c>McpRunToken.MintPathId</c>) and carried on the run's own durable handle, so the ONLY way to the path is
     /// through the handle. There is deliberately no overload that derives one from a run id.</para>
     /// </summary>
-    internal static string McpSocketPathFor(string spoolKey, string socketId)
+    internal static string McpSocketPathFor(string spoolKey, string socketId) => RunSocketPathFor(spoolKey, socketId, McpSocketDir, McpShortSocketRoot);
+
+    /// <summary>
+    /// The per-lease model-broker socket path — <c>&lt;spoolDir&gt;/broker/&lt;socketId&gt;/s</c>, or
+    /// <c>&lt;temp&gt;/cs-broker/&lt;socketId&gt;/s</c> past the <see cref="UnixSocketPathCap"/>. The SAME layout rule as
+    /// <see cref="McpSocketPathFor"/>, under the broker's own directory names: the socket's parent belongs to one lease
+    /// and holds only the socket, so a sandbox's bind of that parent exposes nothing else, and the name is an
+    /// unguessable <paramref name="socketId"/> the caller mints — there is no overload that derives one from a run id.
+    /// </summary>
+    internal static string ModelBrokerSocketPathFor(string spoolKey, string socketId) => RunSocketPathFor(spoolKey, socketId, ModelBrokerSocketDir, ModelBrokerShortSocketRoot);
+
+    /// <summary>The one socket-path layout both per-run sockets follow — see <see cref="McpSocketPathFor"/> for the two shapes and why the caller supplies the id.</summary>
+    private static string RunSocketPathFor(string spoolKey, string socketId, string socketDir, string shortSocketRoot)
     {
-        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketDir, socketId, McpSocketFile);
+        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), socketDir, socketId, McpSocketFile);
 
         if (canonical.Length <= UnixSocketPathCap) return canonical;
 
         // Intentionally temp-rooted: the canonical path overflowed BECAUSE the spool root is long, so the short socket
         // must live elsewhere. Still per-run and still unguessable (~temp+30 chars < cap on macOS), unlinked on dispose;
         // if even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
-        return Path.Combine(Path.GetTempPath(), McpShortSocketRoot, socketId, McpSocketFile);
+        return Path.Combine(Path.GetTempPath(), shortSocketRoot, socketId, McpSocketFile);
     }
 
     /// <summary>

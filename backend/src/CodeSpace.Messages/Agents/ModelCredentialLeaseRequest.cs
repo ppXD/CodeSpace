@@ -26,4 +26,15 @@ public sealed record ModelCredentialLeaseRequest
 
     /// <summary>How long the lease answers from now without a renewal. Sized by the caller off its own heartbeat cadence, so a worker that stops heartbeating stops paying for model calls.</summary>
     public required TimeSpan Ttl { get; init; }
+
+    /// <summary>
+    /// A per-run Unix socket to ALSO serve the lease on, or null for a TCP-only lease. A lease with a socket binds its
+    /// TCP listener on loopback only: a child in a network namespace of its own reaches the broker through the socket,
+    /// never through the host's TCP port. The path belongs to this one lease — its file is deleted when the lease
+    /// closes (its directory never is, because a sandbox's bind pins that directory) — so a caller mints a fresh path
+    /// for every open rather than reusing another lease's. A path a live lease on the same worker still serves is not
+    /// bound again: the lease then comes back with no socket, and the broker says so in a Warning.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? SocketPath { get; init; }
 }

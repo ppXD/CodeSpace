@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Authority;
 using CodeSpace.Core.Services.Agents.Tools;
@@ -73,32 +74,17 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _logger = logger;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _counters = new McpFabricCounters();
-        _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
-        // On any setup throw, dispose the listener + cts (an fd would otherwise orphan) and rethrow; the opener
-        // disposes the dedicated scope and fail-softs (so a degraded host is a logged Warning, not a failed run).
-        try
-        {
-            CreateOwnerOnlyDirectory(Path.GetDirectoryName(socketPath)!, logger);
-
-            // Clear a stale socket file from a crashed prior incarnation. CONCURRENCY NOTE: a second reattach racing the
-            // first could unlink a LIVE socket the first just bound — bounded today by the reconciler's single-flight
-            // CAS (epoch guard), which lets only the current-epoch reattach reach here; the loser's later Bind fails and
-            // the opener's fail-soft swallows it. A self-contained epoch guard inside the endpoint is deferred to a
-            // later slice (matching the design).
-            Quietly(() => File.Delete(socketPath));
-
-            _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
-
-            // Tighten to 0600 BEFORE the listener is reachable: a connect() before Listen cannot succeed, so this
-            // closes the window where the inode is group/other-writable under a permissive umask.
-            SetOwnerOnly(socketPath, logger);
-
-            _listener.Listen(backlog: 4);
-        }
+        // On any setup throw, dispose the cts and rethrow (RunSocket has already closed the listener, so no fd
+        // orphans); the opener disposes the dedicated scope and fail-softs (so a degraded host is a logged Warning, not
+        // a failed run). RunSocket clears a stale socket file from a crashed prior incarnation. CONCURRENCY NOTE: a
+        // second reattach racing the first could unlink a LIVE socket the first just bound — bounded today by the
+        // reconciler's single-flight CAS (epoch guard), which lets only the current-epoch reattach reach here; the
+        // loser's later Bind fails and the opener's fail-soft swallows it. A self-contained epoch guard inside the
+        // endpoint is deferred to a later slice (matching the design).
+        try { _listener = RunSocket.Listen(socketPath, backlog: 4, runId, logger); }
         catch
         {
-            _listener.Dispose();
             _cts.Dispose();
             throw;
         }
@@ -155,7 +141,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         // Remove AFTER the pumps are drained (fail-closed: the registry never points at a closed listener).
         _connects.Remove(_runId);
 
-        Quietly(() => File.Delete(_socketPath));
+        RunSocket.Remove(_socketPath);
 
         _scope.Dispose();
         _cts.Dispose();
@@ -224,49 +210,6 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         var presented = await reader.ReadLineAsync(ct).ConfigureAwait(false);
 
         return presented is not null && McpRunToken.Matches(_token, presented);
-    }
-
-    /// <summary>
-    /// Create the run's socket directory restricted to the owner (0700) — AND restrict the directory that LISTS it,
-    /// which is the one that decides whether the run's random segment is enumerable at all. A directory's own mode
-    /// governs its CHILDREN; its name is listed by its parent. So 0700 on the leaf stops another local user entering
-    /// the run's directory or reaching the socket, but only 0700 on the parent (<c>&lt;spool&gt;/&lt;key&gt;/mcp/</c>,
-    /// or <c>&lt;temp&gt;/cs-mcp/</c> on the short-path fallback) stops them reading the segment out of a listing —
-    /// and the segment is on bubblewrap's <c>--ro-bind-try</c> argv, so it is not secret from a same-uid reader either way.
-    /// The parent is restricted ONLY when it is one of those two directories the layout mints, never an arbitrary
-    /// ancestor: the system temp root is somebody else's.
-    ///
-    /// <para>Best-effort on the modes (a chmod failure is a Warning, not a failed endpoint: the 256-bit token remains
-    /// the authoritative gate); a no-op on Windows, where unix modes don't apply.</para>
-    /// </summary>
-    private void CreateOwnerOnlyDirectory(string directory, ILogger logger)
-    {
-        Directory.CreateDirectory(directory);
-
-        if (OperatingSystem.IsWindows()) return;
-
-        RestrictToOwner(directory, logger);
-
-        if (Path.GetDirectoryName(directory) is { Length: > 0 } parent && IsSocketRoot(parent)) RestrictToOwner(parent, logger);
-    }
-
-    /// <summary>True for the two directories the runner's layout mints as socket roots — the ones whose children are per-run segments and nothing else, so 0700 on them costs no other consumer anything.</summary>
-    private static bool IsSocketRoot(string parent) =>
-        Path.GetFileName(parent) is LocalProcessRunner.McpSocketDir or LocalProcessRunner.McpShortSocketRoot;
-
-    private void RestrictToOwner(string directory, ILogger logger)
-    {
-        try { File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
-        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket directory {SocketDirectory} to 0700; the run's socket directory name may be listable by another local user on this host", _runId, directory); }
-    }
-
-    /// <summary>Restrict the socket file to the owner (0600) so another local user can't connect to the run's endpoint. A no-op on Windows where unix file modes don't apply. Best-effort — a chmod failure must NOT fail the endpoint (the 256-bit token is the authoritative gate), but it's logged as a Warning so it isn't fully silent.</summary>
-    private void SetOwnerOnly(string socketPath, ILogger logger)
-    {
-        if (OperatingSystem.IsWindows()) return;
-
-        try { File.SetUnixFileMode(socketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
-        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket to 0600; it may be group/other-accessible on this host", _runId); }
     }
 
     private static void Quietly(Action action)

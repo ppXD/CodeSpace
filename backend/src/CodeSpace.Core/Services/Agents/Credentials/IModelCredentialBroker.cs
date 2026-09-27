@@ -36,8 +36,9 @@ public interface IModelCredentialBroker
     Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken);
 
     /// <summary>
-    /// RE-OPEN an address this worker never minted: bind the port the request names, install a lease under the route
-    /// and bearer it names, and front the credential it carries. False — never a throw — when the address cannot be
+    /// RE-OPEN an address this worker never minted: bind the port the request names (and re-open the socket it names,
+    /// only once that port holds), install a lease under the route and bearer it names, and front the credential it
+    /// carries. False — never a throw — when the address cannot be
     /// restored, which the caller must treat as "this run's model access really is gone" and end the attempt exactly
     /// as it did before a re-bind existed.
     ///

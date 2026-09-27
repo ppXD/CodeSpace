@@ -7,8 +7,10 @@ using CodeSpace.Core.Services.Agents.Credentials;
 using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
@@ -575,6 +577,449 @@ public class ModelCredentialBrokerTests
         throw new Xunit.Sdk.XunitException($"{failure} (waited {budget.TotalSeconds}s)");
     }
 
+    // ── The per-run socket: the same lease, reached through a Unix socket a sandbox can have bound in ─────────────
+
+    [Fact]
+    public async Task A_call_over_the_lease_socket_is_relayed_with_the_tenants_key_and_one_without_the_token_is_refused()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var path = sockets.NewPath();
+
+        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()) with { SocketPath = path }, CancellationToken.None);
+        if (brokered is null) return;   // this host cannot bind a loopback listener at all — nothing to assert
+
+        brokered.SocketPath.ShouldBe(path, "the lease must say which socket it bound — that path is what the durable handle records for a re-attach to re-open");
+        brokered.ReachableFromNamespace.ShouldBeFalse(
+            "a lease served over a socket binds its TCP listener on LOOPBACK only: its namespaced children come in through the socket, so a wide bind would only hand the port to every neighbour on the host's network");
+
+        (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK,
+            "a call through the socket must reach the provider — the socket is spliced to the lease's own loopback listener, so it is answered by the same checks and the same relay a TCP caller meets, from a loopback source");
+        upstream.LastRequest!.Headers.GetValues("x-api-key").Single().ShouldBe(UpstreamKey, "the tenant's key is attached here, server-side, exactly as on the TCP path");
+        upstream.SeenHeaderValues.ShouldNotContain(brokered.RunToken, "and the run token is not forwarded — the splice copies bytes into the SAME relay, it does not add a second one");
+
+        (await CallOverSocketAsync(path, brokered, token: null)).ShouldBe(HttpStatusCode.Unauthorized,
+            "the socket is a second door to the same lock, not a way around it: a call presenting no bearer is refused exactly as it is on TCP");
+        upstream.Calls.ShouldBe(1, "and the refused call reached nobody");
+    }
+
+    [Fact]
+    public async Task A_lease_socket_is_0600_in_a_0700_directory_under_a_0700_layout_root()
+    {
+        if (OperatingSystem.IsWindows() || !Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+        var path = sockets.NewPath();
+
+        if (await broker.OpenAsync(LeaseFor(Guid.NewGuid()) with { SocketPath = path }, CancellationToken.None) is null) return;
+
+        var directory = Path.GetDirectoryName(path)!;
+        const UnixFileMode ownerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+        File.GetUnixFileMode(path).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite, "the socket is the run's model capability address; no other local user may connect to it");
+        File.GetUnixFileMode(directory).ShouldBe(ownerOnlyDirectory, "the run's own socket directory must be 0700, so no other local user can enter it");
+        File.GetUnixFileMode(Path.GetDirectoryName(directory)!).ShouldBe(ownerOnlyDirectory,
+            "and so must the layout root that LISTS the runs' unguessable directory names — a directory's mode guards its children, its name is guarded by its parent");
+    }
+
+    [Theory]
+    [InlineData("revoke")]
+    [InlineData("supersede")]
+    [InlineData("sweep")]
+    [InlineData("drop")]
+    [InlineData("dispose")]
+    public async Task Every_close_of_a_socket_lease_deletes_its_socket_file_and_keeps_its_directory(string close)
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), time);
+        var runId = Guid.NewGuid();
+        var path = sockets.NewPath();
+
+        try
+        {
+            if (await broker.OpenAsync(LeaseFor(runId, epoch: 7, ttl: TimeSpan.FromMinutes(2)) with { SocketPath = path }, CancellationToken.None) is null) return;
+
+            File.Exists(path).ShouldBeTrue("precondition: the open bound the lease's socket");
+
+            await CloseByAsync(close, broker, runId, time, sockets);
+
+            await WaitUntilAsync(() => !File.Exists(path), TimeSpan.FromSeconds(10),
+                $"the {close} path left the lease's socket file behind — every close must take the socket's address away with the lease, or a later call through it reaches whatever binds there next");
+
+            Directory.Exists(Path.GetDirectoryName(path)).ShouldBeTrue(
+                $"the {close} path deleted the socket's DIRECTORY. A running sandbox's bind pins that directory's inode, so a directory removed and recreated at the same path is invisible to it: the next worker's socket would never reach the child that the re-bind reports restored");
+        }
+        finally { broker.Dispose(); }
+    }
+
+    /// <summary>Take a socket lease down by one of the five paths that close a lease — so the theory above proves every one of them shares the same close.</summary>
+    private static async Task CloseByAsync(string close, LoopbackModelCredentialBroker broker, Guid runId, FakeTimeProvider time, BrokerSockets sockets)
+    {
+        switch (close)
+        {
+            case "revoke": await broker.RevokeAsync(runId, "test-revoke", fencedToEpoch: null, CancellationToken.None); break;
+            case "supersede": await broker.OpenAsync(LeaseFor(runId, epoch: 9) with { SocketPath = sockets.NewPath() }, CancellationToken.None); break;
+            case "sweep": time.Advance(TimeSpan.FromMinutes(5)); break;
+            case "drop": broker.BreakListenerForTest(runId); break;
+            case "dispose": broker.Dispose(); break;
+            default: throw new ArgumentOutOfRangeException(nameof(close), close, "not a close path");
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]   // the worker that minted it went away cleanly: its close deleted the socket file
+    [InlineData(true)]    // it crashed: its socket file is still there, bound to nothing
+    public async Task A_rebind_with_a_socket_reopens_it_at_the_recorded_path_after_the_worker_that_minted_it_is_gone(bool staleFileLeftBehind)
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var runId = Guid.NewGuid();
+        var path = sockets.NewPath();
+        BrokeredModelCredential brokered;
+
+        using (var workerA = LoopbackModelCredentialBroker.ForTest(new StubUpstream()))
+        {
+            if (await workerA.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = path }, CancellationToken.None) is not { } opened) return;
+
+            brokered = opened;
+            (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "precondition: the socket answers while the worker that minted it holds it");
+        }
+
+        if (staleFileLeftBehind) StaleUnixSocket.LeaveAt(path);
+
+        var upstream = new StubUpstream();
+        using var workerB = LoopbackModelCredentialBroker.ForTest(upstream);
+
+        (await workerB.RebindAsync(RebindOf(brokered, runId, epoch: 8) with { SocketPath = path }, CancellationToken.None)).ShouldBeTrue(
+            "worker B must re-open the socket the run's handle recorded — a sandboxed child's only way to its model is that path");
+
+        (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK,
+            customMessage: staleFileLeftBehind
+                ? "a crashed worker leaves its socket FILE behind, bound to nothing; the re-bind must clear it and bind the path again, or every re-attach after a crash answers nothing through the socket"
+                : "the socket must answer again at the SAME path — the child's bind of its directory sees the new socket file, and nothing else about the address may change");
+        (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK,
+            "and the loopback TCP address answers too, for a child on the host's own network that calls the port directly");
+        upstream.Calls.ShouldBe(2, "both calls were relayed by worker B");
+    }
+
+    [Fact]
+    public async Task A_rebind_while_another_worker_still_holds_the_port_is_refused_and_leaves_that_workers_socket_alone()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var upstreamA = new StubUpstream();
+        using var workerA = LoopbackModelCredentialBroker.ForTest(upstreamA);
+        using var workerB = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+        var runId = Guid.NewGuid();
+        var path = sockets.NewPath();
+
+        if (await workerA.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = path }, CancellationToken.None) is not { } brokered) return;
+
+        // Two workers on ONE host, both believing they own the run: worker A never went away. The port is the lock —
+        // worker B must lose it before it touches anything at the socket's path.
+        (await workerB.RebindAsync(RebindOf(brokered, runId, epoch: 8) with { SocketPath = path }, CancellationToken.None)).ShouldBeFalse(
+            "worker A still holds the run's port, so worker B's re-bind must be refused — that port is the lock between the two");
+
+        workerB.HasLease(runId).ShouldBeFalse("a refused re-bind installs nothing");
+        File.Exists(path).ShouldBeTrue(
+            "worker B deleted worker A's live socket file. The port is bound FIRST precisely so that a worker which loses it never touches the socket: delete it before the bind and a refused re-bind still cuts off every sandboxed child worker A is serving");
+        (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "and worker A's socket still answers its run");
+        upstreamA.Calls.ShouldBe(1, "through worker A, which is the worker that still holds it");
+    }
+
+    [Theory]
+    [InlineData(true, true)]    // the same port, route, bearer AND socket: the address this worker already serves
+    [InlineData(false, false)]  // the same port, route and bearer, but another socket: not this lease's address
+    public async Task A_rebind_adopts_a_held_lease_only_when_it_names_the_same_socket(bool sameSocket, bool adopted)
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var runId = Guid.NewGuid();
+        var held = sockets.NewPath();
+        var asked = sameSocket ? held : sockets.NewPath();
+
+        if (await broker.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = held }, CancellationToken.None) is not { } brokered) return;
+
+        (await broker.RebindAsync(RebindOf(brokered, runId, epoch: 9) with { SocketPath = asked }, CancellationToken.None)).ShouldBe(adopted,
+            customMessage: "a held lease is adopted only when EVERY coordinate of the address matches — a re-attach naming another socket describes a child calling somewhere this lease is not listening, and answering true would clear the posture of a run that cannot talk");
+
+        (await broker.RenewAsync(runId, adopted ? 9 : 7, CancellationToken.None)).ShouldBeTrue(adopted ? "the adopted lease answers the new claimant's fence" : "an address that was not adopted keeps its own fence");
+        (await CallOverSocketAsync(held, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "either way the held lease's socket is untouched and still answers");
+
+        if (!sameSocket) File.Exists(asked).ShouldBeFalse("and nothing was bound at the socket the refused re-bind named");
+    }
+
+    [Fact]
+    public async Task A_socket_that_cannot_be_bound_leaves_a_tcp_lease_and_says_so()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        var runId = Guid.NewGuid();
+
+        var brokered = await broker.OpenAsync(LeaseFor(runId) with { SocketPath = sockets.UnbindablePath() }, CancellationToken.None);
+        if (brokered is null) return;
+
+        brokered.SocketPath.ShouldBeNull("a socket that could not be bound must not be reported as bound — the handle would then promise a re-attach an address nothing ever served");
+        (await CallAsync(brokered, "/v1/messages", brokered.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK, "the lease itself still serves on loopback TCP, for a child on the host's own network");
+        logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal),
+            "and it must SAY the socket failed, naming the run — a lease that quietly lost its socket reads, to a sandboxed child, as a model that never answers");
+    }
+
+    [Fact]
+    public async Task A_rebind_whose_socket_cannot_be_reopened_is_refused_and_releases_the_port()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        using var occupied = new OccupiedPort();
+        var port = occupied.Port;
+        occupied.Dispose();   // a port nothing holds, so the TCP half of the re-bind succeeds and the socket half is what is under test
+
+        var request = RebindOn(port, epoch: 8) with { SocketPath = sockets.UnbindablePath() };
+
+        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeFalse(
+            "a re-bind that restored the port but not the socket has not restored the address a sandboxed child calls — answering true would clear the posture of a run that cannot talk");
+
+        broker.HasLease(request.RunId).ShouldBeFalse("and it installs nothing");
+        PortIsBound(port).ShouldBeFalse("the port it bound on the way must be released again, or the refused re-bind leaks a listener for the life of the worker");
+        logger.Warnings.ShouldContain(line => line.Contains(request.RunId.ToString(), StringComparison.Ordinal) && line.Contains(port.ToString(), StringComparison.Ordinal),
+            "the refusal names the run and the port, as every other re-bind refusal does");
+    }
+
+    [Fact]
+    public async Task A_supersede_naming_the_socket_its_predecessor_still_serves_gets_no_socket_and_says_so()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        var runId = Guid.NewGuid();
+        var path = sockets.NewPath();
+
+        if (await broker.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = path }, CancellationToken.None) is null) return;
+
+        var second = (await broker.OpenAsync(LeaseFor(runId, epoch: 8) with { SocketPath = path }, CancellationToken.None)).ShouldNotBeNull("the supersede itself still opens a lease");
+
+        second.SocketPath.ShouldBeNull(
+            "a lease must not report a socket its own supersede deletes: closing the predecessor removes whatever file sits at the path it served, so the new lease would promise a sandboxed child an address that is already gone — restored on paper, unreachable in fact");
+        logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal) && line.Contains(path, StringComparison.Ordinal),
+            "and it must say so, naming the run and the path — the caller broke the one-path-per-lease rule, and a TCP-only lease is what a launch that needs the socket then refuses");
+        (await CallAsync(second, "/v1/messages", second.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK, "the new lease still serves on loopback TCP");
+    }
+
+    [Fact]
+    public async Task A_rebind_naming_a_socket_another_lease_here_serves_is_refused_and_leaves_that_socket_alone()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var upstream = new StubUpstream();
+        using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
+        var path = sockets.NewPath();
+
+        if (await broker.OpenAsync(LeaseFor(Guid.NewGuid()) with { SocketPath = path }, CancellationToken.None) is not { } serving) return;
+
+        using var occupied = new OccupiedPort();
+        var port = occupied.Port;
+        occupied.Dispose();   // a free port, so only the socket can be what refuses this re-bind
+
+        var request = RebindOn(port, epoch: 8) with { SocketPath = path };
+
+        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeFalse(
+            "another lease on this worker already serves that socket: re-binding it would delete that lease's live socket file and hand its sandboxed child to a lease whose bearer it does not hold");
+        broker.HasLease(request.RunId).ShouldBeFalse("a refused re-bind installs nothing");
+        PortIsBound(port).ShouldBeFalse("and holds no port");
+        (await CallOverSocketAsync(path, serving, serving.RunToken)).ShouldBe(HttpStatusCode.OK, "the serving lease's socket still answers its own run");
+        upstream.Calls.ShouldBe(1, "through the lease that serves it");
+    }
+
+    [Fact]
+    public async Task A_closing_lease_gives_up_its_socket_before_its_port_so_a_worker_rebinding_mid_close_is_refused_and_its_socket_survives()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var runId = Guid.NewGuid();
+        var path = sockets.NewPath();
+        ModelCredentialRebindRequest? rebind = null;
+        bool? rebindMidClose = null;
+
+        using var workerB = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+
+        // Worker B stands in at the one instant the close order decides: after worker A's first close step, before its
+        // second. The re-bind is synchronous, so what it answers there is what a second worker on this host would get.
+        using var workerA = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), betweenCloseSteps: _ => rebindMidClose = workerB.RebindAsync(rebind!, CancellationToken.None).GetAwaiter().GetResult());
+
+        if (await workerA.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = path }, CancellationToken.None) is not { } brokered) return;
+
+        rebind = RebindOf(brokered, runId, epoch: 8) with { SocketPath = path };
+
+        await workerA.RevokeAsync(runId, "test-revoke", fencedToEpoch: null, CancellationToken.None);
+
+        rebindMidClose.ShouldBe(false,
+            "mid-close, worker A must still hold the port. Released first, worker B takes the port, clears the path and binds its own socket — and A's socket delete, still to come, then takes B's socket file away while B's re-bind has already answered true");
+        (await workerB.RebindAsync(rebind, CancellationToken.None)).ShouldBeTrue("once A has finished closing, B takes the port and then the socket");
+        File.Exists(path).ShouldBeTrue("and nothing of A's close is left to delete B's socket");
+        (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "B serves the run through it");
+    }
+
+    [Fact]
+    public async Task A_lease_whose_socket_acceptor_died_stops_being_claimed()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+        var runId = Guid.NewGuid();
+
+        if (await broker.OpenAsync(LeaseFor(runId) with { SocketPath = sockets.NewPath() }, CancellationToken.None) is null) return;
+
+        broker.HasLease(runId).ShouldBeTrue("precondition: the lease is live and its socket is accepting");
+
+        while (logger.Warned.Wait(0)) { }   // whatever the open itself warned about is not the signal awaited below
+
+        broker.BreakSocketForTest(runId);
+
+        // Woken by the drop's LAST effect, as for the TCP listener: the warning is written after the lease left the table.
+        (await logger.Warned.WaitAsync(TimeSpan.FromSeconds(10))).ShouldBeTrue("the socket's accept loop never reported that it stopped within 10s");
+
+        broker.HasLease(runId).ShouldBeFalse(
+            "a lease whose socket stopped accepting went on reporting itself live. Through that socket the lease is a sandboxed child's only door, so its connections sit in a backlog nothing accepts while every heartbeat reads true — Running, with no model and no explanation");
+        logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal), "and the drop says so, naming the run");
+    }
+
+    [Theory]
+    [InlineData(true, false, true)]    // a namespace and no socket: a child that reaches this worker at its namespace's gateway — the survivor the gateway path's retirement waits on
+    [InlineData(true, true, false)]    // a namespace and a socket: its child comes in through the socket
+    [InlineData(false, false, false)]  // no namespace: a child on the worker's own network, calling loopback — every shared-network run, and every run on a host that builds no namespaces
+    [InlineData(false, true, false)]   // a socket and no namespace
+    public async Task Only_a_rebind_of_a_handle_with_a_network_namespace_and_no_socket_says_it_is_a_legacy_rebind(bool netns, bool socket, bool legacyLine)
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        using var occupied = new OccupiedPort();
+        var port = occupied.Port;
+        occupied.Dispose();   // a port nothing holds: the re-bind must take, so the only thing that differs between the rows is the line
+
+        var owner = new AgentRunOwnerToken(Guid.NewGuid(), Guid.NewGuid(), 8);
+        var credentialId = Guid.NewGuid();
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow, LaunchHost = LocalProcessRunner.CurrentHost,
+            ModelBrokerPort = port, ModelBrokerRoute = McpRunToken.MintPathId(), ModelBrokerRunToken = McpRunToken.Mint(), ModelBrokerProvider = "Anthropic", ModelBrokerCredentialId = credentialId,
+            EgressNetnsKey = netns ? owner.RunId.ToString("N") : null, ModelBrokerSocketPath = socket ? sockets.NewPath() : null,
+        };
+        var logger = new CapturingLogger();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
+
+        // The executor's reading of the handle, then the broker's re-bind of it — the whole chain the line is decided on.
+        var request = AgentRunExecutor.RebindRequestFor(owner, Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId }).ShouldNotBeNull();
+
+        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeTrue("precondition: the re-bind took");
+
+        logger.Informations.Any(line => line.Contains(LoopbackModelCredentialBroker.LegacyRebindMarker, StringComparison.Ordinal)).ShouldBe(legacyLine,
+            customMessage: "the gateway path to the broker is retired only once no legacy re-bind has happened for a while, and this line is what says one did. It must name exactly the runs that retirement would cut off — a child in a network namespace with no socket to come in through. Missing there, the retirement reads silence and strands them; present for a run on the worker's own network (which calls loopback) or one with a socket, it never reads silence at all");
+    }
+
+    [Fact]
+    public void The_legacy_rebind_marker_is_pinned()
+    {
+        // Retiring the gateway path waits on this line going quiet in the deployment's logs, so the words are what an
+        // operator's query matches. A rename is a decision to change that query, not a refactor.
+        LoopbackModelCredentialBroker.LegacyRebindMarker.ShouldBe("legacy model-broker re-bind");
+    }
+
+    /// <summary>
+    /// POST one model call to a lease THROUGH its Unix socket — the way a sandboxed child reaches it — addressed as that
+    /// child addresses it (<c>127.0.0.1:&lt;port&gt;/&lt;route&gt;</c>), so the Host header the loopback listener matches
+    /// is the one production sends.
+    /// </summary>
+    private static async Task<HttpStatusCode> CallOverSocketAsync(string socketPath, BrokeredModelCredential brokered, string? token)
+    {
+        using var client = new HttpClient(new SocketsHttpHandler { ConnectCallback = (_, cancellationToken) => ConnectUnixAsync(socketPath, cancellationToken) }) { Timeout = TimeSpan.FromSeconds(15) };
+        using var response = await client.SendAsync(Authorized(brokered, "/v1/messages", token));
+
+        return response.StatusCode;
+    }
+
+    private static async ValueTask<Stream> ConnectUnixAsync(string socketPath, CancellationToken cancellationToken)
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+
+        try
+        {
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(socketPath), cancellationToken);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Socket paths laid out by the PRODUCTION layout (<see cref="LocalProcessRunner.ModelBrokerSocketPathFor"/>) under a
+    /// throwaway spool root, so a test's socket sits where a run's would — its own leaf directory under the layout root.
+    /// The spool key is one character so the canonical path fits the <c>AF_UNIX</c> cap under a long temp root. Unique
+    /// per test and removed afterwards, including a short-path fallback leaf if a long temp root ever forces one.
+    /// </summary>
+    private sealed class BrokerSockets : IDisposable
+    {
+        private readonly string _spoolRoot = Path.Combine(Path.GetTempPath(), "cs-bs-" + Guid.NewGuid().ToString("N")[..8]);
+        private readonly List<string> _leaves = [];
+        private readonly IDisposable _settings;
+
+        public BrokerSockets() => _settings = RuntimeSettings.Override(s => s with { AgentRunSpoolDirectory = _spoolRoot });
+
+        public string NewPath()
+        {
+            var path = LocalProcessRunner.ModelBrokerSocketPathFor("k", McpRunToken.MintPathId());
+            _leaves.Add(Path.GetDirectoryName(path)!);
+
+            return path;
+        }
+
+        /// <summary>A path whose directory can never be created, because a regular FILE sits where its parent would be — the one bind failure every host produces the same way.</summary>
+        public string UnbindablePath()
+        {
+            Directory.CreateDirectory(_spoolRoot);
+
+            var blocker = Path.Combine(_spoolRoot, "not-a-directory");
+            File.WriteAllText(blocker, "");
+
+            return Path.Combine(blocker, "leaf", "s");
+        }
+
+        public void Dispose()
+        {
+            _settings.Dispose();
+
+            foreach (var leaf in _leaves) { try { Directory.Delete(leaf, recursive: true); } catch { /* best-effort */ } }
+            try { Directory.Delete(_spoolRoot, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Theory]
     [InlineData(null, true)]                                    // no host stamp — but see the remarks: a handle that old carries no port either, so this arm is about the PREDICATE, not a reachable run
     [InlineData(ThisHost, true)]
@@ -594,6 +1039,25 @@ public class ModelCredentialBrokerTests
 
         (request is not null).ShouldBe(built,
             customMessage: "the agent calls a port on the machine it was LAUNCHED on. Binding that number on a different worker answers nobody at all — and because the caller reads a built request as 'the address is back', it would also clear the posture that says this run has no model, leaving a dead run recorded as healthy and never landed");
+    }
+
+    [Theory]
+    [InlineData("/spool/k/broker/segment/s")]
+    [InlineData(null)]
+    public void A_rebind_carries_the_socket_its_handle_recorded(string? socketPath)
+    {
+        var credentialId = Guid.NewGuid();
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow, LaunchHost = LocalProcessRunner.CurrentHost,
+            ModelBrokerPort = 44444, ModelBrokerRoute = "route-id", ModelBrokerRunToken = "a-recorded-run-token", ModelBrokerProvider = "Anthropic", ModelBrokerCredentialId = credentialId,
+            ModelBrokerSocketPath = socketPath,
+        };
+
+        var request = AgentRunExecutor.RebindRequestFor(new(Guid.NewGuid(), Guid.NewGuid(), 8), Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId }).ShouldNotBeNull();
+
+        request.SocketPath.ShouldBe(socketPath,
+            customMessage: "the re-bind must re-open the socket the launch's lease served, or a sandboxed child whose only door is that socket is left calling nothing; and a handle that recorded none must ask for none, which is what keeps it on the legacy wide re-bind its gateway-addressed child needs");
     }
 
     /// <summary>Stands in for this worker's own host identity inside <c>[InlineData]</c>, which cannot carry a runtime value.</summary>
@@ -672,9 +1136,25 @@ public class ModelCredentialBrokerTests
             "the mixed-version deploy story in one line: old handles keep the outcome they always had, and only handles that recorded an address survive a restart");
     }
 
+    [Fact]
+    public void A_handle_names_its_broker_socket_only_when_it_has_one()
+    {
+        var without = new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp/s", Deadline = DateTimeOffset.UtcNow, ModelBrokerPort = 44444 };
+        var with = without with { ModelBrokerSocketPath = "/spool/k/broker/segment/s" };
+
+        JsonSerializer.Serialize(without, AgentJson.Options).ShouldNotContain("modelBrokerSocketPath",
+            customMessage: "a handle with no broker socket must serialize exactly as one written before the field existed, so a worker on this build writes the same row a worker on the previous build did for every run that has no socket");
+
+        JsonSerializer.Deserialize<SandboxHandle>(JsonSerializer.Serialize(with, AgentJson.Options), AgentJson.Options)!.ModelBrokerSocketPath.ShouldBe("/spool/k/broker/segment/s",
+            "and one that has a socket must carry it through the round-trip — it is the only record of the path a re-attach has to re-open");
+    }
+
     private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<LoopbackModelCredentialBroker>
     {
         public List<string> Warnings { get; } = [];
+
+        /// <summary>The Information lines, kept apart from <see cref="Warnings"/> so the assertions on those stay exactly what they were.</summary>
+        public List<string> Informations { get; } = [];
 
         /// <summary>Released AFTER each warning is recorded, so a waiter that acquires it reads a <see cref="Warnings"/> that already holds that line.</summary>
         public SemaphoreSlim Warned { get; } = new(0);
@@ -684,6 +1164,8 @@ public class ModelCredentialBrokerTests
 
         public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information) Informations.Add(formatter(state, exception));
+
             if (logLevel < Microsoft.Extensions.Logging.LogLevel.Warning) return;
 
             Warnings.Add(formatter(state, exception));

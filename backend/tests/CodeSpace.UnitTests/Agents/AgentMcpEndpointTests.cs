@@ -298,6 +298,27 @@ public class AgentMcpEndpointTests
             customMessage: "the per-run socket must be owner-only (0600) — another local user must not be able to connect");
     }
 
+    [Fact]
+    public async Task An_endpoint_reopened_over_a_crashed_incarnations_socket_file_clears_it_and_serves()
+    {
+        if (OperatingSystem.IsWindows() || !Socket.OSSupportsUnixDomainSockets) return;
+
+        using var dir = new TempDir();
+        var socketPath = Path.Combine(dir.Path, "mcp.sock");
+        var connects = new AgentMcpConnectRegistry();
+        var runId = Guid.NewGuid();
+
+        // A re-attach after the worker was SIGKILLed or OOM-killed: its socket file is still at the path the agent's
+        // declaration names, bound to nothing.
+        StaleUnixSocket.LeaveAt(socketPath);
+
+        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "tok", connects, new TrackingScope(), CancellationToken.None, NullLogger.Instance);
+
+        using var client = await ConnectAsync(socketPath);
+
+        client.Connected.ShouldBeTrue("the re-opened endpoint must accept at the SAME path — a stale file left in place makes the bind fail, and every re-attach after a crash then leaves the agent without its tools");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>

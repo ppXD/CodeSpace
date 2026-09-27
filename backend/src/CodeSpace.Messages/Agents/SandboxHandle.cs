@@ -199,6 +199,17 @@ public sealed record SandboxHandle
     public string? ModelBrokerProvider { get; init; }
 
     /// <summary>
+    /// The per-run Unix socket this run's brokered lease was ALSO served on, recorded so a re-attach re-opens it at the
+    /// same path — the path a sandbox's directory bind still points at. The re-bind takes <see cref="ModelBrokerPort"/>
+    /// on loopback FIRST and touches the socket only once it holds that port, because the port is the lock between two
+    /// workers on one host. Null when the lease had no socket, which is every handle written before this field existed:
+    /// such a handle takes the legacy re-bind, wide first. Omitted from the JSON when null, so a handle without one is
+    /// byte-identical to one written before the field.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModelBrokerSocketPath { get; init; }
+
+    /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
     /// deny-by-default allowlist was enforceable, or a network-off run was sealed to its model broker, and a netns was
     /// set up. It is the teardown handle: the netns / veth /
