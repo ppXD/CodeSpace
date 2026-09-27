@@ -45,14 +45,17 @@ public sealed record SandboxConfinement
     /// <summary>Why the host could not confine — one of the <c>Reason*</c> constants. Null for every outcome but <see cref="SandboxConfinementOutcome.Unconfined"/>.</summary>
     public string? Reason { get; init; }
 
-    /// <summary>Whether the launch severed the agent from the network — a fresh EMPTY net namespace (<c>--unshare-net</c>), or one SEALED to its model broker (<see cref="EgressSealedToBroker"/>, which says which) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
+    /// <summary>Whether the launch severed the agent from the network — a fresh EMPTY net namespace (<c>--unshare-net</c>), with or without its model broker reachable through a relay (<see cref="EgressSealedToBroker"/>, which says which) — true when confinement applied AND its egress policy came out anything but full: the run's network was off, OR it asked for an allowlist the sandbox cannot yet enforce and so failed closed. False for a plain shared-network run and for every unconfined one.</summary>
     public bool NetworkSevered { get; init; }
 
     /// <summary>
-    /// Whether the run's severed network was a SEALED namespace rather than an empty one: no route, no NAT and no DNS,
-    /// with exactly one reachable destination — the run's own model-credential broker on the namespace's gateway. The
-    /// shape a network-off run with a brokered model gets where the host can build it, because an empty namespace
-    /// would cut that run off from its model too. Implies <see cref="NetworkSevered"/>; false for every other run.
+    /// Whether the run's severed network still reached exactly one destination: the run's own model-credential broker.
+    /// The shape a network-off run with a brokered model gets on a confining host — an empty namespace with only
+    /// loopback, where the <c>codespace-mcp relay</c> answers the CLI's broker address and carries each connection to
+    /// the lease's socket bound read-only into the sandbox — because an empty namespace alone would cut that run off
+    /// from its model too. A run launched before the relay reached the broker through a namespace sealed to it (no
+    /// route, no NAT, no DNS, one gateway port) and recorded the same fact. Implies <see cref="NetworkSevered"/>; false
+    /// for every other run.
     /// </summary>
     public bool EgressSealedToBroker { get; init; }
 

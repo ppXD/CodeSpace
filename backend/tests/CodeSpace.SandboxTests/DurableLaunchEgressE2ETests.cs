@@ -1,8 +1,11 @@
 using System.Diagnostics;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Credentials.Broker;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Shouldly;
+using Xunit.Abstractions;
 
 namespace CodeSpace.SandboxTests;
 
@@ -18,7 +21,7 @@ namespace CodeSpace.SandboxTests;
 /// Uses raw IPs over plain HTTP so the signal is purely the egress filter — not DNS, not TLS.
 /// </summary>
 [Trait("Category", "Sandbox")]
-public sealed class DurableLaunchEgressE2ETests
+public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
 {
     private const string Allowed = "1.1.1.1";   // Cloudflare — allowlisted
     private const string Denied = "8.8.8.8";    // Google — NOT allowlisted, must be dropped
@@ -45,6 +48,83 @@ public sealed class DurableLaunchEgressE2ETests
         deny.Status.ShouldBe(SandboxStatus.Failed, $"a NON-allowed host ({Denied}) must be DROPPED by the launched netns — the deny-by-default filter is the whole point. If this succeeds, the filter is not enforcing inside the durable launch.");
 
         (await NetnsExistsAsync(NamespaceOf(denyKey))).ShouldBeFalse("the denied run's netns is reaped on the terminal path too");
+    }
+
+    [Fact]
+    public async Task An_allowlist_run_reaches_its_broker_through_the_relay_and_its_allowlist_still_holds()
+    {
+        // An allowlist run's namespace is its own, so its lease's loopback port is not its loopback: it reaches its
+        // broker through the relay in front of its CLI and the lease's socket — which bubblewrap, sharing the filtered
+        // namespace, binds read-only — while the allowlist that namespace enforces decides everything else.
+        if (!FilteredEgressNetns.IsSupported || BubblewrapSandbox.Available is null) return;   // the root lane, with ip, nft and bwrap, is authoritative
+
+        var runId = Guid.NewGuid();
+        var permissions = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist };
+        var socketPath = AgentRunExecutor.ModelBrokerSocketPathFor(permissions, runId).ShouldNotBeNull("the executor mints a socket for an allowlist run on Linux");
+        using var broker = LoopbackModelCredentialBroker.ForTest(new OkUpstream());
+        var brokered = (await broker.OpenAsync(new() { RunId = runId, TeamId = Guid.NewGuid(), Epoch = 1, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-allowlist-e2e" }, Ttl = TimeSpan.FromMinutes(5), SocketPath = socketPath }, CancellationToken.None)).ShouldNotBeNull();
+        var spec = AgentRunExecutor.ApplyModelBrokerChannel(new SandboxSpec
+        {
+            Command = "/usr/bin/python3", Args = ["-c", AllowlistProbe], AllowNetwork = true, EgressAllowlist = [Allowed], TimeoutSeconds = 60,
+            Environment = new Dictionary<string, string> { ["BROKER_URL"] = brokered.BaseUrl, ["RUN_TOKEN"] = brokered.RunToken, ["SOCK_PATH"] = socketPath },
+        }, brokered);
+
+        spec.ModelBrokerSocketPath.ShouldBe(socketPath, "fixture check: the executor's own hardening stamps an allowlist run with its lease's socket");
+
+        var key = Guid.NewGuid().ToString("N");
+        var runner = new LocalProcessRunner();
+        var lines = new List<string>();
+
+        try
+        {
+            var handle = await runner.LaunchAsync(spec, key, CancellationToken.None);
+            handle.EgressNetnsKey.ShouldBe(key, "an enforceable allowlist still launches the run inside its filtered netns");
+            handle.Confinement.ShouldNotBeNull().EgressSealedToBroker.ShouldBeFalse("an allowlist run is filtered, not sealed: it has more than one destination");
+
+            var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text); return Task.CompletedTask; }, CancellationToken.None);
+            var probe = string.Join(' ', lines);
+
+            result.Status.ShouldBe(SandboxStatus.Success, $"the probe must run to its end; stderr: {result.Stderr}");
+            probe.ShouldContain("broker=200", customMessage: $"the allowlist run's broker answers through the relay; check `ls -la {Path.GetDirectoryName(socketPath)}`; probe: {probe}");
+            probe.ShouldContain("allowed=open", customMessage: $"the allowlisted IP is still reachable through the namespace's NAT; probe: {probe}");
+            probe.ShouldNotContain("denied=open", customMessage: $"and a host outside the allowlist is still dropped; probe: {probe}");
+            SealedEgressE2ETests.AssertSocketDirectoryIsReadOnly(ProbeValue(probe, "sock_unlink"), ProbeValue(probe, "sock_plant"), socketPath);
+
+            output.WriteLine($"[durable-egress-e2e] ran allowlist-relay {probe}");
+        }
+        finally
+        {
+            try { Directory.Delete(LocalProcessRunner.SpoolDirectoryFor(key), recursive: true); } catch { /* best-effort */ }
+        }
+
+        (await NetnsExistsAsync(NamespaceOf(key))).ShouldBeFalse("the run's filtered netns is reaped on completion");
+    }
+
+    /// <summary>The broker through the relay, the two writes the socket's read-only directory must refuse, and the allowlisted IP and a denied one, from inside the run.</summary>
+    private const string AllowlistProbe = SealedEgressE2ETests.SocketDirectoryWrites + "\n" + """
+        import os, socket, urllib.request
+        req = urllib.request.Request(os.environ['BROKER_URL'] + '/v1/messages', data=b'{}', method='POST', headers={'Authorization': 'Bearer ' + os.environ['RUN_TOKEN'], 'content-type': 'application/json'})
+        try:
+            broker = str(urllib.request.urlopen(req, timeout=10).status)
+        except Exception as e:
+            broker = type(e).__name__
+        unlink, plant = sock_writes(os.environ['SOCK_PATH'])
+        def tcp(host):
+            try:
+                socket.create_connection((host, 80), timeout=6).close(); return 'open'
+            except OSError as e:
+                return type(e).__name__
+        print('broker=%s sock_unlink=%s sock_plant=%s allowed=%s denied=%s' % (broker, unlink, plant, tcp('1.1.1.1'), tcp('8.8.8.8')))
+        """;
+
+    /// <summary>The value the probe printed for <paramref name="key"/> (<c>key=value</c>), or <c>?</c> when it printed none.</summary>
+    private static string ProbeValue(string probe, string key) =>
+        probe.Split(' ').FirstOrDefault(pair => pair.StartsWith(key + "=", StringComparison.Ordinal))?[(key.Length + 1)..] ?? "?";
+
+    private sealed class OkUpstream : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true}") });
     }
 
     /// <summary>Launch a real durable run that curls <paramref name="target"/> with an allowlist of <paramref name="allow"/>, observe it to completion, and return the result. Also asserts the run was launched inside a netns keyed by the run.</summary>

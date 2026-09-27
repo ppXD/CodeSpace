@@ -67,11 +67,12 @@
 # arms it (Sandbox__RequireConfinement=true), so a lost grant refuses runs instead of unconfining them.
 #
 # NETWORK-OFF runs (Confined and Standard, the default tier) are severed by bubblewrap (--unshare-net: loopback only).
-# One whose model is brokered still has to reach its broker. Once the model-broker relay ships (`codespace-mcp relay`),
-# it does so through a per-run Unix socket bound read-only into the sandbox, which needs no root and nothing beyond
-# the grants above. Without the relay it is SEALED to the broker through a per-run namespace instead (no route, no NAT,
-# no DNS, one gateway port), which needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN (FilteredEgressNetns.CanSeal); a worker
-# that confines but cannot seal refuses such a run before it spends anything (sandbox_sealed_egress_unavailable).
+# One whose model is brokered still reaches its broker: `codespace-mcp relay` runs inside the sandbox in front of the
+# CLI, answers the CLI's 127.0.0.1:<port>, and carries each call to a per-run Unix socket bound read-only into the
+# sandbox. That needs no root and nothing beyond the grants above — only the codespace-mcp helper, which this image
+# ships. A worker that confines but has no helper that can relay refuses such a run before it spends anything
+# (sandbox_sealed_egress_unavailable): so does one whose CODESPACE_MCP_PROXY_PATH names a build from before the relay
+# or a self-contained publish. An allowlist run reaches its broker through the same relay.
 #
 # EGRESS FILTERING (an allowlist run) needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN + a writable net.ipv4.ip_forward on
 # top of these packages: FilteredEgressPlan runs `ip netns add` (CAP_SYS_ADMIN: it unshares a network namespace and

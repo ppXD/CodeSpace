@@ -35,18 +35,12 @@ public sealed record BrokeredModelCredential(string BaseUrl, string RunToken, Da
     public string? RebindRoute { get; init; }
 
     /// <summary>
-    /// Whether the lease listens on every address, so a child inside a per-run network namespace — which reaches the
-    /// worker at its namespace gateway, never on loopback — can reach it. False (the default) is the fail-closed
-    /// answer: a broker that could only bind loopback, or one that does not say, cannot serve a sealed network-off run,
-    /// and such a run is refused before launch rather than left calling an address nothing answers.
-    /// </summary>
-    public bool ReachableFromNamespace { get; init; }
-
-    /// <summary>
     /// The per-run Unix socket this lease is ALSO served on — the path the request asked for, once bound — or null when
     /// none was asked for or it was not bound: its bind failed, or another live lease on this worker still serves that
-    /// path. The lease then serves TCP alone, and the broker says so in a Warning.
-    /// Stamped on the durable handle beside <see cref="RebindPort"/>, so a re-attaching worker re-opens the same path.
+    /// path. The lease then serves loopback TCP alone, and the broker says so in a Warning. It is the only way a child
+    /// in a network of its own reaches the lease, so a confining runner refuses such a child whose lease came back
+    /// without one. Stamped on the durable handle beside <see cref="RebindPort"/>, so a re-attaching worker re-opens the
+    /// same path.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? SocketPath { get; init; }

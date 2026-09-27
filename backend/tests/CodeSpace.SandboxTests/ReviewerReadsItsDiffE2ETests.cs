@@ -28,9 +28,10 @@ namespace CodeSpace.SandboxTests;
 /// RUNS the command, not whether a model would choose to.</para>
 ///
 /// <para>Every arm runs its tier's production posture, network off included. Under bubblewrap a network-off run whose
-/// model is brokered runs in a namespace sealed to that broker (<c>AgentRunExecutor.ApplySealedEgress</c>), so it
-/// reaches its model and nothing else; before that seal it was severed from the broker too and reached no model at
-/// all, which is why these arms once had to turn the network on to ask anything.</para>
+/// model is brokered is severed, and reaches its model through the <c>codespace-mcp relay</c> in front of its CLI and
+/// the lease's socket bound read-only into the sandbox (<c>AgentRunExecutor.ApplyModelBrokerChannel</c>), so it
+/// reaches its model and nothing else; before that it was severed from the broker too and reached no model at all,
+/// which is why these arms once had to turn the network on to ask anything.</para>
 ///
 /// <para>What it found on Linux, pinned so that a fix has to flip it deliberately: both CLIs read the diff under our
 /// bubblewrap, over a workspace the kernel mounts read-only for a Confined run. Codex does so only because the runner
@@ -101,12 +102,12 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         var repo = NewReviewRepository();
         var upstream = new ScriptedModelUpstream([$"git diff {repo.Base} {repo.Head}"], $"REVIEW-DONE-{repo.Nonce}");
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
-        var brokered = await OpenLeaseAsync(broker);
+        var brokered = await OpenLeaseAsync(broker, AgentAutonomyPolicy.Derive(tier));
 
         var production = AgentAutonomyPolicy.Derive(tier);
         var task = ReviewTask(harnessKind, repo, production, Brokered(harness, brokered));
 
-        var run = await RunAsync(harness, task, brokered.RebindPort);
+        var run = await RunAsync(harness, task, brokered);
 
         run.Spec.ReadOnlyWorkingDirectory.ShouldBe(production.WriteScope == AgentWriteScope.ReadOnly, $"fixture check: a {tier} reviewer must be launched over the workspace mount its write scope gives it, or this arm does not show git reads surviving it");
 
@@ -150,11 +151,11 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         var repo = NewReviewRepository();
         var upstream = new ScriptedModelUpstream([$"echo TAMPER-{repo.Nonce} > app.txt"], $"REVIEW-DONE-{repo.Nonce}");
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
-        var brokered = await OpenLeaseAsync(broker);
+        var brokered = await OpenLeaseAsync(broker, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined));
 
         var task = ReviewTask(harnessKind, repo, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined), Brokered(harness, brokered));
 
-        var run = await RunAsync(harness, task, brokered.RebindPort);
+        var run = await RunAsync(harness, task, brokered);
 
         var fedBack = ToolOutputs(upstream.Requests);
 
@@ -196,13 +197,13 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         var hookProbe = Path.Combine(repo.Directory, ".git", "hooks", $"cs-probe-{repo.Nonce}");
         var upstream = new ScriptedModelUpstream([$"printf CHANGED-{repo.Nonce} > app.txt", $"printf x > {systemProbe}", $"touch {hookProbe}"], $"WORK-DONE-{repo.Nonce}");
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
-        var brokered = await OpenLeaseAsync(broker);
+        var brokered = await OpenLeaseAsync(broker, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard));
 
         var task = ReviewTask(harnessKind, repo, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard), Brokered(harness, brokered)) with { Goal = "Change app.txt." };
 
         ReviewRun run;
 
-        try { run = await RunAsync(harness, task, brokered.RebindPort); }
+        try { run = await RunAsync(harness, task, brokered); }
         finally { if (File.Exists(systemProbe)) File.Delete(systemProbe); }   // a failed refusal must not leave the probe behind for the next run
 
         run.Result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the Standard Codex run did not finish cleanly (exit {run.Result.ExitCode}); stderr: {Tail(run.Result.Stderr)}; last tool output: {Tail(ToolOutputs(upstream.Requests), 600)}");
@@ -217,33 +218,36 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
     [Theory]
     [InlineData(ClaudeCodeHarness.HarnessKind)]
     [InlineData(CodexHarness.HarnessKind)]
-    public async Task A_network_off_reviewer_reaches_its_model_through_the_sealed_namespace(string harnessKind)
+    public Task A_network_off_reviewer_reaches_its_model_through_the_relay(string harnessKind) => NetworkOffReviewerAsync(harnessKind, lane: "root");
+
+    /// <summary>
+    /// The network-off arm, for either lane. The durable launch every agent run takes, network off, under confinement:
+    /// the run must be launched severed, with no namespace of the worker's (so the shipped non-root worker can launch
+    /// it too), reach its model through the relay in front of its CLI and the lease's socket, read the diff, and be
+    /// recorded as sealed to its broker. Before the seal this arm pinned the opposite — a Confined reviewer reached no model.
+    /// </summary>
+    internal async Task NetworkOffReviewerAsync(string harnessKind, string lane)
     {
-        // The durable launch every agent run takes, network off, under confinement: the run must be launched inside a
-        // namespace sealed to its broker (recorded on its handle), reach its model through it, read the diff, and leave
-        // no namespace behind. Before the seal this arm pinned the opposite — a Confined reviewer reached no model.
         var harness = HarnessFor(harnessKind);
 
         if (!Armed(harnessKind) || OperatingSystem.IsWindows()) return;
 
         if (BubblewrapSandbox.Available is null)
         {
-            // Only confinement seals the network: an unconfined host would let this run reach the broker and say nothing.
+            // Only confinement severs the network: an unconfined host would let this run reach the broker and say nothing.
             BubblewrapSandbox.IsRequired.ShouldBeFalse("Sandbox:RequireConfinement is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove what confinement does here");
             return;
         }
-
-        FilteredEgressNetns.CanSeal.ShouldBeTrue("this confining host could not build a throwaway namespace, so every network-off brokered run on it is severed from its model");
 
         await RequirePinnedBinaryAsync(harness, harnessKind);
 
         var repo = NewReviewRepository();
         var upstream = new ScriptedModelUpstream([$"git diff {repo.Base} {repo.Head}"], $"REVIEW-DONE-{repo.Nonce}");
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
-        var brokered = await OpenLeaseAsync(broker);
+        var brokered = await OpenLeaseAsync(broker, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined));
 
         var task = ReviewTask(harnessKind, repo, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Confined), Brokered(harness, brokered));
-        var spec = ProductionSpec(harness, task, brokered.RebindPort);
+        var spec = ProductionSpec(harness, task, brokered);
         var key = Guid.NewGuid().ToString("N");
         var runner = new LocalProcessRunner();
         var lines = new List<string>();
@@ -255,13 +259,14 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds((task.TimeoutSeconds ?? 300) + 60));
         var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text); return Task.CompletedTask; }, budget.Token);
 
-        handle.EgressNetnsKey.ShouldBe(key, "a network-off brokered run must be launched inside a sealed namespace keyed by the run");
+        spec.ModelBrokerSocketPath.ShouldBe(brokered.SocketPath, "fixture check: the spec carries the socket its lease bound, as the executor's own hardening stamps it");
+        handle.EgressNetnsKey.ShouldBeNull("a network-off brokered run gets no namespace of the worker's: the relay reaches its broker without one");
         handle.Confinement.ShouldNotBeNull().EgressSealedToBroker.ShouldBeTrue("the launch must record that the run was sealed to its broker");
-        result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the {harnessKind} reviewer did not finish cleanly through the sealed namespace (exit {result.ExitCode}); stderr: {Tail(result.Stderr)}; requests the model saw: {Describe(upstream.Requests)}");
-        upstream.Requests.ShouldContain(r => r.Body.Contains($"MARKER-NEW-{repo.Nonce}", StringComparison.Ordinal), $"the diff must reach the model through the sealed namespace; last tool output: {Tail(ToolOutputs(upstream.Requests), 600)}");
+        result.Status.ShouldBe(SandboxStatus.Success, customMessage: $"the {harnessKind} reviewer did not finish cleanly through the relay (exit {result.ExitCode}); stderr: {Tail(result.Stderr)}; requests the model saw: {Describe(upstream.Requests)}");
+        upstream.Requests.ShouldContain(r => r.Body.Contains($"MARKER-NEW-{repo.Nonce}", StringComparison.Ordinal), $"the diff must reach the model through the relay; last tool output: {Tail(ToolOutputs(upstream.Requests), 600)}");
         (await GitAsync(repo.Directory, "status --porcelain")).ShouldBeEmpty("a Confined reviewer leaves the workspace exactly as it found it");
 
-        output.WriteLine($"{RanMarker} network-off-sealed {harnessKind} seconds={clock.Elapsed.TotalSeconds:F1}");
+        output.WriteLine($"{RanMarker} {(lane == "root" ? "" : lane + " ")}network-off-relayed {harnessKind} uid={NonRootWorker.EffectiveUid()} seconds={clock.Elapsed.TotalSeconds:F1}");
     }
 
     public void Dispose()
@@ -302,13 +307,17 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         version.ShouldContain(pinned, customMessage: $"'{command} --version' reported '{version.Trim()}', but production pins {pinned} (backend/Dockerfile.worker) — the answer this test gives is only about the pinned binary");
     }
 
-    private static async Task<BrokeredModelCredential> OpenLeaseAsync(LoopbackModelCredentialBroker broker)
+    /// <summary>The lease the executor opens for a run with these permissions — with the socket it asks for exactly where the run's network will be its own (<see cref="AgentRunExecutor.ModelBrokerSocketPathFor"/>).</summary>
+    private async Task<BrokeredModelCredential> OpenLeaseAsync(LoopbackModelCredentialBroker broker, AgentPermissions permissions)
     {
+        var runId = Guid.NewGuid();
         var lease = new ModelCredentialLeaseRequest
         {
-            RunId = Guid.NewGuid(), TeamId = Guid.NewGuid(), Epoch = 1, Ttl = TimeSpan.FromMinutes(10),
+            RunId = runId, TeamId = Guid.NewGuid(), Epoch = 1, Ttl = TimeSpan.FromMinutes(10), SocketPath = AgentRunExecutor.ModelBrokerSocketPathFor(permissions, runId),
             Upstream = new ResolvedModelCredential { Provider = "Custom", ApiKey = "sk-review-e2e-upstream", BaseUrl = "https://scripted-model.invalid" },
         };
+
+        if (lease.SocketPath is { } socketPath) _directories.Add(Path.GetDirectoryName(socketPath)!);
 
         return (await broker.OpenAsync(lease, CancellationToken.None)).ShouldNotBeNull("the broker must be able to listen on this host — a brokered run has no other route to its model");
     }
@@ -325,13 +334,13 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         Environment = new Dictionary<string, string>(brokeredEnvironment) { ["HOME"] = NewDirectory("review-home") },
     };
 
-    /// <summary>The spec the executor would hand the runner: the harness invocation sealed to the run's broker lease when its network is off, and with its write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
-    private static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, int? brokerPort) =>
-        AgentRunExecutor.ApplyWriteScope(AgentRunExecutor.ApplySealedEgress(harness.BuildInvocation(task), task.Permissions, brokerPort), task.Permissions);
+    /// <summary>The spec the executor would hand the runner: the harness invocation with its broker channel stamped when its network is off, and with its write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
+    private static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered) =>
+        AgentRunExecutor.ApplyWriteScope(AgentRunExecutor.ApplyModelBrokerChannel(harness.BuildInvocation(task), brokered), task.Permissions);
 
-    private static async Task<ReviewRun> RunAsync(IAgentHarness harness, AgentTask task, int? brokerPort)
+    private static async Task<ReviewRun> RunAsync(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered)
     {
-        var spec = ProductionSpec(harness, task, brokerPort);
+        var spec = ProductionSpec(harness, task, brokered);
         var lines = new List<string>();
 
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds((task.TimeoutSeconds ?? 300) + 60));

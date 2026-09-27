@@ -104,28 +104,32 @@ public partial class AgentRunExecutorTests
     }
 
     [Theory]
-    [InlineData(AgentAutonomyLevel.Standard, true)]    // network off: the port a confining runner seals the run to its broker with
-    [InlineData(AgentAutonomyLevel.Trusted, false)]    // network on already reaches its broker; nothing to seal
+    [InlineData(AgentAutonomyLevel.Standard, true)]    // network off: the port and socket the runner's relay carries the run to its broker with
+    [InlineData(AgentAutonomyLevel.Trusted, false)]    // network on already reaches its broker on loopback; nothing to relay
     public async Task A_brokered_network_off_launch_carries_its_lease_port_to_the_runner(AgentAutonomyLevel autonomy, bool expectPort)
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // The WIRING pin: ApplySealedEgress's unit tests would pass even if HardenSpec never fed it the lease, and a
-        // network-off brokered run would then be severed from its broker on every host that confines.
+        // The WIRING pin: ApplyModelBrokerChannel's unit tests would pass even if HardenSpec never fed it the lease, and a
+        // network-off brokered run would then be severed from its broker on every host that confines. The socket is the
+        // executor's own on Linux — it asks for one only there, and only for a run whose network is its own.
         var teamId = await SeedTeamAsync();
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-sealed-port-fixture");
         var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = credId, Autonomy = autonomy, Permissions = AgentAutonomyPolicy.Derive(autonomy) });
         var runner = new SpecRecordingDurableRunner();
 
-        using var broker = new LoopbackModelCredentialBroker();
+        using var broker = new RecordingBroker(new LoopbackModelCredentialBroker());
         var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo done");
 
         await ExecuteAsync(runId, harness, runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), credentialBroker: broker);
 
         var launched = runner.Launched.ShouldNotBeNull("the executor must have launched — a null spec means it failed before reaching the runner");
         var leasePort = new Uri(harness.BuiltTask!.Environment["SCRIPTED_BASE_URL"].Replace(SandboxSpec.ModelBrokerHostToken, "127.0.0.1", StringComparison.Ordinal)).Port;
+        var expectSocket = expectPort && OperatingSystem.IsLinux();
 
         launched.ModelBrokerPort.ShouldBe(expectPort ? leasePort : null, $"a {autonomy} brokered run must {(expectPort ? "" : "not ")}hand the runner the port of the lease its CLI was pointed at");
+        broker.Opens.ShouldHaveSingleItem().SocketPath.ShouldBe(expectSocket ? launched.ModelBrokerSocketPath : null, $"the lease asks for a socket exactly where its child will need one (linux={OperatingSystem.IsLinux()})");
+        (launched.ModelBrokerSocketPath is not null).ShouldBe(expectSocket, "and the runner is handed the socket the lease bound, so its relay knows where to carry the CLI");
     }
 
     [Fact]
@@ -168,21 +172,29 @@ public partial class AgentRunExecutorTests
             .ShouldBe("Network: off (Standard) — confined: egress sealed to the run's model broker");
     }
 
-    [Fact]
-    public async Task A_network_off_brokered_run_its_runner_cannot_seal_is_refused_before_it_spends_or_launches()
+    [Theory]
+    [InlineData(false)]   // no helper where the worker looks
+    [InlineData(true)]    // a helper built before the relay, which CODESPACE_MCP_PROXY_PATH can name: its MCP proxy reads the relay's argv as its own
+    public async Task A_network_off_brokered_run_a_confining_runner_cannot_relay_is_refused_before_it_spends_or_launches(bool preRelayHelper)
     {
         if (OperatingSystem.IsWindows()) return;
 
         // The ORDER is the claim: the runner is asked while a refusal still costs nothing. A run owned by a workflow run
         // records a spend row the moment it is admitted — even with no cap — so an absent row proves the refusal came
-        // first; a null launch proves no process started; and the lease must be withdrawn like any finished run's.
+        // first; a null launch proves no process started; and the lease must be withdrawn like any finished run's. The
+        // runner confines and its admission is the local runner's own, over a helper path that does not exist, or over
+        // one that is there and does not answer as the relay — admitted, its CLI would never start, after the spend.
+        using var helper = new TempDir();
+        var helperPath = Path.Combine(helper.Path, "codespace-mcp");
+        if (preRelayHelper) await WritePreRelayHelperAsync(helperPath);
+
         var teamId = await SeedTeamAsync();
-        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-unsealable-fixture");
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-unrelayable-fixture");
         var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: null);
         var runId = await CreateTaskRunInWorkflowAsync(teamId, workflowRunId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "claude-opus-4-8", ModelCredentialId = credId, MaxCostUsd = 5m });
-        var runner = new SealRefusingRunner();
+        var runner = new ConfiningRunner(helperPath);
 
-        using var broker = new LoopbackModelCredentialBroker();
+        using var broker = new RecordingBroker(new LoopbackModelCredentialBroker(), SocketStandIn(runId));
         var harness = new BrokerableScriptedHarness(BrokeredProvider, "echo done");
 
         await ExecuteAsync(runId, harness, runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), credentialBroker: broker);
@@ -194,8 +206,11 @@ public partial class AgentRunExecutorTests
 
         run.Status.ShouldBe(AgentRunStatus.Failed);
         result.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable, "the refusal lands under its own code, which the supervisor steers on");
-        runner.Asked.ShouldHaveSingleItem().Port.ShouldBe(leasePort, "the runner is asked about the spec the run would have launched, lease port and all");
-        runner.Asked[0].Reachable.ShouldBe(CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported, "and is told whether the lease bound where a namespace can reach it");
+        run.Error.ShouldNotBeNull().ShouldContain(CodeSpace.Core.Services.Agents.Sandbox.Exceptions.SealedEgressUnavailableException.CauseRelayMissing, customMessage: "and names the wall: no helper that can run the relay");
+        run.Error.ShouldContain(preRelayHelper ? "did not answer as the relay" : "looked for", customMessage: "and says what was wrong with the helper where it looked");
+        var asked = runner.Asked.ShouldHaveSingleItem();
+        asked.ModelBrokerPort.ShouldBe(leasePort, "the runner is asked about the spec the run would have launched, lease port and all");
+        asked.ModelBrokerSocketPath.ShouldNotBeNull("and the socket its lease bound, so only the helper is what refuses it");
         runner.Launched.ShouldBeNull("a refused run starts no process");
         (await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().Where(r => r.TeamId == teamId).ToListAsync())
             .ShouldBeEmpty("a refusal before admission claims nothing — an admitted run here would have recorded an unbudgeted row");
@@ -203,21 +218,71 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
-    public async Task An_unbrokered_network_off_run_is_admitted_by_a_runner_that_cannot_seal()
+    public async Task A_runner_that_confines_but_cannot_build_a_namespace_admits_a_brokered_network_off_run_and_its_handle_names_the_socket()
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // Nothing to seal, nothing to refuse: a run with no broker lease — model-less, or keyless — launches exactly as
+        // The shipped worker's posture, before the relay the one this code refused: bubblewrap confines, but the worker
+        // is non-root and may not build a network namespace of its own. Its admission is the local runner's own over the
+        // helper this release builds, which it asks; nothing it decides reads whether a namespace can be built. The run
+        // is admitted, spends, launches with no namespace key, and its durable handle carries the socket a re-attach will
+        // re-open.
+        var helperPath = BuiltMcpProxy.ExecutablePathOrNull().ShouldNotBeNull("fixture: the codespace-mcp apphost is built beside its dll (the build-only ProjectReference in CodeSpace.IntegrationTests.csproj)");
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-relayable-fixture");
+        var workflowRunId = await SeedCappedWorkflowRunAsync(teamId, capUsd: null);
+        var runId = await CreateTaskRunInWorkflowAsync(teamId, workflowRunId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "claude-opus-4-8", ModelCredentialId = credId, MaxCostUsd = 5m });
+        var runner = new ConfiningRunner(helperPath);
+
+        using var broker = new RecordingBroker(new LoopbackModelCredentialBroker(), SocketStandIn(runId));
+
+        await ExecuteAsync(runId, new BrokerableScriptedHarness(BrokeredProvider, "echo done"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), credentialBroker: broker);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var launched = runner.Launched.ShouldNotBeNull($"a confining runner that can relay launches the run; it ended {run.Status}: {run.Error}");
+        var socketPath = launched.ModelBrokerSocketPath.ShouldNotBeNull("the runner is handed the socket the lease bound");
+
+        runner.Asked.ShouldHaveSingleItem().ModelBrokerSocketPath.ShouldBe(socketPath, "admitted because the lease bound its socket and the helper runs the relay");
+        (await scope.Resolve<CodeSpaceDbContext>().BudgetReservation.AsNoTracking().Where(r => r.TeamId == teamId).ToListAsync()).ShouldNotBeEmpty("an admitted run is admitted to spend");
+
+        var handle = HandleOf(runId).ShouldNotBeNull();
+        handle.ModelBrokerSocketPath.ShouldBe(socketPath, "the durable handle is the only record of the lease's socket a later worker has");
+        handle.EgressNetnsKey.ShouldBeNull("the run got no namespace of the worker's: its broker is reached through the relay, which needs none");
+    }
+
+    [Fact]
+    public async Task An_unbrokered_network_off_run_is_admitted_by_a_runner_that_cannot_relay()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Nothing to reach, nothing to refuse: a run with no broker lease — model-less, or keyless — launches exactly as
         // it did before, even where a brokered one would be refused.
         var teamId = await SeedTeamAsync();
         var runId = await CreateScriptedRunAsync(teamId);
-        var runner = new SealRefusingRunner();
+        var runner = new ConfiningRunner(helperPath: Path.Combine(Path.GetTempPath(), "cs-no-relay-" + Guid.NewGuid().ToString("N"), "codespace-mcp"));
 
         await ExecuteAsync(runId, new ScriptedHarness("printf 'one\\n'"), runners: new SandboxRunnerRegistry(new ISandboxRunner[] { runner }));
 
-        runner.Asked.ShouldHaveSingleItem().Port.ShouldBeNull();
+        runner.Asked.ShouldHaveSingleItem().ModelBrokerPort.ShouldBeNull();
         runner.Launched.ShouldNotBeNull("an unbrokered network-off run is launched, not refused");
     }
+
+    /// <summary>A codespace-mcp from before the relay, as far as the admission's question goes: its MCP proxy reads any argv as its own and exits with its usage error.</summary>
+    private static async Task WritePreRelayHelperAsync(string path)
+    {
+        await File.WriteAllTextAsync(path, "#!/bin/sh\necho 'The MCP proxy requires a socket path in CODESPACE_MCP_SOCKET.' >&2\nexit 2\n");
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    /// <summary>
+    /// The socket a network-off run's lease is served on, where the executor mints none itself: it asks for one only on
+    /// Linux, and these tests run on developers' macOS hosts too. Null on Linux, so there the socket under test is the
+    /// executor's own.
+    /// </summary>
+    private static string? SocketStandIn(Guid runId) =>
+        OperatingSystem.IsLinux() ? null : LocalProcessRunner.ModelBrokerSocketPathFor(runId.ToString("N"), CodeSpace.Core.Services.Agents.Mcp.McpRunToken.MintPathId());
 
     [Fact]
     public async Task A_run_whose_credential_cannot_be_brokered_discloses_the_direct_injection()
@@ -878,31 +943,35 @@ public partial class AgentRunExecutorTests
     }
 
     [Theory]
-    [InlineData(true)]    // the lease was served over a socket: the handle records it, and the re-attach re-opens it
-    [InlineData(false)]   // it was not: the handle is exactly a pre-field handle, and the re-attach takes the legacy re-bind
+    [InlineData(true)]    // a network-off run: its lease is served over a socket, the handle records it, and the re-attach re-opens it
+    [InlineData(false)]   // a network-on run: no socket, so the handle is exactly a pre-field handle, and the re-attach takes the legacy re-bind
     public async Task A_reattach_re_opens_the_broker_socket_its_handle_recorded_and_a_handle_without_one_takes_the_legacy_rebind(bool socket)
     {
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-socket-rebind-fixture");
-        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+        var autonomy = socket ? AgentAutonomyLevel.Standard : AgentAutonomyLevel.Trusted;
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = credId, Autonomy = autonomy, Permissions = AgentAutonomyPolicy.Derive(autonomy) });
 
-        // Nothing in production mints a broker socket yet, so the launch's lease is asked for one here — at the path the
-        // production layout gives it — which is the one thing this test substitutes. Everything after the open is the
-        // real executor: the handle it stamps, the jsonb column it persists to, and the re-attach that reads it back.
-        var socketPath = socket ? LocalProcessRunner.ModelBrokerSocketPathFor(runId.ToString("N"), CodeSpace.Core.Services.Agents.Mcp.McpRunToken.MintPathId()) : null;
+        // On Linux the executor asks for the socket itself; elsewhere it asks for none, so a network-off run's lease is
+        // asked for one here, at the path the production layout gives it. Everything after the open is the real
+        // executor: the handle it stamps, the jsonb column it persists to, and the re-attach that reads it back.
+        var standIn = socket ? SocketStandIn(runId) : null;
 
         using var release = new TempDir();
         var releaseFile = Path.Combine(release.Path, "release");
         var harness = new BrokerableScriptedHarness(BrokeredProvider, $"while [ ! -f '{releaseFile}' ]; do sleep 0.2; done; echo done");
+        string? socketPath = null;
 
         try
         {
-            var (handle, childBaseUrl) = await DrainLeavingTheAgentRunningAsync(runId, harness, socketPath);
+            var (handle, childBaseUrl) = await DrainLeavingTheAgentRunningAsync(runId, harness, standIn);
             var runToken = handle.ModelBrokerRunToken.ShouldNotBeNull();
+            socketPath = handle.ModelBrokerSocketPath;
 
-            handle.ModelBrokerSocketPath.ShouldBe(socketPath, "the durable handle is the only record of the lease's socket a later worker has — it must carry exactly the path the lease bound, and nothing for a lease that bound none");
+            (socketPath is not null).ShouldBe(socket, "the durable handle is the only record of the lease's socket a later worker has — it must carry the path the lease bound, and nothing for a lease that bound none");
+            if (standIn is not null) socketPath.ShouldBe(standIn, "exactly the path the lease bound");
             if (!socket) RunnerHandleJsonOf(runId).ShouldNotContain("modelBrokerSocketPath", customMessage: "a handle whose lease had no socket must be stored exactly as one written before the field existed");
 
             using var workerB = new RecordingBroker(LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()));
@@ -957,16 +1026,22 @@ public partial class AgentRunExecutorTests
     }
 
     /// <summary>
-    /// The production broker, with the two things the socket test needs from its side of the seam: a socket asked for
-    /// on the lease the launch opens (production mints none yet — so the helper's path fills in only where the executor
-    /// asked for none, and never overwrites one it did ask for), and a record of every re-bind the re-attach asks for —
-    /// which is the executor's reading of the stored handle, observed exactly where it leaves the executor.
+    /// The production broker, with what the socket tests need from its side of the seam: a record of every open the
+    /// launch asks for and every re-bind the re-attach asks for — the executor's own requests, observed exactly where
+    /// they leave the executor — and, where the executor asks for no socket (it mints one only on Linux), a socket
+    /// asked for on the lease the launch opens, which fills in only there and never overwrites one it did ask for.
     /// </summary>
     private sealed class RecordingBroker(LoopbackModelCredentialBroker inner, string? socketPath = null) : IModelCredentialBroker, IDisposable
     {
+        public List<ModelCredentialLeaseRequest> Opens { get; } = [];
+
         public List<ModelCredentialRebindRequest> Rebinds { get; } = [];
 
-        public Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken) => inner.OpenAsync(request with { SocketPath = socketPath ?? request.SocketPath }, cancellationToken);
+        public Task<BrokeredModelCredential?> OpenAsync(ModelCredentialLeaseRequest request, CancellationToken cancellationToken)
+        {
+            Opens.Add(request);
+            return inner.OpenAsync(request with { SocketPath = request.SocketPath ?? socketPath }, cancellationToken);
+        }
 
         public Task<bool> RebindAsync(ModelCredentialRebindRequest request, CancellationToken cancellationToken)
         {
@@ -1531,20 +1606,25 @@ public partial class AgentRunExecutorTests
         return run.Id;
     }
 
-    /// <summary>A durable runner that refuses admission to any spec carrying a broker port — the shape the local runner takes on a host that confines but cannot seal — recording what it was asked and what it launched.</summary>
-    private sealed class SealRefusingRunner : ISandboxRunner, ISandboxDurableRunner, ISandboxEgressAdmission
+    /// <summary>
+    /// A durable runner on a host that CONFINES, whatever host the test runs on: its admission is the local runner's
+    /// own (<c>LocalProcessRunner.EnsureEgressAdmissible</c>) with bubblewrap taken as present and the relay's helper at
+    /// <paramref name="helperPath"/>. It builds no namespace, so its handles carry no namespace key — the non-root
+    /// worker's posture. Records what it was asked and what it launched.
+    /// </summary>
+    private sealed class ConfiningRunner(string helperPath) : ISandboxRunner, ISandboxDurableRunner, ISandboxEgressAdmission
     {
         public string Kind => LocalProcessRunner.LocalKind;
 
-        public List<(int? Port, bool Reachable)> Asked { get; } = new();
+        public List<SandboxSpec> Asked { get; } = new();
 
         public SandboxSpec? Launched { get; private set; }
 
-        public void EnsureEgressAdmissible(SandboxSpec spec, bool modelBrokerReachableFromNamespace)
+        public void EnsureEgressAdmissible(SandboxSpec spec)
         {
-            Asked.Add((spec.ModelBrokerPort, modelBrokerReachableFromNamespace));
+            Asked.Add(spec);
 
-            if (spec.ModelBrokerPort is not null) throw new CodeSpace.Core.Services.Agents.Sandbox.Exceptions.SealedEgressUnavailableException(CodeSpace.Core.Services.Agents.Sandbox.Exceptions.SealedEgressUnavailableException.CauseNoPrivilege);
+            LocalProcessRunner.EnsureEgressAdmissible(spec, confines: true, helperPath);
         }
 
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) =>
@@ -1581,10 +1661,12 @@ public partial class AgentRunExecutorTests
 
         public AgentTask? BuiltTask { get; private set; }
 
+        // Network as the real harnesses derive it (ClaudeCodeHarness, CodexHarness): on exactly when the tier grants it,
+        // which is what the executor's broker channel reads off the built spec.
         public SandboxSpec BuildInvocation(AgentTask task)
         {
             BuiltTask = task;
-            return new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
+            return new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds, AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On };
         }
 
         // KEEPS the line's structured root, as every real harness's parse does — AgentRunFacts reads only

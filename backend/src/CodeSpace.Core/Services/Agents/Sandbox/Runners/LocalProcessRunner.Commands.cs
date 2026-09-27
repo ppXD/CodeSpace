@@ -8,7 +8,7 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 
 public sealed partial class LocalProcessRunner
 {
-    private sealed record CommandIsolationContext(SandboxSpec Spec, string? ConfigHome, string? McpDeclarationPath, IReadOnlyList<string> EgressPrefix, IReadOnlyList<string> CgroupPrefix);
+    internal sealed record CommandIsolationContext(SandboxSpec Spec, string? ConfigHome, string? McpDeclarationPath, IReadOnlyList<string> EgressPrefix, IReadOnlyList<string> CgroupPrefix);
 
     private async Task<CommandInvocation> PrepareCommandAsync(SandboxSpec spec, CancellationToken cancellationToken)
     {
@@ -24,11 +24,11 @@ public sealed partial class LocalProcessRunner
             var egress = await SetupEgressNetnsAsync(spec, key, cancellationToken).ConfigureAwait(false);
             invocation.EgressKey = egress.Key;
 
-            // Re-layer the spec with the broker host resolved (the start info was built before the run's /30 existed).
-            // The ARGV needs it as much as the env does — a harness whose CLI ignores its base-URL env var carries
-            // that URL on the command line instead — so the resolved spec, not `spec`, is what builds the child
-            // command below. A no-op for every run that does not mention the token: the values are identical.
-            var launched = ResolveModelBrokerHost(spec, egress.GatewayIp);
+            // Re-layer the spec with the broker host resolved. The ARGV needs it as much as the env does — a harness
+            // whose CLI ignores its base-URL env var carries that URL on the command line instead — so the resolved
+            // spec, not `spec`, is what builds the child command below. A no-op for every run that does not mention the
+            // token: the values are identical.
+            var launched = ResolveModelBrokerHost(spec);
             foreach (var (name, value) in launched.Environment) invocation.StartInfo.Environment[name] = value;
             WithoutProxiesWhenSealed(invocation.StartInfo.Environment, spec, egress.ExecPrefix);
 

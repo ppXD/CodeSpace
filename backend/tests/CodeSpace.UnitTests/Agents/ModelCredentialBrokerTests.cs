@@ -110,18 +110,56 @@ public class ModelCredentialBrokerTests
         upstream.SeenHeaderValues.ShouldNotContain(brokered.RunToken, "the per-run bearer authenticates to the broker only; forwarding it leaks a capability the provider has no use for");
     }
 
-    [Fact]
-    public async Task A_lease_says_whether_a_per_run_namespace_can_reach_it()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_new_lease_listens_on_loopback_only_even_where_a_per_run_namespace_can_exist(bool socket)
     {
-        // A sealed network-off run reaches the worker at its namespace gateway, never on loopback, so the lease has to
-        // say whether it took the wide bind. The wide bind is tried only where namespaces can exist; everywhere else
-        // it binds loopback and must say it is NOT reachable, which is what refuses a sealed launch before it spends.
-        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+        // A child in a network of its own reaches its lease through the socket and the relay in its sandbox, so no new
+        // lease has any reason to hand its port to the host's neighbours — with a socket or without, and on a host
+        // that builds filtered-egress namespaces (the sandbox lane, a Linux lane with ip and nft) as on one that
+        // cannot. Mutation: bind wide again where FilteredEgressNetns.IsSupported, and this goes red on such a host.
+        if (socket && !Socket.OSSupportsUnixDomainSockets) return;
 
-        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()), CancellationToken.None);
+        using var sockets = new BrokerSockets();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+        var runId = Guid.NewGuid();
+
+        var brokered = await broker.OpenAsync(LeaseFor(runId) with { SocketPath = socket ? sockets.NewPath() : null }, CancellationToken.None);
         if (brokered is null) return;   // this host cannot bind a listener at all — nothing to assert
 
-        brokered.ReachableFromNamespace.ShouldBe(FilteredEgressNetns.IsSupported, "reachable from a namespace exactly when the broker bound every address, which it tries only where a namespace can exist");
+        broker.ListenerPrefixForTest(runId).ShouldBe($"http://127.0.0.1:{brokered.RebindPort}/", $"a lease binds loopback alone (namespaces possible here: {FilteredEgressNetns.IsSupported})");
+    }
+
+    [Theory]
+    [InlineData(false, true)]    // the legacy re-bind: a handle written before the socket, whose namespaced child calls the gateway
+    [InlineData(false, false)]   // no socket and no namespace: a child on the worker's own network (network on, or an unconfined host) calls loopback
+    [InlineData(true, true)]     // a handle with a socket: its child comes in through it, spliced to loopback
+    public async Task Only_a_rebind_of_a_namespaced_child_without_a_socket_binds_wide_and_only_where_a_namespace_can_exist(bool socket, bool netns)
+    {
+        // Mutation: key the wide bind on the missing socket alone, and the no-namespace row goes red on a host that
+        // builds filtered-egress namespaces — a Trusted run's loopback lease would come back on every address.
+        if (socket && !Socket.OSSupportsUnixDomainSockets) return;
+
+        using var sockets = new BrokerSockets();
+        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
+        var port = ReserveLoopbackPort();
+        var request = RebindOn(port, epoch: 3) with { SocketPath = socket ? sockets.NewPath() : null, ChildInNetworkNamespace = netns };
+
+        if (!await broker.RebindAsync(request, CancellationToken.None)) return;   // the port was taken in between — nothing to observe
+
+        var wide = !socket && netns && FilteredEgressNetns.IsSupported;
+
+        broker.ListenerPrefixForTest(request.RunId).ShouldBe(wide ? $"http://+:{port}/" : $"http://127.0.0.1:{port}/", $"only a veth-sealed or allowlist run launched before the relay reaches this worker at its namespace gateway, so its re-bind alone keeps the wide bind until they drain; every other child calls loopback (namespaces possible here: {FilteredEgressNetns.IsSupported})");
+    }
+
+    /// <summary>A loopback port free at the moment of asking — a re-bind names its port, it never picks one.</summary>
+    private static int ReserveLoopbackPort()
+    {
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+
+        return ((IPEndPoint)probe.LocalEndPoint!).Port;
     }
 
     [Fact]
@@ -365,12 +403,8 @@ public class ModelCredentialBrokerTests
     [Fact]
     public async Task Rebind_reports_false_when_the_port_is_taken_rather_than_pretending_it_worked()
     {
-        // The fixture holds ONE address — loopback, which is the only candidate host a worker that cannot build
-        // filtered-egress namespaces ever tries. A host that CAN build them prefers the wide bind, which this fixture
-        // does not hold, so the refusal would not be falsifiable there. No unit lane is such a host (the privileged
-        // job runs SandboxTests, not this assembly); the guard is here so the test stays honest if that changes,
-        // rather than quietly passing because the broker bound a different address than the one under test.
-        if (FilteredEgressNetns.IsSupported) return;
+        // The fixture holds ONE address — loopback, which is the only candidate host for a re-bind whose child is not
+        // in a network namespace of its own, on every host, including one that builds filtered-egress namespaces.
 
         // Held for the WHOLE test: released early, the broker could bind the very port this is meant to deny it.
         using var occupied = new OccupiedPort();
@@ -589,11 +623,12 @@ public class ModelCredentialBrokerTests
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
         var path = sockets.NewPath();
 
-        var brokered = await broker.OpenAsync(LeaseFor(Guid.NewGuid()) with { SocketPath = path }, CancellationToken.None);
+        var runId = Guid.NewGuid();
+        var brokered = await broker.OpenAsync(LeaseFor(runId) with { SocketPath = path }, CancellationToken.None);
         if (brokered is null) return;   // this host cannot bind a loopback listener at all — nothing to assert
 
         brokered.SocketPath.ShouldBe(path, "the lease must say which socket it bound — that path is what the durable handle records for a re-attach to re-open");
-        brokered.ReachableFromNamespace.ShouldBeFalse(
+        broker.ListenerPrefixForTest(runId).ShouldBe($"http://127.0.0.1:{brokered.RebindPort}/",
             "a lease served over a socket binds its TCP listener on LOOPBACK only: its namespaced children come in through the socket, so a wide bind would only hand the port to every neighbour on the host's network");
 
         (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK,

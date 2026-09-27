@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Shouldly;
 
@@ -28,17 +29,64 @@ public class AgentRunExecutorEgressTests
     }
 
     [Theory]
-    [InlineData(AgentNetworkAccess.Off, 43121, 43121)]   // network off + a brokered model → the port a confining runner seals it to
-    [InlineData(AgentNetworkAccess.Off, null, null)]     // network off, unbrokered → nothing to seal to; severed as always
-    [InlineData(AgentNetworkAccess.On, 43121, null)]     // network on reaches its broker already; its egress is the allowlist's business
-    public void Only_a_network_off_brokered_run_carries_its_broker_port(AgentNetworkAccess network, int? brokerPort, int? expected)
+    [InlineData(false, false, 43121, true, 43121, true)]    // network off + a brokered model → the port and socket the relay carries it through
+    [InlineData(false, false, 43121, false, 43121, false)]  // network off, a lease with no socket → the port alone (a confining runner refuses it)
+    [InlineData(false, false, null, false, null, false)]    // network off, unbrokered → nothing to reach; severed as always
+    [InlineData(true, true, 43121, true, 43121, true)]      // an allowlist → its network is its own, so it is relayed too
+    [InlineData(true, false, 43121, true, null, false)]     // network on reaches its broker already, on loopback
+    public void Only_a_brokered_run_whose_network_is_its_own_carries_its_broker_channel(bool allowNetwork, bool allowlist, int? brokerPort, bool socket, int? expectedPort, bool expectSocket)
     {
-        var spec = new SandboxSpec { Command = "agent" };
+        var spec = new SandboxSpec { Command = "agent", AllowNetwork = allowNetwork, EgressAllowlist = allowlist ? ["gw.example.com"] : null };
+        var brokered = brokerPort is null ? null : new BrokeredModelCredential("http://{broker}:43121/r", "token", DateTimeOffset.UtcNow) { RebindPort = brokerPort, SocketPath = socket ? "/spool/k/broker/seg/s" : null };
 
-        var result = AgentRunExecutor.ApplySealedEgress(spec, new AgentPermissions { Network = network }, brokerPort);
+        var result = AgentRunExecutor.ApplyModelBrokerChannel(spec, brokered);
 
-        result.ModelBrokerPort.ShouldBe(expected);
-        if (expected is null) result.ShouldBeSameAs(spec, "nothing to stamp — the spec is returned untouched");
+        result.ModelBrokerPort.ShouldBe(expectedPort);
+        result.ModelBrokerSocketPath.ShouldBe(expectSocket ? "/spool/k/broker/seg/s" : null);
+        if (expectedPort is null) result.ShouldBeSameAs(spec, "nothing to stamp — the spec is returned untouched");
+    }
+
+    [Theory]
+    [InlineData(AgentNetworkAccess.Off, AgentEgressPolicy.Full, new string[0])]
+    [InlineData(AgentNetworkAccess.On, AgentEgressPolicy.Full, new string[0])]
+    [InlineData(AgentNetworkAccess.On, AgentEgressPolicy.Allowlist, new[] { "registry.npmjs.org" })]
+    [InlineData(AgentNetworkAccess.On, AgentEgressPolicy.Allowlist, new string[0])]   // an allowlist with nothing derivable: severed
+    [InlineData(AgentNetworkAccess.Off, AgentEgressPolicy.Allowlist, new[] { "registry.npmjs.org" })]
+    public void The_lease_asks_for_a_socket_exactly_when_the_built_spec_turns_out_to_need_one(AgentNetworkAccess network, AgentEgressPolicy egress, string[] extraHosts)
+    {
+        // Drift pin: the lease is opened before the spec exists, so it decides from the PERMISSIONS whether the child's
+        // network will be its own; the spec's channel is stamped from the SPEC. If the two ever disagree, a child either
+        // needs a socket its lease never asked for, or a network-sharing run is handed one it never uses.
+        var permissions = new AgentPermissions { Network = network, Egress = egress, EgressAllowHosts = extraHosts };
+        var harnessSpec = new SandboxSpec { Command = "agent", AllowNetwork = network == AgentNetworkAccess.On };
+        var built = AgentRunExecutor.ApplyEgressPolicy(harnessSpec, permissions, modelBaseUrl: null, modelProvider: null, workspace: null);
+        var brokered = new BrokeredModelCredential("http://{broker}:43121/r", "token", DateTimeOffset.UtcNow) { RebindPort = 43121, SocketPath = "/spool/k/broker/seg/s" };
+
+        var stamped = AgentRunExecutor.ApplyModelBrokerChannel(built, brokered).ModelBrokerPort is not null;
+
+        AgentRunExecutor.ChildNetworkIsPrivate(permissions).ShouldBe(stamped, $"permissions {network}/{egress}/[{string.Join(',', extraHosts)}] built to AllowNetwork={built.AllowNetwork}, allowlist=[{string.Join(',', built.EgressAllowlist ?? [])}]");
+    }
+
+    [Theory]
+    [InlineData(AgentNetworkAccess.Off, AgentEgressPolicy.Full, true)]
+    [InlineData(AgentNetworkAccess.On, AgentEgressPolicy.Allowlist, true)]
+    [InlineData(AgentNetworkAccess.On, AgentEgressPolicy.Full, false)]   // Trusted: the worker's own network — no socket, nothing changes
+    public void A_socket_is_minted_only_on_linux_and_only_for_a_run_whose_network_is_its_own(AgentNetworkAccess network, AgentEgressPolicy egress, bool privateNetwork)
+    {
+        var runId = Guid.NewGuid();
+
+        var first = AgentRunExecutor.ModelBrokerSocketPathFor(new AgentPermissions { Network = network, Egress = egress }, runId);
+        var second = AgentRunExecutor.ModelBrokerSocketPathFor(new AgentPermissions { Network = network, Egress = egress }, runId);
+
+        if (!OperatingSystem.IsLinux() || !privateNetwork)
+        {
+            first.ShouldBeNull("a host that never confines, or a run that shares the worker's network, mints nothing — its spec, argv and environment stay exactly as they were");
+            return;
+        }
+
+        first.ShouldNotBeNull().ShouldEndWith("/s");
+        Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(first))).ShouldBeOneOf(LocalProcessRunner.ModelBrokerSocketDir, LocalProcessRunner.ModelBrokerShortSocketRoot);
+        first.ShouldNotBe(second, "a path serves one lease at a time, so every open mints a fresh, unguessable one");
     }
 
     [Fact]

@@ -460,7 +460,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
             // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
             // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
-            var hardening = new SpecHardening(modelBaseUrl, modelProvider, workspaceProvision, brokeredCredential?.RebindPort);
+            var hardening = new SpecHardening(modelBaseUrl, modelProvider, workspaceProvision, brokeredCredential);
 
             SandboxSpec BuildSpec(AgentTask built) => HardenSpec(harness.BuildInvocation(AugmentToolsForMcp(built, mcp, mcpWiring)) with { Mcp = mcpWiring }, built, hardening);
 
@@ -484,10 +484,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 spec = BuildSpec(RunCold(effectiveTask));
             }
 
-            // A spec this runner could only launch with a network that leaves the agent unable to work — a network-off
-            // brokered run on a host that confines but cannot seal — is refused HERE, the last moment a refusal costs
-            // nothing: before the local acceptance is prepared, the spend admitted or a process started.
-            (runner as ISandboxEgressAdmission)?.EnsureEgressAdmissible(spec, brokeredCredential?.ReachableFromNamespace ?? false);
+            // A spec this runner could only launch with a network that leaves the agent unable to work — a brokered run
+            // with a network of its own that this host cannot relay to its broker — is refused HERE, the last moment a
+            // refusal costs nothing: before the local acceptance is prepared, the spend admitted or a process started.
+            (runner as ISandboxEgressAdmission)?.EnsureEgressAdmissible(spec);
 
             // Verification is judged against the contract the envelope persisted — never a goal amended for the
             // dispatch alone (this cold hint, or an unreadable checkpoint's) — or the contract hash cannot match.
@@ -3766,7 +3766,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var wouldInject = projector is not null && credential is not null;
 
-        var brokered = await OpenBrokeredCredentialAsync(harness, credential, teamId, brokerage, cancellationToken).ConfigureAwait(false);
+        var brokered = await OpenBrokeredCredentialAsync(harness, LeaseRequestFor(task, teamId, credential, brokerage), cancellationToken).ConfigureAwait(false);
 
         // Fail closed BEFORE the projection that would put the key in the env — a deployment that mandates
         // confinement refuses the run rather than handing out a credential it cannot withdraw. Skipped entirely on a
@@ -3788,7 +3788,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // in the egress allowlist (B3.3b) — the UPSTREAM ones even under brokerage, deliberately: the allowlist is
         // enforced inside the run's netns, the broker reaches the provider from the host outside it, and a brokered
         // run keeping the provider host reachable loses nothing — the token it holds is refused there. (A network-OFF
-        // brokered run is the one sealed to just its broker; see ApplySealedEgress.) DefaultModel flows out so a model-less ("auto") run
+        // brokered run reaches just its broker, through the relay; see ApplyModelBrokerChannel.) DefaultModel flows out so a model-less ("auto") run
         // falls back to one of the credential's own models instead of the CLI default. All null when no credential
         // resolved. CredentialId names the ROW whose key this run authenticates with (null for the operator-global
         // key, which has no row) — D3 bounds an escalation's candidate models to exactly that row.
@@ -3806,25 +3806,41 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// passed over in silence: they decide whether this run is holding the tenant's long-lived key, and a deployment
     /// that believed itself brokered has no other way to find out that every run took the direct path.</para>
     /// </summary>
-    private async Task<BrokeredModelCredential?> OpenBrokeredCredentialAsync(IAgentHarness harness, ResolvedModelCredential? credential, Guid teamId, AgentRunOwnerToken? owner, CancellationToken cancellationToken)
+    private async Task<BrokeredModelCredential?> OpenBrokeredCredentialAsync(IAgentHarness harness, ModelCredentialLeaseRequest? lease, CancellationToken cancellationToken)
     {
-        if (owner is null || credential is null) return null;   // a redaction-only re-resolve, or no credential to front at all
+        if (lease is null) return null;   // a redaction-only re-resolve, or no credential to front at all
 
-        if (_credentialBroker is not { } broker) { LogUnbrokered(owner.RunId, "no model-credential broker is registered on this worker"); return null; }
-        if (harness is not IBrokeredModelCredentialProjector) { LogUnbrokered(owner.RunId, $"the {harness.Kind} harness cannot be re-pointed at a broker"); return null; }
+        if (_credentialBroker is not { } broker) { LogUnbrokered(lease.RunId, "no model-credential broker is registered on this worker"); return null; }
+        if (harness is not IBrokeredModelCredentialProjector) { LogUnbrokered(lease.RunId, $"the {harness.Kind} harness cannot be re-pointed at a broker"); return null; }
 
         try
         {
-            return await broker.OpenAsync(
-                new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Upstream = credential, Ttl = Credentials.ModelCredentialLease.Ttl },
-                cancellationToken).ConfigureAwait(false);
+            return await broker.OpenAsync(lease, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            _logger.LogWarning(exception, "Agent run {RunId}: the model-credential broker could not open a lease; this run's credential is unbrokered", owner.RunId);
+            _logger.LogWarning(exception, "Agent run {RunId}: the model-credential broker could not open a lease; this run's credential is unbrokered", lease.RunId);
             return null;
         }
     }
+
+    /// <summary>The lease a LAUNCH asks the broker for — null for a redaction-only resolve (no <paramref name="owner"/>) or when there is no credential to front. It asks for a socket exactly when the run's child will need one (<see cref="ModelBrokerSocketPathFor"/>).</summary>
+    private static ModelCredentialLeaseRequest? LeaseRequestFor(AgentTask task, Guid teamId, ResolvedModelCredential? credential, AgentRunOwnerToken? owner) =>
+        owner is null || credential is null ? null : new() { RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Upstream = credential, Ttl = Credentials.ModelCredentialLease.Ttl, SocketPath = ModelBrokerSocketPathFor(task.Permissions, owner.RunId) };
+
+    /// <summary>
+    /// A fresh per-run socket path for the run's broker lease, or null when its child will never need one: a run whose
+    /// network is the worker's (network on, no allowlist) calls the lease's loopback port directly, and a host that is
+    /// not Linux never confines, so its child shares the worker's network whatever the run asked. Minted afresh on every
+    /// open (an unguessable segment under the run's spool), because a path serves one lease at a time. The permission
+    /// test is the lease-time spelling of <see cref="ChildNetworkIsPrivate(SandboxSpec)"/>, which reads the built spec,
+    /// and a unit test pins that the two agree.
+    /// </summary>
+    internal static string? ModelBrokerSocketPathFor(AgentPermissions permissions, Guid runId) =>
+        OperatingSystem.IsLinux() && ChildNetworkIsPrivate(permissions) ? LocalProcessRunner.ModelBrokerSocketPathFor(runId.ToString("N"), McpRunToken.MintPathId()) : null;
+
+    /// <summary>Whether a run with these permissions gets a network that is not the worker's: network off, or narrowed to an allowlist — which, off or on, never shares the worker's.</summary>
+    internal static bool ChildNetworkIsPrivate(AgentPermissions permissions) => permissions.Network != AgentNetworkAccess.On || permissions.Egress == AgentEgressPolicy.Allowlist;
 
     /// <summary>Say WHY a run is taking the direct-credential path. Information, not Debug: it is the fact that decides what the run is holding, and a deployment reads its own posture off this line.</summary>
     private void LogUnbrokered(Guid runId, string reason) =>
@@ -4069,21 +4085,26 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         spec with { ReadOnlyWorkingDirectory = permissions.WriteScope != AgentWriteScope.Workspace };
 
     /// <summary>
-    /// Stamp a network-off run's broker port onto its spec, so a confining runner able to build one runs it in a
-    /// namespace SEALED to that broker instead of severing it from everything — the broker included, which left such a
-    /// run unable to reach any model. Only network-off runs: a run with network reaches its broker already, and its
-    /// egress is <see cref="ApplyEgressPolicy"/>'s business. Returns the spec itself when there is nothing to stamp.
+    /// Stamp the run's broker channel onto its spec when its child's network is its own — network off, or narrowed to
+    /// an allowlist — so a confining runner starts the CLI behind the relay that carries it to its broker, instead of
+    /// severing it from everything, the broker included. The port always; the socket path when the broker bound one
+    /// (a runner that confines refuses such a child without it, before it spends). A run on the worker's own network
+    /// reaches its broker already and is returned as it is, as is every spec with no lease to reach. Reads the spec
+    /// after <see cref="ApplyEgressPolicy"/>, so an allowlist that came out empty — severed — counts as off.
     /// </summary>
-    internal static SandboxSpec ApplySealedEgress(SandboxSpec spec, AgentPermissions permissions, int? brokerPort) =>
-        permissions.Network == AgentNetworkAccess.Off && brokerPort is { } port ? spec with { ModelBrokerPort = port } : spec;
+    internal static SandboxSpec ApplyModelBrokerChannel(SandboxSpec spec, BrokeredModelCredential? brokered) =>
+        brokered?.RebindPort is { } port && ChildNetworkIsPrivate(spec) ? spec with { ModelBrokerPort = port, ModelBrokerSocketPath = brokered.SocketPath } : spec;
 
-    /// <summary>What the executor's hardening reads beyond the task itself: the model endpoint and the workspace the egress allowlist is built from, and the port of the run's brokered model lease, if it has one.</summary>
-    private readonly record struct SpecHardening(string? ModelBaseUrl, string? ModelProvider, WorkspaceProvisionRequest? Workspace, int? ModelBrokerPort);
+    /// <summary>Whether the built spec's child gets a network that is not the worker's — the spec-side spelling of <see cref="ChildNetworkIsPrivate(AgentPermissions)"/>.</summary>
+    private static bool ChildNetworkIsPrivate(SandboxSpec spec) => !spec.AllowNetwork || spec.EgressAllowlist is { Count: > 0 };
 
-    /// <summary>The harness invocation with every one of the executor's own spec post-processings applied — the egress posture, the broker seal, the write scope and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
+    /// <summary>What the executor's hardening reads beyond the task itself: the model endpoint and the workspace the egress allowlist is built from, and the run's brokered model lease, if it has one.</summary>
+    private readonly record struct SpecHardening(string? ModelBaseUrl, string? ModelProvider, WorkspaceProvisionRequest? Workspace, BrokeredModelCredential? ModelBroker);
+
+    /// <summary>The harness invocation with every one of the executor's own spec post-processings applied — the egress posture, the broker channel, the write scope and the tier's resource ceilings. One name so the launch and each revise round cannot drift apart on which hardening they got.</summary>
     private static SandboxSpec HardenSpec(SandboxSpec spec, AgentTask task, SpecHardening hardening)
     {
-        var egress = ApplySealedEgress(ApplyEgressPolicy(spec, task.Permissions, hardening.ModelBaseUrl, hardening.ModelProvider, hardening.Workspace), task.Permissions, hardening.ModelBrokerPort);
+        var egress = ApplyModelBrokerChannel(ApplyEgressPolicy(spec, task.Permissions, hardening.ModelBaseUrl, hardening.ModelProvider, hardening.Workspace), hardening.ModelBroker);
 
         return ApplyResourceCeilings(ApplyWriteScope(egress, task.Permissions), task.Autonomy, RuntimeSettings.Current.AgentMemoryCeilingMb);
     }

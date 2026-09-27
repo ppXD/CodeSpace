@@ -82,8 +82,8 @@ public sealed record SandboxSpec
 
     /// <summary>
     /// Whether the command may reach the network. <c>false</c> (the DEFAULT) → the sandbox runner severs egress
-    /// entirely (a fresh network namespace with only loopback — or, for a run whose model is brokered, one sealed to
-    /// that broker: see <see cref="ModelBrokerPort"/>), so a confined agent cannot reach cloud-metadata, the LAN, or
+    /// entirely (a fresh network namespace with only loopback — a run whose model is brokered still reaches that
+    /// broker, through its socket: see <see cref="ModelBrokerPort"/>), so a confined agent cannot reach cloud-metadata, the LAN, or
     /// exfiltrate over the internet. <c>true</c> → the host network is shared, UNLESS
     /// <see cref="EgressAllowlist"/> narrows it. Enforced only by a sandboxing runner; a bare-process runner cannot
     /// honour it.
@@ -107,17 +107,28 @@ public sealed record SandboxSpec
     public IReadOnlyList<string>? EgressAllowlist { get; init; }
 
     /// <summary>
-    /// The port of this run's model-credential broker lease, set only for a run whose network is OFF and whose model
-    /// is reached through that broker. Such a run cannot be severed from everything the way <see cref="AllowNetwork"/>
-    /// otherwise asks — the broker would be cut off with the rest, and the agent could reach no model at all — so a
-    /// confining runner able to build one runs it in a SEALED namespace instead: no route, no NAT, no DNS, and exactly
-    /// one reachable destination, this port on the namespace's gateway. A runner that cannot seal keeps severing.
+    /// The port of this run's model-credential broker lease, set only for a run whose network is not the worker's —
+    /// network off, or narrowed to an <see cref="EgressAllowlist"/> — and whose model is reached through that broker.
+    /// Such a child cannot reach the broker's loopback port from its own namespace, so a confining runner starts it
+    /// behind the <c>codespace-mcp relay</c>, which listens on <c>127.0.0.1:&lt;this port&gt;</c> inside the sandbox
+    /// and carries each connection to <see cref="ModelBrokerSocketPath"/>. The network stays exactly as severed or
+    /// filtered as <see cref="AllowNetwork"/> and the allowlist ask.
     ///
-    /// <para>Set by <c>AgentRunExecutor.ApplySealedEgress</c> at the executor's one spec choke point. Null (every other
-    /// spec) ⇒ omitted from the JSON, so the spec serializes and hashes as it did before the field existed.</para>
+    /// <para>Set by <c>AgentRunExecutor.ApplyModelBrokerChannel</c> at the executor's one spec choke point. Null (every
+    /// other spec) ⇒ omitted from the JSON, so the spec serializes and hashes as it did before the field existed.</para>
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public int? ModelBrokerPort { get; init; }
+
+    /// <summary>
+    /// The per-run Unix socket the run's broker lease is also served on — the other end of the relay
+    /// <see cref="ModelBrokerPort"/> describes. The runner binds its directory read-only into the sandbox. Null when the
+    /// broker bound none (a host that mints none, or a bind that failed): a confining runner then has no way to reach
+    /// such a child's broker, and refuses it before anything is spent. Omitted from the JSON while null, so a spec
+    /// without one serializes and hashes as it did before the field existed.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModelBrokerSocketPath { get; init; }
 
     /// <summary>
     /// Max processes the command + its descendants may spawn (RLIMIT_NPROC) — a fork-bomb cap so a runaway agent

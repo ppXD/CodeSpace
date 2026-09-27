@@ -152,7 +152,9 @@ public sealed partial class NativeLaunchRegistryTests
         var spec = NativeLaunchProtocol.Freeze(new SandboxSpec { Command = "/bin/sh" });
 
         NativeLaunchProtocol.SpecHash(spec with { ModelBrokerPort = 43121 }).ShouldNotBe(NativeLaunchProtocol.SpecHash(spec), "a launch sealed to a broker is a different execution from one severed from everything");
+        NativeLaunchProtocol.SpecHash(spec with { ModelBrokerPort = 43121, ModelBrokerSocketPath = "/spool/k/broker/seg/s" }).ShouldNotBe(NativeLaunchProtocol.SpecHash(spec with { ModelBrokerPort = 43121 }), "a relayed launch is a different execution from one with no socket to relay to");
         JsonSerializer.Serialize(spec, NativeLaunchProtocol.Json).ShouldNotContain("modelBrokerPort", customMessage: "an unbrokered spec must serialize, and hash, exactly as it did before the field existed");
+        JsonSerializer.Serialize(spec with { ModelBrokerPort = 43121 }, NativeLaunchProtocol.Json).ShouldNotContain("modelBrokerSocketPath", customMessage: "nor does a spec whose lease has no socket carry the socket field");
     }
 
     [Fact]

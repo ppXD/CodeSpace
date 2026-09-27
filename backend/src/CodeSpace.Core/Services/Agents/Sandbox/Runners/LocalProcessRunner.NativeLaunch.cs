@@ -220,11 +220,6 @@ public sealed partial class LocalProcessRunner
     private async Task StartBrokerAsync(BrokerStart request, CancellationToken cancellationToken)
     {
         var binary = RunnerHostBinaryPath();
-
-        // The bootstrap's admission window opens at "owned" and must cover the whole cgroup + namespace setup below, so
-        // the one slow first-use cost — the seal probe — is paid before the window opens rather than inside it.
-        _ = SealableBrokerPort(request.Spec);
-
         var info = new ProcessStartInfo(binary) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         info.ArgumentList.Add("broker"); info.ArgumentList.Add(request.Directory);
         using var process = new Process { StartInfo = info };
@@ -244,15 +239,15 @@ public sealed partial class LocalProcessRunner
             cgroupKey = cgroup.Key;
             var egress = await SetupEgressNetnsAsync(request.Spec, request.SpoolKey, cancellationToken).ConfigureAwait(false);
             egressKey = egress.Key;
-            // The child's env is built from the spec with the broker host resolved to the address THIS launch can
-            // reach the worker at — known only now, after the run's /30 was reserved above.
-            var command = BuildDurableStartInfo(ResolveModelBrokerHost(request.Spec, egress.GatewayIp), request.Spool, egress.ExecPrefix, cgroup.ExecPrefix, bootstrapSession: true);
+            // The child's env is built from the spec with the broker host resolved to loopback, where the lease — or,
+            // for a child with a network of its own, the relay in front of it — answers.
+            var command = BuildDurableStartInfo(ResolveModelBrokerHost(request.Spec), request.Spool, egress.ExecPrefix, cgroup.ExecPrefix, bootstrapSession: true);
             var invocation = new NativeLaunchInvocation
             {
                 Spec = request.Spec, ReadOnlyPaths = request.Spec.ReadOnlyPaths, CaptureBudget = request.Spec.CaptureBudget,
                 Command = command.FileName, Args = command.ArgumentList.ToArray(), WorkingDirectory = command.WorkingDirectory,
                 Environment = command.Environment.ToDictionary(pair => pair.Key, pair => pair.Value), EgressNetnsKey = egressKey, CgroupRunKey = cgroupKey,
-                Confinement = BubblewrapSandbox.DeriveConfinement(BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason, ShareNetwork(request.Spec, egress.ExecPrefix), EgressAllowlist(request.Spec, egress.ExecPrefix), SealedEgress(request.Spec, egress.ExecPrefix)),
+                Confinement = LaunchConfinement(request.Spec, egress.ExecPrefix, BubblewrapSandbox.Available, BubblewrapSandbox.UnavailableReason),
             };
             // Measured BEFORE transmission is marked started, so a frame no pipe can carry is refused while the catch
             // below can still tear the netns and cgroup down, and the broker reads EOF and releases its slot as rejected.

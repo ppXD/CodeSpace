@@ -91,6 +91,10 @@ public sealed partial class LocalProcessRunner
     /// framework-dependent build output (the apphost beside its <c>.dll</c>, <c>.deps.json</c> and
     /// <c>.runtimeconfig.json</c>) or a single-file publish. A self-contained publish of several files cannot start
     /// inside the sandbox, and the executor refuses it with a Warning (<see cref="McpProxyNeedsItsDirectory"/>).</para>
+    ///
+    /// <para>It must also be a build of this release. A brokered run whose network is its own starts its CLI behind
+    /// the helper's relay verb (<see cref="ModelBrokerRelay"/>), which a build from before it does not have; the
+    /// admission asks the helper and refuses such a run before it spends (<see cref="RelayHelperProblem"/>).</para>
     /// </summary>
     public const string McpProxyPathEnvVar = "CODESPACE_MCP_PROXY_PATH";
 
@@ -326,19 +330,17 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist or a Sealed broker route, set
-    /// up the per-run netns and return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the
-    /// teardown key. None/Full need no netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner
-    /// that cannot enforce it degrades to None (no netns) via <see cref="SandboxEgressPolicy"/>, a network-off run this
-    /// host cannot seal stays severed, and a netns whose setup fails throws.
+    /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist, set up the per-run netns and
+    /// return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the teardown key. None/Full need no
+    /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner that cannot enforce it degrades
+    /// to None (no netns) via <see cref="SandboxEgressPolicy"/>, and a netns whose setup fails throws. A network-off run
+    /// never gets one: it reaches its broker, if it has one, through the relay (<see cref="RelaysModelBroker"/>).
     /// </summary>
-    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
+    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
     {
-        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported, SealableBrokerPort(spec));
+        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported);
 
-        if (policy.Mode == SandboxEgressMode.Sealed) return await SetupSealedNetnsAsync(policy.BrokerPort!.Value, spoolKey, ct).ConfigureAwait(false);
-
-        if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null, null);
+        if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null);
 
         // The allowlist carries host NAMES (+ IP literals); the IPv4-only netns pins IPs, so resolve at setup on the
         // host that builds the namespace. Best-effort/fail-closed: an unresolvable host is dropped (the resulting set,
@@ -351,50 +353,58 @@ public sealed partial class LocalProcessRunner
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
 
-        return (setup.ExecPrefix, spoolKey, setup.HostIp);
+        return (setup.ExecPrefix, spoolKey);
     }
 
     /// <summary>
-    /// The broker port a network-off run may be sealed to — only where bubblewrap confines the command (exactly where
-    /// it would otherwise sever it with <c>--unshare-net</c>) and this host has proved it can build a namespace. Null
-    /// everywhere else, so an unconfined host keeps the launch it always had and a host that cannot seal keeps severing.
+    /// Refuse, before anything is spent, a brokered run whose child would run in a network of its own on this host but
+    /// could not be carried to its broker: its lease came back without the socket, or the <c>codespace-mcp</c> helper
+    /// at <see cref="McpProxyBinaryPath"/> cannot run the relay there (<see cref="RelayHelperProblem"/>). A spec with no
+    /// broker port, or a child that shares the worker's network (an unconfined host, a network-granting run with no
+    /// allowlist), is admitted untouched: nothing about its launch changes. The admission reads the same
+    /// <see cref="ChildNetworkIsPrivate"/> the launch does, with the namespace predicted rather than built.
     /// </summary>
-    private static int? SealableBrokerPort(SandboxSpec spec) =>
-        spec.ModelBrokerPort is { } port && BubblewrapSandbox.Available is not null && FilteredEgressNetns.CanSeal ? port : null;
+    public void EnsureEgressAdmissible(SandboxSpec spec) => EnsureEgressAdmissible(spec, BubblewrapSandbox.Available is not null, McpProxyBinaryPath());
 
-    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key, string? GatewayIp)> SetupSealedNetnsAsync(int brokerPort, string spoolKey, CancellationToken ct)
+    /// <summary><see cref="EnsureEgressAdmissible(SandboxSpec)"/> over whether this host <paramref name="confines"/> and where it keeps the relay's helper, so a test can stand in for a confining host on any host.</summary>
+    internal static void EnsureEgressAdmissible(SandboxSpec spec, bool confines, string helperPath)
     {
-        var setup = await FilteredEgressNetns.SetupSealedAsync(spoolKey, brokerPort, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
-
-        // The same refusal EnsureEgressAdmissible raises before any spend, for the rarer case the probe could not
-        // foresee — a setup step that fails on a host that proved it can seal (a name collision, a kernel refusal).
-        if (!setup.SetupOk)
-            throw SealedEgressUnavailableException.SetupFailed(setup.SetupError);
-
-        return (setup.ExecPrefix, spoolKey, setup.HostIp);
+        if (RelayRefusal(spec, ChildNetworkIsPrivate(spec, WouldFilterEgress(spec), confines), helperPath) is { } cause)
+            throw new SealedEgressUnavailableException(cause);
     }
 
     /// <summary>
-    /// Refuse, before anything is spent, a network-off brokered run this host would confine but cannot seal — the
-    /// mirror of <see cref="SealableBrokerPort"/>, which would otherwise quietly sever it from its broker. A spec with
-    /// no broker port, or a host that does not confine, is admitted untouched: nothing about its launch changes.
+    /// Why a brokered child with a network of its own could not reach its broker from this host, or null when it can
+    /// or needs nothing: no broker port, a network it shares with the worker, or both halves of the relay in place.
+    /// Pure over the host's facts, so every cause is testable on a host that has none of them.
     /// </summary>
-    public void EnsureEgressAdmissible(SandboxSpec spec, bool modelBrokerReachableFromNamespace)
+    internal static string? RelayRefusal(SandboxSpec spec, bool childNetworkIsPrivate, string helperPath)
     {
-        if (spec.ModelBrokerPort is null || BubblewrapSandbox.Available is null) return;
+        if (spec.ModelBrokerPort is null || !childNetworkIsPrivate) return null;
 
-        if (SealRefusal(FilteredEgressNetns.IsSupported, FilteredEgressNetns.CanSeal, modelBrokerReachableFromNamespace) is not { } cause) return;
+        if (spec.ModelBrokerSocketPath is not { Length: > 0 }) return SealedEgressUnavailableException.CauseBrokerSocketUnavailable;
 
-        // The probe keeps the step that failed and its output; an operator needs that more than the category.
-        throw new SealedEgressUnavailableException(cause == SealedEgressUnavailableException.CauseNoPrivilege && FilteredEgressNetns.SealUnavailableReason is { } probe ? $"{cause}; the probe: {probe}" : cause);
+        return RelayHelperProblem(helperPath) is { } problem ? $"{SealedEgressUnavailableException.CauseRelayMissing} ({problem})" : null;
     }
 
-    /// <summary>Why a confining host cannot seal a brokered network-off run, or null when it can. Pure over the host's three facts, so every cause is testable on a host that has none of them.</summary>
-    internal static string? SealRefusal(bool haveTools, bool canSeal, bool brokerReachableFromNamespace) =>
-        !haveTools ? SealedEgressUnavailableException.CauseMissingTools
-        : !canSeal ? SealedEgressUnavailableException.CauseNoPrivilege
-        : !brokerReachableFromNamespace ? SealedEgressUnavailableException.CauseBrokerLoopbackOnly
-        : null;
+    /// <summary>
+    /// What stops the helper at <paramref name="helperPath"/> from running the relay inside a sandbox, or null when
+    /// nothing does: it is not there; it is a self-contained publish, which cannot start from the files the sandbox
+    /// binds (<see cref="McpProxyNeedsItsDirectory"/>); or, asked, it does not answer as the relay
+    /// (<see cref="ModelBrokerRelay.HelperRunsRelay"/>) — a build from before the relay, which the
+    /// <see cref="McpProxyPathEnvVar"/> override can name, or a file that cannot start.
+    /// </summary>
+    private static string? RelayHelperProblem(string helperPath)
+    {
+        if (!File.Exists(helperPath)) return $"looked for {helperPath}";
+
+        if (McpProxyNeedsItsDirectory(helperPath)) return $"{helperPath} is a self-contained publish of several files, which cannot start from the files the sandbox binds";
+
+        return ModelBrokerRelay.HelperRunsRelay(helperPath) ? null : $"{helperPath} did not answer as the relay: it predates it, or cannot start";
+    }
+
+    /// <summary>Whether this host launches <paramref name="spec"/> inside a filtered-egress namespace — the prefix <see cref="SetupEgressNetnsAsync"/> builds, predicted for the admission that runs before any of it exists.</summary>
+    private static bool WouldFilterEgress(SandboxSpec spec) => SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported).Mode == SandboxEgressMode.Filtered;
 
     /// <summary>
     /// Create this run's cgroup-v2 resource-cap leaf (B4) when a memory/cpu cap is requested AND the operator delegated
@@ -959,10 +969,11 @@ public sealed partial class LocalProcessRunner
     }
 
     /// <summary>
-    /// Resolve <see cref="SandboxSpec.ModelBrokerHostToken"/> — everywhere it can appear in a spec — to the address
-    /// THIS child can actually reach the worker at: the filtered netns's own gateway when it runs inside one, else
-    /// loopback (a run sharing the host network). Total by construction: the token never survives into a child,
-    /// because a base URL still carrying it would be a broken URL rather than a visibly refused one.
+    /// Resolve <see cref="SandboxSpec.ModelBrokerHostToken"/> — everywhere it can appear in a spec — to the address the
+    /// child reaches its broker at: <c>127.0.0.1</c>, always. A child sharing the worker's network finds the lease's
+    /// own loopback listener there; a child in a network of its own finds the relay, which listens on that address
+    /// inside the child's namespace and carries the call to the lease's socket. Total by construction: the token never
+    /// survives into a child, because a base URL still carrying it would be a broken URL rather than a visibly refused one.
     ///
     /// <para>The ENV is not the only carrier, and assuming it was is what broke brokered Codex runs: a harness whose
     /// CLI ignores its base-URL env var re-emits the value on the ARGV instead (<c>CodexHarness</c>'s
@@ -973,38 +984,35 @@ public sealed partial class LocalProcessRunner
     /// <para>Returns the spec UNCHANGED when nothing mentions the token, which is every run whose credential was
     /// not brokered — byte-identical command, argv and env, and no allocation.</para>
     ///
-    /// <para>A network-off brokered run on a host that seals runs inside a namespace SEALED to its broker, and resolves
-    /// to that namespace's gateway like any other netns run. One that is severed instead (no netns, no shared network —
-    /// a host that cannot seal) resolves to loopback and cannot reach the broker — nor could it reach the provider
-    /// directly, so brokerage neither adds nor removes anything for it.</para>
-    ///
     /// <para><see cref="MentionsModelBrokerHost(SandboxSpec)"/> scans only <see cref="SandboxSpec.Command"/>,
     /// <see cref="SandboxSpec.Args"/> and <see cref="SandboxSpec.Environment"/> — a harness that instead wrote the
     /// broker base URL into <see cref="SandboxSpec.ConfigHomeFiles"/> would ship the token unresolved into that file,
     /// so any such projection must route the base URL through the command, argv, or env carriers this pass covers.</para>
     /// </summary>
-    internal static SandboxSpec ResolveModelBrokerHost(SandboxSpec spec, string? gatewayIp)
+    internal static SandboxSpec ResolveModelBrokerHost(SandboxSpec spec)
     {
         if (!MentionsModelBrokerHost(spec)) return spec;
 
-        var host = gatewayIp is { Length: > 0 } reachable ? reachable : "127.0.0.1";
-        var environment = spec.Environment.ToDictionary(entry => entry.Key, entry => WithModelBrokerHost(entry.Value, host), StringComparer.Ordinal);
+        var environment = spec.Environment.ToDictionary(entry => entry.Key, entry => WithModelBrokerHost(entry.Value, ModelBrokerHost), StringComparer.Ordinal);
 
-        ExemptBrokerFromProxies(environment, host);
+        ExemptBrokerFromProxies(environment, ModelBrokerHost);
 
         return spec with
         {
-            Command = WithModelBrokerHost(spec.Command, host),
-            Args = spec.Args.Select(arg => WithModelBrokerHost(arg, host)).ToList(),
+            Command = WithModelBrokerHost(spec.Command, ModelBrokerHost),
+            Args = spec.Args.Select(arg => WithModelBrokerHost(arg, ModelBrokerHost)).ToList(),
             Environment = environment,
         };
     }
 
+    /// <summary>What <see cref="SandboxSpec.ModelBrokerHostToken"/> resolves to in every child — see <see cref="ResolveModelBrokerHost"/>.</summary>
+    private const string ModelBrokerHost = "127.0.0.1";
+
     private static readonly string[] NoProxyVariables = { "NO_PROXY", "no_proxy" };
 
     /// <summary>
-    /// Keep a child that was handed a proxy from sending its model calls there. The broker is reached at an address no
-    /// operator's NO_PROXY can name ahead of time — a per-run gateway, or a loopback a NO_PROXY may simply omit. Both
+    /// Keep a child that was handed a proxy from sending its model calls there. The broker is reached on loopback, which
+    /// an operator's NO_PROXY may simply omit — and inside a namespace of its own, loopback is the relay. Both
     /// spellings get the union of what the task or the worker set, because readers prefer different ones (curl, Python
     /// and Claude Code lowercase; reqwest and Go uppercase) and a spelling created with the broker alone would hide the
     /// operator's own exemptions from half of them. A child with no proxy is left as it was: a NO_PROXY written there
@@ -1054,20 +1062,48 @@ public sealed partial class LocalProcessRunner
     private static readonly string[] ProxyVariables = { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" };
 
     /// <summary>
-    /// Drop the proxy variables from a SEALED launch's environment. Its only destination is its broker, on the
-    /// namespace's own gateway — a proxy is unreachable from there, and a CLI that honours the variables would send its
-    /// every model call to it and fail as if the provider were down. The per-run gateway is never in an operator's
-    /// NO_PROXY, so the variables must go rather than be amended. The worker's own hop to the provider keeps its proxy.
+    /// Drop the proxy variables from a SEALED launch's environment. Its only destination is its broker, through the
+    /// relay on its own loopback — a proxy is unreachable from a network that is off, and a CLI that honours the
+    /// variables would send every call it does not exempt there and fail as if the provider were down. The worker's own
+    /// hop to the provider keeps its proxy. An allowlist run keeps its proxy, which its allowlist may well admit, and
+    /// reaches the relay past it through the loopback exemption in NO_PROXY.
     /// </summary>
     internal static void WithoutProxiesWhenSealed(IDictionary<string, string?> environment, SandboxSpec spec, IReadOnlyList<string> egressExecPrefix)
     {
-        if (!SealedEgress(spec, egressExecPrefix)) return;
+        if (!SealedEgress(spec, egressExecPrefix.Count > 0, BubblewrapSandbox.Available is not null)) return;
 
         foreach (var name in ProxyVariables) environment.Remove(name);
     }
 
-    /// <summary>Whether this launch runs inside a SEALED netns: a namespace prefix for a run whose network is off can only be the sealed one, since an allowlist is read only when network is granted. Read by the launch's confinement record, beside <see cref="ShareNetwork"/>.</summary>
-    private static bool SealedEgress(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix) => !spec.AllowNetwork && egressExecPrefix.Count > 0;
+    /// <summary>Whether this launch is SEALED to its broker: its network is off and the relay carries it to that broker, its one destination. Read by the proxy strip and the launch's confinement record, beside <see cref="ShareNetwork"/>; over the same two host facts as <see cref="RelaysModelBroker"/>.</summary>
+    internal static bool SealedEgress(SandboxSpec spec, bool inNamespace, bool confines) => !spec.AllowNetwork && RelaysModelBroker(spec, inNamespace, confines);
+
+    /// <summary>
+    /// What this launch's confinement RECORD says, from the same derivations its argv is built from: whether
+    /// <paramref name="bwrap"/> confined it at all, whether its network was severed, and whether it was sealed to its
+    /// broker. Pure over the host's facts, so the record for every posture is testable on any host.
+    /// </summary>
+    internal static SandboxConfinement LaunchConfinement(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix, string? bwrap, string? unavailableReason) =>
+        BubblewrapSandbox.DeriveConfinement(bwrap, unavailableReason, ShareNetwork(spec, egressExecPrefix), EgressAllowlist(spec, egressExecPrefix), SealedEgress(spec, egressExecPrefix.Count > 0, bwrap is not null));
+
+    /// <summary>
+    /// Whether this launch starts its CLI behind the <c>codespace-mcp relay</c> (<see cref="ModelBrokerRelay"/>): its
+    /// model is brokered, the lease has a socket, and the child's network is its own on this host — the chain runs in a
+    /// filtered-egress namespace (<paramref name="inNamespace"/>), or bubblewrap confines it (<paramref name="confines"/>)
+    /// into a fresh one. The ONE predicate the argv, the proxy strip, the confinement record and the admission all
+    /// read, so no two of them can disagree about which children reach their broker through the socket.
+    /// </summary>
+    internal static bool RelaysModelBroker(SandboxSpec spec, bool inNamespace, bool confines) =>
+        spec.ModelBrokerPort is not null && spec.ModelBrokerSocketPath is { Length: > 0 } && ChildNetworkIsPrivate(spec, inNamespace, confines);
+
+    /// <summary>
+    /// Whether the child's network is not the worker's: it runs in a filtered-egress namespace, or bubblewrap confines it
+    /// and gives it a fresh one (<see cref="BubblewrapSandbox.SeversNetwork"/> — network off, or an allowlist bwrap
+    /// cannot enforce). Such a child cannot reach the broker's loopback port. An unconfined child shares the worker's
+    /// network whatever the spec asked, and reaches it directly.
+    /// </summary>
+    internal static bool ChildNetworkIsPrivate(SandboxSpec spec, bool inNamespace, bool confines) =>
+        inNamespace || confines && BubblewrapSandbox.SeversNetwork(spec.AllowNetwork, spec.EgressAllowlist);
 
     /// <summary>
     /// The allowlist bwrap's OWN egress policy sees. Inside a filtered netns the namespace IS the enforcement, so the
@@ -1086,54 +1122,76 @@ public sealed partial class LocalProcessRunner
     /// </summary>
     private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, CommandIsolationContext context)
     {
-        var (spec, configHome, mcpDeclarationPath, egressExecPrefix, cgroupExecPrefix) = context;
         // Fail-closed: a deployment that mandates isolation (Sandbox:RequireConfinement) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
 
-        var command = spec.Command;
+        foreach (var arg in ChildCommand(context, BubblewrapSandbox.Available, ProcessRlimits.Available)) argv.Add(arg);
+    }
 
-        // The declaration the write above laid down is inside the config-home, which bwrap binds writable at its own
-        // absolute path below — so the path on the argv resolves inside the sandbox exactly as it does outside it.
-        IReadOnlyList<string> args = ArgsWithMcpDeclaration(spec, mcpDeclarationPath);
+    /// <summary>
+    /// The whole <c>"$@"</c> chain for this launch, given the host's <paramref name="bwrap"/> and
+    /// <paramref name="prlimit"/> (null where absent): <c>cgroup → netns → prlimit → bwrap → relay → cli</c>, each layer
+    /// present only where it applies. Pure over those two facts, so every host's chain is testable on any host.
+    /// </summary>
+    internal static IReadOnlyList<string> ChildCommand(CommandIsolationContext context, string? bwrap, string? prlimit)
+    {
+        var (spec, _, _, egressExecPrefix, cgroupExecPrefix) = context;
 
-        // 1. Filesystem + namespace confinement (bubblewrap), innermost. A CLI that brings an OS sandbox of its own has
-        //    it stood down HERE and nowhere else — the one decision that wraps the command — so it cannot lose its own
-        //    sandbox on a launch that did not get ours.
-        if (BubblewrapSandbox.Available is { } bwrap)
-        {
-            args = BubblewrapSandbox.BuildArgs(PlanFor(spec, WithRunnerConfinement(args, spec.WhenRunnerConfines), configHome, egressExecPrefix));
-            command = bwrap;
-        }
+        // 1. Filesystem + namespace confinement (bubblewrap), innermost, with the broker relay just inside it.
+        var (command, args) = ConfinedCommand(context, bwrap);
 
         // 2. Resource caps (prlimit) — outermost WITHIN "$@" ONLY: it wraps the agent chain, never the supervisor shell
         //    that owns the spool. So its RLIMIT_FSIZE bounds files the AGENT writes, and cannot bound out.log/err.log at
         //    all: those are written by the supervisor's own (unlimited) FIFO copier children, and RLIMIT_FSIZE does not
         //    apply to pipe writes either. The spool's byte budget is enforced by those bounded copiers (CSP_MAX_BYTES,
         //    SpoolCapBytes) instead. Fork-bomb + runaway-agent-file caps; memory-RSS + total-disk need the cgroup tier.
-        if (ProcessRlimits.Available is { } prlimit)
+        if (prlimit is not null)
             (command, args) = ProcessRlimits.Wrap(prlimit, command, args, ProcessRlimits.EffectiveMaxProcesses(spec.MaxProcesses), ProcessRlimits.EffectiveMaxFileSizeMb(spec.MaxFileSizeMb));
 
         // 4. cgroup self-add (sh -c 'echo $$ > procs && exec "$@"'), OUTERMOST — places the WHOLE chain into the per-run
         //    resource-capped cgroup on the HOST before entering the netns; cgroup membership is inherited across the
         //    netns/prlimit/bwrap unshares, so the agent + every descendant are capped. Empty ⇒ byte-identical.
-        foreach (var p in cgroupExecPrefix) argv.Add(p);
-
         // 3. Filtered-egress netns (ip netns exec <ns>) — enters the per-run filtered network namespace before
         //    prlimit/bwrap/agent, so the entire chain's only egress is the nftables allowlist. Empty (no prefix)
         //    ⇒ byte-identical to a run without an enforceable allowlist.
-        foreach (var p in egressExecPrefix) argv.Add(p);
-
-        argv.Add(command);
-        foreach (var arg in args) argv.Add(arg);
+        return [.. cgroupExecPrefix, .. egressExecPrefix, command, .. args];
     }
 
     /// <summary>
-    /// What bubblewrap confines this launch to: the ONLY writable host paths are the config home and — unless the spec
-    /// may only read it — the workspace, which is otherwise mounted read-only. The MCP socket's dedicated dir and the
-    /// helper's own files are read-only. Pure over its inputs, so the spec-to-mount mapping is testable on a host that
-    /// cannot confine.
+    /// The CLI as whatever confines it runs it. Under bubblewrap: the CLI's own sandbox stood down (a CLI that brings
+    /// an OS sandbox of its own has it stood down HERE and nowhere else — the one decision that wraps the command — so
+    /// it cannot lose it on a launch that did not get ours), then the broker relay, then bubblewrap around both, so the
+    /// relay binds the sandbox's loopback and the stand-down still lands on the CLI's own argv. Without bubblewrap, the
+    /// relay alone, for a child that is in a namespace all the same (an allowlist on a host with no userns).
     /// </summary>
-    internal static BwrapPlan PlanFor(SandboxSpec spec, IReadOnlyList<string> args, string? configHome, IReadOnlyList<string> egressExecPrefix)
+    private static (string Command, IReadOnlyList<string> Args) ConfinedCommand(CommandIsolationContext context, string? bwrap)
+    {
+        var (spec, configHome, mcpDeclarationPath, egressExecPrefix, _) = context;
+        var inNamespace = egressExecPrefix.Count > 0;
+
+        // The declaration the write above laid down is inside the config-home, which bwrap binds writable at its own
+        // absolute path below — so the path on the argv resolves inside the sandbox exactly as it does outside it.
+        var args = ArgsWithMcpDeclaration(spec, mcpDeclarationPath);
+
+        if (bwrap is null) return WithModelBrokerRelay(spec, RelaysModelBroker(spec, inNamespace, confines: false), spec.Command, args);
+
+        var (command, relayed) = WithModelBrokerRelay(spec, RelaysModelBroker(spec, inNamespace, confines: true), spec.Command, WithRunnerConfinement(args, spec.WhenRunnerConfines));
+
+        return (bwrap, BubblewrapSandbox.BuildArgs(PlanFor(spec, command, relayed, configHome, egressExecPrefix)));
+    }
+
+    /// <summary>The CLI behind the broker relay when <paramref name="relays"/> (<see cref="RelaysModelBroker"/>); otherwise exactly the command and argv it was given.</summary>
+    private static (string Command, IReadOnlyList<string> Args) WithModelBrokerRelay(SandboxSpec spec, bool relays, string command, IReadOnlyList<string> args) =>
+        relays ? ModelBrokerRelay.Wrap(McpProxyBinaryPath(), spec.ModelBrokerPort!.Value, spec.ModelBrokerSocketPath!, command, args) : (command, args);
+
+    /// <summary>
+    /// What bubblewrap confines this launch to: the ONLY writable host paths are the config home and — unless the spec
+    /// may only read it — the workspace, which is otherwise mounted read-only. The MCP socket's dedicated dir, the
+    /// broker socket's, and the helper's own files are read-only. <paramref name="command"/> and <paramref name="args"/>
+    /// are what runs inside — the CLI, or the relay in front of it. Pure over its inputs, so the spec-to-mount mapping is
+    /// testable on a host that cannot confine.
+    /// </summary>
+    internal static BwrapPlan PlanFor(SandboxSpec spec, string command, IReadOnlyList<string> args, string? configHome, IReadOnlyList<string> egressExecPrefix)
     {
         var writable = new List<string>();
         if (!string.IsNullOrEmpty(spec.WorkingDirectory) && !spec.ReadOnlyWorkingDirectory) writable.Add(spec.WorkingDirectory);
@@ -1155,9 +1213,11 @@ public sealed partial class LocalProcessRunner
             readOnlyExtra.AddRange(McpProxyFiles(McpProxyBinaryPath()));
         }
 
+        readOnlyExtra.AddRange(ModelBrokerRelayPaths(spec, egressExecPrefix));
+
         return new BwrapPlan
         {
-            Command = spec.Command,
+            Command = command,
             Args = args,
             WorkingDirectory = spec.WorkingDirectory,
             WorkingDirectoryReadOnly = spec.ReadOnlyWorkingDirectory,
@@ -1170,6 +1230,26 @@ public sealed partial class LocalProcessRunner
             ShareNetwork = ShareNetwork(spec, egressExecPrefix),
             EgressAllowlist = EgressAllowlist(spec, egressExecPrefix),
         };
+    }
+
+    /// <summary>
+    /// What a relayed launch needs bound read-only beyond the rest (<see cref="PlanFor"/> runs only where bubblewrap
+    /// confines): the broker socket's own directory, the same rule as the MCP socket's; the helper that runs the relay,
+    /// file by file; and the CLI's own directory when it is an absolute path outside the read-only roots, which
+    /// bubblewrap would have bound had the CLI been the command, and the relay now is. Empty for every other launch,
+    /// so its argv is exactly what it was.
+    /// </summary>
+    private static IEnumerable<string> ModelBrokerRelayPaths(SandboxSpec spec, IReadOnlyList<string> egressExecPrefix)
+    {
+        if (!RelaysModelBroker(spec, egressExecPrefix.Count > 0, confines: true)) return Array.Empty<string>();
+
+        var paths = new List<string> { Path.GetDirectoryName(spec.ModelBrokerSocketPath!)! };
+
+        paths.AddRange(McpProxyFiles(McpProxyBinaryPath()));
+
+        if (BubblewrapSandbox.CommandDirectoryToBind(spec.Command) is { } cliDirectory) paths.Add(cliDirectory);
+
+        return paths;
     }
 
     /// <summary>

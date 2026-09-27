@@ -177,8 +177,9 @@ jobs:
         # The headline E2E spawns a REAL agent process through the production runner, which wraps it in
         # bubblewrap + prlimit (the production confinement posture). Running as root in the SDK container, so
         # no sudo. ca-certificates so the container can fetch packages; util-linux for prlimit; iproute2 and
-        # nftables so a network-off brokered agent is SEALED to its broker, as a confining host must, rather than
-        # refused as sandbox_sealed_egress_unavailable.
+        # nftables because the worker image ships them for allowlist runs. A network-off brokered agent needs
+        # neither: it reaches its broker through the codespace-mcp relay, which the test project's build places
+        # beside its assembly, and without which it is refused as sandbox_sealed_egress_unavailable.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates iproute2 nftables

@@ -175,11 +175,12 @@ public sealed record SandboxHandle
     /// that authenticates to nothing else and expires — not the tenant's key, which never leaves the broker.</para>
     ///
     /// <para>Per-lease ports change the shape of that exposure rather than its nature: the number of squattable
-    /// addresses is now the number of concurrent brokered runs instead of one per worker, and on a host that builds
-    /// filtered-egress namespaces each is a WIDE (<c>+</c>) bind rather than loopback — the pre-existing design, since
-    /// a sealed run reaches the worker at its namespace gateway and not on loopback, so there are now N of those where
-    /// there was 1. Reaching them still buys nothing without a live run's bearer, and the broker refuses any source
-    /// outside loopback and the allocator's <c>10/8</c> space.</para>
+    /// addresses is now the number of concurrent brokered runs instead of one per worker. Every lease binds loopback; a
+    /// child in a network of its own reaches it through <see cref="ModelBrokerSocketPath"/>. Only the re-bind of a
+    /// handle with no socket path — a namespaced run launched before the socket existed, which reaches the worker at its
+    /// namespace gateway — still binds WIDE (<c>+</c>) where the host builds filtered-egress namespaces. Reaching any of
+    /// them still buys nothing without a live run's bearer, and the broker refuses any source outside loopback and the
+    /// allocator's <c>10/8</c> space.</para>
     /// </summary>
     public int? ModelBrokerPort { get; init; }
 
@@ -211,8 +212,9 @@ public sealed record SandboxHandle
 
     /// <summary>
     /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
-    /// deny-by-default allowlist was enforceable, or a network-off run was sealed to its model broker, and a netns was
-    /// set up. It is the teardown handle: the netns / veth /
+    /// deny-by-default allowlist was enforceable and a netns was set up (or, on a handle written before a namespaced
+    /// run reached its broker through a relay, when a network-off run was sealed to its broker through one). It is the
+    /// teardown handle: the netns / veth /
     /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, from a DIFFERENT worker
     /// process on the same host) tears the namespace down with no setup-time state — the tools it drives are local, so
     /// the same-host boundary in the type remarks applies. Null when the run had no allowlist or the runner couldn't
