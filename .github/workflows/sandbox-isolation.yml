@@ -224,8 +224,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 82 ]; then
-            echo "::error::Expected >=82 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run reaching its broker through the relay and nothing else + an allowlist run relayed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart + a pre-relay namespaced run re-bound at its gateway and torn down with its seal + an allowlist run's veth guarded both ways, a flow the worker opened before the run included), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 83 ]; then
+            echo "::error::Expected >=83 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run reaching its broker through the relay and nothing else + an allowlist run relayed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart + a pre-relay namespaced run re-bound at its gateway and torn down with its seal + an allowlist run's veth guarded both ways, a flow the worker opened before the run included + forwarding a root worker may not write named before an allowlist is planned), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -265,14 +265,15 @@ jobs:
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
           print('All 6 sealed-egress arms ran and passed.')
 
-          # The allowlist plan's host-routing arms, the guard on its veth, and the relayed allowlist launch return early
-          # without ip and nft; require their markers. The IPv6 arm prints its marker only where the veth has a link-local.
-          for marker in ('[filtered-egress-e2e] ran restart-reissue', '[filtered-egress-e2e] ran policy-route-discard-dst', '[filtered-egress-e2e] ran worker-shut', '[filtered-egress-e2e] ran ipv6-link-local', '[filtered-egress-e2e] ran shadowed-peer-refused', '[filtered-egress-e2e] ran established-flow-refused', '[filtered-egress-e2e] ran pmtu-upload', '[filtered-egress-e2e] ran stale-guard-replaced', '[durable-egress-e2e] ran allowlist-relay'):
+          # The allowlist plan's host-routing arms, the guard on its veth, the relayed allowlist launch, and the forwarding
+          # probe's read-only arm return early without ip and nft, or off root; require their markers. The IPv6 arm prints
+          # its marker only where the veth has a link-local.
+          for marker in ('[filtered-egress-e2e] ran restart-reissue', '[filtered-egress-e2e] ran policy-route-discard-dst', '[filtered-egress-e2e] ran worker-shut', '[filtered-egress-e2e] ran ipv6-link-local', '[filtered-egress-e2e] ran shadowed-peer-refused', '[filtered-egress-e2e] ran established-flow-refused', '[filtered-egress-e2e] ran pmtu-upload', '[filtered-egress-e2e] ran stale-guard-replaced', '[filtered-egress-e2e] ran forwarding-read-only', '[durable-egress-e2e] ran allowlist-relay'):
               assert marker in text, f'"{marker}" is missing — this lane is root with ip and nft, so the allowlist plan must run'
-          for method in ('FilteredEgressNetnsE2ETests.A_30_still_held_by_a_run_that_outlived_its_worker_is_not_handed_to_the_next_run', 'FilteredEgressNetnsE2ETests.A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing', 'FilteredEgressNetnsE2ETests.An_allowlist_run_reaches_neither_the_worker_s_gateway_nor_its_address_while_dns_on_the_worker_and_the_allowlist_still_answer', 'FilteredEgressNetnsE2ETests.An_allowlist_run_has_no_path_to_the_worker_over_the_veth_s_ipv6_link_local_either', 'FilteredEgressNetnsE2ETests.A_peer_the_worker_reaches_at_the_run_s_address_is_refused_and_the_sandbox_receives_nothing', 'FilteredEgressNetnsE2ETests.A_flow_the_worker_opened_to_the_shadowed_peer_before_the_run_is_neither_handed_to_the_sandbox_nor_answered_from_it', 'FilteredEgressNetnsE2ETests.An_upload_across_a_narrower_uplink_completes_because_the_worker_s_frag_needed_reaches_the_run', 'FilteredEgressNetnsE2ETests.A_guard_an_earlier_teardown_left_behind_is_replaced_not_added_to', 'DurableLaunchEgressE2ETests.An_allowlist_run_reaches_its_broker_through_the_relay_and_its_allowlist_still_holds'):
+          for method in ('FilteredEgressNetnsE2ETests.A_30_still_held_by_a_run_that_outlived_its_worker_is_not_handed_to_the_next_run', 'FilteredEgressNetnsE2ETests.A_host_whose_policy_rule_discards_the_run_s_replies_fails_the_setup_and_leaks_nothing', 'FilteredEgressNetnsE2ETests.An_allowlist_run_reaches_neither_the_worker_s_gateway_nor_its_address_while_dns_on_the_worker_and_the_allowlist_still_answer', 'FilteredEgressNetnsE2ETests.An_allowlist_run_has_no_path_to_the_worker_over_the_veth_s_ipv6_link_local_either', 'FilteredEgressNetnsE2ETests.A_peer_the_worker_reaches_at_the_run_s_address_is_refused_and_the_sandbox_receives_nothing', 'FilteredEgressNetnsE2ETests.A_flow_the_worker_opened_to_the_shadowed_peer_before_the_run_is_neither_handed_to_the_sandbox_nor_answered_from_it', 'FilteredEgressNetnsE2ETests.An_upload_across_a_narrower_uplink_completes_because_the_worker_s_frag_needed_reaches_the_run', 'FilteredEgressNetnsE2ETests.A_guard_an_earlier_teardown_left_behind_is_replaced_not_added_to', 'FilteredEgressNetnsE2ETests.Forwarding_a_root_worker_may_not_write_is_named_before_an_allowlist_is_planned_on_it', 'DurableLaunchEgressE2ETests.An_allowlist_run_reaches_its_broker_through_the_relay_and_its_allowlist_still_holds'):
               cases = [r for r in results if method in r.get('testName', '')]
               assert len(cases) == 1 and cases[0].get('outcome') == 'Passed', f'{method}: must pass'
-          print('All 9 allowlist-plan arms ran and passed.')
+          print('All 10 allowlist-plan arms ran and passed.')
 
           # The broker's socket, relay-revoke and legacy-gateway arms return early without bwrap or ip/nft; require each
           # marker, the legacy survivor's teardown of the seal it carried included.
@@ -327,9 +328,10 @@ jobs:
 
       - name: Test the non-root worker posture (uid 1654, no capabilities)
         # The shipped worker runs as uid 1654 with no capabilities and may not build a network namespace of its own,
-        # and every step above runs as root. Category=SandboxNonRoot runs the relay's arms again as that uid; each one
-        # first asserts geteuid() != 0, that bubblewrap confines, and that no namespace can be built, so the lane cannot
-        # pass as root or on a host that could fall back to a veth namespace. RequireConfinement stays set. The runner's
+        # and every step above runs as root. Category=SandboxNonRoot runs the relay's arms again as that uid, and an
+        # allowlist run it cannot filter, which is severed and still relayed; each one first asserts geteuid() != 0,
+        # that bubblewrap confines, and that no namespace can be built, so the lane cannot pass as root or on a host
+        # that could fall back to a veth namespace. RequireConfinement stays set. The runner's
         # kernel restricts unprivileged user namespaces through AppArmor where it has that switch; lifting it is the
         # same node setting operators give the worker. The root arms above leave their short-path socket roots behind
         # owner-only, which uid 1654 could not enter, so those go first.
@@ -366,11 +368,51 @@ jobs:
           root = ET.parse(path).getroot()
           counters = root.find('.//{*}Counters')
           executed, passed = int(counters.get('executed')), int(counters.get('passed'))
-          assert executed >= 9 and passed == executed, f'expected all 9 non-root arms to run and pass, got executed={executed} passed={passed}'
+          assert executed >= 10 and passed == executed, f'expected all 10 non-root arms to run and pass, got executed={executed} passed={passed}'
           text = open(path, encoding='utf-8').read()
-          for marker in ('[non-root-e2e] ran admission uid=1654', '[sealed-egress-e2e] ran non-root durable uid=1654', '[sealed-egress-e2e] ran non-root non-durable uid=1654', '[sealed-egress-e2e] ran non-root restart uid=1654', '[sealed-egress-e2e] ran non-root relay-refused uid=1654', '[sealed-egress-e2e] ran non-root relay-ipv6', '[broker-socket-e2e] ran non-root socket-channel uid=1654', '[review-diff-e2e] ran non-root network-off-relayed claude-code uid=1654', '[review-diff-e2e] ran non-root network-off-relayed codex-cli uid=1654'):
+          for marker in ('[non-root-e2e] ran admission uid=1654', '[sealed-egress-e2e] ran non-root durable uid=1654', '[sealed-egress-e2e] ran non-root non-durable uid=1654', '[sealed-egress-e2e] ran non-root restart uid=1654', '[sealed-egress-e2e] ran non-root relay-refused uid=1654', '[sealed-egress-e2e] ran non-root relay-ipv6', '[broker-socket-e2e] ran non-root socket-channel uid=1654', '[review-diff-e2e] ran non-root network-off-relayed claude-code uid=1654', '[review-diff-e2e] ran non-root network-off-relayed codex-cli uid=1654', '[durable-egress-e2e] ran non-root allowlist-severed uid=1654'):
               assert marker in text, f'non-root arm marker "{marker}" is missing — the arm returned early or did not run as the worker uid'
           print(f'All {executed} non-root arms ran as uid 1654 and passed.')
+          PY
+
+      - name: Test the unconfined worker posture (uid 1654, nothing confining)
+        # docker-compose.yml ships the worker image with none of the grants bubblewrap needs: uid 1654 with ip and nft
+        # installed, nothing confining, RequireConfinement off. A confining worker severs an allowlist it cannot filter;
+        # here nothing would enforce that, so Category=SandboxUnconfined pins that such a run is still planned into its
+        # namespace and aborted at the setup, never launched on the worker's network. It runs as that uid with
+        # CODESPACE_BWRAP_PATH naming no binary and RequireConfinement unset — the one lane that must not confine —
+        # and each arm first asserts exactly that posture. Reuses the home, packages and build output the non-root step
+        # made readable to that uid.
+        shell: bash
+        run: |
+          set -euo pipefail
+          results=backend/TestResults/unconfined
+          mkdir -p "$results"
+          chown 1654:1654 "$results"
+          packages=$(dotnet nuget locals global-packages --list | sed -E 's/^global-packages: *//; s:/+$::')
+          test -d "$packages"
+          setpriv --reuid 1654 --regid 1654 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
+            env -u Sandbox__RequireConfinement HOME=/tmp/nonroot-home DOTNET_CLI_HOME=/tmp/nonroot-home NUGET_PACKAGES="$packages" CODESPACE_BWRAP_PATH=/nonexistent/bwrap \
+            dotnet test backend/tests/CodeSpace.SandboxTests/CodeSpace.SandboxTests.csproj \
+              --no-build \
+              --filter "Category=SandboxUnconfined" \
+              --logger "console;verbosity=detailed" \
+              --logger "trx;LogFileName=sandbox-unconfined.trx" \
+              --results-directory "$results"
+
+      - name: Assert the unconfined arms actually ran as uid 1654
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          path = 'backend/TestResults/unconfined/sandbox-unconfined.trx'
+          root = ET.parse(path).getroot()
+          counters = root.find('.//{*}Counters')
+          executed, passed = int(counters.get('executed')), int(counters.get('passed'))
+          assert executed >= 3 and passed == executed, f'expected all 3 unconfined arms to run and pass, got executed={executed} passed={passed}'
+          text = open(path, encoding='utf-8').read()
+          for marker in ('[unconfined-e2e] ran allowlist-never-unfiltered durable uid=1654', '[unconfined-e2e] ran allowlist-never-unfiltered one-shot uid=1654', '[unconfined-e2e] ran admission uid=1654'):
+              assert marker in text, f'unconfined arm marker "{marker}" is missing — the arm returned early or did not run as the worker uid'
+          print(f'All {executed} unconfined arms ran as uid 1654 and passed.')
           PY
 
       - name: Upload test results
@@ -381,4 +423,5 @@ jobs:
           path: |
             backend/TestResults/*.trx
             backend/TestResults/nonroot/*.trx
+            backend/TestResults/unconfined/*.trx
           if-no-files-found: ignore

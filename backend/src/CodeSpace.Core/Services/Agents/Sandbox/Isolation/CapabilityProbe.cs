@@ -2,15 +2,15 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 
 /// <summary>
 /// Keeps the answer to a question this process can only settle by trying — are <c>ip</c> and <c>nft</c> runnable
-/// (<see cref="FilteredEgressNetns.IsSupported"/>), can it build a sealed namespace (<see cref="FilteredEgressNetns.CanSeal"/>).
+/// (<see cref="FilteredEgressNetns.IsSupported"/>), can it filter an allowlist run (<see cref="FilteredEgressNetns.CanFilter"/>).
 /// A proof holds for the process. A failure may be transient — a fork that failed once, a slow first mount of
 /// <c>/run/netns</c>, rtnl held by a burst of teardowns — so it stands for one retry interval and is then probed
 /// again, with its reason kept for whoever reports what could not be done.
 ///
-/// <para>The FIRST probe is waited for by every caller: a fresh worker that may well seal must not refuse its first
-/// launches while it finds out. A RE-probe is made by one caller outside the lock while the others take the standing
-/// failure — which they would have got anyway — instead of queueing behind a probe that can take tens of seconds on a
-/// host that keeps failing slowly. Timed on a monotonic clock, so a wall-clock step cannot hold a failure forever or
+/// <para>The FIRST probe is waited for by every caller: a fresh worker that may well filter must not sever its first
+/// allowlist runs while it finds out. A RE-probe is made by one caller outside the lock while the others take the
+/// standing failure — which they would have got anyway — instead of queueing behind a probe that can take tens of
+/// seconds on a host that keeps failing slowly. Timed on a monotonic clock, so a wall-clock step cannot hold a failure forever or
 /// re-probe on every call.</para>
 /// </summary>
 internal sealed class CapabilityProbe(Func<string?> probe, Func<TimeSpan> monotonicNow, TimeSpan retryInterval)

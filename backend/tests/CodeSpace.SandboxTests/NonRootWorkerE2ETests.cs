@@ -14,7 +14,9 @@ namespace CodeSpace.SandboxTests;
 /// process may not build a network namespace of its own. Until the relay, a confining host that could not build one
 /// refused every network-off brokered run before it spent; here the REAL runner admits it, and the real chain carries
 /// it to its broker through the relay and the lease's socket. Each arm asserts the posture first
-/// (<see cref="NonRootWorker.Require"/>), then runs the SAME arm the root lane runs, so both lanes pin one behaviour.
+/// (<see cref="NonRootWorker.Require"/>), then runs the SAME arm the root lane runs, so both lanes pin one behaviour —
+/// but for the allowlist arm: this worker cannot filter, so its allowlist run is severed where the root lane's is
+/// filtered, and it still reaches its broker.
 ///
 /// <para>Selected by its trait alone (<c>--filter Category=SandboxNonRoot</c>), never by the root lane's
 /// <c>Category=Sandbox</c>. Every arm that ran prints its class's marker with <c>non-root</c> and its uid, which the
@@ -77,6 +79,14 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
 
         using var arms = new SealedEgressE2ETests(output);
         await arms.ReachesTheNextWorkerAfterARestartAsync(Lane);
+    }
+
+    [Fact]
+    public async Task An_allowlist_run_this_worker_cannot_filter_is_severed_and_still_reaches_its_broker_through_the_relay()
+    {
+        if (!NonRootWorker.Require()) return;
+
+        await new DurableLaunchEgressE2ETests(output).IsSeveredAndStillReachesItsBrokerAsync(Lane);
     }
 
     [Fact]

@@ -23,8 +23,8 @@
 # can still repoint CODESPACE_CODEX_CLI_PATH / CODESPACE_CLAUDE_CODE_PATH at a different binary.
 #
 # CONFINEMENT POSTURE. The worker logs one "Sandbox posture:" line at boot — whether bubblewrap confines and why not,
-# whether the codespace-mcp helper is present, whether the namespace probe (FilteredEgressNetns.CanSeal) holds and why
-# not. Read it before the first run; what each tier needs from the deployment is below.
+# whether the codespace-mcp helper is present, whether the allowlist filter probe (FilteredEgressNetns.CanFilter) holds
+# and why not. Read it before the first run; what each tier needs from the deployment is below.
 #
 # BUBBLEWRAP (every tier) needs no root and no capability: the non-root user below confines through UNPRIVILEGED user
 # namespaces, which a container runtime's defaults deny. Grant them, without --privileged or --cap-add:
@@ -74,14 +74,20 @@
 # (sandbox_sealed_egress_unavailable): so does one whose CODESPACE_MCP_PROXY_PATH names a build from before the relay
 # or a self-contained publish. An allowlist run reaches its broker through the same relay.
 #
-# EGRESS FILTERING (an allowlist run) needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN + a writable net.ipv4.ip_forward on
-# top of these packages: FilteredEgressPlan runs `ip netns add` (CAP_SYS_ADMIN: it unshares a network namespace and
-# bind-mounts it), builds a veth and an nftables ruleset, and `sysctl -w net.ipv4.ip_forward=1`. With `ip` or `nft`
-# missing, FilteredEgressNetns.IsSupported is false and SandboxEgressPolicy.Derive turns the allowlist into Denied (NO
-# network at all), never into Full. With them installed but the privilege missing — this image as shipped, since the
-# user below is non-root — that probe still passes, so the run is planned Filtered and its launch aborts when setup is
-# refused ("Filtered-egress netns setup failed"): it is never launched unfiltered, but it is not quietly Denied either.
-# Grant the privilege on any deployment that relies on allowlisted egress.
+# EGRESS FILTERING (an allowlist run) needs root + CAP_NET_ADMIN + CAP_SYS_ADMIN, and net.ipv4.ip_forward already 1 or
+# writable, on top of these packages: FilteredEgressPlan runs `ip netns add` (CAP_SYS_ADMIN: it unshares a network
+# namespace and bind-mounts it), builds a veth and an nftables ruleset, and `sysctl -w net.ipv4.ip_forward=1`, which
+# only warns where /proc/sys is read-only or the write is denied, so forwarding that reads 0 there stays off. Where
+# bubblewrap confines, the worker proves all of it before it plans a run Filtered (FilteredEgressNetns.CanFilter: the
+# binaries, one throwaway namespace, and that sysctl), and the boot line names the step that failed. Where any of it is
+# missing — this image as shipped with the grants above, since the user below is non-root —
+# SandboxEgressPolicy.Derive turns the allowlist into Denied (NO network at all), never into Full: bubblewrap severs
+# the run, its record says NetworkSevered, and a brokered one still reaches its model through the relay above. Where
+# bubblewrap does not confine (none of the grants above, as docker-compose.yml ships it), nothing would enforce
+# Denied, so the run is still planned Filtered on the binaries alone: its setup filters it, or is refused and aborts
+# the launch ("Filtered-egress netns setup failed") — it is never launched on the worker's network, and
+# Sandbox__RequireConfinement refuses such a host outright. Grant the privilege on any deployment that relies on
+# allowlisted egress.
 #
 # global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
 # base-image digest pinning is a deferred follow-up — it needs the manifest-LIST digest + a Renovate bump (a

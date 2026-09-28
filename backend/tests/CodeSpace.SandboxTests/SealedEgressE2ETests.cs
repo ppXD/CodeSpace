@@ -250,7 +250,7 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
         ((CodeSpace.Messages.Failures.IFailure)noSocket).Code.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.SandboxSealedEgressUnavailable);
 
         var missing = Path.Combine(NewDirectory("no-helper"), "codespace-mcp");
-        Should.Throw<SealedEgressUnavailableException>(() => LocalProcessRunner.EnsureEgressAdmissible(spec with { ModelBrokerSocketPath = "/spool/k/broker/seg/s" }, BubblewrapSandbox.Available is not null, missing))
+        Should.Throw<SealedEgressUnavailableException>(() => LocalProcessRunner.EnsureEgressAdmissible(spec with { ModelBrokerSocketPath = "/spool/k/broker/seg/s" }, BubblewrapSandbox.Available is not null, FilteredEgressNetns.CanFilter, missing))
             .Cause.ShouldStartWith(SealedEgressUnavailableException.CauseRelayMissing);
 
         var (result, probe) = await RunAsync(spec);

@@ -105,8 +105,8 @@ public sealed class RootlessWorkerPostureTests
         line.Properties["BubblewrapUnavailableReason"].ShouldBe(BubblewrapSandbox.UnavailableReason ?? "none");
         line.Properties["McpProxyPresent"].ShouldBe(helperPresent);
         line.Properties["McpProxyPath"].ShouldBe(helperPath);
-        line.Properties["CanSeal"].ShouldBe(FilteredEgressNetns.CanSeal);
-        line.Properties["SealUnavailableReason"].ShouldBe(FilteredEgressNetns.SealUnavailableReason ?? "none");
+        line.Properties["CanFilter"].ShouldBe(FilteredEgressNetns.CanFilter);
+        line.Properties["FilterUnavailableReason"].ShouldBe(FilteredEgressNetns.FilterUnavailableReason ?? "none");
     }
 
     /// <summary>Allowed for every caller on every architecture: no argument filter, and no capability, architecture or kernel condition.</summary>

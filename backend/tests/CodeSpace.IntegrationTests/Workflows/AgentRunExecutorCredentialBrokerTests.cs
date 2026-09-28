@@ -1608,9 +1608,9 @@ public partial class AgentRunExecutorTests
 
     /// <summary>
     /// A durable runner on a host that CONFINES, whatever host the test runs on: its admission is the local runner's
-    /// own (<c>LocalProcessRunner.EnsureEgressAdmissible</c>) with bubblewrap taken as present and the relay's helper at
-    /// <paramref name="helperPath"/>. It builds no namespace, so its handles carry no namespace key — the non-root
-    /// worker's posture. Records what it was asked and what it launched.
+    /// own (<c>LocalProcessRunner.EnsureEgressAdmissible</c>) with bubblewrap taken as present, no allowlist it can
+    /// filter, and the relay's helper at <paramref name="helperPath"/>. It builds no namespace, so its handles carry no
+    /// namespace key — the non-root worker's posture. Records what it was asked and what it launched.
     /// </summary>
     private sealed class ConfiningRunner(string helperPath) : ISandboxRunner, ISandboxDurableRunner, ISandboxEgressAdmission
     {
@@ -1624,7 +1624,7 @@ public partial class AgentRunExecutorTests
         {
             Asked.Add(spec);
 
-            LocalProcessRunner.EnsureEgressAdmissible(spec, confines: true, helperPath);
+            LocalProcessRunner.EnsureEgressAdmissible(spec, confines: true, filtersAllowlist: false, helperPath);
         }
 
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) =>

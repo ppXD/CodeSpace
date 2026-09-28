@@ -332,13 +332,15 @@ public sealed partial class LocalProcessRunner
     /// <summary>
     /// Derive this run's egress posture and, when it is an enforceable Filtered allowlist, set up the per-run netns and
     /// return the <c>ip netns exec</c> prefix the supervisor chain runs behind plus the teardown key. None/Full need no
-    /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a runner that cannot enforce it degrades
-    /// to None (no netns) via <see cref="SandboxEgressPolicy"/>, and a netns whose setup fails throws. A network-off run
-    /// never gets one: it reaches its broker, if it has one, through the relay (<see cref="RelaysModelBroker"/>).
+    /// netns (empty prefix, null key). Fail-closed: an allowlist requested on a confining runner that cannot filter it
+    /// (<see cref="FiltersAllowlist"/>) degrades to None (no netns) via <see cref="SandboxEgressPolicy"/>, where
+    /// bubblewrap severs it; on a runner where nothing confines, it is planned Filtered wherever the binaries are, and a
+    /// netns whose setup fails throws. A child with no netns reaches its broker, if it has one, through the relay
+    /// (<see cref="RelaysModelBroker"/>).
     /// </summary>
     private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key)> SetupEgressNetnsAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
     {
-        var policy = SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported);
+        var policy = EgressPolicyFor(spec, HostFiltersAllowlist(BubblewrapSandbox.Available is not null));
 
         if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null);
 
@@ -362,14 +364,22 @@ public sealed partial class LocalProcessRunner
     /// at <see cref="McpProxyBinaryPath"/> cannot run the relay there (<see cref="RelayHelperProblem"/>). A spec with no
     /// broker port, or a child that shares the worker's network (an unconfined host, a network-granting run with no
     /// allowlist), is admitted untouched: nothing about its launch changes. The admission reads the same
-    /// <see cref="ChildNetworkIsPrivate"/> the launch does, with the namespace predicted rather than built.
+    /// <see cref="ChildNetworkIsPrivate"/> the launch does, with the namespace predicted rather than built — from the
+    /// same host fact the launch derives it from (<see cref="HostFiltersAllowlist"/>), so a confining worker's
+    /// allowlist it cannot filter is admitted as the severed run it will be, never as a namespace its setup would then
+    /// refuse.
     /// </summary>
-    public void EnsureEgressAdmissible(SandboxSpec spec) => EnsureEgressAdmissible(spec, BubblewrapSandbox.Available is not null, McpProxyBinaryPath());
-
-    /// <summary><see cref="EnsureEgressAdmissible(SandboxSpec)"/> over whether this host <paramref name="confines"/> and where it keeps the relay's helper, so a test can stand in for a confining host on any host.</summary>
-    internal static void EnsureEgressAdmissible(SandboxSpec spec, bool confines, string helperPath)
+    public void EnsureEgressAdmissible(SandboxSpec spec)
     {
-        if (RelayRefusal(spec, ChildNetworkIsPrivate(spec, WouldFilterEgress(spec), confines), helperPath) is { } cause)
+        var confines = BubblewrapSandbox.Available is not null;
+
+        EnsureEgressAdmissible(spec, confines, HostFiltersAllowlist(confines), McpProxyBinaryPath());
+    }
+
+    /// <summary><see cref="EnsureEgressAdmissible(SandboxSpec)"/> over whether this host <paramref name="confines"/>, whether it plans an allowlist into a filtered namespace (<paramref name="filtersAllowlist"/>, <see cref="FiltersAllowlist"/>), and where it keeps the relay's helper, so a test can stand in for any host on any host.</summary>
+    internal static void EnsureEgressAdmissible(SandboxSpec spec, bool confines, bool filtersAllowlist, string helperPath)
+    {
+        if (RelayRefusal(spec, ChildNetworkIsPrivate(spec, WouldFilterEgress(spec, filtersAllowlist), confines), helperPath) is { } cause)
             throw new SealedEgressUnavailableException(cause);
     }
 
@@ -403,8 +413,30 @@ public sealed partial class LocalProcessRunner
         return ModelBrokerRelay.HelperRunsRelay(helperPath) ? null : $"{helperPath} did not answer as the relay: it predates it, or cannot start";
     }
 
-    /// <summary>Whether this host launches <paramref name="spec"/> inside a filtered-egress namespace — the prefix <see cref="SetupEgressNetnsAsync"/> builds, predicted for the admission that runs before any of it exists.</summary>
-    private static bool WouldFilterEgress(SandboxSpec spec) => SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, FilteredEgressNetns.IsSupported).Mode == SandboxEgressMode.Filtered;
+    /// <summary>Whether a host that plans an allowlist into a filtered namespace (<paramref name="filtersAllowlist"/>) launches <paramref name="spec"/> inside one — the prefix <see cref="SetupEgressNetnsAsync"/> builds, predicted for the admission that runs before any of it exists.</summary>
+    private static bool WouldFilterEgress(SandboxSpec spec, bool filtersAllowlist) => EgressPolicyFor(spec, filtersAllowlist).Mode == SandboxEgressMode.Filtered;
+
+    /// <summary>
+    /// The egress policy a host that plans an allowlist into a filtered namespace (<paramref name="filtersAllowlist"/>,
+    /// <see cref="FiltersAllowlist"/>) gives <paramref name="spec"/>: Filtered there, and otherwise None — severed,
+    /// never Full. The ONE derivation the launch and the admission read, so the admission cannot admit a run as the
+    /// namespace its setup would refuse.
+    /// </summary>
+    internal static SandboxEgressPolicy EgressPolicyFor(SandboxSpec spec, bool filtersAllowlist) => SandboxEgressPolicy.Derive(spec.AllowNetwork, spec.EgressAllowlist, filtersAllowlist);
+
+    /// <summary>
+    /// Whether a host plans an allowlist run into a filtered namespace. Where bubblewrap <paramref name="confines"/>, only
+    /// once every step of the setup is proven (<paramref name="canFilter"/>, <see cref="FilteredEgressNetns.CanFilter"/>):
+    /// bubblewrap severs the run it cannot filter, which still reaches its broker through the relay, where a setup it
+    /// then refused would abort the run after its spend was admitted. Where nothing confines, wherever the binaries are
+    /// (<paramref name="toolsPresent"/>, <see cref="FilteredEgressNetns.IsSupported"/>), as it always was: nothing there
+    /// would enforce None, so its setup filters the run or aborts its launch, and it is never launched on the worker's
+    /// network.
+    /// </summary>
+    internal static bool FiltersAllowlist(bool confines, bool canFilter, bool toolsPresent) => confines ? canFilter : toolsPresent;
+
+    /// <summary><see cref="FiltersAllowlist"/> over this host's probes — the ONE host fact the launch and the admission read. The filter probe is asked only where bubblewrap confines, the one posture it decides.</summary>
+    private static bool HostFiltersAllowlist(bool confines) => FiltersAllowlist(confines, confines && FilteredEgressNetns.CanFilter, FilteredEgressNetns.IsSupported);
 
     /// <summary>
     /// Create this run's cgroup-v2 resource-cap leaf (B4) when a memory/cpu cap is requested AND the operator delegated

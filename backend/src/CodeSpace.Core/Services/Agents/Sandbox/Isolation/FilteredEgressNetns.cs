@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
@@ -7,36 +8,98 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// The privileged executor of a <see cref="FilteredEgressPlan"/> (B3.2 enforcement) — sets up a per-run filtered
 /// network namespace, runs a command INSIDE it (so its only egress is the nftables allowlist), and tears the
 /// namespace down. Needs <c>ip</c> + <c>nft</c> + <c>CAP_NET_ADMIN</c>/root, so it runs for real only in the
-/// privileged sandbox-isolation CI job; <see cref="IsSupported"/> gates it everywhere else. Teardown is BEST-EFFORT
+/// privileged sandbox-isolation CI job; <see cref="CanFilter"/> gates it everywhere else bubblewrap confines, and the
+/// binaries alone where nothing does (<c>LocalProcessRunner.FiltersAllowlist</c>). Teardown is BEST-EFFORT
 /// and ALWAYS runs (even on a setup failure mid-way), so a failed run never leaks a netns / veth / nft table.
 /// </summary>
 public static class FilteredEgressNetns
 {
 
-    /// <summary>How long a failed tools or seal probe stands before it is tried again (see <see cref="CapabilityProbe"/>): caching a transient failure for the process lifetime would misreport this worker's posture until it restarted.</summary>
-    internal static readonly TimeSpan SealProbeRetryInterval = TimeSpan.FromMinutes(1);
+    /// <summary>How long a failed tools or filter probe stands before it is tried again (see <see cref="CapabilityProbe"/>): caching a transient failure for the process lifetime would misreport this worker's posture until it restarted.</summary>
+    internal static readonly TimeSpan ProbeRetryInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>The sysctl the plan's setup turns on (<c>sysctl -w net.ipv4.ip_forward=1</c>, <see cref="FilteredEgressPlan.Build"/>), as the file the filter probe reads.</summary>
+    internal const string IpForwardPath = "/proc/sys/net/ipv4/ip_forward";
+
+    private const string ToolsMissing = "ip or nft is not installed";
 
     private static readonly long ProcessStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
-    private static readonly CapabilityProbe Tools = new(() => ProbeSupported() ? null : "ip or nft is not installed", () => System.Diagnostics.Stopwatch.GetElapsedTime(ProcessStart), SealProbeRetryInterval);
+    private static readonly CapabilityProbe Tools = new(() => ProbeSupported() ? null : ToolsMissing, () => System.Diagnostics.Stopwatch.GetElapsedTime(ProcessStart), ProbeRetryInterval);
 
-    private static readonly CapabilityProbe Seal = new(ProbeSeal, () => System.Diagnostics.Stopwatch.GetElapsedTime(ProcessStart), SealProbeRetryInterval);
+    private static readonly CapabilityProbe Filter = new(() => FilterProbe(IpForwardPath), () => System.Diagnostics.Stopwatch.GetElapsedTime(ProcessStart), ProbeRetryInterval);
 
-    /// <summary>True when <c>ip</c> + <c>nft</c> are present (the binaries the plan drives). Actual privilege to create a netns is exercised at run time — a setup failure fails closed. A failed probe is retried like the seal probe (<see cref="CapabilityProbe"/>): a fork that failed once at boot must not disable every allowlist, and the legacy re-bind's wide bind, for the process lifetime.</summary>
+    /// <summary>True when <c>ip</c> + <c>nft</c> are present (the binaries the plan drives). Whether this process may USE them to filter a run is <see cref="CanFilter"/>, which a confining host's launch keys on; this alone gates what needs only the binaries — tearing a namespace down by name, the legacy re-bind's wide bind — and the allowlist plan of a host where bubblewrap does not confine, whose setup filters the run or aborts its launch (<c>LocalProcessRunner.FiltersAllowlist</c>). A failed probe is retried like the filter probe (<see cref="CapabilityProbe"/>): a fork that failed once at boot must not disable any of them for the process lifetime.</summary>
     public static bool IsSupported => Tools.Holds;
 
     /// <summary>
-    /// True when this process has PROVED it can build a namespace: the binaries are present AND one throwaway
-    /// namespace was created and deleted, and nftables answered. The binaries alone are not enough — an image can ship
-    /// them to a worker that runs without the privilege to use them. The boot posture line reports it; no launch keys
-    /// on it, since a namespaced run reaches its broker through a relay that needs no namespace of the worker's own.
-    /// A proof is kept for the process; a failure is kept for
-    /// <see cref="SealProbeRetryInterval"/> and then probed again, and says why in <see cref="SealUnavailableReason"/>.
+    /// True when this process has PROVED it can filter an allowlist run: the binaries are present, one throwaway
+    /// namespace was created and deleted and nftables answered, and forwarding will be on once the setup has asked for
+    /// it (<see cref="ForwardingProblem(string)"/>). The binaries alone are not enough — an image can ship them to a
+    /// worker that runs without the privilege to use them, where an allowlist run planned Filtered would abort at its
+    /// setup after its spend was admitted. So where bubblewrap confines, the launch's egress derivation keys on this
+    /// (<c>LocalProcessRunner.FiltersAllowlist</c>): where it does not hold, an allowlist FAILS CLOSED to no egress
+    /// (<see cref="SandboxEgressPolicy.Derive"/>), which bubblewrap enforces, and a brokered run still reaches its
+    /// broker through the relay. Where nothing confines, nothing would enforce that, so the binaries alone still plan
+    /// the run Filtered there. A proof is kept for the process; a failure is kept for
+    /// <see cref="ProbeRetryInterval"/> and then probed again, and says why in <see cref="FilterUnavailableReason"/>.
     /// </summary>
-    public static bool CanSeal => Seal.Holds;
+    public static bool CanFilter => Filter.Holds;
 
-    /// <summary>Why the last seal probe failed — the failed step and its output — or null when none has failed since the last proof. Read by the boot posture line, so the cause is not lost with the probe.</summary>
-    public static string? SealUnavailableReason => Seal.UnavailableReason;
+    /// <summary>Why the last filter probe failed — the failed step and its output — or null when none has failed since the last proof. Read by the boot posture line, so the cause is not lost with the probe.</summary>
+    public static string? FilterUnavailableReason => Filter.UnavailableReason;
+
+    /// <summary>
+    /// The filter probe <see cref="CanFilter"/> runs, with the forwarding file it asks about passed in
+    /// (<see cref="IpForwardPath"/> there), so the root lane can ask the whole composition about a file root may not
+    /// write, not only its parts. Its namespace step builds and deletes this process's one probe namespace for real, so
+    /// it is asked beside <see cref="CanFilter"/> only once that has settled.
+    /// </summary>
+    internal static string? FilterProbe(string forwardingPath) => FilterProblem(IsSupported, ProbeNamespace, () => ForwardingProblem(forwardingPath));
+
+    /// <summary>
+    /// The first thing that stops this process filtering an allowlist run, in the order its setup meets them — the
+    /// binaries, a namespace, forwarding — or null when nothing does. A step is asked only once the one before it
+    /// holds, so a host without <c>ip</c> is never asked to run it. Pure over the three questions, so every row of the
+    /// truth table is testable on a host that can answer none of them.
+    /// </summary>
+    internal static string? FilterProblem(bool toolsPresent, Func<string?> namespaceProblem, Func<string?> forwardingProblem)
+    {
+        if (!toolsPresent) return ToolsMissing;
+
+        return namespaceProblem() ?? forwardingProblem();
+    }
+
+    /// <summary>
+    /// Why forwarding would still be off after the setup's <c>sysctl -w net.ipv4.ip_forward=1</c>, or null when it
+    /// will be on: the file already reads 1, or this process may write it. Asked with a read and <c>access(2)</c>,
+    /// which change nothing. The setup's own write cannot be the question: procps' <c>sysctl -w</c> warns and exits 0
+    /// on a read-only <c>/proc/sys</c> and on a denied write alike, so a setup that ran it would succeed with nothing
+    /// forwarded — an allowlist whose allowed hosts are unreachable, recorded as filtered.
+    /// </summary>
+    internal static string? ForwardingProblem(string path) => ForwardingProblem(path, ReadForwarding(path), MayWrite(path));
+
+    /// <summary><see cref="ForwardingProblem(string)"/> over what the file read (null when it could not be read) and whether this process may write it.</summary>
+    internal static string? ForwardingProblem(string path, string? value, bool writable)
+    {
+        if (value == "1" || writable) return null;
+
+        return value is null ? $"{path} could not be read, and this process may not write it" : $"{path} reads {value}, and this process may not write it";
+    }
+
+    private static string? ReadForwarding(string path)
+    {
+        try { return File.ReadAllText(path).Trim(); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    private static bool MayWrite(string path) => !OperatingSystem.IsWindows() && Access(path, WriteOk) == 0;
+
+    /// <summary><c>W_OK</c> from <c>unistd.h</c>, the same value on Linux and macOS.</summary>
+    private const int WriteOk = 2;
+
+    [DllImport("libc", EntryPoint = "access", SetLastError = true)]
+    private static extern int Access(string path, int mode);
 
     /// <summary>The outcome of running a command inside the filtered netns: the command's exit code + its combined output, plus whether the netns setup itself succeeded.</summary>
     public sealed record Outcome
@@ -200,11 +263,9 @@ public static class FilteredEgressNetns
     /// an add killed at its timeout may still have created it — so a probe can leave at most one namespace behind per
     /// worker, and the next probe from the same process removes it.
     /// </summary>
-    private static string? ProbeSeal()
+    private static string? ProbeNamespace()
     {
-        if (!IsSupported) return "ip or nft is not installed";
-
-        var probe = $"cs-seal-probe-{Environment.ProcessId}";
+        var probe = $"cs-filter-probe-{Environment.ProcessId}";
 
         try
         {

@@ -21,7 +21,9 @@ namespace CodeSpace.SandboxTests;
 /// reachable from inside the launched run, (2) a NON-allowed IP is DROPPED, and (3) the netns is REAPED on the
 /// run's terminal path (no leak). Needs ip + nft + CAP_NET_ADMIN, so it runs for real ONLY in the privileged
 /// sandbox-isolation CI job; elsewhere <see cref="FilteredEgressNetns.IsSupported"/> is false and it degrade-skips.
-/// Uses raw IPs over plain HTTP so the signal is purely the egress filter — not DNS, not TLS.
+/// Uses raw IPs over plain HTTP so the signal is purely the egress filter — not DNS, not TLS. The arm for a worker
+/// that has the binaries but cannot filter (<see cref="IsSeveredAndStillReachesItsBrokerAsync"/>) is run by the
+/// non-root lane, which is that posture.
 /// </summary>
 [Trait("Category", "Sandbox")]
 public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
@@ -63,22 +65,13 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
         // worker's own address, which the guard on the run's veth drops.
         if (!FilteredEgressNetns.IsSupported || BubblewrapSandbox.Available is null) return;   // the root lane, with ip, nft and bwrap, is authoritative
 
+        FilteredEgressNetns.CanFilter.ShouldBeTrue($"ip and nft are here and this is the root lane, so an allowlist must be filterable here ({FilteredEgressNetns.FilterUnavailableReason}); otherwise it is severed, which the non-root lane pins");
+
         using var workerListener = new TcpListener(IPAddress.Any, 0);
         workerListener.Start();
 
-        var runId = Guid.NewGuid();
-        var permissions = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist };
-        var socketPath = AgentRunExecutor.ModelBrokerSocketPathFor(permissions, runId).ShouldNotBeNull("the executor mints a socket for an allowlist run on Linux");
         using var broker = LoopbackModelCredentialBroker.ForTest(new OkUpstream());
-        var brokered = (await broker.OpenAsync(new() { RunId = runId, TeamId = Guid.NewGuid(), Epoch = 1, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-allowlist-e2e" }, Ttl = TimeSpan.FromMinutes(5), SocketPath = socketPath }, CancellationToken.None)).ShouldNotBeNull();
-        var spec = AgentRunExecutor.ApplyModelBrokerChannel(new SandboxSpec
-        {
-            Command = "/usr/bin/python3", Args = ["-c", AllowlistProbe], AllowNetwork = true, EgressAllowlist = [Allowed], TimeoutSeconds = 60,
-            Environment = new Dictionary<string, string> { ["BROKER_URL"] = brokered.BaseUrl, ["RUN_TOKEN"] = brokered.RunToken, ["SOCK_PATH"] = socketPath, ["WORKER_IP"] = SealedEgressE2ETests.WorkerIpv4(), ["WORKER_PORT"] = ((IPEndPoint)workerListener.LocalEndpoint).Port.ToString(CultureInfo.InvariantCulture) },
-        }, brokered);
-
-        spec.ModelBrokerSocketPath.ShouldBe(socketPath, "fixture check: the executor's own hardening stamps an allowlist run with its lease's socket");
-
+        var (spec, socketPath) = await BrokeredAllowlistSpecAsync(broker, workerListener);
         var key = Guid.NewGuid().ToString("N");
         var runner = new LocalProcessRunner();
         var lines = new List<string>();
@@ -87,7 +80,8 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
         {
             var handle = await runner.LaunchAsync(spec, key, CancellationToken.None);
             handle.EgressNetnsKey.ShouldBe(key, "an enforceable allowlist still launches the run inside its filtered netns");
-            handle.Confinement.ShouldNotBeNull().EgressSealedToBroker.ShouldBeFalse("an allowlist run is filtered, not sealed: it has more than one destination");
+            handle.Confinement.ShouldNotBeNull().NetworkSevered.ShouldBeFalse("a filtered allowlist run shares its namespace's network: filtered, not severed");
+            handle.Confinement.EgressSealedToBroker.ShouldBeFalse("an allowlist run is filtered, not sealed: it has more than one destination");
 
             var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text); return Task.CompletedTask; }, CancellationToken.None);
             var probe = string.Join(' ', lines);
@@ -108,6 +102,78 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
         }
 
         (await NetnsExistsAsync(NamespaceOf(key))).ShouldBeFalse("the run's filtered netns is reaped on completion");
+    }
+
+    /// <summary>
+    /// The severed arm, for the non-root lane (<see cref="NonRootWorkerE2ETests"/>): a confining worker with <c>ip</c>
+    /// and <c>nft</c> installed that cannot filter — the shipped image's non-root posture — launches an allowlist run
+    /// severed, never into a namespace its setup would refuse after the run was admitted to spend (where nothing
+    /// confines, <see cref="UnconfinedWorkerE2ETests"/> pins the other answer). The REAL runner
+    /// admits it, launches it with no namespace of the worker's and records it severed, and the probe inside it still
+    /// reaches its broker through the relay while the allowlisted IP is as unreachable as any other.
+    /// </summary>
+    internal async Task IsSeveredAndStillReachesItsBrokerAsync(string lane)
+    {
+        FilteredEgressNetns.IsSupported.ShouldBeTrue("fixture check: ip and nft are installed here, so the binaries alone would plan this run Filtered — the posture whose setup aborted it after its spend was admitted");
+        FilteredEgressNetns.CanFilter.ShouldBeFalse("this lane cannot filter an allowlist, which is the posture this arm is for");
+
+        using var workerListener = new TcpListener(IPAddress.Any, 0);
+        workerListener.Start();
+
+        using var broker = LoopbackModelCredentialBroker.ForTest(new OkUpstream());
+        var (spec, socketPath) = await BrokeredAllowlistSpecAsync(broker, workerListener);
+        var key = Guid.NewGuid().ToString("N");
+        var runner = new LocalProcessRunner();
+        var lines = new List<string>();
+
+        Should.NotThrow(() => runner.EnsureEgressAdmissible(spec), "a severed allowlist run whose lease has its socket and whose helper runs the relay is admitted");
+
+        try
+        {
+            // Keyed on the binaries alone, the launch plans this run Filtered and throws here: its namespace setup is refused.
+            var handle = await runner.LaunchAsync(spec, key, CancellationToken.None);
+            handle.EgressNetnsKey.ShouldBeNull("an allowlist this worker cannot filter gets no namespace: bubblewrap severs it instead");
+
+            var record = handle.Confinement.ShouldNotBeNull();
+            record.Outcome.ShouldBe(SandboxConfinementOutcome.Confined);
+            record.NetworkSevered.ShouldBeTrue("an allowlist this worker cannot filter FAILS CLOSED to no egress, and the run's record says so");
+
+            var result = await runner.AttachAsync(handle, (frame, _) => { lines.Add(frame.Text); return Task.CompletedTask; }, CancellationToken.None);
+            var probe = string.Join(' ', lines);
+
+            result.Status.ShouldBe(SandboxStatus.Success, $"the probe must run to its end; stderr: {result.Stderr}");
+            probe.ShouldContain("broker=200", customMessage: $"the severed run still reaches its broker through the relay; check `ls -la {Path.GetDirectoryName(socketPath)}`; probe: {probe}");
+            probe.ShouldNotContain("allowed=open", customMessage: $"severed: the allowlisted IP is as unreachable as any other host, never reached unfiltered; probe: {probe}");
+            probe.ShouldNotContain("denied=open", customMessage: $"and a host outside the allowlist is unreachable too; probe: {probe}");
+            ProbeValue(probe, "worker").ShouldNotBe("open", $"and so is the worker's listener at the worker's own address; probe: {probe}");
+            SealedEgressE2ETests.AssertSocketDirectoryIsReadOnly(ProbeValue(probe, "sock_unlink"), ProbeValue(probe, "sock_plant"), socketPath);
+
+            output.WriteLine($"[durable-egress-e2e] ran {lane} allowlist-severed uid={NonRootWorker.EffectiveUid()} {probe} filter-unavailable=({FilteredEgressNetns.FilterUnavailableReason})");
+        }
+        finally
+        {
+            try { Directory.Delete(LocalProcessRunner.SpoolDirectoryFor(key), recursive: true); } catch { /* best-effort */ }
+        }
+
+        (await NetnsExistsAsync(NamespaceOf(key))).ShouldBeFalse("and no namespace was left behind for it");
+    }
+
+    /// <summary>An allowlist run of the probe below whose model is brokered, with the socket the executor mints for it on Linux, hardened as the executor hardens it, and told the worker's own address and <paramref name="workerListener"/>'s port.</summary>
+    private static async Task<(SandboxSpec Spec, string SocketPath)> BrokeredAllowlistSpecAsync(LoopbackModelCredentialBroker broker, TcpListener workerListener)
+    {
+        var runId = Guid.NewGuid();
+        var permissions = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist };
+        var socketPath = AgentRunExecutor.ModelBrokerSocketPathFor(permissions, runId).ShouldNotBeNull("the executor mints a socket for an allowlist run on Linux");
+        var brokered = (await broker.OpenAsync(new() { RunId = runId, TeamId = Guid.NewGuid(), Epoch = 1, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-allowlist-e2e" }, Ttl = TimeSpan.FromMinutes(5), SocketPath = socketPath }, CancellationToken.None)).ShouldNotBeNull();
+        var spec = AgentRunExecutor.ApplyModelBrokerChannel(new SandboxSpec
+        {
+            Command = "/usr/bin/python3", Args = ["-c", AllowlistProbe], AllowNetwork = true, EgressAllowlist = [Allowed], TimeoutSeconds = 60,
+            Environment = new Dictionary<string, string> { ["BROKER_URL"] = brokered.BaseUrl, ["RUN_TOKEN"] = brokered.RunToken, ["SOCK_PATH"] = socketPath, ["WORKER_IP"] = SealedEgressE2ETests.WorkerIpv4(), ["WORKER_PORT"] = ((IPEndPoint)workerListener.LocalEndpoint).Port.ToString(CultureInfo.InvariantCulture) },
+        }, brokered);
+
+        spec.ModelBrokerSocketPath.ShouldBe(socketPath, "fixture check: the executor's own hardening stamps an allowlist run with its lease's socket");
+
+        return (spec, socketPath);
     }
 
     /// <summary>The broker through the relay, the two writes the socket's read-only directory must refuse, the allowlisted IP and a denied one, and the worker's listener at the namespace's default gateway and at the worker's own address, from inside the run.</summary>

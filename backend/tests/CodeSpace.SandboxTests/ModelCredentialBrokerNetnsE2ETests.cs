@@ -289,7 +289,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         // and ends by tearing the namespace down.
         if (!FilteredEgressNetns.IsSupported) return;   // the root lane, with ip + nft, is authoritative
 
-        FilteredEgressNetns.CanSeal.ShouldBeTrue("ip and nft are here, but this process could not build a namespace — the survivor this arm stands for could not exist either");
+        FilteredEgressNetns.CanFilter.ShouldBeTrue($"ip and nft are here, but this process could not build an allowlist namespace ({FilteredEgressNetns.FilterUnavailableReason}) — the survivor this arm stands for could not exist either");
 
         var runId = Guid.NewGuid();
         var teamId = Guid.NewGuid();
