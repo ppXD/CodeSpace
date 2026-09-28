@@ -27,7 +27,8 @@ internal static class NonRootWorker
 
         GetEuid().ShouldNotBe(0u, "this is the non-root lane: run it as the worker's uid with no capabilities (setpriv --reuid 1654 --regid 1654 --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs); as root it proves nothing about the shipped posture");
         BubblewrapSandbox.Available.ShouldNotBeNull($"bubblewrap must confine as this uid ({BubblewrapSandbox.UnavailableReason}); check `sysctl kernel.apparmor_restrict_unprivileged_userns` and `bwrap --unshare-user --unshare-net true` as this user");
-        FilteredEgressNetns.CanSeal.ShouldBeFalse("this uid must NOT be able to build a network namespace — that is the posture the relay exists for; a worker that can was given CAP_SYS_ADMIN");
+        FilteredEgressNetns.CanFilter.ShouldBeFalse("this uid must NOT be able to build a network namespace — that is the posture the relay exists for; a worker that can was given CAP_SYS_ADMIN");
+        FilteredEgressNetns.FilterUnavailableReason.ShouldNotBeNull().ShouldNotStartWith(FilteredEgressNetns.IpForwardPath, customMessage: $"and the wall must be the namespace, not forwarding: this process built one and was stopped only at {FilteredEgressNetns.IpForwardPath}, so something gave it the privilege to build it (CAP_SYS_ADMIN, or a setuid ip)");
 
         return true;
     }

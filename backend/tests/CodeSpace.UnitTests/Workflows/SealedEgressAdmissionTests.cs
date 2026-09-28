@@ -108,6 +108,38 @@ public sealed class SealedEgressAdmissionTests : IDisposable
         LocalProcessRunner.ChildNetworkIsPrivate(spec, inNamespace, confines).ShouldBe(expected);
     }
 
+    [Theory]
+    [InlineData(true, false, Helper.Relay, null)]                                                 // a confining worker that cannot filter: severed, and relayed — admitted as the run it will launch
+    [InlineData(true, false, Helper.Missing, SealedEgressUnavailableException.CauseRelayMissing)] // severed, with no helper to relay it: refused before it spends
+    [InlineData(true, true, Helper.Relay, null)]                                                  // filtered in its namespace, and relayed
+    [InlineData(false, true, Helper.Missing, SealedEgressUnavailableException.CauseRelayMissing)] // in its namespace on a host with no bwrap, it still needs the relay
+    [InlineData(false, false, Helper.Missing, null)]                                              // nothing confines it and no ip or nft plan it into a namespace: it shares the worker's network and calls loopback itself
+    public void An_allowlist_run_is_admitted_as_the_launch_this_worker_can_give_it(bool confines, bool filtersAllowlist, Helper helper, string? expected)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var spec = new SandboxSpec { Command = "agent", AllowNetwork = true, EgressAllowlist = ["api.anthropic.com"], ModelBrokerPort = 43121, ModelBrokerSocketPath = "/spool/k/broker/seg/s" };
+
+        var thrown = Record.Exception(() => LocalProcessRunner.EnsureEgressAdmissible(spec, confines, filtersAllowlist, HelperAt(helper)));
+
+        if (expected is null) thrown.ShouldBeNull();
+        else thrown.ShouldBeOfType<SealedEgressUnavailableException>().Cause.ShouldStartWith(expected, customMessage: "the cause leads with the wall");
+    }
+
+    [Fact]
+    public void A_brokered_allowlist_spec_without_its_socket_is_refused_exactly_where_this_host_would_give_it_a_network_of_its_own()
+    {
+        // The allowlist twin of the network-off row below, over this host's own probes: a confining host severs or
+        // filters the run, and a host where nothing confines plans it into a namespace wherever ip and nft are, so
+        // either way nothing could carry it to its broker. Only an unconfined host without the binaries admits it.
+        var spec = new SandboxSpec { Command = "agent", AllowNetwork = true, EgressAllowlist = ["api.anthropic.com"], ModelBrokerPort = 43121 };
+
+        var thrown = Record.Exception(() => new LocalProcessRunner().EnsureEgressAdmissible(spec));
+
+        if (BubblewrapSandbox.Available is null && !FilteredEgressNetns.IsSupported) thrown.ShouldBeNull();
+        else thrown.ShouldBeOfType<SealedEgressUnavailableException>().Cause.ShouldBe(SealedEgressUnavailableException.CauseBrokerSocketUnavailable);
+    }
+
     [Fact]
     public void A_spec_with_no_broker_port_is_admitted_on_any_host() =>
         // Nothing to reach: every unbrokered run launches exactly as it always did.

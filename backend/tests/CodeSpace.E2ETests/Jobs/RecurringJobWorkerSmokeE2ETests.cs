@@ -116,7 +116,7 @@ public sealed class RecurringJobWorkerSmokeE2ETests
                 + "no longer calls LocalProcessRunner.LogSandboxPosture (or calls it after an early return); more than one means it is called twice.");
 
         line.Level.ShouldBe(LogEventLevel.Information);
-        new[] { "BubblewrapConfines", "BubblewrapUnavailableReason", "McpProxyPresent", "CanSeal", "SealUnavailableReason" }.Except(line.Properties.Keys).ShouldBeEmpty(
+        new[] { "BubblewrapConfines", "BubblewrapUnavailableReason", "McpProxyPresent", "CanFilter", "FilterUnavailableReason" }.Except(line.Properties.Keys).ShouldBeEmpty(
             customMessage: "the posture line must carry each probe a launch reads, by the property names operators filter on");
     }
 

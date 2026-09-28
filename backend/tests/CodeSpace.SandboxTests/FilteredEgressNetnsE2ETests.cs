@@ -28,7 +28,7 @@ namespace CodeSpace.SandboxTests;
 /// address or the veth's IPv6 link-local) while DNS on the worker and the allowlist still answer; a peer the worker
 /// reaches at an address the run's /30 shadows is refused and the sandbox receives nothing, a flow the worker opened to
 /// that peer before the run included; an upload across a narrower uplink still completes; and a guard an earlier round
-/// left behind is replaced, not added to.</para>
+/// left behind is replaced, not added to. So does the one about forwarding a root worker may not turn on.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
 public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
@@ -410,6 +410,63 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             output.WriteLine($"{RanMarker} stale-guard-replaced {Describe(probe)}");
         }
         finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task Forwarding_a_root_worker_may_not_write_is_named_before_an_allowlist_is_planned_on_it()
+    {
+        // The setup's `sysctl -w net.ipv4.ip_forward=1` warns and exits 0 on a read-only /proc/sys, so on a root worker
+        // whose forwarding reads 0 there the setup succeeds and the allowlist reaches nothing. For root only a mount can
+        // refuse the write — file modes never do — so this binds a file reading 0 read-only and asks the real access(2),
+        // as the filter probe does of /proc/sys. Needs mount, so root alone; and a lane that builds namespaces, where the
+        // forwarding step alone can decide the whole probe — which is asked too, once CanFilter has settled, since both
+        // build this process's one probe namespace.
+        if (!OperatingSystem.IsLinux() || NonRootWorker.EffectiveUid() != 0 || !BuildsNamespaces()) return;
+
+        using var file = new ReadOnlyForwardingFile();
+        await file.StageAsync();
+
+        var refused = $"{file.ReadOnlyPath} reads 0, and this process may not write it";
+
+        FilteredEgressNetns.ForwardingProblem(file.WritablePath).ShouldBeNull("control: the same bytes where root may write them — the setup would turn forwarding on");
+        FilteredEgressNetns.ForwardingProblem(file.ReadOnlyPath).ShouldBe(refused, customMessage: $"a read-only mount refuses root's write, so forwarding would stay off; check `grep {file.ReadOnlyPath} /proc/mounts`");
+
+        FilteredEgressNetns.FilterProbe(file.WritablePath).ShouldBeNull("control: the filter probe CanFilter runs holds on this lane where forwarding may be turned on");
+        FilteredEgressNetns.FilterProbe(file.ReadOnlyPath).ShouldBe(refused, customMessage: "the probe CanFilter runs asks the forwarding step too: with a namespace buildable, forwarding root may not turn on is what stops an allowlist being filtered");
+
+        output.WriteLine($"{RanMarker} forwarding-read-only");
+    }
+
+    /// <summary>A file reading 0 and the same file bound read-only at a second path, both under a GUID-named directory; the bind is unmounted and the directory removed on dispose (Rule 12.2/12.3).</summary>
+    private sealed class ReadOnlyForwardingFile : IDisposable
+    {
+        private readonly string _dir = Path.Combine(Path.GetTempPath(), "cs-forwarding-" + Guid.NewGuid().ToString("N"));
+
+        private bool _mounted;
+
+        public string WritablePath => Path.Combine(_dir, "writable");
+
+        public string ReadOnlyPath => Path.Combine(_dir, "read-only");
+
+        public async Task StageAsync()
+        {
+            Directory.CreateDirectory(_dir);
+            await File.WriteAllTextAsync(WritablePath, "0\n");
+            await File.WriteAllTextAsync(ReadOnlyPath, "");
+
+            (await RunHostExitAsync(["mount", "--bind", WritablePath, ReadOnlyPath])).ShouldBe(0, "setup: root must be able to bind a file over another");
+            _mounted = true;
+
+            (await RunHostExitAsync(["mount", "-o", "remount,ro,bind", ReadOnlyPath])).ShouldBe(0, "setup: and to make that bind read-only");
+        }
+
+        public void Dispose()
+        {
+            if (_mounted)
+                try { using var umount = System.Diagnostics.Process.Start("umount", ReadOnlyPath); umount.WaitForExit(10_000); } catch { /* best-effort */ }
+
+            try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     /// <summary>From inside the namespace: the worker's listener at the gateway and at its own address, DNS to the worker over UDP and TCP, and the allowlisted IP.</summary>
@@ -832,7 +889,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
     {
         if (!FilteredEgressNetns.IsSupported) return false;
 
-        FilteredEgressNetns.CanSeal.ShouldBeTrue("ip and nft are here, but this process could not build a throwaway namespace — an allowlist run could not be filtered on this host");
+        FilteredEgressNetns.CanFilter.ShouldBeTrue($"ip and nft are here, but this process could not filter an allowlist run on this host ({FilteredEgressNetns.FilterUnavailableReason})");
         return true;
     }
 
