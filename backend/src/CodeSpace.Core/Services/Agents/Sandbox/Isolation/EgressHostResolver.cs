@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 
 /// <summary>
 /// Resolves a deny-by-default egress allowlist of host NAMES (and IP literals) to the IPv4 addresses the filtered
-/// netns pins (B3.3a). <see cref="FilteredEgressPlan"/> builds an IPv4 <c>table ip</c> over a <c>10.x</c> /30, so only
+/// netns pins (B3.3a). <see cref="FilteredEgressPlan"/> builds an IPv4 <c>table ip</c> over a per-run /30, so only
 /// A records apply — an IP literal passes through verbatim, a name is resolved to its A records, and an IPv6 address
 /// is DROPPED (the netns has no v6 route, so a v6 destination is severed, not bypassed — fail-closed). Best-effort +
 /// de-duped + order-preserving: a name that fails to resolve is skipped. Because the netns still permits DNS, the
@@ -66,7 +66,7 @@ public static class EgressHostResolver
         if (b[0] == 172 && b[1] is >= 16 and <= 31) return false;    // RFC1918
         if (b[0] == 192 && b[1] == 0 && b[2] == 0) return false;     // 192.0.0/24 IETF protocol assignments
         if (b[0] == 192 && b[1] == 168) return false;           // RFC1918
-        if (b[0] == 198 && b[1] is 18 or 19) return false;      // 198.18/15 benchmarking
+        if (b[0] == 198 && b[1] is 18 or 19) return false;      // 198.18/15 benchmarking, which also holds every per-run /30
         if (b[0] >= 224) return false;                          // 224/3 multicast + reserved class E (incl. 255.255.255.255)
 
         return true;

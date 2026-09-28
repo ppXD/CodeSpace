@@ -14,9 +14,9 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// </summary>
 public sealed class HostRoutedPrefixes
 {
-    private readonly IReadOnlyList<(uint Network, uint Mask)> _prefixes;
+    private readonly IReadOnlyList<(uint Network, uint Mask, string Destination)> _prefixes;
 
-    private HostRoutedPrefixes(IReadOnlyList<(uint Network, uint Mask)> prefixes) => _prefixes = prefixes;
+    private HostRoutedPrefixes(IReadOnlyList<(uint Network, uint Mask, string Destination)> prefixes) => _prefixes = prefixes;
 
     /// <summary>The argv that lists them, as JSON.</summary>
     public static IReadOnlyList<string> ListArgv { get; } = new[] { "ip", "-j", "-4", "route", "show", "table", "all" };
@@ -25,39 +25,40 @@ public sealed class HostRoutedPrefixes
     public static HostRoutedPrefixes Parse(string ipJson)
     {
         using var document = JsonDocument.Parse(ipJson);
-        var prefixes = new List<(uint, uint)>();
+        var prefixes = new List<(uint, uint, string)>();
 
         foreach (var route in document.RootElement.EnumerateArray())
             if (route.TryGetProperty("dst", out var dst) && dst.GetString() is { } destination && destination != "default" && TryParsePrefix(destination, out var prefix) && prefix.Mask >= NarrowestDefaultLike && !(IsNullRoute(route) && prefix.Mask < SlashThirty))
-                prefixes.Add(prefix);
+                prefixes.Add((prefix.Network, prefix.Mask, destination));
 
         return new HostRoutedPrefixes(prefixes);
     }
 
     /// <summary>Whether <paramref name="cidr"/> shares any address with a prefix this host routes.</summary>
-    public bool Overlaps(string cidr) => OverlapEnd(cidr) is not null;
+    public bool Overlaps(string cidr) => WidestOverlap(cidr) is not null;
 
-    /// <summary>The last address of the widest routed prefix <paramref name="cidr"/> overlaps, or null when it overlaps none — so a walk can move past the whole routed range at once instead of one /30 at a time.</summary>
-    public uint? OverlapEnd(string cidr)
+    /// <summary>The widest routed prefix <paramref name="cidr"/> overlaps — as the host lists it, and its last address — or null when it overlaps none: so a walk can move past the whole routed range at once instead of one /30 at a time, and name what it moved past. Routed prefixes that overlap one /30 either contain it, and then nest, so the widest reaches furthest; or lie inside it, and then any of them ends within it.</summary>
+    public (string Prefix, uint End)? WidestOverlap(string cidr)
     {
         if (!TryParsePrefix(cidr, out var candidate)) throw new ArgumentException($"'{cidr}' is not an IPv4 prefix.", nameof(cidr));
 
-        uint? end = null;
+        (uint Network, uint Mask, string Destination)? widest = null;
 
         foreach (var routed in _prefixes)
-            if ((routed.Network & (routed.Mask & candidate.Mask)) == (candidate.Network & (routed.Mask & candidate.Mask)))
-                end = Math.Max(end ?? 0, routed.Network | ~routed.Mask);
+            if ((routed.Network & (routed.Mask & candidate.Mask)) == (candidate.Network & (routed.Mask & candidate.Mask)) && (widest is null || routed.Mask < widest.Value.Mask))
+                widest = routed;
 
-        return end;
+        return widest is { } found ? (found.Destination, found.Network | ~found.Mask) : null;
     }
 
     /// <summary>
     /// A route that discards what it matches (<c>blackhole</c>, <c>unreachable</c>, <c>prohibit</c>, <c>throw</c>). One
     /// BROADER than a /30 has no peers to shadow and, in the table that holds a run's connected /30, loses longest-prefix
-    /// match to it, so a hardened host's RFC 1918 null route must not refuse every launch. One as narrow as a /30 or
-    /// narrower — a banned /32 — WINS that match and would discard the run's replies, so it still occupies what it
-    /// covers. A table a policy rule consults BEFORE that one is decided by rule order, not prefix length, which this
-    /// list cannot see; the setup asks the kernel instead (<see cref="FilteredEgressPlan.RouteCheckArgv"/>).
+    /// match to it, so a hardened host's bogon null route (RFC 1918, or the 198.18.0.0/15 the /30s come from) must not
+    /// refuse every launch. One as narrow as a /30 or narrower — a banned /32 — WINS that match and would discard the
+    /// run's replies, so it still occupies what it covers. A table a policy rule consults BEFORE that one is decided by
+    /// rule order, not prefix length, which this list cannot see; the setup asks the kernel instead
+    /// (<see cref="FilteredEgressPlan.RouteCheckArgv"/>).
     /// </summary>
     private static bool IsNullRoute(JsonElement route) =>
         route.TryGetProperty("type", out var type) && type.GetString() is "blackhole" or "unreachable" or "prohibit" or "throw";

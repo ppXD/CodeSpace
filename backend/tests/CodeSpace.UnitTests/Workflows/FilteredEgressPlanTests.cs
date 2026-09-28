@@ -14,7 +14,7 @@ public class FilteredEgressPlanTests
 {
     // A fixed reserved /30 — the collision-FREE allocation is EgressSubnetAllocator's job (pinned separately); these
     // tests pin the plan SHAPE given a lease.
-    private static readonly EgressSubnetAllocator.Lease Subnet = new() { Cidr = "10.5.7.16/30", HostIp = "10.5.7.17", NsIp = "10.5.7.18" };
+    private static readonly EgressSubnetAllocator.Lease Subnet = new() { Cidr = "198.19.70.16/30", HostIp = "198.19.70.17", NsIp = "198.19.70.18" };
 
     [Fact]
     public void Names_are_run_unique_and_consistent_across_the_plan()
@@ -139,24 +139,24 @@ public class FilteredEgressPlanTests
     [Fact]
     public void The_route_check_asks_the_kernel_how_the_host_reaches_the_namespace_end()
     {
-        FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet).RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "10.5.7.18", "from", "10.5.7.17" }, "to the namespace's end, from the gateway — an allowlist run has no one port its replies come from; as text, which every iproute2 prints");
+        FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet).RouteCheckArgv.ShouldBe(new[] { "ip", "route", "get", "198.19.70.18", "from", "198.19.70.17" }, "to the namespace's end, from the gateway — an allowlist run has no one port its replies come from; as text, which every iproute2 prints");
     }
 
     [Theory]
-    [InlineData(0, "10.5.7.18 from 10.5.7.17 dev csh-runffff6 uid 0 \n    cache \n", null)]                                                            // through the run's own veth
-    [InlineData(0, "10.5.7.18 from 10.5.7.17 via 192.168.1.1 dev eth0 uid 0 \n    cache \n", "through something other than the run's own veth csh-runffff6")]
-    [InlineData(0, "local 10.5.7.18 from 10.5.7.17 dev lo table local src 10.5.7.18 uid 0 \n    cache <local> \n", "through something other than the run's own veth")]   // a host address shadows the namespace's end
-    [InlineData(2, "RTNETLINK answers: Invalid argument\n", "exit 2: RTNETLINK answers: Invalid argument — this host cannot route replies back to 10.5.7.16/30")]   // a blackhole a policy rule consults before main
+    [InlineData(0, "198.19.70.18 from 198.19.70.17 dev csh-runffff6 uid 0 \n    cache \n", null)]                                                            // through the run's own veth
+    [InlineData(0, "198.19.70.18 from 198.19.70.17 via 192.168.1.1 dev eth0 uid 0 \n    cache \n", "through something other than the run's own veth csh-runffff6")]
+    [InlineData(0, "local 198.19.70.18 from 198.19.70.17 dev lo table local src 198.19.70.18 uid 0 \n    cache <local> \n", "through something other than the run's own veth")]   // a host address shadows the namespace's end
+    [InlineData(2, "RTNETLINK answers: Invalid argument\n", "exit 2: RTNETLINK answers: Invalid argument — this host cannot route replies back to 198.19.70.16/30")]   // a blackhole a policy rule consults before main
     [InlineData(2, "RTNETLINK answers: No route to host", "exit 2: RTNETLINK answers: No route to host")]                                                             // unreachable
     [InlineData(0, "", "through something other than the run's own veth")]                                                                                          // no answer at all is no proof
-    [InlineData(0, "10.5.7.18 from 10.5.7.17 uid 0", "through something other than the run's own veth")]                                                           // no device named
-    [InlineData(0, "10.5.7.18 from 10.5.7.17 dev", "through something other than the run's own veth")]
-    [InlineData(0, "10.5.7.18 dev csh-runffff6 \n10.5.7.18 dev eth0", "through something other than the run's own veth")]                                          // two answers are not one route
-    [InlineData(0, """[{"dst":"10.5.7.18","from":"10.5.7.17","dev":"csh-runffff6","uid":0,"flags":[],"cache":[]}]""", "through something other than the run's own veth")]   // JSON is not what the argv asks for
+    [InlineData(0, "198.19.70.18 from 198.19.70.17 uid 0", "through something other than the run's own veth")]                                                           // no device named
+    [InlineData(0, "198.19.70.18 from 198.19.70.17 dev", "through something other than the run's own veth")]
+    [InlineData(0, "198.19.70.18 dev csh-runffff6 \n198.19.70.18 dev eth0", "through something other than the run's own veth")]                                          // two answers are not one route
+    [InlineData(0, """[{"dst":"198.19.70.18","from":"198.19.70.17","dev":"csh-runffff6","uid":0,"flags":[],"cache":[]}]""", "through something other than the run's own veth")]   // JSON is not what the argv asks for
     public void Only_a_route_through_the_run_s_own_veth_passes_the_check(int exit, string output, string? failure)
     {
         // The /30 was chosen from the routes the host lists, but a policy rule consults its tables in rule order, not
-        // by prefix length: a blackhole 10.0.0.0/8 in a table checked before main discards the replies to a
+        // by prefix length: a bogon blackhole 198.18.0.0/15 in a table checked before main discards the replies to a
         // cleanly set-up namespace. Only the kernel's own lookup sees that, so anything but a route through the run's
         // own veth fails the setup instead of admitting a run that can never be answered.
         var plan = FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet);

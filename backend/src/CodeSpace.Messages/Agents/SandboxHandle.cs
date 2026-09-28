@@ -180,7 +180,7 @@ public sealed record SandboxHandle
     /// handle with no socket path — a namespaced run launched before the socket existed, which reaches the worker at its
     /// namespace gateway — still binds WIDE (<c>+</c>) where the host builds filtered-egress namespaces. Reaching any of
     /// them still buys nothing without a live run's bearer, and the broker refuses any source outside loopback and the
-    /// allocator's <c>10/8</c> space.</para>
+    /// <c>10/8</c> space the allocator carved those runs' /30s from before it moved to 198.19.64.0–198.19.191.255.</para>
     /// </summary>
     public int? ModelBrokerPort { get; init; }
 

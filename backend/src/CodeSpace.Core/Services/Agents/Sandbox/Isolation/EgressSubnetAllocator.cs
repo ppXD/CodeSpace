@@ -72,9 +72,9 @@ public sealed class EgressSubnetAllocator
     /// <summary>A reserved /30 and its host (.1-of-the-block + 1) and netns (+2) addresses.</summary>
     public sealed record Lease
     {
-        public required string Cidr { get; init; }     // 10.A.B.C/30
-        public required string HostIp { get; init; }   // 10.A.B.(C+1)
-        public required string NsIp { get; init; }      // 10.A.B.(C+2)
+        public required string Cidr { get; init; }     // 198.19.A.B/30
+        public required string HostIp { get; init; }   // 198.19.A.(B+1)
+        public required string NsIp { get; init; }      // 198.19.A.(B+2)
     }
 
     /// <summary>The reservation directory's name under the spool root. Dot-prefixed so it can never collide with a run's own spool directory (those are keyed by 32-hex run keys) and so it reads as infrastructure beside them.</summary>
@@ -92,16 +92,23 @@ public sealed class EgressSubnetAllocator
     private const string LockingUnenforced = "exclusive file locking is not enforced there";
     private const string LockingUnproven = "exclusive file locking could not be proven across processes";
 
-    // 254 (octet2 ∈ 1..254) × 254 (octet3 ∈ 1..254) × 64 (octet4 block ∈ {0,4,…,252}) distinct /30s in 10.0.0.0/8.
-    private const int Octet2Count = 254;
-    private const int Octet3Count = 254;
-    private const int Block4Count = 64;
+    /// <summary>
+    /// The first address of the pool the /30s come from: 198.19.64.0–198.19.191.255, the middle half of 198.19.0.0/16
+    /// inside RFC 2544's benchmarking block 198.18.0.0/15, walked upward. A run's /30 becomes a connected route on the
+    /// worker, more specific than anything it overlaps, so the pool must sit where the worker has no peers. 10/8 is
+    /// where pod, service and peered-VPC networks live, and a /30 there sent the worker's own traffic for a real peer
+    /// into a sandbox. The rest of 198.18.0.0/15 is taken on a developer's host: fake-ip DNS proxies hand out addresses
+    /// from its bottom, and OrbStack sits at its top (198.19.192.0/18). The block is not globally reachable, so an
+    /// allowlist never pins an address in it either (<see cref="EgressHostResolver"/>). A committed value, changed by
+    /// a PR.
+    /// </summary>
+    private const uint PoolStart = 0xC6134000;   // 198.19.64.0
 
-    /// <summary>How many candidates one acquire may find held by this worker or TRY to reserve before failing closed. Bounds the worst-case syscall count of one acquire, and is far above any plausible per-host concurrency (the /30 space itself holds ≈4.1M). Candidates the host already routes are passed over without counting against it.</summary>
+    /// <summary>How many candidates one acquire may find held by this worker or TRY to reserve before failing closed. Bounds the worst-case syscall count of one acquire, and is far above any plausible per-host concurrency (the pool itself holds 8192). Candidates the host already routes are passed over without counting against it.</summary>
     internal const int MaxConcurrentReservations = 4096;
 
-    /// <summary>Every /30 <see cref="CidrAt"/> can name — the space a walk may pass through when the host routes the start of it.</summary>
-    internal const int CandidateCount = Octet2Count * Octet3Count * Block4Count;
+    /// <summary>Every /30 <see cref="CidrAt"/> can name, 198.19.64.0/30 up to 198.19.191.252/30 — the space a walk may pass through when the host routes the start of it.</summary>
+    internal const int CandidateCount = 8192;
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Reservation> _byRun = new(StringComparer.Ordinal);
@@ -179,11 +186,11 @@ public sealed class EgressSubnetAllocator
 
             // Up to MaxConcurrentReservations candidates are held here or TRIED — that bound is about concurrency —
             // while ranges the host already routes are passed over whole, without counting against it, so a broad
-            // route over the first range moves the walk on through 10.0.0.0/8 instead of refusing while unrouted /30s
+            // route over the first range moves the walk on through the pool instead of refusing while unrouted /30s
             // remain, and costs one step rather than one per /30 it covers.
             var heldHere = 0;
             var tried = 0;
-            var routed = 0;
+            var routedPast = new List<string>();
 
             for (var index = 0; index < CandidateCount && heldHere + tried < MaxConcurrentReservations; index++)
             {
@@ -193,11 +200,10 @@ public sealed class EgressSubnetAllocator
 
                 // The lock says no live WORKER holds it; the host's routes say nothing ELSE does — its own network, or a
                 // run whose namespace outlived the worker that reserved it. Neither alone is enough.
-                if (hostRoutes?.OverlapEnd(cidr) is { } routedEnd)
+                if (hostRoutes?.WidestOverlap(cidr) is { } routed)
                 {
-                    var past = Math.Max(IndexAtOrAbove((ulong)routedEnd + 1), index + 1);
-                    routed += past - index;
-                    index = past - 1;
+                    routedPast.Add(routed.Prefix);
+                    index = Math.Max(IndexAtOrAbove((ulong)routed.End + 1), index + 1) - 1;
                     continue;
                 }
 
@@ -213,12 +219,15 @@ public sealed class EgressSubnetAllocator
 
             // Only when nothing could even be TRIED is it the routes; otherwise the directory or real concurrency is
             // the wall, and ExhaustionOrRefusal re-probes to say which.
-            if (tried == 0 && routed > 0)
-                throw new InvalidOperationException($"EgressSubnetAllocator: no /30 in 10.0.0.0/8 is free that this host does not already route — this worker holds {_inUse.Count}, and every other candidate overlaps a route or address the host holds (its own network, or a namespace that outlived its worker).");
+            if (tried == 0 && routedPast.Count > 0) throw RoutedPoolRefusal(routedPast);
 
             throw ExhaustionOrRefusal();
         }
     }
+
+    /// <summary>The refusal of a host that routes every candidate this worker does not hold. It names the routes the walk moved past, as the host lists them, so an operator can find each one in <c>ip route show table all</c>: the pool is two /18s, so a single broader route (a worker network numbered from 198.19.0.0/16, a VPN over 198.18.0.0/15) is enough to refuse every filtered-egress launch on the host. Each route is named once, since the walk never comes back below one it moved past.</summary>
+    private InvalidOperationException RoutedPoolRefusal(IReadOnlyList<string> routedPast) =>
+        new($"EgressSubnetAllocator: no /30 in 198.19.64.0–198.19.191.255 is free that this host does not already route — this worker holds {_inUse.Count}, and every other candidate overlaps a route or address the host holds (its own network, or a namespace that outlived its worker): {string.Join(", ", routedPast)}.");
 
     /// <summary>
     /// What the BOTTOM of the probe loop actually means. Every candidate unavailable can be 4096 live /30s — and can
@@ -459,38 +468,23 @@ public sealed class EgressSubnetAllocator
     /// <summary>Where <see cref="Host"/> reserves: a fixed leaf under the agent-run spool root, resolved through the SAME <c>DurableRoots</c> the spool itself uses, so every worker process sharing that root resolves the same directory and an operator who relocates the spool relocates the reservations. Resolved per acquire rather than at type init, so it reads the settings the deployment bound rather than whatever was current when this class was first touched.</summary>
     internal string ReservationDirectory => _directory ?? Path.Combine(DurableRoots.AgentRunSpool(RuntimeSettings.Current.AgentRunSpoolDirectory), ReservationLeaf);
 
+    /// <summary>The <paramref name="index"/>th /30 of the pool, counting up from 198.19.64.0/30 in steps of four addresses.</summary>
     internal static string CidrAt(int index)
     {
-        var block4 = index % Block4Count;                                 // 0..63  → octet4 = block4*4
-        var octet3 = index / Block4Count % Octet3Count;                   // 0..253 → +1
-        var octet2 = index / Block4Count / Octet3Count % Octet2Count;     // 0..253 → +1
-        return $"10.{octet2 + 1}.{octet3 + 1}.{block4 * 4}/30";
+        var network = PoolStart + (uint)index * 4;
+
+        return $"{network >> 24}.{network >> 16 & 0xFF}.{network >> 8 & 0xFF}.{network & 0xFF}/30";
     }
 
-    /// <summary>The first candidate index whose /30 starts at or above <paramref name="address"/> — the inverse of <see cref="CidrAt"/>, which walks 10.1.1.0 up to 10.254.254.252 skipping the <c>.0</c> and <c>.255</c> second and third octets. <see cref="CandidateCount"/> when none does.</summary>
-    internal static int IndexAtOrAbove(ulong address)
-    {
-        if (address > 0x0AFEFEFC) return CandidateCount;   // past 10.254.254.252
-        if (address < 0x0A010100) return 0;                // before 10.1.1.0
-
-        var octet2 = (int)(address >> 16 & 0xFF);
-        var octet3 = (int)(address >> 8 & 0xFF);
-        var block4 = (int)((address & 0xFF) + 3) / 4;
-
-        if (octet3 == 0) (octet3, block4) = (1, 0);
-        if (octet3 == 255) (octet2, octet3, block4) = (octet2 + 1, 1, 0);
-        if (block4 == Block4Count) (octet3, block4) = (octet3 + 1, 0);
-        if (octet3 == 255) (octet2, octet3) = (octet2 + 1, 1);
-
-        return octet2 > Octet2Count ? CandidateCount : ((octet2 - 1) * Octet3Count + (octet3 - 1)) * Block4Count + block4;
-    }
+    /// <summary>The first candidate index whose /30 starts at or above <paramref name="address"/> — the inverse of <see cref="CidrAt"/>. <see cref="CandidateCount"/> when none does.</summary>
+    internal static int IndexAtOrAbove(ulong address) => address <= PoolStart ? 0 : (int)Math.Min(CandidateCount, (address - PoolStart + 3) / 4);
 
     private static Lease LeaseFor(string cidr)
     {
         var slash = cidr.IndexOf('/');
         var lastDot = cidr.LastIndexOf('.');
-        var prefix = cidr[..lastDot];                                     // 10.A.B
-        var baseOctet = int.Parse(cidr[(lastDot + 1)..slash]);            // C (the /30 block base)
+        var prefix = cidr[..lastDot];                                     // 198.19.A
+        var baseOctet = int.Parse(cidr[(lastDot + 1)..slash]);            // B (the /30 block base)
         return new Lease { Cidr = cidr, HostIp = $"{prefix}.{baseOctet + 1}", NsIp = $"{prefix}.{baseOctet + 2}" };
     }
 }
