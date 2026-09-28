@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { VariableSummary, VariableValueType } from "@/api/variables";
+import { parsePlainForDisplay } from "./parse-plain-for-display";
 import {
   useDeleteProjectVariable,
   useDeleteTeamVariable,
@@ -273,7 +274,7 @@ interface PlainValueEditorProps {
 }
 
 function PlainValueEditor({ valueType, valuePlain, isMutating, onSave }: PlainValueEditorProps) {
-  const [draft, setDraft] = useState(valuePlain ?? "");
+  const [draft, setDraft] = useState(parsePlainForDisplay(valueType, valuePlain));
 
   const save = async () => {
     const parsed = parsePlainAs(valueType, draft);

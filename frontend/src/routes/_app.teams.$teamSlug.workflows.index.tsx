@@ -114,14 +114,14 @@ function WorkflowsListPage() {
         )}
 
         {!workflows.isLoading && !workflows.error && rows.length > 0 && (
-          <table className="tbl">
+          <table className="tbl wf-table">
             <thead>
               <tr>
                 <th style={{ width: "44%" }}>Workflow</th>
                 <th>Triggers</th>
                 <th>Version</th>
                 <th>Updated</th>
-                <th className="col-right" />
+                <th className="col-right wf-col-actions" />
               </tr>
             </thead>
             <tbody>
@@ -146,7 +146,7 @@ function WorkflowsListPage() {
                       </div>
                       <div className="repo-info">
                         <div className="repo-name">
-                          {w.name}
+                          <span className="repo-name-text" title={w.name}>{w.name}</span>
                           {!w.enabled && <span className="wf-badge wf-badge-disabled">disabled</span>}
                         </div>
                         {/* Wrap in .repo-path-desc so a long description ellipsis-truncates
@@ -169,7 +169,7 @@ function WorkflowsListPage() {
                   </td>
                   <td><span className="wf-version">v{w.latestVersion}</span></td>
                   <td>{formatRelative(w.lastModifiedDate)}</td>
-                  <td className="col-right" onClick={(e) => e.stopPropagation()}>
+                  <td className="col-right wf-col-actions" onClick={(e) => e.stopPropagation()}>
                     <div className="wf-row-actions">
                       <button
                         className="btn btn-ghost"
