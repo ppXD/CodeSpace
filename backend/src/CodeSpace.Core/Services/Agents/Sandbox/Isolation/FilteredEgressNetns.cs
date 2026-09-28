@@ -57,11 +57,11 @@ public static class FilteredEgressNetns
 
         /// <summary>
         /// The HOST-side veth address of this run's /30 (<c>FilteredEgressPlan.HostIp</c>) — the namespace's default
-        /// gateway, and therefore the only address a process inside it can reach this worker at. Null when setup
-        /// failed. It is returned because a per-run worker-hosted endpoint (the model-credential broker) has to be
-        /// addressed by the child, and this address is not knowable before the /30 is reserved HERE. Reaching it is
-        /// not an egress-allowlist question: a packet to the host's own address is delivered locally, so the plan's
-        /// forward-hook filter never sees it.
+        /// gateway. Null when setup failed. It is not knowable before the /30 is reserved HERE, so it is returned. A
+        /// packet to the host's own address is delivered locally, so the plan's forward-hook filter never sees it; the
+        /// plan's guard on the veth does, and admits nothing there but DNS and replies
+        /// (<c>FilteredEgressPlan.BuildVethGuardRuleset</c>). A child launched before that guard still reaches this worker
+        /// at this address, which is how a run launched before the relay reached its broker.
         /// </summary>
         public string? HostIp { get; init; }
 

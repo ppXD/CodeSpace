@@ -282,10 +282,11 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         // The in-flight survivor this deploy must not strand: a namespaced run launched by the code before the relay,
         // whose child froze a base URL at its namespace's GATEWAY and whose handle recorded no socket. Its re-bind is the
         // legacy one: the recorded port on every address, wide first, where this host can build namespaces; and the
-        // broker's source gate admits the child's 10.x address. The namespace is the allowlist plan's, applied on a 10.x
-        // lease as the old allocator handed them out, so the arm keeps meaning what it means when the pool moves. A
-        // network-off survivor was sealed through that veth by an inet table of its own, which only the teardown by name
-        // still deletes, so the arm stages that table too and ends by tearing the namespace down.
+        // broker's source gate admits the child's 10.x address. The namespace is the allowlist plan's as it was built
+        // before its veth was guarded (PreGuardPlan), applied on a 10.x lease as the old allocator handed them out, so
+        // the arm keeps meaning what it means when the pool moves. A network-off survivor was sealed through that veth
+        // by an inet table of its own, which only the teardown by name still deletes, so the arm stages that table too
+        // and ends by tearing the namespace down.
         if (!FilteredEgressNetns.IsSupported) return;   // the root lane, with ip + nft, is authoritative
 
         FilteredEgressNetns.CanSeal.ShouldBeTrue("ip and nft are here, but this process could not build a namespace — the survivor this arm stands for could not exist either");
@@ -299,7 +300,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
 
         try
         {
-            var plan = FilteredEgressPlan.Build(netnsKey, Array.Empty<string>(), lease);
+            var plan = PreGuardPlan(netnsKey, lease);
             var setup = await FilteredEgressNetns.ApplyAsync(netnsKey, plan, timeoutSeconds: 20, CancellationToken.None);
             setup.SetupOk.ShouldBeTrue($"the allowlist-plan netns must set up on {lease.Cidr}; setup error: {setup.SetupError}");
 
@@ -332,6 +333,18 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
             output.WriteLine($"{RanMarker} legacy-sealed-teardown table={sealTable}");
         }
         finally { await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None); }
+    }
+
+    /// <summary>
+    /// The allowlist plan a run launched before the guard on its veth was built with: the same setup and forward table
+    /// (<see cref="FilteredEgressPlan.BuildNftRuleset"/>), and no inet table of the plan's own. A new namespace drops what
+    /// its child sends the worker, gateway included; a survivor's does not, which is how it still reaches its broker there.
+    /// </summary>
+    private static FilteredEgressPlan PreGuardPlan(string netnsKey, EgressSubnetAllocator.Lease lease)
+    {
+        var plan = FilteredEgressPlan.Build(netnsKey, Array.Empty<string>(), lease);
+
+        return plan with { NftRuleset = FilteredEgressPlan.BuildNftRuleset(plan.Namespace, lease.Cidr, Array.Empty<string>()) };
     }
 
     /// <summary>

@@ -460,11 +460,23 @@ public sealed class SealedEgressE2ETests(ITestOutputHelper output) : IDisposable
 
     private static string Pid(string line) => line.Split(" pid=")[1];
 
-    /// <summary>The worker's first non-loopback IPv4 address — its eth0, where the worker's own listeners are reachable from its network.</summary>
-    private static string WorkerIpv4() =>
-        NetworkInterface.GetAllNetworkInterfaces().Where(nic => nic.OperationalStatus == OperationalStatus.Up && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses).Select(address => address.Address).FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork)?.ToString()
-        ?? throw new Xunit.Sdk.XunitException("fixture: this host has no non-loopback IPv4 address to probe the worker at");
+    /// <summary>
+    /// The IPv4 address of the device the worker's default route leaves by — its eth0, where the worker's own listeners
+    /// are reachable from its network. Not the first address listed: a run's host veth is created after eth0, lists
+    /// before it, and is torn down with its run, so a sibling run's gateway would stand in for the worker's address.
+    /// </summary>
+    internal static string WorkerIpv4()
+    {
+        var device = DefaultRouteDevice();
+
+        return NetworkInterface.GetAllNetworkInterfaces().Where(nic => nic.Name == device).SelectMany(nic => nic.GetIPProperties().UnicastAddresses).Select(address => address.Address).FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork)?.ToString()
+            ?? throw new Xunit.Sdk.XunitException($"fixture: {device}, which carries the worker's default route, has no IPv4 address to probe the worker at — check `ip -4 addr show dev {device}`");
+    }
+
+    /// <summary>The device of the main table's IPv4 default route (destination and mask both zero in <c>/proc/net/route</c>).</summary>
+    private static string DefaultRouteDevice() =>
+        File.ReadLines("/proc/net/route").Skip(1).Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).FirstOrDefault(fields => fields.Length > 7 && fields[1] == "00000000" && fields[7] == "00000000")?[0]
+        ?? throw new Xunit.Sdk.XunitException("fixture: the worker has no IPv4 default route, so it has no uplink address to be probed at — check `ip -4 route show default`");
 
     /// <summary>Every non-loopback IPv6 address the worker holds, link-local ones with their scope — none may be reachable from a relayed sandbox.</summary>
     private static IReadOnlyList<string> WorkerIpv6Addresses() =>
