@@ -3,8 +3,9 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// <summary>
 /// The PURE command-sequence builder for a deny-by-default egress allowlist (B3.2 enforcement) — a per-run network
 /// namespace whose only egress is NAT'd to the host, with an nftables FORWARD filter that permits the netns subnet
-/// to reach ONLY the resolved allowlist IPs (+ DNS), dropping everything else. It produces the <c>ip</c> / <c>nft</c>
-/// / <c>sysctl</c> argv sequences for SETUP, the <c>ip netns exec</c> prefix the confined command runs behind, and
+/// to reach ONLY the resolved allowlist IPs (+ DNS), dropping everything else, and a guard on the host veth that keeps
+/// the namespace and the worker out of each other (<see cref="BuildVethGuardRuleset"/>). It produces the <c>ip</c> /
+/// <c>nft</c> / <c>sysctl</c> argv sequences for SETUP, the <c>ip netns exec</c> prefix the confined command runs behind, and
 /// the TEARDOWN sequence — all pure data so the rules (the allow set, the default-drop, the teardown) are unit-pinned
 /// without root. The privileged executor (and its CI E2E) runs them; this file never touches the kernel.
 ///
@@ -67,7 +68,7 @@ public sealed record FilteredEgressPlan
         return dev >= 0 && dev == Array.LastIndexOf(words, "dev") && dev + 1 < words.Length ? words[dev + 1] : null;
     }
 
-    /// <summary>The nftables ruleset (NAT masquerade + the scoped default-drop forward allowlist) applied via <c>nft -f -</c> on STDIN after <see cref="SetupCommands"/>. Kept off the argv (multi-line) so it pipes cleanly.</summary>
+    /// <summary>The nftables ruleset (NAT masquerade + the scoped default-drop forward allowlist, then the guard on the run's host veth — <see cref="BuildVethGuardRuleset"/>) applied via <c>nft -f -</c> on STDIN after <see cref="SetupCommands"/>, as one transaction. Kept off the argv (multi-line) so it pipes cleanly.</summary>
     public required string NftRuleset { get; init; }
 
     /// <summary>The argv that applies <see cref="NftRuleset"/> on stdin.</summary>
@@ -98,7 +99,7 @@ public sealed record FilteredEgressPlan
         var subnetCidr = subnet.Cidr;
         var table = ns;   // one nft table per run, named like the ns
 
-        var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps);
+        var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps) + BuildVethGuardRuleset(table, vethHost, subnetCidr);
 
         var setup = NamespaceSetup(ns, vethHost, vethNs, subnet);
         setup.Add(new[] { "ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", hostIp });
@@ -156,7 +157,7 @@ public sealed record FilteredEgressPlan
             new[] { "ip", "netns", "del", ns },          // removes the ns + its veth end
             new[] { "ip", "link", "del", vethHost },     // best-effort: del may already be gone with the ns
             new[] { "nft", "delete", "table", "ip", ns },
-            new[] { "nft", "delete", "table", "inet", ns },   // the table of a network-off run sealed to its broker before the relay replaced the seal; best-effort, absent otherwise
+            new[] { "nft", "delete", "table", "inet", ns },   // the veth guard, or the seal a network-off run launched before the relay carries; best-effort, absent for an allowlist run launched before the guard
         };
     }
 
@@ -188,6 +189,47 @@ public sealed record FilteredEgressPlan
 
         return string.Join("\n", lines) + "\n";
     }
+
+    /// <summary>
+    /// The guard on the host end of the run's veth, both ways. INPUT: what the namespace sends the worker ITSELF — its
+    /// gateway, its other addresses, the veth's IPv6 link-local — is dropped, except DNS and the rest of a flow the
+    /// namespace opened. DNS is exactly what the forward filter admits (UDP and TCP port 53 from the run's /30), here for
+    /// a resolver the worker serves on one of its own addresses: the namespace resolves through the worker's
+    /// <c>resolv.conf</c>, and a loopback resolver there is the namespace's own loopback, which no veth rule reaches.
+    /// OUTPUT: the worker may send into the namespace only the replies to those flows and the errors about the run's own
+    /// traffic — ICMP fragmentation-needed among them, without which an upload across a narrower uplink stalls — and
+    /// anything it starts is rejected. A peer the worker reaches at an address the run's /30 shadows is then refused at
+    /// once instead of handed to the sandbox.
+    ///
+    /// <para>Each accept is bound to its conntrack direction, because ESTABLISHED alone says nothing about who opened
+    /// the flow. Wherever another run already has conntrack running on the worker, a connection the worker opened to
+    /// that peer before this /30 existed is ESTABLISHED, and its next packet takes this veth: admitted either way, it
+    /// would hand the worker's bytes to the sandbox and the sandbox's answers to the worker as the peer's.</para>
+    ///
+    /// <para>Keyed on the veth, so another run's namespace is untouched; <c>inet</c>, so IPv6 is covered too. The
+    /// table is declared, deleted and redefined in the same <c>nft -f</c> transaction as the forward table, which the
+    /// kernel applies atomically: a table of this name that an earlier teardown failed to delete would otherwise keep
+    /// its own rules, its drop included, ahead of these.</para>
+    /// </summary>
+    internal static string BuildVethGuardRuleset(string table, string vethHost, string subnet) => string.Join("\n", new[]
+    {
+        $"table inet {table} {{}}",
+        $"delete table inet {table}",
+        $"table inet {table} {{",
+        "  chain input {",
+        "    type filter hook input priority 0;",
+        $"    iifname \"{vethHost}\" ct direction original ct state established,related accept",
+        $"    iifname \"{vethHost}\" ip saddr {subnet} udp dport 53 accept",
+        $"    iifname \"{vethHost}\" ip saddr {subnet} tcp dport 53 accept",
+        $"    iifname \"{vethHost}\" drop",
+        "  }",
+        "  chain output {",
+        "    type filter hook output priority 0;",
+        $"    oifname \"{vethHost}\" ct direction reply ct state established,related accept",
+        $"    oifname \"{vethHost}\" reject",
+        "  }",
+        "}",
+    }) + "\n";
 
     private static string Slug(string runId)
     {

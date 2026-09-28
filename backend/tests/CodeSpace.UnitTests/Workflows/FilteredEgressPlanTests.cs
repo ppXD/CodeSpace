@@ -54,7 +54,7 @@ public class FilteredEgressPlanTests
     public void The_nft_ruleset_allows_only_the_given_ips_then_drops_the_subnet()
     {
         var plan = FilteredEgressPlan.Build("run-cccc3333", new[] { "1.1.1.1", "140.82.112.3" }, Subnet);
-        var rs = plan.NftRuleset;
+        var rs = ForwardTable(plan.NftRuleset);
 
         rs.ShouldContain("masquerade", customMessage: "the subnet is NAT'd out (interface-agnostic)");
         rs.ShouldContain("ct state established,related accept", customMessage: "return traffic is allowed");
@@ -65,14 +65,64 @@ public class FilteredEgressPlanTests
     }
 
     [Fact]
+    public void The_ruleset_guards_the_host_veth_both_ways_in_the_same_transaction()
+    {
+        // Pinned whole and written out, because every line is load-bearing and a membership assertion is satisfied by
+        // the wrong chain: the forward table, then the guard in the same transaction; inet (the veth's IPv6 link-local
+        // must meet the same drop); replaced, not appended to (a table of this name an earlier teardown left behind would
+        // keep its drop ahead of these); INPUT from the veth admits only the rest of the flows the namespace opened, and
+        // the DNS the forward filter admits, from the run's /30; OUTPUT to the veth admits only those flows' replies and
+        // errors, frag-needed among them, and rejects the rest. Each accept is bound to its direction: a flow the worker
+        // opened to the peer at the run's .2 before the /30 shadowed it is ESTABLISHED wherever conntrack already ran,
+        // and neither its packets nor a forged answer to them may cross.
+        var plan = FilteredEgressPlan.Build("run-9aa7d001", new[] { "1.1.1.1" }, Subnet);
+
+        plan.NftRuleset.ShouldBe(
+            $"table ip {plan.Namespace} {{\n" +
+            "  chain postrouting {\n" +
+            "    type nat hook postrouting priority 100;\n" +
+            $"    ip saddr {Subnet.Cidr} masquerade\n" +
+            "  }\n" +
+            "  chain forward {\n" +
+            "    type filter hook forward priority 0;\n" +
+            "    ct state established,related accept\n" +
+            $"    ip saddr {Subnet.Cidr} udp dport 53 accept\n" +
+            $"    ip saddr {Subnet.Cidr} tcp dport 53 accept\n" +
+            $"    ip saddr {Subnet.Cidr} ip daddr {{ 1.1.1.1 }} accept\n" +
+            $"    ip saddr {Subnet.Cidr} drop\n" +
+            "  }\n" +
+            "}\n" +
+            $"table inet {plan.Namespace} {{}}\n" +
+            $"delete table inet {plan.Namespace}\n" +
+            $"table inet {plan.Namespace} {{\n" +
+            "  chain input {\n" +
+            "    type filter hook input priority 0;\n" +
+            $"    iifname \"{plan.VethHost}\" ct direction original ct state established,related accept\n" +
+            $"    iifname \"{plan.VethHost}\" ip saddr {Subnet.Cidr} udp dport 53 accept\n" +
+            $"    iifname \"{plan.VethHost}\" ip saddr {Subnet.Cidr} tcp dport 53 accept\n" +
+            $"    iifname \"{plan.VethHost}\" drop\n" +
+            "  }\n" +
+            "  chain output {\n" +
+            "    type filter hook output priority 0;\n" +
+            $"    oifname \"{plan.VethHost}\" ct direction reply ct state established,related accept\n" +
+            $"    oifname \"{plan.VethHost}\" reject\n" +
+            "  }\n" +
+            "}\n");
+        plan.VethHost.ShouldBe("csh-run9aa7d", "the guard is keyed on the run's own host veth, never on a subnet another run may share");
+    }
+
+    [Fact]
     public void With_no_allowed_ips_there_is_no_accept_set_only_dns_then_drop()
     {
         // A degenerate allowlist (no IPs) still produces a valid ruleset: DNS + a scoped drop, no daddr-accept rule.
-        var rs = FilteredEgressPlan.Build("run-dddd4444", Array.Empty<string>(), Subnet).NftRuleset;
+        var rs = ForwardTable(FilteredEgressPlan.Build("run-dddd4444", Array.Empty<string>(), Subnet).NftRuleset);
 
         rs.ShouldNotContain("ip daddr {", customMessage: "no allowed IPs → no daddr accept rule");
-        rs.ShouldContain("drop");
+        rs.ShouldContain($"    ip saddr {Subnet.Cidr} drop\n", customMessage: "the scoped default-drop stands with no allow set too: the executor passes an empty list when every allowlisted host failed to resolve, which must mean no egress, never full egress");
     }
+
+    /// <summary>The forward table alone — what precedes the guard's inet table — so an assertion about the forward filter cannot be met by a line of the guard.</summary>
+    private static string ForwardTable(string ruleset) => ruleset.Split("table inet ")[0];
 
     [Fact]
     public void Setup_creates_the_netns_and_veth_and_default_route()
