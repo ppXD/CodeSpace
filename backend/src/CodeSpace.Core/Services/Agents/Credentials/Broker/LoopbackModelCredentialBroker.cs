@@ -44,9 +44,10 @@ namespace CodeSpace.Core.Services.Agents.Credentials.Broker;
 /// <para><b>What guards it.</b> The 256-bit bearer, checked in constant time, is the capability; the run's route
 /// segment is a 128-bit CSPRNG id, so a caller cannot even find another run's route by holding its id; the lease
 /// expires without renewal and is withdrawn outright on cancel. The source-address gate below is defence in depth,
-/// not the guarantee: it admits loopback and the <c>10.0.0.0/8</c> space the subnet allocator hands out, so a
-/// deployment whose pods sit in a 10/8 network has neighbours that can REACH the port — and still cannot use it
-/// without a live run's token.</para>
+/// not the guarantee: it admits loopback and the <c>10.0.0.0/8</c> space the subnet allocator handed per-run /30s out
+/// of before it moved to 198.19.64.0–198.19.191.255. The gateway-addressed survivors above call from there; every run
+/// since reaches this broker from loopback. So a deployment whose pods sit in a 10/8 network has neighbours that can
+/// REACH the port — and still cannot use it without a live run's token.</para>
 ///
 /// <para><b>Streaming is load-bearing.</b> Both harnesses stream (SSE), so the proxy reads response headers only
 /// (<see cref="HttpCompletionOption.ResponseHeadersRead"/>) and flushes every chunk it copies. A buffered relay would
@@ -740,9 +741,12 @@ public sealed class LoopbackModelCredentialBroker : IModelCredentialBroker, IDis
     }
 
     /// <summary>
-    /// Whether a request's source could be one of this host's sandboxes: loopback (a run sharing the host network) or
-    /// the <c>10.0.0.0/8</c> space <see cref="EgressSubnetAllocator"/> carves per-run /30s out of. Defence in depth
-    /// behind the token — see the type remarks on what it does and does not buy.
+    /// Whether a request's source could be one of this host's sandboxes: loopback (a run sharing the host network, or a
+    /// relayed one, whose socket is spliced to the port from this worker) or the <c>10.0.0.0/8</c> space
+    /// <see cref="EgressSubnetAllocator"/> carved per-run /30s out of before it moved to 198.19.64.0–198.19.191.255,
+    /// which a namespaced run launched before the relay still calls from. A run holding a /30 from the new pool is
+    /// relayed, so it never calls from that /30. Defence in depth behind the token — see the type remarks on what it
+    /// does and does not buy.
     /// </summary>
     internal static bool IsPlausibleSandboxSource(IPAddress? source) =>
         source is not null && (IPAddress.IsLoopback(source) || (source.AddressFamily == AddressFamily.InterNetwork && source.GetAddressBytes()[0] == 10));

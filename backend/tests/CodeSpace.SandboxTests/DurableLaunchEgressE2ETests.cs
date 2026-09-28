@@ -89,6 +89,7 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
             result.Status.ShouldBe(SandboxStatus.Success, $"the probe must run to its end; stderr: {result.Stderr}");
             probe.ShouldContain("broker=200", customMessage: $"the allowlist run's broker answers through the relay; check `ls -la {Path.GetDirectoryName(socketPath)}`; probe: {probe}");
             probe.ShouldContain("allowed=open", customMessage: $"the allowlisted IP is still reachable through the namespace's NAT; probe: {probe}");
+            IsInThePool(ProbeValue(probe, "src")).ShouldBeTrue($"the run's namespace end must hold an address from 198.19.64.0–198.19.191.255, and it is that source the NAT carried to {Allowed}; check `ip netns exec {NamespaceOf(key)} ip -4 addr` while a run is up; probe: {probe}");
             probe.ShouldNotContain("denied=open", customMessage: $"and a host outside the allowlist is still dropped; probe: {probe}");
             ProbeValue(probe, "gateway").ShouldNotBe("open", $"the worker's listener must stay shut at the run's gateway — the guard on its veth drops it; probe: {probe}");
             ProbeValue(probe, "worker").ShouldNotBe("open", $"and at the worker's own address; probe: {probe}");
@@ -176,7 +177,7 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
         return (spec, socketPath);
     }
 
-    /// <summary>The broker through the relay, the two writes the socket's read-only directory must refuse, the allowlisted IP and a denied one, and the worker's listener at the namespace's default gateway and at the worker's own address, from inside the run.</summary>
+    /// <summary>The broker through the relay, the two writes the socket's read-only directory must refuse, the allowlisted IP and a denied one, the source address the run reaches the allowlisted IP from, and the worker's listener at the namespace's default gateway and at the worker's own address, from inside the run.</summary>
     private const string AllowlistProbe = SealedEgressE2ETests.SocketDirectoryWrites + "\n" + """
         import os, socket, urllib.request
         req = urllib.request.Request(os.environ['BROKER_URL'] + '/v1/messages', data=b'{}', method='POST', headers={'Authorization': 'Bearer ' + os.environ['RUN_TOKEN'], 'content-type': 'application/json'})
@@ -194,9 +195,21 @@ public sealed class DurableLaunchEgressE2ETests(ITestOutputHelper output)
             for fields in (line.split() for line in open('/proc/net/route').read().splitlines()[1:]):
                 if fields[1] == '00000000':
                     return socket.inet_ntoa(bytes.fromhex(fields[2])[::-1])
+        def source(host):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((host, 80)); return s.getsockname()[0]
+            except OSError as e:
+                return type(e).__name__
+            finally:
+                s.close()
         port = int(os.environ['WORKER_PORT'])
-        print('broker=%s sock_unlink=%s sock_plant=%s allowed=%s denied=%s gateway=%s worker=%s' % (broker, unlink, plant, tcp('1.1.1.1'), tcp('8.8.8.8'), tcp(gateway(), port, 3), tcp(os.environ['WORKER_IP'], port, 3)))
+        print('broker=%s sock_unlink=%s sock_plant=%s allowed=%s denied=%s src=%s gateway=%s worker=%s' % (broker, unlink, plant, tcp('1.1.1.1'), tcp('8.8.8.8'), source('1.1.1.1'), tcp(gateway(), port, 3), tcp(os.environ['WORKER_IP'], port, 3)))
         """;
+
+    /// <summary>Whether <paramref name="address"/> lies in 198.19.64.0–198.19.191.255, the pool per-run /30s come from — by the test's own arithmetic, not the allocator's.</summary>
+    private static bool IsInThePool(string address) =>
+        System.Net.IPAddress.TryParse(address, out var ip) && ip.GetAddressBytes() is [198, 19, >= 64 and <= 191, _];
 
     /// <summary>The value the probe printed for <paramref name="key"/> (<c>key=value</c>), or <c>?</c> when it printed none.</summary>
     private static string ProbeValue(string probe, string key) =>
