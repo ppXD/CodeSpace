@@ -170,17 +170,14 @@ public sealed record SandboxHandle
     /// re-attach, this port is unbound. A local process that grabs it and ACCEPTS — rather than merely holding it,
     /// which only makes the re-bind refuse and the run land typed — receives the child's next request: its bearer, its
     /// prompt, and whatever the child does with the reply it sends back. Nothing in the address stops that, because
-    /// the address is all the child has. What bounds it: the squatter must be ON THIS HOST (the child reaches loopback
-    /// or its own netns gateway), must win the race for one specific ephemeral port, and gains a per-run broker bearer
+    /// the address is all the child has. What bounds it: the squatter must be ON THIS HOST (the child reaches loopback,
+    /// directly or through its relay), must win the race for one specific ephemeral port, and gains a per-run broker bearer
     /// that authenticates to nothing else and expires — not the tenant's key, which never leaves the broker.</para>
     ///
     /// <para>Per-lease ports change the shape of that exposure rather than its nature: the number of squattable
-    /// addresses is now the number of concurrent brokered runs instead of one per worker. Every lease binds loopback; a
-    /// child in a network of its own reaches it through <see cref="ModelBrokerSocketPath"/>. Only the re-bind of a
-    /// handle with no socket path — a namespaced run launched before the socket existed, which reaches the worker at its
-    /// namespace gateway — still binds WIDE (<c>+</c>) where the host builds filtered-egress namespaces. Reaching any of
-    /// them still buys nothing without a live run's bearer, and the broker refuses any source outside loopback and the
-    /// <c>10/8</c> space the allocator carved those runs' /30s from before it moved to 198.19.64.0–198.19.191.255.</para>
+    /// addresses is now the number of concurrent brokered runs instead of one per worker. Every lease and every re-bind
+    /// binds loopback; a child in a network of its own reaches it through <see cref="ModelBrokerSocketPath"/>. Reaching
+    /// any of them still buys nothing without a live run's bearer, and the broker refuses any source but loopback.</para>
     /// </summary>
     public int? ModelBrokerPort { get; init; }
 
@@ -203,9 +200,11 @@ public sealed record SandboxHandle
     /// The per-run Unix socket this run's brokered lease was ALSO served on, recorded so a re-attach re-opens it at the
     /// same path — the path a sandbox's directory bind still points at. The re-bind takes <see cref="ModelBrokerPort"/>
     /// on loopback FIRST and touches the socket only once it holds that port, because the port is the lock between two
-    /// workers on one host. Null when the lease had no socket, which is every handle written before this field existed:
-    /// such a handle takes the legacy re-bind, wide first. Omitted from the JSON when null, so a handle without one is
-    /// byte-identical to one written before the field.
+    /// workers on one host. Null when the lease had no socket — a child on the worker's own network, which calls
+    /// loopback, and every handle written before this field existed. A handle with an <see cref="EgressNetnsKey"/> and
+    /// none is a namespaced run launched before the socket existed, whose child calls its namespace gateway; a re-attach
+    /// does not re-bind it. Omitted from the JSON when null, so a handle without one is byte-identical to one written
+    /// before the field.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ModelBrokerSocketPath { get; init; }

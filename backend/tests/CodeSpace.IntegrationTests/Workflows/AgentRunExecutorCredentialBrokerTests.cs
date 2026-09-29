@@ -902,13 +902,6 @@ public partial class AgentRunExecutorTests
     {
         if (OperatingSystem.IsWindows()) return;
 
-        // BEFORE anything is launched. The fixture below holds LOOPBACK, the only candidate host a worker without
-        // filtered-egress namespaces tries; on a host that builds them the broker prefers the wide bind this fixture
-        // does not hold, so the refusal would not be falsifiable. Skipping here rather than after the drain, because
-        // the drain deliberately leaves a real `sleep 600` child ALIVE: a guard further down would return having
-        // leaked a ten-minute detached process and a run row stuck Running on every netns-capable dev box.
-        if (CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported) return;
-
         var teamId = await SeedTeamAsync();
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-rebind-refused-fixture");
         var runId = await CreateRunWithCredentialAsync(teamId, credId);
@@ -942,10 +935,85 @@ public partial class AgentRunExecutorTests
             $"the agent (pid {handle.ProcessId}) was still alive after its run was landed lease-lost; an agent that cannot call a model must be stopped, not just recorded — diagnose with `ps -p {handle.ProcessId} -o pid,stat,etime,command`");
     }
 
+    [Fact]
+    public async Task A_reattach_of_a_run_whose_child_calls_its_namespace_gateway_asks_for_no_re_bind_and_lands_it_typed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A Trusted run shares the worker's network, so its lease has no socket on any host. Its handle, read back from
+        // the row with a network namespace added, is the one a run launched before its broker had a socket left behind:
+        // its child calls that namespace's gateway, where no broker listens any more.
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-gateway-survivor-fixture");
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted, Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted) });
+
+        var harness = new BrokerableScriptedHarness(BrokeredProvider, "sleep 600");
+        var (handle, _) = await DrainLeavingTheAgentRunningAsync(runId, harness);
+
+        try
+        {
+            await StageGatewayAddressedHandleAsync(runId, handle);
+
+            using var workerB = new RecordingBroker(LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()));
+            using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(90));   // a re-bind that took would leave the agent sleeping: this ends the pass, not the suite
+            var reservation = await ReserveReattachAfterLapseAsync(runId);
+
+            await ReattachUntilStoppedAsync(reservation, harness, workerB, bounded.Token);
+
+            workerB.Rebinds.ShouldBeEmpty("a re-bind binds loopback, and this run's child calls its namespace's gateway: asking for one would read as 'the address is back' and clear the posture that says its model access is gone");
+            workerB.HasLease(runId).ShouldBeFalse("and nothing may be installed for it");
+
+            using var verify = _fixture.BeginScope();
+            var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+            run.Status.ShouldBe(AgentRunStatus.Failed, "a run no worker can restore is ended, not left burning its wall clock on calls nothing answers");
+            JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.ExitReason.ShouldBe(CodeSpace.Messages.Failures.FailureCodes.ModelCredentialLeaseLost, "under the typed code any other unrestorable run lands with");
+            JsonSerializer.Deserialize<SandboxConfinement>(run.SandboxConfinementJson!, AgentJson.Options)!.ModelCredentialLeaseLost.ShouldBeTrue("the posture says its model access is gone, which is now true");
+
+            await WaitUntilAsync(() => !ProcessIsAlive(handle.ProcessId), TimeSpan.FromSeconds(15),
+                $"the agent (pid {handle.ProcessId}) was still alive after its run was landed lease-lost — diagnose with `ps -p {handle.ProcessId} -o pid,stat,etime,command`");
+        }
+        finally { KillQuietly(handle.ProcessId); }
+    }
+
+    /// <summary>
+    /// Give a drained run's persisted handle a network namespace, keeping its port, route and bearer and no broker socket:
+    /// the handle a namespaced run launched before its broker had a socket wrote. Through SQL, as the older handle shapes
+    /// in these suites are staged; and into the native launch's receipt when the launch wrote one, because the runner
+    /// answers for a handle only while its namespace key matches the receipt's, and such a run's two agreed.
+    /// </summary>
+    private async Task StageGatewayAddressedHandleAsync(Guid runId, SandboxHandle handle)
+    {
+        var netnsKey = Guid.NewGuid().ToString("N");
+        var receipt = Path.Combine(handle.SpoolDirectory, NativeLaunchProtocol.DirectoryName, NativeLaunchProtocol.ReceiptFile);
+
+        if (File.Exists(receipt))
+        {
+            var recorded = JsonSerializer.Deserialize<NativeLaunchReceipt>(await File.ReadAllTextAsync(receipt), NativeLaunchProtocol.Json).ShouldNotBeNull();
+            await File.WriteAllTextAsync(receipt, JsonSerializer.Serialize(recorded with { EgressNetnsKey = netnsKey }, NativeLaunchProtocol.Json));
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET runner_handle = runner_handle || jsonb_build_object('egressNetnsKey', {netnsKey}::text) WHERE id = {runId}");
+
+        var staged = HandleOf(runId).ShouldNotBeNull();
+
+        staged.EgressNetnsKey.ShouldBe(netnsKey, "fixture: the staged handle must record the namespace");
+        staged.ModelBrokerSocketPath.ShouldBeNull("fixture: and no broker socket, or this pins the socket re-bind instead");
+        staged.ModelBrokerPort.ShouldBe(handle.ModelBrokerPort, "fixture: and still the port, route and bearer a re-bind would need");
+    }
+
+    /// <summary>Best-effort: stop an agent a failed assertion left running, so a red run does not leak a ten-minute <c>sleep</c>.</summary>
+    private static void KillQuietly(int pid)
+    {
+        try { using var process = Process.GetProcessById(pid); process.Kill(entireProcessTree: true); }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { /* already gone */ }
+    }
+
     [Theory]
     [InlineData(true)]    // a network-off run: its lease is served over a socket, the handle records it, and the re-attach re-opens it
-    [InlineData(false)]   // a network-on run: no socket, so the handle is exactly a pre-field handle, and the re-attach takes the legacy re-bind
-    public async Task A_reattach_re_opens_the_broker_socket_its_handle_recorded_and_a_handle_without_one_takes_the_legacy_rebind(bool socket)
+    [InlineData(false)]   // a network-on run: no socket, so the handle is exactly a pre-field handle, and the re-attach re-binds loopback alone
+    public async Task A_reattach_re_opens_the_broker_socket_its_handle_recorded_and_a_handle_without_one_is_served_on_loopback(bool socket)
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -974,7 +1042,8 @@ public partial class AgentRunExecutorTests
             if (standIn is not null) socketPath.ShouldBe(standIn, "exactly the path the lease bound");
             if (!socket) RunnerHandleJsonOf(runId).ShouldNotContain("modelBrokerSocketPath", customMessage: "a handle whose lease had no socket must be stored exactly as one written before the field existed");
 
-            using var workerB = new RecordingBroker(LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream()));
+            var brokerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
+            using var workerB = new RecordingBroker(brokerB);
             var reservation = await ReserveReattachAfterLapseAsync(runId);
             var reattach = ReattachUntilStoppedAsync(reservation, harness, workerB);
 
@@ -983,9 +1052,9 @@ public partial class AgentRunExecutorTests
             var rebind = workerB.Rebinds.ShouldHaveSingleItem();
 
             rebind.SocketPath.ShouldBe(socketPath,
-                customMessage: "the re-attach read the handle back from the row and must ask for the socket it recorded — or, for a handle that recorded none, for none, which is what keeps a gateway-addressed child on the wide legacy re-bind");
-            rebind.ChildInNetworkNamespace.ShouldBeFalse(
-                "this run shares the worker's network and its child calls loopback, so its re-bind is not the legacy gateway kind — reading it as one would keep the line the gateway path's retirement waits on firing for every shared-network run, forever");
+                customMessage: "the re-attach read the handle back from the row and must ask for the socket it recorded — or, for a handle that recorded none, for none");
+            brokerB.ListenerPrefixForTest(runId).ShouldBe($"http://127.0.0.1:{handle.ModelBrokerPort}/",
+                $"worker B serves the re-bound port on loopback alone, with a socket or without one — every child calls it there, directly or through its relay (namespaces possible here: {CodeSpace.Core.Services.Agents.Sandbox.Isolation.FilteredEgressNetns.IsSupported})");
             (await ReachesUpstreamAsync(childBaseUrl, runToken)).ShouldBeTrue("the original loopback address answers again on worker B");
 
             if (socketPath is not null)
