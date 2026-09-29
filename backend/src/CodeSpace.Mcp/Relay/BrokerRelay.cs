@@ -71,8 +71,14 @@ internal static class BrokerRelay
             var inheritedSocketEngineThreads = CapThreads();   // before Listen: the first socket fixes the engine count
 
             using var listener = Listen(command.Port);
+
+            // Before the CLI exists: a signal that met the relay's default action would kill it and leave the CLI
+            // running without its broker. One that lands before the CLI has a pid is held and delivered once it does.
+            var signals = new SignalRelay(Kill);
+            using var forwarding = ForwardSignals(signals);
             using var cli = StartCli(command, inheritedSocketEngineThreads);
-            using var forwarding = ForwardSignals(cli.Id);
+
+            signals.Started(cli.Id);
 
             _ = AcceptLoopAsync(listener, command.Broker);
 
@@ -168,22 +174,76 @@ internal static class BrokerRelay
     /// the process that signal reached; a relay that died would leave the CLI running on without its broker, and the
     /// chain would report a status the CLI never had.
     /// </summary>
-    private static SignalForwarding ForwardSignals(int cliPid)
+    private static SignalForwarding ForwardSignals(SignalRelay signals)
     {
-        var registrations = ForwardedSignals.Select(forwarded => PosixSignalRegistration.Create(forwarded.Signal, context => Forward(context, cliPid, forwarded.Number)));
+        var registrations = ForwardedSignals.Select(forwarded => PosixSignalRegistration.Create(forwarded.Signal, context => Forward(context, signals, forwarded.Number)));
 
         return new SignalForwarding(registrations.ToArray());
     }
 
-    private static void Forward(PosixSignalContext context, int cliPid, int signal)
+    private static void Forward(PosixSignalContext context, SignalRelay signals, int signal)
     {
         context.Cancel = true;   // the relay stays, and exits with whatever the CLI does about the signal
 
-        kill(cliPid, signal);    // ESRCH once the CLI has gone: the relay is then already on its way out with its status
+        signals.Received(signal);
     }
+
+    /// <summary>Send <paramref name="signal"/> to <paramref name="pid"/>. ESRCH once the CLI has gone: the relay is then already on its way out with its status.</summary>
+    private static void Kill(int pid, int signal) => kill(pid, signal);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int signal);
+
+    /// <summary>
+    /// Where a signal the relay receives goes: straight to the CLI once it has a pid, else held and delivered the moment
+    /// it has one — the relay's handlers are in place before the CLI starts, so a signal can land first. Of several held
+    /// signals the CLI gets the last; each of them asks it to stop. The hold is re-checked after it is made, so a start
+    /// that ran in between still delivers it, and an atomic take makes sure nothing is delivered twice.
+    /// </summary>
+    internal sealed class SignalRelay(Action<int, int> deliver)
+    {
+        private int _cliPid;
+        private int _held;
+
+        /// <summary>Run between reading no pid and holding the signal — the interleaving only the re-check saves. Null in production.</summary>
+        internal Action? BeforeHoldForTest { get; init; }
+
+        /// <summary>Run between holding the signal and the re-check. Null in production.</summary>
+        internal Action? AfterHoldForTest { get; init; }
+
+        /// <summary>A signal reached the relay: pass it on, or hold it until the CLI has a pid.</summary>
+        public void Received(int signal)
+        {
+            if (Volatile.Read(ref _cliPid) is var pid and not 0)
+            {
+                deliver(pid, signal);
+                return;
+            }
+
+            BeforeHoldForTest?.Invoke();
+
+            // An Exchange, not a Volatile.Write: it is also the full fence the re-check below relies on, so either the
+            // start takes the held signal or the re-check sees its pid. A plain write lets both miss it.
+            Interlocked.Exchange(ref _held, signal);
+
+            AfterHoldForTest?.Invoke();
+
+            if (Volatile.Read(ref _cliPid) is var started and not 0) DeliverHeld(started);
+        }
+
+        /// <summary>The CLI has a pid: deliver whatever arrived before it did.</summary>
+        public void Started(int cliPid)
+        {
+            Volatile.Write(ref _cliPid, cliPid);
+
+            DeliverHeld(cliPid);
+        }
+
+        private void DeliverHeld(int pid)
+        {
+            if (Interlocked.Exchange(ref _held, 0) is var held and not 0) deliver(pid, held);
+        }
+    }
 
     private sealed class SignalForwarding(PosixSignalRegistration[] registrations) : IDisposable
     {

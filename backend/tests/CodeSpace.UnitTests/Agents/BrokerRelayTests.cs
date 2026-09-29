@@ -247,6 +247,25 @@ public sealed class BrokerRelayTests : IDisposable
         said.ShouldBe($"cli-got-{signal}\n", "the CLI's trap ran, and the relay said nothing of its own");
     }
 
+    [Fact]
+    public async Task The_relay_already_catches_every_forwarded_signal_when_its_cli_starts()
+    {
+        if (!OperatingSystem.IsLinux()) return;   // SigCgt is read from /proc
+
+        // The CLI's first act is to read its parent's caught-signal mask, with shell builtins alone so no exec delays it,
+        // and so it sees the relay as it was the instant the CLI existed. Registered after the start, the handlers are not
+        // there yet (the runtime catches INT and TERM on its own; HUP is the one that tells), and a signal sent the moment
+        // the CLI runs meets the relay's default action — the relay dies and leaves its CLI running without its broker.
+        // Registered before the start, the mask is complete before the fork, so this can never fail for the right order.
+        var run = await RunRelayAsync([FreePort().ToString(), AbsentSocket, "--", "/bin/sh", "-c", "while IFS=: read -r key value; do [ \"$key\" = SigCgt ] && echo $value; done < /proc/$PPID/status; true"]);
+
+        run.ExitCode.ShouldBe(0, $"stderr: {run.Stderr}");
+        var caught = Convert.ToUInt64(run.Stdout.Trim(), 16);
+
+        foreach (var (name, number) in new[] { ("HUP", 1), ("INT", 2), ("TERM", 15) })
+            ((caught >> (number - 1)) & 1).ShouldBe(1UL, $"SIG{name} must already be caught by the relay when its CLI starts; SigCgt={run.Stdout.Trim()}");
+    }
+
     [Theory]
     [InlineData(null, "unset")]
     [InlineData("3", "3")]
