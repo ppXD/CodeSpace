@@ -727,8 +727,8 @@ public sealed partial class LocalProcessRunner
         return new SandboxResult { Status = SandboxStatus.Stalled, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
-    /// <summary>Supervisor disappeared: it writes the marker before exiting, so re-check after a beat — a true "gone with no marker" was a kill.</summary>
-    private async Task<SandboxResult> VanishedAsync(SandboxHandle handle, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
+    /// <summary>Supervisor disappeared: it writes the marker before exiting, so re-check after a beat — a true "gone with no marker" was a kill. It is TimedOut when a controller's deadline stop is on record, or when it is a plain failure observed after its deadline, including the re-check delay; OOM evidence keeps its own verdict. Internal so a test can hand it that corpse: the loop has no signal for the gap it falls into.</summary>
+    internal async Task<SandboxResult> VanishedAsync(SandboxHandle handle, long offset, Func<SandboxOutputFrame, CancellationToken, Task> onFrame, CancellationToken ct)
     {
         await Task.Delay(PollInterval, ct).ConfigureAwait(false);
 
@@ -737,9 +737,18 @@ public sealed partial class LocalProcessRunner
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
             return await CompleteFromSpoolAsync(handle, offset, code, onFrame, ct).ConfigureAwait(false);
 
+        // A broker or guardian that enforces the deadline after the loop read the stop file and the clock, but before it
+        // read liveness, leaves this same corpse: no marker, supervisor gone. Its stop record says the deadline killed it,
+        // ahead of the OOM counter, which is cumulative: a child OOM the run survived must not claim a later deadline kill.
+        if (NativeDeadlineExpired(handle)) return await TimeoutAsync(handle, offset, onFrame, ct).ConfigureAwait(false);
+
         // Same read as the marker path, and for the same reason: the OOM killer can take the supervisor along with the
         // agent, leaving no marker at all — the cgroup counter is what tells that apart from an external kill.
         var status = ExitStatusFor(handle, exitCode: -1);
+
+        // Without a stop record the clock may only claim a plain failure: an OOM kill just before the deadline stays
+        // ResourceExhausted even though the re-check delay above carried it past the deadline.
+        if (status == SandboxStatus.Failed && DateTimeOffset.UtcNow >= handle.Deadline) return await TimeoutAsync(handle, offset, onFrame, ct).ConfigureAwait(false);
 
         await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
