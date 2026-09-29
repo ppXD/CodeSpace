@@ -125,7 +125,7 @@ public sealed class AllowlistFilterProbeTests : IDisposable
     [Fact]
     public void The_forwarding_probe_reads_the_sysctl_the_setup_writes()
     {
-        var plan = FilteredEgressPlan.Build("run-forwarding", ["1.1.1.1"], new EgressSubnetAllocator.Lease { Cidr = "198.19.70.16/30", HostIp = "198.19.70.17", NsIp = "198.19.70.18" });
+        var plan = FilteredEgressPlan.Build("run-forwarding", ["1.1.1.1"], new EgressSubnetAllocator.Lease { Cidr = "198.19.70.16/30", HostIp = "198.19.70.17", NsIp = "198.19.70.18" }, []);
 
         var write = plan.SetupCommands.Single(argv => argv[0] == "sysctl");
         write.Take(2).ShouldBe(new[] { "sysctl", "-w" });

@@ -28,7 +28,16 @@ namespace CodeSpace.SandboxTests;
 /// address or the veth's IPv6 link-local) while DNS on the worker and the allowlist still answer; a peer the worker
 /// reaches at an address the run's /30 shadows is refused and the sandbox receives nothing, a flow the worker opened to
 /// that peer before the run included; an upload across a narrower uplink still completes; and a guard an earlier round
-/// left behind is replaced, not added to. So does the one about forwarding a root worker may not turn on.</para>
+/// left behind is replaced, not added to. So does the one about forwarding a root worker may not turn on, and the four
+/// about DNS: port 53 is open only at the resolver the run's resolv.conf names; the namespace the production setup
+/// builds reads the worker's own resolv.conf, whose resolvers alone its tables admit; and a resolver address the
+/// worker's own NAT rewrites — DNATed before the forward table, REDIRECTed to the worker before the guard — still
+/// answers the run.</para>
+///
+/// <para>An arm that needs a resolver of its own names it in a resolv.conf staged at <c>/etc/netns/&lt;ns&gt;/</c>,
+/// which <c>ip netns exec</c> binds over the namespace's <c>/etc/resolv.conf</c>, and builds the rules from that same
+/// file (<c>NamespaceResolvConf</c>): the worker's own is the job's, and is not the test's to rewrite while sibling
+/// classes resolve through it.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
 public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
@@ -133,7 +142,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         var table = RandomNumberGenerator.GetInt32(10_000, 1_000_000).ToString(CultureInfo.InvariantCulture);
         string[] rule = ["pref", "100", "to", lease.Cidr, "lookup", table];
         var runId = Guid.NewGuid().ToString("N");
-        var plan = FilteredEgressPlan.Build(runId, new[] { Allowed }, lease);
+        var plan = FilteredEgressPlan.Build(runId, new[] { Allowed }, lease, []);
 
         // A run of this test killed between its rule add and its cleanup leaves a rule for its /30 in a table this run
         // cannot name; left there, it would fail this run's control and blame the check.
@@ -173,25 +182,29 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         // Before the relay, an allowlist run reached its broker at its namespace's gateway, so that door stood open onto
         // every listener the worker has — its API, every other run's lease — at the gateway and at the worker's own
         // address. The relay carries the broker over a socket now, and the guard on the veth drops what the namespace
-        // sends the worker itself, save DNS to a resolver the worker serves on its own address. The control deletes the
-        // guard and asks again: the listener must answer then, or its silence proved nothing about the guard.
+        // sends the worker itself, save DNS to a resolver the worker serves on its own address and the run's resolv.conf
+        // names. Port 53 at any other address of the worker — here a listener at the gateway — stays shut. The control
+        // deletes the guard and asks again: both listeners must answer then, or their silence proved nothing about it.
         using var listener = new TcpListener(IPAddress.Any, 0);
         listener.Start();
         var workerIp = SealedEgressE2ETests.WorkerIpv4();
         using var resolver = new WorkerResolver(workerIp);
         var runId = Guid.NewGuid().ToString("N");
-        var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, timeoutSeconds: 20, CancellationToken.None);
+        using var view = new NamespaceResolvConf(runId, $"nameserver {workerIp}\n");
+        var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, view.Path, timeoutSeconds: 20, CancellationToken.None);
 
         try
         {
             setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
 
+            using var unlisted = new WorkerResolver(setup.HostIp!);
             var guarded = await ProbeTheWorkerAsync(setup, workerIp, listener);
 
             guarded["gateway"].ShouldNotBe("open", $"a listener on the worker must not be reachable at the run's gateway {setup.HostIp} (its API, every other run's lease); probe: {Describe(guarded)}");
             guarded["worker"].ShouldNotBe("open", $"nor at the worker's own address {workerIp}; probe: {Describe(guarded)}");
-            guarded["dns_udp"].ShouldBe("answered", $"a resolver the worker serves on its own address still answers over UDP — the DNS the forward filter admits anywhere; probe: {Describe(guarded)}");
+            guarded["dns_udp"].ShouldBe("answered", $"the resolver the run's resolv.conf names, which the worker serves on its own address, still answers over UDP; probe: {Describe(guarded)}");
             guarded["dns_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(guarded)}");
+            guarded["gateway_53"].ShouldNotBe("open", $"but port 53 at the gateway {setup.HostIp}, which the resolv.conf does not name, is shut — check `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` names {workerIp} on each port-53 accept; probe: {Describe(guarded)}");
             guarded["allowed"].ShouldBe("open", $"the allowlisted {Allowed} is still reachable through the namespace's NAT; probe: {Describe(guarded)}");
 
             (await RunHostExitAsync(["nft", "delete", "table", "inet", FilteredEgressPlan.NamespaceFor(runId)])).ShouldBe(0, "control setup: the guard must be there to delete");
@@ -199,6 +212,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
 
             unguarded["gateway"].ShouldBe("open", $"control: with the guard gone the listener answers at the gateway, or the refusal above proved nothing about the guard; probe: {Describe(unguarded)}");
             unguarded["worker"].ShouldBe("open", $"control: and at the worker's own address; probe: {Describe(unguarded)}");
+            unguarded["gateway_53"].ShouldBe("open", $"control: and port 53 at the gateway, or its refusal proved nothing about the pin; probe: {Describe(unguarded)}");
 
             output.WriteLine($"{RanMarker} worker-shut {Describe(guarded)} control: {Describe(unguarded)}");
         }
@@ -268,7 +282,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         (await AskAsync(world.ShadowedIp, UplinkWorld.PeerPort, 4)).ShouldBe("PEER got 4 bytes", "control: before the run exists the worker reaches the peer at the run's .2 through its uplink, or there is no collision to guard");
 
         var runId = Guid.NewGuid().ToString("N");
-        var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease), timeoutSeconds: 20, CancellationToken.None);
+        var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease, []), timeoutSeconds: 20, CancellationToken.None);
 
         try
         {
@@ -325,7 +339,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             tracked.ShouldContain(line => line.Contains(" udp ") && line.Contains($"src={udpLocal.Address} dst={world.ShadowedIp} sport={udpLocal.Port} dport={UplinkWorld.PeerPort} ") && !line.Contains("[UNREPLIED]"), $"fixture: conntrack must track the worker's answered datagram flow before the run exists, or its next packet is NEW and this arm proves nothing; {ConntrackTable}: {string.Join(" | ", tracked)}");
             tracked.ShouldContain(line => line.Contains(" ESTABLISHED ") && line.Contains($"src={tcpLocal.Address} dst={world.ShadowedIp} sport={tcpLocal.Port} dport={UplinkWorld.PeerPort} "), $"fixture: and its pooled connection as ESTABLISHED; {ConntrackTable}: {string.Join(" | ", tracked)}");
 
-            var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease), timeoutSeconds: 20, CancellationToken.None);
+            var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease, []), timeoutSeconds: 20, CancellationToken.None);
             setup.SetupOk.ShouldBeTrue($"the run's namespace must set up over the shadowed /30: {setup.SetupError}");
 
             using var sandbox = await NamespaceProcess.StartAsync(setup.ExecPrefix, SandboxListenerScript, UplinkWorld.PeerPort.ToString(CultureInfo.InvariantCulture), udpLocal.Address.ToString(), udpLocal.Port.ToString(CultureInfo.InvariantCulture));
@@ -363,7 +377,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         // ICMP cannot pass for one that did.
         await using var world = await UplinkWorld.StartAsync();
         var runId = Guid.NewGuid().ToString("N");
-        var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease), timeoutSeconds: 20, CancellationToken.None);
+        var setup = await FilteredEgressNetns.ApplyAsync(runId, FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease, []), timeoutSeconds: 20, CancellationToken.None);
 
         try
         {
@@ -394,12 +408,13 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         listener.Start();
         var workerIp = SealedEgressE2ETests.WorkerIpv4();
         using var resolver = new WorkerResolver(workerIp);
+        using var view = new NamespaceResolvConf(runId, $"nameserver {workerIp}\n");
 
         try
         {
-            (await RunHostExitAsync(["nft", "-f", "-"], FilteredEgressPlan.BuildVethGuardRuleset(names.Namespace, names.VethHost, "192.0.2.252/30"))).ShouldBe(0, "setup: an earlier round's guard, for a /30 of its own, must load");
+            (await RunHostExitAsync(["nft", "-f", "-"], FilteredEgressPlan.BuildVethGuardRuleset(names.Namespace, names.VethHost, "192.0.2.252/30", [workerIp]))).ShouldBe(0, "setup: an earlier round's guard, for a /30 of its own, must load");
 
-            var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, timeoutSeconds: 20, CancellationToken.None);
+            var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, view.Path, timeoutSeconds: 20, CancellationToken.None);
             setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up over the stale table: {setup.SetupError}");
 
             var probe = await ProbeTheWorkerAsync(setup, workerIp, listener);
@@ -410,6 +425,237 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             output.WriteLine($"{RanMarker} stale-guard-replaced {Describe(probe)}");
         }
         finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task An_allowlist_run_reaches_port_53_only_at_the_resolver_its_resolv_conf_names()
+    {
+        if (!BuildsNamespaces()) return;
+
+        // Port 53 open to any address is a tunnel, not DNS: the run opens TCP to any host that listens there and carries
+        // whatever bytes it likes. The peer beyond the uplink serves DNS at two addresses; the run's resolv.conf names
+        // one. A lookup through that file — the query a tool in the run makes — is answered by it; port 53 at the other
+        // is shut over TCP and UDP. The control puts back the any-address accepts the forward table had before the pin:
+        // the other address must answer then, or its silence proved nothing about the pin.
+        await using var world = await UplinkWorld.StartAsync();
+        await world.ServeDnsAsync();
+
+        var runId = Guid.NewGuid().ToString("N");
+        using var view = new NamespaceResolvConf(runId, $"nameserver {world.ResolverIp}\n");
+        var plan = FilteredEgressPlan.Build(runId, new[] { world.AllowedIp }, world.RunLease, NamespaceResolvers.Read(view.Path));
+        var setup = await FilteredEgressNetns.ApplyAsync(runId, plan, timeoutSeconds: 20, CancellationToken.None);
+
+        try
+        {
+            setup.SetupOk.ShouldBeTrue($"the run's namespace must set up: {setup.SetupError}");
+
+            var pinned = await ProbePort53Async(setup.ExecPrefix, world.ResolverIp, world.UnlistedIp);
+
+            pinned["view"].ShouldBe(File.ReadAllText(view.Path), $"fixture: the namespace must read the resolv.conf the rules were built from, or the lookup below asked some other resolver; probe: {Describe(pinned)}");
+            pinned["lookup"].ShouldBe(PinnedAnswer, $"a lookup through the namespace's resolv.conf must be answered by the resolver it names, {world.ResolverIp}; probe: {Describe(pinned)}");
+            pinned["resolver_udp"].ShouldBe("answered", $"and DNS to it directly over UDP; probe: {Describe(pinned)}");
+            pinned["resolver_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(pinned)}");
+            pinned["unlisted_tcp"].ShouldNotBe("open", $"a connection to port 53 at {world.UnlistedIp}, which the resolv.conf does not name, is the channel that carries any bytes to any host, and must be shut — check `nft list table ip {plan.Namespace}` names {world.ResolverIp} on each port-53 accept; probe: {Describe(pinned)}");
+            pinned["unlisted_udp"].ShouldNotBe("answered", $"and a datagram to it unanswered; probe: {Describe(pinned)}");
+
+            (await RunHostExitAsync(["nft", "insert", "rule", "ip", plan.Namespace, "forward", "ip", "saddr", plan.NsSubnetCidr, "udp", "dport", "53", "accept"])).ShouldBe(0, "control setup: the unpinned UDP accept must load");
+            (await RunHostExitAsync(["nft", "insert", "rule", "ip", plan.Namespace, "forward", "ip", "saddr", plan.NsSubnetCidr, "tcp", "dport", "53", "accept"])).ShouldBe(0, "control setup: and the TCP one");
+            var unpinned = await ProbePort53Async(setup.ExecPrefix, world.ResolverIp, world.UnlistedIp);
+
+            unpinned["unlisted_tcp"].ShouldBe("open", $"control: with port 53 open to any address the run connects to {world.UnlistedIp}:53, or the refusal above proved nothing about the pin; probe: {Describe(unpinned)}");
+            unpinned["unlisted_udp"].ShouldBe("answered", $"control: and is answered there over UDP; probe: {Describe(unpinned)}");
+
+            output.WriteLine($"{RanMarker} dns-pinned {Describe(pinned)} control: {Describe(unpinned)}".Replace('\n', ' '));
+        }
+        finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task A_namespace_the_setup_builds_reads_the_worker_s_resolv_conf_and_opens_port_53_to_its_resolvers_alone()
+    {
+        if (!BuildsNamespaces()) return;
+
+        // The production setup, reading no file but the worker's: the rules are built from /etc/resolv.conf because that
+        // is the file the namespace reads, and it is only that file while nothing gives the namespace a /etc of its own
+        // (`ip netns exec` binds /etc/netns/<ns>/* over /etc where that exists). The loaded tables open port 53 to exactly
+        // that file's reachable resolvers. The file must name one, as a production worker's does: one naming none leaves
+        // the tables empty whichever file the setup read, and pins nothing. A container job's names only Docker's embedded
+        // 127.0.0.11, the namespace's own loopback, so the sandbox lane appends a resolver to it.
+        var runId = Guid.NewGuid().ToString("N");
+        var ns = FilteredEgressPlan.NamespaceFor(runId);
+        var workerView = await File.ReadAllTextAsync(NamespaceResolvers.ResolvConfPath);
+        var resolvers = NamespaceResolvers.Parse(workerView);
+
+        resolvers.ShouldNotBeEmpty($"fixture: {NamespaceResolvers.ResolvConfPath} must name a resolver the namespace can reach (an IPv4 nameserver off loopback), or this arm cannot tell the file the setup read from any other — the sandbox-isolation job appends one after the container's 127.0.0.11; this host's: [{workerView.Replace('\n', '|')}]");
+
+        var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, timeoutSeconds: 20, CancellationToken.None);
+
+        try
+        {
+            setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
+
+            Directory.Exists(Path.Combine("/etc/netns", ns)).ShouldBeFalse("nothing may give the plan's namespace a /etc of its own, which its rules would not be built from");
+            (await RunHostAsync(setup.ExecPrefix.Concat(["cat", NamespaceResolvers.ResolvConfPath]).ToList())).ShouldBe(workerView, "the namespace reads the worker's resolv.conf, byte for byte");
+
+            foreach (var family in new[] { "ip", "inet" })
+            {
+                var dns = (await RunHostAsync(["nft", "list", "table", family, ns])).Split('\n').Where(line => line.Contains("dport 53", StringComparison.Ordinal)).Select(line => line.Trim()).ToList();
+
+                dns.Count.ShouldBe(2, $"`nft list table {family} {ns}` must accept DNS over UDP and TCP to the resolvers of {NamespaceResolvers.ResolvConfPath} ({string.Join(", ", resolvers)}); got: {string.Join(" | ", dns)}");
+                dns.ShouldAllBe(line => line.Contains("ct original ip daddr", StringComparison.Ordinal) && resolvers.All(resolver => line.Contains(resolver, StringComparison.Ordinal)), $"and each accept names every one of them, as the address the run sent to; got: {string.Join(" | ", dns)}");
+            }
+
+            output.WriteLine($"{RanMarker} resolv-conf-view resolvers=[{string.Join(",", resolvers)}]");
+        }
+        finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task A_resolver_address_the_worker_dnats_before_its_forward_hook_still_answers_the_run()
+    {
+        if (!BuildsNamespaces()) return;
+
+        // A resolv.conf may name an address no resolver holds, which the worker's own NAT turns into one before the run's
+        // forward table sees the query: kube-proxy DNATs a cluster DNS service address on PREROUTING wherever the worker
+        // shares a node's network (hostNetwork, ClusterFirstWithHostNet). By FORWARD the query carries the resolver's own
+        // address, which the file does not name, so the pin must admit it by the address the run sent it to. The DNAT
+        // here keys on the run's veth alone. Port 53 at the resolver's own address stays shut, and the control deletes the
+        // DNAT: the resolver's answer must not come back then, or it came some other way than through the worker's rewrite.
+        await using var world = await UplinkWorld.StartAsync();
+        await world.ServeDnsAsync();
+
+        var runId = Guid.NewGuid().ToString("N");
+        var service = ServiceAddress();
+        using var view = new NamespaceResolvConf(runId, $"nameserver {service}\noptions timeout:1 attempts:1\n");
+        await using var dnat = await WorkerNat.StageAsync(NamesOf(runId).VethHost, service, $"dnat to {world.ResolverIp}");
+        var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { world.AllowedIp }, view.Path, timeoutSeconds: 20, CancellationToken.None);
+
+        try
+        {
+            setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
+
+            var rewritten = await ProbePort53Async(setup.ExecPrefix, service, world.ResolverIp);
+
+            rewritten["view"].ShouldBe(File.ReadAllText(view.Path), $"fixture: the namespace must read the resolv.conf the rules were built from; probe: {Describe(rewritten)}");
+            rewritten["lookup"].ShouldBe(PinnedAnswer, $"a lookup through the resolv.conf, which names {service}, must be answered by the resolver the worker DNATs it to, {world.ResolverIp} — check each port-53 accept in `nft list table ip {FilteredEgressPlan.NamespaceFor(runId)}` matches `ct original ip daddr`; probe: {Describe(rewritten)}");
+            rewritten["resolver_udp"].ShouldBe("answered", $"and DNS to {service} directly over UDP; probe: {Describe(rewritten)}");
+            rewritten["resolver_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(rewritten)}");
+            rewritten["unlisted_tcp"].ShouldNotBe("open", $"but port 53 at the resolver's own address {world.ResolverIp}, which the file does not name, stays shut; probe: {Describe(rewritten)}");
+            rewritten["unlisted_udp"].ShouldNotBe("answered", $"and a datagram to it unanswered; probe: {Describe(rewritten)}");
+
+            (await dnat.DeleteAsync()).ShouldBe(0, "control setup: the worker's DNAT must be there to delete");
+            var direct = await LookupAsync(setup.ExecPrefix);
+
+            direct.ShouldNotBe(PinnedAnswer, $"control: with the DNAT gone the lookup must not reach the resolver at {world.ResolverIp}, or the answer above did not come through the worker's rewrite");
+
+            output.WriteLine($"{RanMarker} dns-dnat {Describe(rewritten)} control: lookup={direct}".Replace('\n', ' '));
+        }
+        finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task A_resolver_address_the_worker_redirects_to_itself_still_answers_the_run()
+    {
+        if (!BuildsNamespaces()) return;
+
+        // The same rewrite ahead of the guard's input chain: a transparent DNS proxy on the worker REDIRECTs the address
+        // the resolv.conf names to itself, so the query reaches the worker at the run's gateway, which the file does not
+        // name either. The guard must admit it by the address the run sent it to. The proxy answers at the gateway; port
+        // 53 there, asked directly, stays shut; and the control deletes the REDIRECT: the proxy's answer must not come back then.
+        var runId = Guid.NewGuid().ToString("N");
+        var service = ServiceAddress();
+        using var view = new NamespaceResolvConf(runId, $"nameserver {service}\noptions timeout:1 attempts:1\n");
+        await using var redirect = await WorkerNat.StageAsync(NamesOf(runId).VethHost, service, "redirect to :53");
+        var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, view.Path, timeoutSeconds: 20, CancellationToken.None);
+
+        try
+        {
+            setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
+
+            using var proxy = new WorkerResolver(setup.HostIp!);
+            var rewritten = await ProbePort53Async(setup.ExecPrefix, service, setup.HostIp!);
+
+            rewritten["view"].ShouldBe(File.ReadAllText(view.Path), $"fixture: the namespace must read the resolv.conf the rules were built from; probe: {Describe(rewritten)}");
+            rewritten["lookup"].ShouldBe(PinnedAnswer, $"a lookup through the resolv.conf, which names {service}, must be answered by the proxy the worker redirects it to at {setup.HostIp} — check each port-53 accept in `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` matches `ct original ip daddr`; probe: {Describe(rewritten)}");
+            rewritten["resolver_udp"].ShouldBe("answered", $"and DNS to {service} directly over UDP; probe: {Describe(rewritten)}");
+            rewritten["resolver_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(rewritten)}");
+            rewritten["unlisted_tcp"].ShouldNotBe("open", $"but port 53 at the gateway {setup.HostIp}, which the file does not name, stays shut though the proxy listens there; probe: {Describe(rewritten)}");
+            rewritten["unlisted_udp"].ShouldNotBe("answered", $"and a datagram to it unanswered; probe: {Describe(rewritten)}");
+
+            (await redirect.DeleteAsync()).ShouldBe(0, "control setup: the worker's REDIRECT must be there to delete");
+            var direct = await LookupAsync(setup.ExecPrefix);
+
+            direct.ShouldNotBe(PinnedAnswer, $"control: with the REDIRECT gone the lookup must not reach the proxy at {setup.HostIp}, or the answer above did not come through the worker's rewrite");
+
+            output.WriteLine($"{RanMarker} dns-redirect {Describe(rewritten)} control: lookup={direct}".Replace('\n', ' '));
+        }
+        finally { await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None); }
+    }
+
+    /// <summary>An address a resolv.conf names as it names a cluster DNS service's, which only the worker's NAT makes this test's resolver: a random one of TEST-NET-3 (RFC 5737), which is never handed out. A host whose own network answers any DNS query (a fake-IP proxy) answers there too, but never with <see cref="PinnedAnswer"/>.</summary>
+    private static string ServiceAddress() => $"203.0.113.{RandomNumberGenerator.GetInt32(1, 255)}";
+
+    /// <summary>
+    /// A NAT the worker applies ahead of the run's own rules to DNS the run sends one address — as kube-proxy DNATs a
+    /// service address, or a transparent DNS proxy REDIRECTs it to the worker. A table of its own, GUID-named, whose
+    /// rules match the run's veth alone, so no other run or test meets them (Rule 12.2); deleted on dispose, best-effort
+    /// (12.3).
+    /// </summary>
+    private sealed class WorkerNat : IAsyncDisposable
+    {
+        private readonly string _table = $"cs-wnat-{Guid.NewGuid().ToString("N")[..8]}";
+
+        private WorkerNat() { }
+
+        /// <summary>Load the table: DNS over UDP and TCP from <paramref name="vethHost"/> to <paramref name="address"/>, rewritten by <paramref name="rewrite"/> (an nft NAT statement).</summary>
+        public static async Task<WorkerNat> StageAsync(string vethHost, string address, string rewrite)
+        {
+            var nat = new WorkerNat();
+            var rules = new[] { "udp", "tcp" }.Select(protocol => $"    iifname \"{vethHost}\" ip daddr {address} {protocol} dport 53 {rewrite}\n");
+
+            (await RunHostExitAsync(["nft", "-f", "-"], $"table ip {nat._table} {{\n  chain prerouting {{\n    type nat hook prerouting priority -100;\n{string.Concat(rules)}  }}\n}}\n")).ShouldBe(0, $"fixture: the worker's NAT for DNS to {address} must load");
+
+            return nat;
+        }
+
+        /// <summary>Delete the table, returning <c>nft</c>'s exit code.</summary>
+        public Task<int> DeleteAsync() => RunHostExitAsync(["nft", "delete", "table", "ip", _table]);
+
+        public async ValueTask DisposeAsync() => await DeleteAsync();
+    }
+
+    /// <summary>
+    /// The resolv.conf the run's namespace reads, staged at <c>/etc/netns/&lt;ns&gt;/resolv.conf</c>, which <c>ip netns
+    /// exec</c> binds over <c>/etc/resolv.conf</c> for everything it runs there — and handed to the setup as the file its
+    /// rules are read from, so the rules and the namespace's view are one file, as the worker's own is for a production
+    /// run. The namespace name is the GUID-derived run key's (Rule 12.2); the directory is removed on dispose, and
+    /// <c>/etc/netns</c> with it when this made it (12.3).
+    /// </summary>
+    private sealed class NamespaceResolvConf : IDisposable
+    {
+        private const string Root = "/etc/netns";
+
+        private readonly string _dir;
+        private readonly bool _madeRoot;
+
+        public NamespaceResolvConf(string runId, string text)
+        {
+            _dir = System.IO.Path.Combine(Root, FilteredEgressPlan.NamespaceFor(runId));
+            _madeRoot = !Directory.Exists(Root);
+
+            Directory.CreateDirectory(_dir);
+            File.WriteAllText(Path, text);
+        }
+
+        public string Path => System.IO.Path.Combine(_dir, "resolv.conf");
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
+
+            if (_madeRoot)
+                try { Directory.Delete(Root); } catch { /* best-effort: not empty, or already gone */ }
+        }
     }
 
     [Fact]
@@ -469,21 +715,33 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>From inside the namespace: the worker's listener at the gateway and at its own address, DNS to the worker over UDP and TCP, and the allowlisted IP.</summary>
+    /// <summary>From inside the namespace: the worker's listener at the gateway and at its own address, DNS to the worker over UDP and TCP, port 53 at the gateway, and the allowlisted IP.</summary>
     private static async Task<Dictionary<string, string>> ProbeTheWorkerAsync(FilteredEgressNetns.SetupResult setup, string workerIp, TcpListener listener)
     {
         var stdout = await RunHostAsync(setup.ExecPrefix.Concat(["python3", "-c", WorkerProbeScript, setup.HostIp!, workerIp, PortOf(listener), Allowed]).ToList());
         var line = stdout.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.StartsWith('{'));
 
-        return line is null ? new Dictionary<string, string> { ["gateway"] = $"no probe output: {stdout}", ["worker"] = "?", ["dns_udp"] = "?", ["dns_tcp"] = "?", ["allowed"] = "?" } : JsonSerializer.Deserialize<Dictionary<string, string>>(line)!;
+        return line is null ? new Dictionary<string, string> { ["gateway"] = $"no probe output: {stdout}", ["worker"] = "?", ["dns_udp"] = "?", ["dns_tcp"] = "?", ["gateway_53"] = "?", ["allowed"] = "?" } : JsonSerializer.Deserialize<Dictionary<string, string>>(line)!;
     }
+
+    /// <summary>From inside the namespace, as JSON: its view of /etc/resolv.conf, a lookup of <see cref="PinnedName"/> through it, DNS to <paramref name="resolver"/> over UDP and TCP, and TCP and a DNS query to port 53 of <paramref name="unlisted"/>.</summary>
+    private static async Task<Dictionary<string, string>> ProbePort53Async(IReadOnlyList<string> execPrefix, string resolver, string unlisted)
+    {
+        var stdout = await RunHostAsync(execPrefix.Concat(["python3", "-c", Port53ProbeScript, resolver, unlisted, PinnedName]).ToList());
+        var line = stdout.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.StartsWith('{'));
+
+        return line is null ? new Dictionary<string, string> { ["view"] = $"no probe output: {stdout}", ["lookup"] = "?", ["resolver_udp"] = "?", ["resolver_tcp"] = "?", ["unlisted_tcp"] = "?", ["unlisted_udp"] = "?" } : JsonSerializer.Deserialize<Dictionary<string, string>>(line)!;
+    }
+
+    /// <summary>From inside the namespace: a lookup of <see cref="PinnedName"/> through its resolv.conf alone — the address, or the error.</summary>
+    private static async Task<string> LookupAsync(IReadOnlyList<string> execPrefix) => (await RunHostAsync(execPrefix.Concat(["python3", "-c", LookupScript, PinnedName]).ToList())).Trim();
 
     private static string Describe(Dictionary<string, string> probe) => string.Join(' ', probe.Select(p => $"{p.Key}={p.Value}"));
 
     private static string PortOf(TcpListener listener) => ((IPEndPoint)listener.LocalEndpoint).Port.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>The run's namespace, table and veth names: the run key's alone, so a plan on any lease names them as the setup did.</summary>
-    private static FilteredEgressPlan NamesOf(string runId) => FilteredEgressPlan.Build(runId, Array.Empty<string>(), new EgressSubnetAllocator.Lease { Cidr = "0.0.0.0/30", HostIp = "0.0.0.1", NsIp = "0.0.0.2" });
+    private static FilteredEgressPlan NamesOf(string runId) => FilteredEgressPlan.Build(runId, Array.Empty<string>(), new EgressSubnetAllocator.Lease { Cidr = "0.0.0.0/30", HostIp = "0.0.0.1", NsIp = "0.0.0.2" }, []);
 
     /// <summary>Connect from the worker, send <paramref name="bytes"/> bytes and half-close, and return the peer's one-line answer — or the socket error that stopped it, or <c>timeout</c>.</summary>
     private static async Task<string> AskAsync(string host, int port, int bytes)
@@ -585,7 +843,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         return words[ether + 1];
     }
 
-    /// <summary>From inside the namespace, as JSON: the worker's listener at the gateway (argv 1) and its own address (argv 2) on port argv 3, a DNS query to that address over UDP and TCP, and port 80 of the allowlisted argv 4. It never fails on a shut door — the test decides.</summary>
+    /// <summary>From inside the namespace, as JSON: the worker's listener at the gateway (argv 1) and its own address (argv 2) on port argv 3, a DNS query to that address over UDP and TCP, a connection to port 53 at the gateway, and port 80 of the allowlisted argv 4. It never fails on a shut door — the test decides.</summary>
     private const string WorkerProbeScript = """
         import json, socket, struct, sys
         gateway, worker, port, allowed = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
@@ -606,7 +864,105 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
                 return 'answered' if len(s.recv(512)) > 2 else 'empty'
             except OSError as e:
                 return type(e).__name__
-        print(json.dumps({'gateway': tcp(gateway, port), 'worker': tcp(worker, port), 'dns_udp': dns_udp(worker), 'dns_tcp': dns_tcp(worker), 'allowed': tcp(allowed, 80)}))
+        print(json.dumps({'gateway': tcp(gateway, port), 'worker': tcp(worker, port), 'dns_udp': dns_udp(worker), 'dns_tcp': dns_tcp(worker), 'gateway_53': tcp(gateway, 53), 'allowed': tcp(allowed, 80)}))
+        """;
+
+    /// <summary>The name <see cref="Port53ProbeScript"/> looks up through the namespace's resolv.conf, under the reserved <c>.test</c> TLD (RFC 6761), which no /etc/hosts names.</summary>
+    private const string PinnedName = "dns-pin.test";
+
+    /// <summary>What <see cref="PeerResolverScript"/> answers every A query with: an address in TEST-NET-1 (RFC 5737), so a lookup that returns it was answered by that resolver and no other.</summary>
+    private const string PinnedAnswer = "192.0.2.53";
+
+    /// <summary>
+    /// From inside the namespace, as JSON: the namespace's own /etc/resolv.conf; a lookup of argv 3 through the C
+    /// library's resolver, which reads that file — the query a tool in the run makes; a DNS query over UDP and TCP to the
+    /// resolver argv 1; and to port 53 of argv 2, which the file does not name, a TCP connection — the channel that
+    /// carries any bytes — and a DNS query over UDP. It never fails on a shut door — the test decides.
+    /// </summary>
+    private const string Port53ProbeScript = """
+        import json, socket, struct, sys
+        resolver, unlisted, name = sys.argv[1], sys.argv[2], sys.argv[3]
+        query = bytes.fromhex('123401000001000000000000076578616d706c6503636f6d0000010001')
+        def tcp(host, port):
+            try:
+                socket.create_connection((host, port), timeout=3).close(); return 'open'
+            except OSError as e:
+                return type(e).__name__
+        def dns_udp(host):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3); s.sendto(query, (host, 53)); s.recvfrom(512); return 'answered'
+            except OSError as e:
+                return type(e).__name__
+        def dns_tcp(host):
+            try:
+                s = socket.create_connection((host, 53), timeout=3); s.sendall(struct.pack('!H', len(query)) + query)
+                return 'answered' if len(s.recv(512)) > 2 else 'empty'
+            except OSError as e:
+                return type(e).__name__
+        def lookup(name):
+            try:
+                return socket.getaddrinfo(name, 53, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+            except OSError as e:
+                return type(e).__name__ + ':' + str(e)
+        print(json.dumps({'view': open('/etc/resolv.conf').read(), 'lookup': lookup(name), 'resolver_udp': dns_udp(resolver), 'resolver_tcp': dns_tcp(resolver), 'unlisted_tcp': tcp(unlisted, 53), 'unlisted_udp': dns_udp(unlisted)}))
+        """;
+
+    /// <summary>A lookup of argv 1 through the C library's resolver, which reads the namespace's /etc/resolv.conf: the address, or the error.</summary>
+    private const string LookupScript = """
+        import socket, sys
+        try:
+            print(socket.getaddrinfo(sys.argv[1], 53, socket.AF_INET, socket.SOCK_STREAM)[0][4][0])
+        except OSError as e:
+            print(type(e).__name__ + ':' + str(e))
+        """;
+
+    /// <summary>
+    /// A resolver in the peer's namespace: TCP port 53 on every address the peer holds, UDP port 53 on each of argv 2…
+    /// (a datagram's answer must leave from the address it was sent to, or the worker's NAT cannot hand it back), each A
+    /// query answered with the one record argv 1 and anything else with no record. Prints <c>ready</c> once every
+    /// socket is bound.
+    /// </summary>
+    private const string PeerResolverScript = """
+        import socket, struct, sys, threading
+        record = socket.inet_aton(sys.argv[1])
+        def answer(q):
+            end = 12
+            while q[end]:
+                end += 1 + q[end]
+            end += 5
+            a = q[end - 4:end - 2] == b'\x00\x01'
+            header = q[:2] + b'\x81\x80\x00\x01' + (b'\x00\x01' if a else b'\x00\x00') + b'\x00\x00\x00\x00'
+            return header + q[12:end] + (b'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04' + record if a else b'')
+        def exactly(c, n):
+            data = b''
+            while len(data) < n:
+                chunk = c.recv(n - len(data))
+                if not chunk:
+                    raise OSError('closed')
+                data += chunk
+            return data
+        def serve_udp(u):
+            while True:
+                q, sender = u.recvfrom(512)
+                try:
+                    u.sendto(answer(q), sender)
+                except (IndexError, OSError):
+                    pass
+        def serve_tcp(c):
+            try:
+                c.settimeout(10)
+                r = answer(exactly(c, struct.unpack('!H', exactly(c, 2))[0]))
+                c.sendall(struct.pack('!H', len(r)) + r)
+            except (IndexError, OSError, struct.error):
+                pass
+            c.close()
+        t = socket.socket(); t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); t.bind(('0.0.0.0', 53)); t.listen(16)
+        for address in sys.argv[2:]:
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.bind((address, 53))
+            threading.Thread(target=serve_udp, args=(u,), daemon=True).start()
+        print('ready', flush=True)
+        while True:
+            threading.Thread(target=serve_tcp, args=(t.accept()[0],), daemon=True).start()
         """;
 
     /// <summary>Connect to argv 1 (a scoped link-local address) on port argv 2 and print <c>open</c> or the error.</summary>
@@ -684,8 +1040,9 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
 
     /// <summary>
     /// A resolver the worker serves on its own address, port 53, over UDP and TCP — the resolver a <c>resolv.conf</c>
-    /// naming a worker address sends the namespace to. It answers every query with the query itself, the response bit
-    /// set: enough for a probe to tell an answer from a drop.
+    /// naming a worker address sends the namespace to, or a transparent DNS proxy redirects it to. It answers an A
+    /// question with the one record <see cref="PinnedAnswer"/> and any other with no record, so a probe can tell an
+    /// answer from a drop and a lookup that reaches it returns that address.
     /// </summary>
     private sealed class WorkerResolver : IDisposable
     {
@@ -717,6 +1074,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
                 }
                 catch (Exception) when (_stop.IsCancellationRequested) { return; }
                 catch (SocketException) { /* an ICMP error for an earlier answer surfaces here; keep serving */ }
+                catch (IndexOutOfRangeException) { /* a datagram too short to hold a question; keep serving */ }
             }
         }
 
@@ -740,11 +1098,25 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             }
         }
 
+        /// <summary>The question back with the response bit set, and for an A question the one record <see cref="PinnedAnswer"/>, named by a pointer to the question's name.</summary>
         private static byte[] Answer(byte[] query)
         {
-            var answer = (byte[])query.Clone();
-            if (answer.Length > 2) answer[2] |= 0x80;
-            return answer;
+            var end = QuestionEnd(query);
+            var isA = query[end - 4] == 0 && query[end - 3] == 1;
+
+            byte[] header = [query[0], query[1], 0x81, 0x80, 0, 1, 0, (byte)(isA ? 1 : 0), 0, 0, 0, 0];
+            byte[] record = isA ? [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0x3c, 0, 4, .. IPAddress.Parse(PinnedAnswer).GetAddressBytes()] : [];
+
+            return [.. header, .. query[12..end], .. record];
+        }
+
+        /// <summary>Where the question ends: past its name's labels and their terminating zero, then its type and class.</summary>
+        private static int QuestionEnd(byte[] query)
+        {
+            var end = 12;
+            while (query[end] != 0) end += 1 + query[end];
+
+            return end + 5;
         }
 
         public void Dispose()
@@ -797,8 +1169,9 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
     /// 1400 while the peer's end keeps 1500, so the peer advertises a segment the uplink cannot carry and the worker must
     /// answer an oversized packet with frag-needed. The worker routes a /28 of TEST-NET-2 (RFC 5737, never handed out)
     /// there; the run's /30 is the first /30 of that /28, so its connected route shadows the peer's address at the run's
-    /// .2 exactly as a /30 handed out over a peer's subnet would. The peer holds that .2 and the allowlisted .9 on its
-    /// loopback and serves <see cref="PeerPort"/> on both. The block and every name are random, and Dispose removes the
+    /// .2 exactly as a /30 handed out over a peer's subnet would. The peer holds that .2, the allowlisted .9, a resolver's
+    /// .10 and a non-resolver's .11 on its loopback, and serves <see cref="PeerPort"/> on all of them, and DNS on the last
+    /// two once asked (<see cref="ServeDnsAsync"/>). The block and every name are random, and Dispose removes the
     /// namespace — and with it both ends of the veth and the route through it.
     /// </summary>
     private sealed class UplinkWorld : IAsyncDisposable
@@ -810,6 +1183,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         private readonly string _block;
         private readonly int _base;
         private NamespaceProcess? _server;
+        private NamespaceProcess? _resolver;
 
         private UplinkWorld(string suffix, int @base)
         {
@@ -827,7 +1201,15 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
 
         public string AllowedIp => Address(9);
 
+        /// <summary>The address the run's resolv.conf names as its resolver.</summary>
+        public string ResolverIp => Address(10);
+
+        /// <summary>An address the peer serves DNS at too, which no resolv.conf names: port 53 there is the channel the pin shuts.</summary>
+        public string UnlistedIp => Address(11);
+
         private string WorkerEnd => Address(17);
+
+        private string[] Peer => ["ip", "netns", "exec", _peerNamespace];
 
         private string PeerEnd => Address(18);
 
@@ -847,9 +1229,12 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             return world;
         }
 
+        /// <summary>Serve DNS on port 53 at <see cref="ResolverIp"/> and <see cref="UnlistedIp"/> alike, answering each A query with <see cref="PinnedAnswer"/>.</summary>
+        public async Task ServeDnsAsync() => _resolver = await NamespaceProcess.StartAsync(Peer, PeerResolverScript, PinnedAnswer, ResolverIp, UnlistedIp);
+
         private async Task BuildAsync()
         {
-            string[] peer = ["ip", "netns", "exec", _peerNamespace];
+            var peer = Peer;
             var down = $"csd-{_uplink[4..]}";
 
             string[][] steps =
@@ -864,6 +1249,8 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
                 [.. peer, "ip", "link", "set", "lo", "up"],
                 [.. peer, "ip", "addr", "add", $"{ShadowedIp}/32", "dev", "lo"],
                 [.. peer, "ip", "addr", "add", $"{AllowedIp}/32", "dev", "lo"],
+                [.. peer, "ip", "addr", "add", $"{ResolverIp}/32", "dev", "lo"],
+                [.. peer, "ip", "addr", "add", $"{UnlistedIp}/32", "dev", "lo"],
                 [.. peer, "ip", "route", "add", "default", "via", WorkerEnd],
                 ["ip", "route", "replace", _block, "via", PeerEnd, "dev", _uplink],
             ];
@@ -877,6 +1264,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         public async ValueTask DisposeAsync()
         {
             _server?.Dispose();
+            _resolver?.Dispose();
 
             await RunHostExitAsync(["ip", "netns", "del", _peerNamespace]);   // takes the peer's veth end, and so the pair and the route through it
             await RunHostExitAsync(["ip", "link", "del", _uplink]);           // best-effort: gone with its peer already
