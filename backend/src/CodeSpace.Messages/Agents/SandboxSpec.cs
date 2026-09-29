@@ -202,11 +202,10 @@ public sealed record SandboxSpec
 
     /// <summary>
     /// The token that stands in for the HOST ADDRESS of the model-credential broker inside an
-    /// <see cref="Environment"/> value (the base URL a brokered run's CLI calls). Only the RUNNER knows that address,
-    /// and only at launch: a deny-by-default egress run executes inside a per-run network namespace whose /30 is
-    /// reserved DURING the launch — after the broker lease was opened and its base URL was projected — so the child
-    /// reaches the worker at that namespace's own gateway IP, while a run sharing the host network reaches it on
-    /// loopback. The runner substitutes whichever applies, so the token NEVER survives into the child.
+    /// <see cref="Environment"/> value (the base URL a brokered run's CLI calls). The RUNNER substitutes it at launch,
+    /// with loopback for every child: a run sharing the host network calls the broker there, and one in a network of
+    /// its own calls the <c>codespace-mcp relay</c> there, which carries the call to the lease's socket. So the token
+    /// NEVER survives into the child.
     ///
     /// <para>The same shape as <see cref="McpDeclarationPathToken"/>, and for the same reason: a pure
     /// <c>IAgentHarness.BuildInvocation</c> (and, here, a pure credential projection) cannot know a per-launch

@@ -18,8 +18,8 @@ namespace CodeSpace.SandboxTests;
 /// read-only into the sandbox (<see cref="A_severed_child_reaches_its_broker_through_the_lease_socket_and_the_same_child_reaches_the_next_worker"/>,
 /// which needs only bubblewrap and so runs as root and as the unprivileged worker uid alike), through the relay the
 /// production chain puts in front of the CLI, for a network-off and an allowlist child, until the lease is revoked —
-/// and, for a run launched before the relay, at its namespace's gateway on a legacy re-bind, until its teardown by name
-/// removes the namespace and the seal it carried.</para>
+/// and, for a run launched before the relay whose child calls its namespace's gateway, that a re-bind leaves nothing
+/// answering there (<see cref="A_gateway_addressed_child_reaches_nothing_after_a_socketless_rebind"/>).</para>
 ///
 /// <para>The second claim is the flip side: the bearer the sandbox holds is NOT the tenant's key. Sent straight to the
 /// provider it buys nothing, so a token that escapes a run is not a credential.</para>
@@ -276,69 +276,72 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         finally { if (allowlist) await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None); }
     }
 
+    /// <summary>
+    /// 🟢 High fidelity (Rule 12): the gateway path to the broker is gone, observed on a live kernel. The run it served
+    /// was launched before the relay: its child froze its broker's address at its namespace's GATEWAY, and its handle
+    /// recorded a port, a route and a bearer but no socket. It is staged as it was, on a 10.x lease as the old allocator
+    /// handed them out, in the allowlist plan's namespace as it was built before its veth was guarded
+    /// (<see cref="PreGuardPlan"/>), so the only thing that decides whether the gateway answers is the broker's bind.
+    ///
+    /// <para>A socketless re-bind on the next worker binds loopback like every lease: the worker reaches it there, and
+    /// the child at its gateway is refused. The control then binds the SAME port at the gateway and is answered, so the
+    /// refusal is the broker's bind and not a namespace that could not reach its gateway at all.</para>
+    /// </summary>
     [Fact]
-    public async Task A_gateway_addressed_run_launched_before_the_relay_is_re_bound_wide_and_reaches_its_broker()
+    public async Task A_gateway_addressed_child_reaches_nothing_after_a_socketless_rebind()
     {
-        // The in-flight survivor this deploy must not strand: a namespaced run launched by the code before the relay,
-        // whose child froze a base URL at its namespace's GATEWAY and whose handle recorded no socket. Its re-bind is the
-        // legacy one: the recorded port on every address, wide first, where this host can build namespaces; and the
-        // broker's source gate admits the child's 10.x address. The namespace is the allowlist plan's as it was built
-        // before its veth was guarded (PreGuardPlan), applied on a 10.x lease as the old allocator handed them out, so
-        // the arm keeps meaning what it means when the pool moves. A network-off survivor was sealed through that veth
-        // by an inet table of its own, which only the teardown by name still deletes, so the arm stages that table too
-        // and ends by tearing the namespace down.
         if (!FilteredEgressNetns.IsSupported) return;   // the root lane, with ip + nft, is authoritative
 
-        FilteredEgressNetns.CanFilter.ShouldBeTrue($"ip and nft are here, but this process could not build an allowlist namespace ({FilteredEgressNetns.FilterUnavailableReason}) — the survivor this arm stands for could not exist either");
+        FilteredEgressNetns.CanFilter.ShouldBeTrue($"ip and nft are here, but this process could not build an allowlist namespace ({FilteredEgressNetns.FilterUnavailableReason}) — the survivor this arm stands for could not be staged");
 
         var runId = Guid.NewGuid();
-        var teamId = Guid.NewGuid();
         var netnsKey = Guid.NewGuid().ToString("N");
-        var third = RandomNumberGenerator.GetInt32(0, 64) * 4;
-        var second = RandomNumberGenerator.GetInt32(0, 256);
-        var lease = new EgressSubnetAllocator.Lease { Cidr = $"10.254.{second}.{third}/30", HostIp = $"10.254.{second}.{third + 1}", NsIp = $"10.254.{second}.{third + 2}" };
+        var lease = LegacyLease();
 
         try
         {
-            var plan = PreGuardPlan(netnsKey, lease);
-            var setup = await FilteredEgressNetns.ApplyAsync(netnsKey, plan, timeoutSeconds: 20, CancellationToken.None);
-            setup.SetupOk.ShouldBeTrue($"the allowlist-plan netns must set up on {lease.Cidr}; setup error: {setup.SetupError}");
+            var setup = await FilteredEgressNetns.ApplyAsync(netnsKey, PreGuardPlan(netnsKey, lease), timeoutSeconds: 20, CancellationToken.None);
+            setup.SetupOk.ShouldBeTrue($"the pre-guard allowlist netns must set up on {lease.Cidr}; setup error: {setup.SetupError}");
 
-            // What the survivor's handle recorded: a port, a route and a bearer — and no socket.
-            var brokered = new BrokeredModelCredential("unused", McpRunTokenMint(), DateTimeOffset.UtcNow) { RebindPort = FreeLoopbackPort(), RebindRoute = McpPathIdMint() };
-            var url = $"http://{setup.HostIp}:{brokered.RebindPort}/{brokered.RebindRoute}/v1/messages";
-            var sealTable = plan.Namespace;
-
-            (await RunHostAsync(["nft", "-f", "-"], RetiredSealRuleset(sealTable, plan.VethHost, plan.HostIp, brokered.RebindPort!.Value))).ShouldBe(0, "setup: the seal a network-off survivor carries must load on this host");
-            (await RunHostAsync(["nft", "list", "table", "inet", sealTable])).ShouldBe(0, "control: the survivor's seal is there before its run ends");
-
-            (await CurlAsync(setup.ExecPrefix, url, brokered.RunToken)).Exit.ShouldNotBe(0, "precondition: the worker that minted the address is gone, so nothing answers at the gateway");
+            // What the survivor's handle recorded: a port, a route and a bearer, and no socket.
+            var port = FreeLoopbackPort();
+            var route = CodeSpace.Core.Services.Agents.Mcp.McpRunToken.MintPathId();
+            var token = CodeSpace.Core.Services.Agents.Mcp.McpRunToken.Mint();
+            var gatewayUrl = $"http://{lease.HostIp}:{port}/{route}/v1/messages";
 
             using var workerB = LoopbackModelCredentialBroker.ForTest(new AlwaysOkUpstream());
 
-            (await workerB.RebindAsync(RebindOf(brokered, runId, teamId, epoch: 2) with { ChildInNetworkNamespace = true }, CancellationToken.None)).ShouldBeTrue("the new worker must re-open the survivor's recorded address");
-            workerB.ListenerPrefixForTest(runId).ShouldBe($"http://+:{brokered.RebindPort}/", "a re-bind with no socket on a host that builds namespaces takes the wide bind, first");
+            (await workerB.RebindAsync(SocketlessRebind(runId, port, route, token), CancellationToken.None)).ShouldBeTrue("the next worker must re-open the recorded port");
+            workerB.ListenerPrefixForTest(runId).ShouldBe($"http://127.0.0.1:{port}/", "a re-bind without a socket binds loopback like every lease, on a host that builds namespaces too");
 
-            (await CurlInNetnsAsync(setup.ExecPrefix, url, brokered.RunToken)).ShouldBe("200",
-                customMessage: $"the survivor must reach its re-bound broker at its gateway {setup.HostIp}; if curl cannot connect the re-bind took loopback instead of the wide bind — check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {url}`");
+            (await CurlAsync($"http://127.0.0.1:{port}/{route}/v1/messages", token)).ShouldBe((0, "200"), customMessage: "control: the re-bound lease answers where it binds, so the refusal below is about where it binds");
 
-            output.WriteLine($"{RanMarker} legacy-gateway-rebind lease={lease.Cidr}");
+            var (gatewayExit, gatewayStatus) = await CurlAsync(gatewayUrl, token, setup.ExecPrefix);
 
-            // The run's terminal path: the teardown by name, reconstructed from the run key alone, as a later worker does.
-            await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None);
+            gatewayExit.ShouldBe(7,
+                customMessage: $"a child calling its gateway must be refused (curl exit 7) — got exit {gatewayExit}, status '{gatewayStatus}'. Exit 0 means the broker answered at the gateway, so a wide bind is back; check by hand: `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} curl -v {gatewayUrl}`");
 
-            (await RunHostAsync(["nft", "list", "table", "inet", sealTable])).ShouldNotBe(0, $"the survivor's seal must go with its run, or every sealed run in flight at the deploy leaks an nft table on the worker — check `nft list tables | grep {sealTable}`");
-            (await RunHostAsync(["ip", "netns", "pids", sealTable])).ShouldNotBe(0, $"and so must its namespace — check `ip netns list | grep {sealTable}`");
+            (await AnsweredAtGatewayAsync(lease.HostIp, port, setup.ExecPrefix)).ShouldBe("204",
+                customMessage: $"control: a listener bound at the gateway on the same port must be answered from inside, or the refusal above proved nothing about the broker's bind — check `ip netns exec {FilteredEgressPlan.NamespaceFor(netnsKey)} ip route`");
 
-            output.WriteLine($"{RanMarker} legacy-sealed-teardown table={sealTable}");
+            output.WriteLine($"{RanMarker} gateway-retired uid={EffectiveUid()} lease={lease.Cidr} gatewayExit={gatewayExit}");
         }
         finally { await FilteredEgressNetns.TeardownAsync(netnsKey, CancellationToken.None); }
+    }
+
+    /// <summary>A /30 from the range the allocator walked (10.1.1.0 up to 10.254.254.252) before it moved to 198.19.64.0–198.19.191.255, which is where a run launched before the relay still sits. Its top /16, random within it, so repeated runs rarely share one.</summary>
+    private static EgressSubnetAllocator.Lease LegacyLease()
+    {
+        var second = RandomNumberGenerator.GetInt32(1, 255);
+        var third = RandomNumberGenerator.GetInt32(0, 64) * 4;
+
+        return new() { Cidr = $"10.254.{second}.{third}/30", HostIp = $"10.254.{second}.{third + 1}", NsIp = $"10.254.{second}.{third + 2}" };
     }
 
     /// <summary>
     /// The allowlist plan a run launched before the guard on its veth was built with: the same setup and forward table
     /// (<see cref="FilteredEgressPlan.BuildNftRuleset"/>), and no inet table of the plan's own. A new namespace drops what
-    /// its child sends the worker, gateway included; a survivor's does not, which is how it still reaches its broker there.
+    /// its child sends the worker, gateway included; a survivor's does not, which is how it reached its broker there.
     /// </summary>
     private static FilteredEgressPlan PreGuardPlan(string netnsKey, EgressSubnetAllocator.Lease lease)
     {
@@ -347,43 +350,42 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         return plan with { NftRuleset = FilteredEgressPlan.BuildNftRuleset(plan.Namespace, lease.Cidr, Array.Empty<string>(), Array.Empty<string>()) };
     }
 
-    /// <summary>
-    /// The inet table the veth seal (#2035) loaded for a network-off run: input from the run's veth only to the broker's
-    /// port at the gateway, nothing forwarded. A copy of the ruleset that change shipped, kept only to stage what a run
-    /// sealed before the relay still carries; the plan that built it is gone, so there is no live source for it to drift
-    /// from, and the teardown under test deletes the table by its name whatever it holds.
-    /// </summary>
-    private static string RetiredSealRuleset(string table, string vethHost, string hostIp, int brokerPort) => string.Join("\n", new[]
+    /// <summary>The re-bind a survivor's handle yields: its recorded port, route and bearer, and no socket path.</summary>
+    private static ModelCredentialRebindRequest SocketlessRebind(Guid runId, int port, string route, string token) => new()
     {
-        $"table inet {table} {{",
-        "  chain input {",
-        "    type filter hook input priority 0;",
-        $"    iifname \"{vethHost}\" ct state established,related accept",
-        $"    iifname \"{vethHost}\" ip daddr {hostIp} tcp dport {brokerPort} accept",
-        $"    iifname \"{vethHost}\" drop",
-        "  }",
-        "  chain forward {",
-        "    type filter hook forward priority 0;",
-        $"    iifname \"{vethHost}\" drop",
-        "  }",
-        "}",
-    }) + "\n";
+        RunId = runId, TeamId = Guid.NewGuid(), Epoch = 2, Port = port, PathId = route, RunToken = token,
+        Upstream = new() { Provider = "Anthropic", ApiKey = "sk-e2e-upstream-key" }, Ttl = TimeSpan.FromMinutes(5),
+    };
 
-    /// <summary>Run one host command as this worker, feeding <paramref name="stdin"/> when given, and return its exit code.</summary>
-    private static async Task<int> RunHostAsync(IReadOnlyList<string> argv, string? stdin = null)
+    /// <summary>Bind <paramref name="port"/> at the gateway <paramref name="hostIp"/>, answer one request 204, and return the status the namespace's curl saw — or curl's exit code when it saw none.</summary>
+    private static async Task<string> AnsweredAtGatewayAsync(string hostIp, int port, IReadOnlyList<string> execPrefix)
     {
-        var psi = new ProcessStartInfo { FileName = argv[0], UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var argument in argv.Skip(1)) psi.ArgumentList.Add(argument);
+        using var control = new System.Net.HttpListener();
+        control.Prefixes.Add($"http://{hostIp}:{port}/");
+        control.Start();
 
-        using var process = Process.Start(psi)!;
+        _ = AnswerOnceAsync(control);
 
-        await process.StandardInput.WriteAsync(stdin ?? "");
-        process.StandardInput.Close();
-        await process.StandardOutput.ReadToEndAsync();
-        await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        var (exit, status) = await CurlAsync($"http://{hostIp}:{port}/", "control", execPrefix);
 
-        return process.ExitCode;
+        return exit == 0 ? status : $"curl exit {exit}";
+    }
+
+    private static async Task AnswerOnceAsync(System.Net.HttpListener listener)
+    {
+        var context = await listener.GetContextAsync();
+
+        context.Response.StatusCode = 204;
+        context.Response.Close();
+    }
+
+    /// <summary>A port free on loopback right now, allocated by the kernel (Rule 12.8).</summary>
+    private static int FreeLoopbackPort()
+    {
+        using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+
+        return ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
     }
 
     /// <summary>
@@ -434,18 +436,6 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         return (process.ExitCode, stdout.Result.Trim());
     }
 
-    private static int FreeLoopbackPort()
-    {
-        using var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-        probe.Start();
-
-        return ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
-    }
-
-    private static string McpRunTokenMint() => CodeSpace.Core.Services.Agents.Mcp.McpRunToken.Mint();
-
-    private static string McpPathIdMint() => CodeSpace.Core.Services.Agents.Mcp.McpRunToken.MintPathId();
-
     private static ModelCredentialLeaseRequest LeaseFor(Guid runId, Guid teamId) =>
         new() { RunId = runId, TeamId = teamId, Epoch = 1, Upstream = new() { Provider = "Anthropic", ApiKey = "sk-e2e-upstream-key" }, Ttl = TimeSpan.FromMinutes(5) };
 
@@ -469,7 +459,7 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
 
         if (brokered is null) return;
 
-        var (exit, status) = await CurlAsync(null, $"https://{ProviderHost}/v1/messages", brokered.RunToken);
+        var (exit, status) = await CurlAsync($"https://{ProviderHost}/v1/messages", brokered.RunToken);
 
         if (exit != 0) return;   // no egress from this runner at all — nothing to observe, and the CI job with network is authoritative
 
@@ -486,17 +476,8 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
         return LocalProcessRunner.ResolveModelBrokerHost(spec).Environment["URL"];
     }
 
-    private static async Task<string> CurlInNetnsAsync(IReadOnlyList<string> execPrefix, string url, string token)
-    {
-        var (exit, status) = await CurlAsync(execPrefix, url, token);
-
-        exit.ShouldBe(0, $"curl itself failed inside the namespace (exit {exit}) — that is a reachability failure, not a refusal. Diagnose with: `{string.Join(' ', execPrefix)} curl -v {url}`");
-
-        return status;
-    }
-
-    /// <summary>POST to <paramref name="url"/> with the bearer and report (curl exit code, HTTP status). Run behind <paramref name="execPrefix"/> when one is given, so the request originates INSIDE the namespace.</summary>
-    private static async Task<(int Exit, string Status)> CurlAsync(IReadOnlyList<string>? execPrefix, string url, string token)
+    /// <summary>POST to <paramref name="url"/> with the bearer and report (curl exit code, HTTP status) — from this worker, or from inside a namespace behind <paramref name="execPrefix"/> when one is given.</summary>
+    private static async Task<(int Exit, string Status)> CurlAsync(string url, string token, IReadOnlyList<string>? execPrefix = null)
     {
         var argv = (execPrefix ?? Array.Empty<string>()).Concat(new[]
         {

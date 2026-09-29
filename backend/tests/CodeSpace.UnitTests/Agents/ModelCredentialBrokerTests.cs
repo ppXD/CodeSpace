@@ -132,26 +132,34 @@ public class ModelCredentialBrokerTests
     }
 
     [Theory]
-    [InlineData(false, true)]    // the legacy re-bind: a handle written before the socket, whose namespaced child calls the gateway
-    [InlineData(false, false)]   // no socket and no namespace: a child on the worker's own network (network on, or an unconfined host) calls loopback
-    [InlineData(true, true)]     // a handle with a socket: its child comes in through it, spliced to loopback
-    public async Task Only_a_rebind_of_a_namespaced_child_without_a_socket_binds_wide_and_only_where_a_namespace_can_exist(bool socket, bool netns)
+    [InlineData(false)]   // no socket: a child on the worker's own network, calling loopback — the row that bound every address while namespaced runs from before the relay were still in flight
+    [InlineData(true)]    // a socket: its child comes in through it, spliced to loopback
+    public async Task A_rebind_binds_loopback_only_with_a_socket_or_without_even_where_a_per_run_namespace_can_exist(bool socket)
     {
-        // Mutation: key the wide bind on the missing socket alone, and the no-namespace row goes red on a host that
-        // builds filtered-egress namespaces — a Trusted run's loopback lease would come back on every address.
+        // Mutation: bind the recorded port on every address again for a re-bind without a socket, and the first row
+        // goes red.
         if (socket && !Socket.OSSupportsUnixDomainSockets) return;
 
         using var sockets = new BrokerSockets();
         using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream());
         var port = ReserveLoopbackPort();
-        var request = RebindOn(port, epoch: 3) with { SocketPath = socket ? sockets.NewPath() : null, ChildInNetworkNamespace = netns };
+        var request = RebindOn(port, epoch: 3) with { SocketPath = socket ? sockets.NewPath() : null };
 
         if (!await broker.RebindAsync(request, CancellationToken.None)) return;   // the port was taken in between — nothing to observe
 
-        var wide = !socket && netns && FilteredEgressNetns.IsSupported;
-
-        broker.ListenerPrefixForTest(request.RunId).ShouldBe(wide ? $"http://+:{port}/" : $"http://127.0.0.1:{port}/", $"only a veth-sealed or allowlist run launched before the relay reaches this worker at its namespace gateway, so its re-bind alone keeps the wide bind until they drain; every other child calls loopback (namespaces possible here: {FilteredEgressNetns.IsSupported})");
+        broker.ListenerPrefixForTest(request.RunId).ShouldBe($"http://127.0.0.1:{port}/", $"a re-bind binds loopback alone, as an open does: no child calls this worker anywhere else, so any wider bind only hands the port to the host's neighbours (namespaces possible here: {FilteredEgressNetns.IsSupported})");
     }
+
+    [Theory]
+    [InlineData("127.0.0.1", true)]      // a child on the worker's own network, or a relayed one whose socket this worker splices to the port
+    [InlineData("::1", true)]
+    [InlineData("10.1.1.2", false)]      // the 10/8 space per-run /30s were carved from before the pool moved, admitted while runs launched before the relay still called from it
+    [InlineData("198.19.64.2", false)]   // a /30 from today's pool: its run is relayed, so it never calls from there
+    [InlineData("192.168.1.20", false)]  // a neighbour on the host's network
+    [InlineData(null, false)]
+    public void Only_loopback_is_a_plausible_sandbox_source(string? source, bool plausible) =>
+        LoopbackModelCredentialBroker.IsPlausibleSandboxSource(source is null ? null : IPAddress.Parse(source)).ShouldBe(plausible,
+            customMessage: "every child's call reaches the broker from loopback — directly, or spliced from its socket by this worker — so any other source is a neighbour probing the port, refused before the bearer is even weighed");
 
     /// <summary>A loopback port free at the moment of asking — a re-bind names its port, it never picks one.</summary>
     private static int ReserveLoopbackPort()
@@ -503,11 +511,10 @@ public class ModelCredentialBrokerTests
         (await broker.RebindAsync(RebindOf(live, runId, epoch: 9), CancellationToken.None)).ShouldBeTrue(
             "an address that is already up IS restored — answering false here would make a re-attach end a run whose model access never went anywhere");
 
-        // Re-binding would have walked the candidate hosts against a port THIS PROCESS holds; on Linux the wide bind
-        // fails while loopback succeeds underneath it, so Install would close the live WIDE listener and a sealed
-        // netns run would lose its broker while this returned true. The address has to be untouched.
+        // Re-binding would have asked for a port THIS PROCESS holds: refused, a live run ends typed; granted, Install
+        // closes the listener the child is calling while this returns true. The address has to be untouched.
         (await CallAsync(live, "/v1/messages", live.RunToken)).StatusCode.ShouldBe(HttpStatusCode.OK,
-            customMessage: "the address must still answer after the adoption — a re-bind that closed and re-opened it would drop a sealed run's wide bind down to loopback, which reads as success here and as a dead run in production");
+            customMessage: "the address must still answer after the adoption — a re-bind that closed and re-opened it would read as success here and as a dead run in production");
         upstream.Calls.ShouldBe(1);
 
         (await broker.RenewAsync(runId, 9, CancellationToken.None)).ShouldBeTrue(
@@ -942,48 +949,6 @@ public class ModelCredentialBrokerTests
         logger.Warnings.ShouldContain(line => line.Contains(runId.ToString(), StringComparison.Ordinal), "and the drop says so, naming the run");
     }
 
-    [Theory]
-    [InlineData(true, false, true)]    // a namespace and no socket: a child that reaches this worker at its namespace's gateway — the survivor the gateway path's retirement waits on
-    [InlineData(true, true, false)]    // a namespace and a socket: its child comes in through the socket
-    [InlineData(false, false, false)]  // no namespace: a child on the worker's own network, calling loopback — every shared-network run, and every run on a host that builds no namespaces
-    [InlineData(false, true, false)]   // a socket and no namespace
-    public async Task Only_a_rebind_of_a_handle_with_a_network_namespace_and_no_socket_says_it_is_a_legacy_rebind(bool netns, bool socket, bool legacyLine)
-    {
-        if (!Socket.OSSupportsUnixDomainSockets) return;
-
-        using var sockets = new BrokerSockets();
-        using var occupied = new OccupiedPort();
-        var port = occupied.Port;
-        occupied.Dispose();   // a port nothing holds: the re-bind must take, so the only thing that differs between the rows is the line
-
-        var owner = new AgentRunOwnerToken(Guid.NewGuid(), Guid.NewGuid(), 8);
-        var credentialId = Guid.NewGuid();
-        var handle = new SandboxHandle
-        {
-            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow, LaunchHost = LocalProcessRunner.CurrentHost,
-            ModelBrokerPort = port, ModelBrokerRoute = McpRunToken.MintPathId(), ModelBrokerRunToken = McpRunToken.Mint(), ModelBrokerProvider = "Anthropic", ModelBrokerCredentialId = credentialId,
-            EgressNetnsKey = netns ? owner.RunId.ToString("N") : null, ModelBrokerSocketPath = socket ? sockets.NewPath() : null,
-        };
-        var logger = new CapturingLogger();
-        using var broker = LoopbackModelCredentialBroker.ForTest(new StubUpstream(), logger: logger);
-
-        // The executor's reading of the handle, then the broker's re-bind of it — the whole chain the line is decided on.
-        var request = AgentRunExecutor.RebindRequestFor(owner, Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId }).ShouldNotBeNull();
-
-        (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeTrue("precondition: the re-bind took");
-
-        logger.Informations.Any(line => line.Contains(LoopbackModelCredentialBroker.LegacyRebindMarker, StringComparison.Ordinal)).ShouldBe(legacyLine,
-            customMessage: "the gateway path to the broker is retired only once no legacy re-bind has happened for a while, and this line is what says one did. It must name exactly the runs that retirement would cut off — a child in a network namespace with no socket to come in through. Missing there, the retirement reads silence and strands them; present for a run on the worker's own network (which calls loopback) or one with a socket, it never reads silence at all");
-    }
-
-    [Fact]
-    public void The_legacy_rebind_marker_is_pinned()
-    {
-        // Retiring the gateway path waits on this line going quiet in the deployment's logs, so the words are what an
-        // operator's query matches. A rename is a decision to change that query, not a refactor.
-        LoopbackModelCredentialBroker.LegacyRebindMarker.ShouldBe("legacy model-broker re-bind");
-    }
-
     /// <summary>
     /// POST one model call to a lease THROUGH its Unix socket — the way a sandboxed child reaches it — addressed as that
     /// child addresses it (<c>127.0.0.1:&lt;port&gt;/&lt;route&gt;</c>), so the Host header the loopback listener matches
@@ -1077,6 +1042,27 @@ public class ModelCredentialBrokerTests
     }
 
     [Theory]
+    [InlineData(true, false, false)]   // a namespace and no socket: a run launched before the relay, whose child calls its namespace's gateway, where nothing listens any more
+    [InlineData(true, true, true)]     // a namespace and a socket: its child comes in through the socket
+    [InlineData(false, false, true)]   // no namespace: a child on the worker's own network, calling loopback
+    [InlineData(false, true, true)]    // a socket and no namespace
+    public void A_rebind_is_not_built_for_a_handle_whose_child_calls_its_namespace_gateway(bool netns, bool socket, bool built)
+    {
+        var credentialId = Guid.NewGuid();
+        var handle = new SandboxHandle
+        {
+            Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp", Deadline = DateTimeOffset.UtcNow, LaunchHost = LocalProcessRunner.CurrentHost,
+            ModelBrokerPort = 44444, ModelBrokerRoute = "route-id", ModelBrokerRunToken = "a-recorded-run-token", ModelBrokerProvider = "Anthropic", ModelBrokerCredentialId = credentialId,
+            EgressNetnsKey = netns ? "a-recorded-netns-key" : null, ModelBrokerSocketPath = socket ? "/spool/k/broker/segment/s" : null,
+        };
+
+        var request = AgentRunExecutor.RebindRequestFor(new(Guid.NewGuid(), Guid.NewGuid(), 8), Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId });
+
+        (request is not null).ShouldBe(built,
+            customMessage: "every lease binds loopback, so a child that calls its namespace's gateway reaches nothing a re-bind could open. Built anyway, the re-bind would read as 'the address is back' and clear the posture that says the run lost its model access, leaving an agent that can make no call recorded as healthy; declined, the run lands typed and its agent is stopped");
+    }
+
+    [Theory]
     [InlineData("/spool/k/broker/segment/s")]
     [InlineData(null)]
     public void A_rebind_carries_the_socket_its_handle_recorded(string? socketPath)
@@ -1092,7 +1078,7 @@ public class ModelCredentialBrokerTests
         var request = AgentRunExecutor.RebindRequestFor(new(Guid.NewGuid(), Guid.NewGuid(), 8), Guid.NewGuid(), handle, new() { Provider = "Anthropic", CredentialId = credentialId }).ShouldNotBeNull();
 
         request.SocketPath.ShouldBe(socketPath,
-            customMessage: "the re-bind must re-open the socket the launch's lease served, or a sandboxed child whose only door is that socket is left calling nothing; and a handle that recorded none must ask for none, which is what keeps it on the legacy wide re-bind its gateway-addressed child needs");
+            customMessage: "the re-bind must re-open the socket the launch's lease served, or a sandboxed child whose only door is that socket is left calling nothing; and a handle that recorded none must ask for none, since its child calls loopback");
     }
 
     /// <summary>Stands in for this worker's own host identity inside <c>[InlineData]</c>, which cannot carry a runtime value.</summary>
@@ -1188,9 +1174,6 @@ public class ModelCredentialBrokerTests
     {
         public List<string> Warnings { get; } = [];
 
-        /// <summary>The Information lines, kept apart from <see cref="Warnings"/> so the assertions on those stay exactly what they were.</summary>
-        public List<string> Informations { get; } = [];
-
         /// <summary>Released AFTER each warning is recorded, so a waiter that acquires it reads a <see cref="Warnings"/> that already holds that line.</summary>
         public SemaphoreSlim Warned { get; } = new(0);
 
@@ -1199,8 +1182,6 @@ public class ModelCredentialBrokerTests
 
         public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information) Informations.Add(formatter(state, exception));
-
             if (logLevel < Microsoft.Extensions.Logging.LogLevel.Warning) return;
 
             Warnings.Add(formatter(state, exception));

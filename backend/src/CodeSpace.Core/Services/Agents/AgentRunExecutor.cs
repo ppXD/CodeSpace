@@ -4564,11 +4564,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// The re-bind this run's handle makes possible, or null when it makes none. Three gates, each of which would
+    /// The re-bind this run's handle makes possible, or null when it makes none. Four gates, each of which would
     /// otherwise produce a lease that answers the wrong thing:
     ///
     /// <para><b>The address.</b> Port + route + bearer must all be recorded. A handle stamped before they were is a
     /// run whose port nobody wrote down, and that is the mixed-version deploy case: it keeps the typed landing.</para>
+    ///
+    /// <para><b>The door.</b> See <see cref="CallsItsBrokerAtAGateway"/> — a child that calls an address no broker
+    /// serves any more is not restored by a lease on loopback, and a re-bind that took would clear the posture that says
+    /// its model access is gone.</para>
     ///
     /// <para><b>The host.</b> The agent calls a port on the machine it was launched on. Binding that number HERE, on a
     /// worker that is not that machine, would answer nobody at all — while clearing the posture that says the run's
@@ -4580,21 +4584,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <para><b>The credential.</b> See <see cref="FrontsTheSameCredential"/> — a resolve that landed on a different
     /// ROW is not a restoration.</para>
     ///
-    /// <para>Takes what it reads rather than the whole context, so the three gates are directly testable (Rule 1 —
+    /// <para>Takes what it reads rather than the whole context, so the four gates are directly testable (Rule 1 —
     /// four parameters, under the cap).</para>
     /// </summary>
     internal static ModelCredentialRebindRequest? RebindRequestFor(AgentRunOwnerToken owner, Guid teamId, SandboxHandle handle, ResolvedModelCredential? upstream)
     {
         if (handle.ModelBrokerRunToken is not { Length: > 0 } token || handle.ModelBrokerRoute is not { Length: > 0 } route || handle.ModelBrokerPort is not { } port) return null;
+        if (CallsItsBrokerAtAGateway(handle)) return null;
         if (!LocalProcessRunner.PidAnswerableHere(handle)) return null;
         if (upstream is not { } resolved || !FrontsTheSameCredential(handle, resolved)) return null;
 
         return new()
         {
             RunId = owner.RunId, TeamId = teamId, Epoch = owner.Epoch, Port = port, PathId = route, RunToken = token, Upstream = resolved, Ttl = Credentials.ModelCredentialLease.Ttl,
-            SocketPath = handle.ModelBrokerSocketPath, ChildInNetworkNamespace = handle.EgressNetnsKey is { Length: > 0 },
+            SocketPath = handle.ModelBrokerSocketPath,
         };
     }
+
+    /// <summary>
+    /// Whether this handle's child reaches its broker at its network namespace's gateway rather than through a socket:
+    /// a namespace recorded and no broker socket. Only a run launched before a namespaced child reached its broker
+    /// through a socket has that shape — every brokered launch into a network of its own since mints one or is refused
+    /// — and nothing listens at a gateway any more, since every lease binds loopback. So such a run keeps the typed
+    /// landing, and its agent is stopped rather than left calling nothing.
+    /// </summary>
+    private static bool CallsItsBrokerAtAGateway(SandboxHandle handle) => handle.EgressNetnsKey is { Length: > 0 } && handle.ModelBrokerSocketPath is null;
 
     /// <summary>
     /// Whether the credential this pass resolved is the SAME one the launch's lease fronted — the row id when the
