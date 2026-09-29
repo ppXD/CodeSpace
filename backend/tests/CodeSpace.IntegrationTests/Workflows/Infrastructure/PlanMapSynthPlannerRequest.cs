@@ -62,6 +62,7 @@ public static class PlanMapSynthPlannerRequest
             SystemPrompt = LlmWorkflowPlanner.SystemPrompt,
             UserPrompt = LlmWorkflowPlanner.BuildUserPromptForTest(planRequest, catalog),
             JsonSchema = PlannerSchema.ResponseSchema,
+            WireJsonSchema = PlannerSchema.WireSchema,
         };
     }
 

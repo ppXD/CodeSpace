@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -64,6 +65,18 @@ public class InfraParkTests
     }
 
     [Fact]
+    public void The_park_log_carries_the_faults_own_words()
+    {
+        // The planner parked on an empty-bodied gateway 500 run after run, and the park line named only the category —
+        // so the one thing a reader needed, what the gateway actually said, was in no log line at all.
+        var logger = new CapturingLogger();
+
+        InfraPark.Park(Context() with { Logger = logger }, Fault(LlmErrorCategory.Transient), DateTimeOffset.UtcNow);
+
+        logger.Messages.ShouldHaveSingleItem().ShouldContain("upstream unavailable");
+    }
+
+    [Fact]
     public void The_park_keeps_the_nodes_ambient_cell_so_a_map_branch_stays_in_its_branch()
     {
         // The supervisor overrides IterationKey because its node is top-level. A generic node must NOT: the engine
@@ -112,5 +125,17 @@ public class InfraParkTests
         result.Status.ShouldBe(NodeStatus.Failure, "a 24h outage is a real failure — parking past the window would hide an outage nobody is coming to fix");
         result.Error.ShouldContain("model plane", Case.Insensitive);
         result.Retryable.ShouldBeFalse("re-running the node cannot reach a provider that has been down for a day");
+    }
+
+    /// <summary>Keeps every line the park writes, formatted the way a sink would render it.</summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+
+        private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
     }
 }

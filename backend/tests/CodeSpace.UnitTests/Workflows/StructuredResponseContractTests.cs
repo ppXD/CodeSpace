@@ -406,6 +406,52 @@ public sealed class StructuredResponseContractTests
         advisory.Bodies[1].ShouldNotContain("previous (invalid) response", customMessage: "a degradable reply is not invalid; calling it that is a lie the model then acts on");
     }
 
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
+    public async Task The_planner_request_sends_the_provider_a_combinator_free_schema_that_still_declares_every_acceptance_field(string provider)
+    {
+        // A hosted vLLM backend compiles the forced tool's schema into its decoding grammar. The per-kind oneOf
+        // branches (#1854) broke that compile: every planner call came back an EMPTY HTTP 500, the planner parked,
+        // and the live planner gates measured nothing on run after run while every other caller of the same model
+        // got 200s. The provider sees no combinator at any depth, and still sees every field an acceptance can carry.
+        var handler = new WireHandler(provider, [PlannerReply("TestsPass", ",\"argv\":[\"sh\"]")]);
+
+        await Client(provider, handler).CompleteStructuredAsync(PlannerRequest(provider), CancellationToken.None);
+
+        var sent = SentToolSchema(provider, handler.Bodies[0]);
+        JsonSchemaCombinatorsTests.CombinatorPaths(sent).ShouldBeEmpty("the provider's constrained decoder must never be handed a combinator");
+
+        var acceptance = sent.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance").GetProperty("properties");
+        foreach (var field in new[] { "formatVersion", "kind", "argv", "artifactPaths" })
+            acceptance.TryGetProperty(field, out _).ShouldBeTrue($"the decoder can only emit acceptance.{field} if the wire schema declares it");
+    }
+
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
+    public async Task A_reply_the_wire_schema_admits_but_the_contract_rejects_still_earns_the_reask_and_the_fault(string provider)
+    {
+        // The wire schema relaxes only what the provider's decoder is told. The contract is still JsonSchema: a reply
+        // that satisfies the combinator-free wire form but breaks the combinator it dropped is re-asked and, if it
+        // stays broken, faulted exactly as before.
+        var request = new StructuredLLMCompletionRequest
+        {
+            Model = "wire-test-model", SystemPrompt = "Return data", UserPrompt = "Name exactly one of a or b",
+            JsonSchema = JsonDocument.Parse("""{"type":"object","oneOf":[{"required":["a"]},{"required":["b"]}]}""").RootElement,
+            WireJsonSchema = JsonDocument.Parse("""{"type":"object"}""").RootElement,
+            Credential = new ResolvedModelCredential { Provider = provider, ApiKey = "fixture-key" },
+        };
+        var handler = new WireHandler(provider, ["{}", "{}"]);
+
+        var error = await Should.ThrowAsync<LlmApiException>(() => Client(provider, handler).CompleteStructuredAsync(request, CancellationToken.None));
+
+        error.Category.ShouldBe(LlmErrorCategory.Malformed);
+        handler.Bodies.Count.ShouldBe(2, "the combinator the wire dropped still earned its one re-ask");
+        handler.Bodies[1].ShouldContain("oneOf requires exactly one matching schema");
+        JsonSchemaCombinatorsTests.CombinatorPaths(SentToolSchema(provider, handler.Bodies[0])).ShouldBeEmpty("the provider was handed the wire schema, not the contract");
+    }
+
     /// <summary>The live regression shape: one subtask that names an oracle kind and authors NO payload for it — a consumer-contract defect the model-visible schema ALSO faults (no per-kind <c>oneOf</c> branch matches), which is why the two must be read as one severity. <paramref name="payload"/> appends raw acceptance keys, so an EMPTY payload can be authored too.</summary>
     private static string PlannerReply(string kind, string payload = "") =>
         PlannerReplyWithAcceptance("{\"formatVersion\":2,\"kind\":\"" + kind + "\"" + payload + "}");
@@ -433,6 +479,14 @@ public sealed class StructuredResponseContractTests
         Credential = new ResolvedModelCredential { Provider = provider, ApiKey = "fixture-key" },
         ResponseValidator = json => json.TryGetProperty("argv", out var argv) && argv.ValueKind == JsonValueKind.Array && argv.GetArrayLength() > 0 ? [] : ["consumer requires non-empty argv"],
     };
+
+    /// <summary>The schema the forced tool call carried on the wire: Anthropic's <c>tools[0].input_schema</c>, the OpenAI wire's <c>tools[0].function.parameters</c>.</summary>
+    private static JsonElement SentToolSchema(string provider, string body)
+    {
+        var tool = JsonDocument.Parse(body).RootElement.GetProperty("tools")[0];
+
+        return provider == "Anthropic" ? tool.GetProperty("input_schema").Clone() : tool.GetProperty("function").GetProperty("parameters").Clone();
+    }
 
     private static IStructuredLLMClient Client(string provider, WireHandler handler) => provider == "Anthropic" ? new AnthropicClient(new Factory(handler)) : new OpenAiClient(new Factory(handler));
     private sealed class Factory(HttpMessageHandler handler) : IHttpClientFactory

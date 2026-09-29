@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodeSpace.Core.Services.Workflows.Llm;
 
 namespace CodeSpace.Core.Services.Workflows.Planning;
 
@@ -154,6 +155,15 @@ public static class PlannerSchema
           "required": ["goal", "subtasks"]
         }
         """).RootElement.Clone();
+
+    /// <summary>
+    /// What the provider's constrained decoder is handed in place of <see cref="ResponseSchema"/>: the same schema with its
+    /// combinators stripped, so the acceptance is one flat typed object that still declares every field (<c>formatVersion</c>,
+    /// <c>kind</c>, <c>argv</c>, <c>artifactPaths</c>, …) but carries no per-kind branch. The branches made a hosted vLLM
+    /// backend answer every planner call with an empty HTTP 500. <see cref="ResponseSchema"/> still validates each reply and
+    /// is still the schema the prompt quotes, so the per-kind requirements are enforced by the bounded re-ask instead.
+    /// </summary>
+    public static readonly JsonElement WireSchema = JsonSchemaCombinators.Strip(ResponseSchema);
 
     /// <summary>Deserialization options for mapping a schema-valid object back into <c>PlannedWorkflow</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>.</summary>
     public static readonly JsonSerializerOptions Options = new()

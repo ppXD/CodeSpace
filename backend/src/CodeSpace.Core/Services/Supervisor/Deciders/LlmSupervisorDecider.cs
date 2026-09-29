@@ -572,7 +572,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// <summary>The fewest decisions worth folding — below this a compaction would not shrink the prompt meaningfully (the overflow has another cause), so the original fault propagates to the clean-stop path.</summary>
     internal const int MinCompactFold = 4;
 
-    private static readonly JsonElement TapeSummarySchema = JsonDocument.Parse("""
+    internal static readonly JsonElement TapeSummarySchema = JsonDocument.Parse("""
         { "type": "object", "additionalProperties": false, "required": ["summary"], "properties": { "summary": { "type": "string", "description": "The compact progress digest." } } }
         """).RootElement;
 

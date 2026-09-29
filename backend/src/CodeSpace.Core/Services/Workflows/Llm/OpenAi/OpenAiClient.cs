@@ -254,7 +254,7 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
             Stop = request.Sampling?.Stop,
             ReasoningEffort = LlmModelCapabilities.SupportsReasoningEffort(request.Model) ? request.ReasoningEffort : null,   // sent ONLY to a reasoning model (a plain chat model 400s on it); the value rides verbatim (the API validates it per model)
             Messages = BuildMessages(system, request.UserPrompt),
-            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
+            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.WireJsonSchema ?? request.JsonSchema } } },
             ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
         };
 

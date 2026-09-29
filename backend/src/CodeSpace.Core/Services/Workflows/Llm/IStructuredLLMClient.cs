@@ -36,6 +36,15 @@ public sealed record StructuredLLMCompletionRequest
     /// <summary>JSON Schema (object) the response MUST conform to.</summary>
     public required JsonElement JsonSchema { get; init; }
 
+    /// <summary>
+    /// The schema the PROVIDER is handed as the forced tool's schema, when that must differ from <see cref="JsonSchema"/>;
+    /// null sends <see cref="JsonSchema"/> itself. It exists for a constrained decoder that cannot compile a construct the
+    /// contract needs (see <see cref="JsonSchemaCombinators"/>). It must ACCEPT everything <see cref="JsonSchema"/>
+    /// accepts: every reply is still validated against <see cref="JsonSchema"/>, which also stays the schema the prompt
+    /// quotes, so a narrower wire schema would forbid the model an answer the contract allows.
+    /// </summary>
+    public JsonElement? WireJsonSchema { get; init; }
+
     /// <summary>Server-only validation of the consumer contract, alongside JSON schema. Violations enter the same bounded model re-ask; this callback never rewrites output.</summary>
     [JsonIgnore]
     public Func<JsonElement, IReadOnlyList<string>>? ResponseValidator { get; init; }

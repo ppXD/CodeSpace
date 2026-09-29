@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -120,6 +121,20 @@ public sealed class InfraParkRideTests
         // exactly as designed (park, don't die) and the owner's gateway being down may never red main.
         RealModelGate.IsGatewayInfraFailure(ex).ShouldBeTrue("an unresolved model-plane park routes as infra — a model-capability red here would be the original false red wearing a new name");
         RealModelGate.IsGatewayInfraFailure(new AggregateException(ex)).ShouldBeTrue("the await chain can wrap it");
+    }
+
+    [Fact]
+    public async Task An_unresolved_park_names_the_fault_the_park_stored_on_its_marker()
+    {
+        // The planner's park outlived this ride on run after run, and the skip said only THAT the model plane never
+        // came back. What the gateway actually said sat on the park's own marker, one read away. The marker is minted
+        // by the production writer, so the key this read depends on cannot drift from it unnoticed.
+        var marker = SupervisorInfraPark.Marker(SupervisorInfraPark.Next(null, DateTimeOffset.UtcNow), "Anthropic API error (HTTP 500, Transient): Hosted_vllmException");
+        var cell = Parked() with { WaitPayloadJson = marker.GetRawText() };
+
+        var ex = await Should.ThrowAsync<InfraParkUnresolvedException>(() => InfraParkRide.RideAsync(() => Task.FromResult(cell), _ => Task.CompletedTask, maxWakes: 1, wakePause: TimeSpan.Zero));
+
+        ex.Message.ShouldContain("Anthropic API error (HTTP 500, Transient): Hosted_vllmException", Case.Sensitive, "the infra skip must carry the gateway's own words, not only the park's duration");
     }
 
     [Fact]
