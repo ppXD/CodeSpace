@@ -342,9 +342,9 @@ public sealed class ModelCredentialBrokerNetnsE2ETests(ITestOutputHelper output)
     /// </summary>
     private static FilteredEgressPlan PreGuardPlan(string netnsKey, EgressSubnetAllocator.Lease lease)
     {
-        var plan = FilteredEgressPlan.Build(netnsKey, Array.Empty<string>(), lease);
+        var plan = FilteredEgressPlan.Build(netnsKey, Array.Empty<string>(), lease, Array.Empty<string>());
 
-        return plan with { NftRuleset = FilteredEgressPlan.BuildNftRuleset(plan.Namespace, lease.Cidr, Array.Empty<string>()) };
+        return plan with { NftRuleset = FilteredEgressPlan.BuildNftRuleset(plan.Namespace, lease.Cidr, Array.Empty<string>(), Array.Empty<string>()) };
     }
 
     /// <summary>

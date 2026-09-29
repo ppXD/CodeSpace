@@ -3,8 +3,9 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// <summary>
 /// The PURE command-sequence builder for a deny-by-default egress allowlist (B3.2 enforcement) — a per-run network
 /// namespace whose only egress is NAT'd to the host, with an nftables FORWARD filter that permits the netns subnet
-/// to reach ONLY the resolved allowlist IPs (+ DNS), dropping everything else, and a guard on the host veth that keeps
-/// the namespace and the worker out of each other (<see cref="BuildVethGuardRuleset"/>). It produces the <c>ip</c> /
+/// to reach ONLY the resolved allowlist IPs (+ DNS to the resolvers its resolv.conf names, <see cref="NamespaceResolvers"/>),
+/// dropping everything else, and a guard on the host veth that keeps the namespace and the worker out of each other
+/// (<see cref="BuildVethGuardRuleset"/>). It produces the <c>ip</c> /
 /// <c>nft</c> / <c>sysctl</c> argv sequences for SETUP, the <c>ip netns exec</c> prefix the confined command runs behind, and
 /// the TEARDOWN sequence — all pure data so the rules (the allow set, the default-drop, the teardown) are unit-pinned
 /// without root. The privileged executor (and its CI E2E) runs them; this file never touches the kernel.
@@ -85,9 +86,10 @@ public sealed record FilteredEgressPlan
     /// GUID-derived unique names; <paramref name="subnet"/> is the COLLISION-FREE /30 the caller reserved from
     /// <see cref="EgressSubnetAllocator"/> (so no two concurrent runs on the host — in this worker process or any
     /// other — share a subnet, a host-global nft-chain hazard); <paramref name="allowedIps"/> are the only reachable
-    /// destinations (plus DNS).
+    /// destinations, plus DNS to <paramref name="resolvers"/> alone — the nameservers the namespace's tools query
+    /// (<see cref="NamespaceResolvers"/>), none when it has none it could reach.
     /// </summary>
-    public static FilteredEgressPlan Build(string runId, IReadOnlyList<string> allowedIps, EgressSubnetAllocator.Lease subnet)
+    public static FilteredEgressPlan Build(string runId, IReadOnlyList<string> allowedIps, EgressSubnetAllocator.Lease subnet, IReadOnlyList<string> resolvers)
     {
         var ns = NamespaceFor(runId);
         var slug = Slug(runId);
@@ -99,7 +101,7 @@ public sealed record FilteredEgressPlan
         var subnetCidr = subnet.Cidr;
         var table = ns;   // one nft table per run, named like the ns
 
-        var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps) + BuildVethGuardRuleset(table, vethHost, subnetCidr);
+        var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps, resolvers) + BuildVethGuardRuleset(table, vethHost, subnetCidr, resolvers);
 
         var setup = NamespaceSetup(ns, vethHost, vethNs, subnet);
         setup.Add(new[] { "ip", "netns", "exec", ns, "ip", "route", "add", "default", "via", hostIp });
@@ -161,11 +163,9 @@ public sealed record FilteredEgressPlan
         };
     }
 
-    /// <summary>The nftables ruleset fed to <c>nft -f -</c> on stdin: NAT masquerade for the subnet + a default-drop forward filter scoped to the subnet that permits established + the allowed IPs + DNS.</summary>
-    internal static string BuildNftRuleset(string table, string subnet, IReadOnlyList<string> allowedIps)
+    /// <summary>The nftables ruleset fed to <c>nft -f -</c> on stdin: NAT masquerade for the subnet + a default-drop forward filter scoped to the subnet that permits established + DNS to <paramref name="resolvers"/> (<see cref="DnsAccepts"/>) + the allowed IPs.</summary>
+    internal static string BuildNftRuleset(string table, string subnet, IReadOnlyList<string> allowedIps, IReadOnlyList<string> resolvers)
     {
-        var allowSet = allowedIps.Count > 0 ? "{ " + string.Join(", ", allowedIps) + " }" : null;
-
         var lines = new List<string>
         {
             $"table ip {table} {{",
@@ -176,12 +176,12 @@ public sealed record FilteredEgressPlan
             "  chain forward {",
             "    type filter hook forward priority 0;",
             "    ct state established,related accept",
-            $"    ip saddr {subnet} udp dport 53 accept",
-            $"    ip saddr {subnet} tcp dport 53 accept",
         };
 
-        if (allowSet is not null)
-            lines.Add($"    ip saddr {subnet} ip daddr {allowSet} accept");
+        lines.AddRange(DnsAccepts($"    ip saddr {subnet}", resolvers));
+
+        if (allowedIps.Count > 0)
+            lines.Add($"    ip saddr {subnet} ip daddr {SetOf(allowedIps)} accept");
 
         lines.Add($"    ip saddr {subnet} drop");   // scoped default-drop: only the netns subnet, never the host's own forwarding
         lines.Add("  }");
@@ -191,11 +191,29 @@ public sealed record FilteredEgressPlan
     }
 
     /// <summary>
+    /// The accepts for DNS, UDP and TCP port 53, from what <paramref name="match"/> matches to <paramref name="resolvers"/>
+    /// alone — none at all when there are none. The forward table and the guard read the one list: a resolver beyond the
+    /// worker is met on FORWARD, one the worker serves on its own address on INPUT. Port 53 open to any address would be
+    /// a tunnel, not DNS: the run could open TCP to any host that listens there and carry whatever bytes it likes.
+    ///
+    /// <para>A resolver is matched as the address the run sent to, which conntrack records before any NAT
+    /// (<c>ct original ip daddr</c>). The worker's own NAT runs ahead of both hooks and may rewrite it: kube-proxy DNATs a
+    /// cluster DNS service address on a node's PREROUTING, and a transparent DNS proxy REDIRECTs it to the worker. By
+    /// then the packet carries an address no resolv.conf names. The port is the packet's own, 53, as it was before the
+    /// pin, so a NAT that moves DNS to another port is still not admitted.</para>
+    /// </summary>
+    private static IEnumerable<string> DnsAccepts(string match, IReadOnlyList<string> resolvers) =>
+        resolvers.Count == 0 ? [] : [$"{match} ct original ip daddr {SetOf(resolvers)} udp dport 53 accept", $"{match} ct original ip daddr {SetOf(resolvers)} tcp dport 53 accept"];
+
+    /// <summary>An anonymous nft set of <paramref name="addresses"/>, which must not be empty.</summary>
+    private static string SetOf(IReadOnlyList<string> addresses) => "{ " + string.Join(", ", addresses) + " }";
+
+    /// <summary>
     /// The guard on the host end of the run's veth, both ways. INPUT: what the namespace sends the worker ITSELF — its
     /// gateway, its other addresses, the veth's IPv6 link-local — is dropped, except DNS and the rest of a flow the
-    /// namespace opened. DNS is exactly what the forward filter admits (UDP and TCP port 53 from the run's /30), here for
-    /// a resolver the worker serves on one of its own addresses: the namespace resolves through the worker's
-    /// <c>resolv.conf</c>, and a loopback resolver there is the namespace's own loopback, which no veth rule reaches.
+    /// namespace opened. DNS is what the forward filter admits (<see cref="DnsAccepts"/>), here for a resolver the worker
+    /// serves on one of its own addresses or redirects to itself; a loopback resolver in the worker's <c>resolv.conf</c>
+    /// is the namespace's own loopback, which no veth rule reaches, and is never on the list (<see cref="NamespaceResolvers"/>).
     /// OUTPUT: the worker may send into the namespace only the replies to those flows and the errors about the run's own
     /// traffic — ICMP fragmentation-needed among them, without which an upload across a narrower uplink stalls — and
     /// anything it starts is rejected. A peer the worker reaches at an address the run's /30 shadows is then refused at
@@ -211,7 +229,7 @@ public sealed record FilteredEgressPlan
     /// kernel applies atomically: a table of this name that an earlier teardown failed to delete would otherwise keep
     /// its own rules, its drop included, ahead of these.</para>
     /// </summary>
-    internal static string BuildVethGuardRuleset(string table, string vethHost, string subnet) => string.Join("\n", new[]
+    internal static string BuildVethGuardRuleset(string table, string vethHost, string subnet, IReadOnlyList<string> resolvers) => string.Join("\n", new[]
     {
         $"table inet {table} {{}}",
         $"delete table inet {table}",
@@ -219,8 +237,8 @@ public sealed record FilteredEgressPlan
         "  chain input {",
         "    type filter hook input priority 0;",
         $"    iifname \"{vethHost}\" ct direction original ct state established,related accept",
-        $"    iifname \"{vethHost}\" ip saddr {subnet} udp dport 53 accept",
-        $"    iifname \"{vethHost}\" ip saddr {subnet} tcp dport 53 accept",
+    }.Concat(DnsAccepts($"    iifname \"{vethHost}\" ip saddr {subnet}", resolvers)).Concat(new[]
+    {
         $"    iifname \"{vethHost}\" drop",
         "  }",
         "  chain output {",
@@ -229,7 +247,7 @@ public sealed record FilteredEgressPlan
         $"    oifname \"{vethHost}\" reject",
         "  }",
         "}",
-    }) + "\n";
+    })) + "\n";
 
     private static string Slug(string runId)
     {

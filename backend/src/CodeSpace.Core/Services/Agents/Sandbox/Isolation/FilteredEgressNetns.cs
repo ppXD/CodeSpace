@@ -122,9 +122,9 @@ public static class FilteredEgressNetns
         /// The HOST-side veth address of this run's /30 (<c>FilteredEgressPlan.HostIp</c>) — the namespace's default
         /// gateway. Null when setup failed. It is not knowable before the /30 is reserved HERE, so it is returned. A
         /// packet to the host's own address is delivered locally, so the plan's forward-hook filter never sees it; the
-        /// plan's guard on the veth does, and admits nothing there but DNS and replies
-        /// (<c>FilteredEgressPlan.BuildVethGuardRuleset</c>). A child launched before that guard still reaches this worker
-        /// at this address, which is how a run launched before the relay reached its broker.
+        /// plan's guard on the veth does, and admits nothing there but replies and DNS to a resolver the run's resolv.conf
+        /// names (<c>FilteredEgressPlan.BuildVethGuardRuleset</c>). A child launched before that guard still reaches this
+        /// worker at this address, which is how a run launched before the relay reached its broker.
         /// </summary>
         public string? HostIp { get; init; }
 
@@ -132,13 +132,17 @@ public static class FilteredEgressNetns
     }
 
     /// <summary>
-    /// Set up a fresh filtered netns whose only egress is <paramref name="allowedIps"/> (+ DNS), WITHOUT running anything
+    /// Set up a fresh filtered netns whose only egress is <paramref name="allowedIps"/> (+ DNS to the resolvers the worker's
+    /// resolv.conf names, which is the one the namespace reads — <see cref="NamespaceResolvers"/>), WITHOUT running anything
     /// in it — the durable launch then runs its detached process behind the returned <see cref="SetupResult.ExecPrefix"/>
     /// and calls <see cref="TeardownAsync"/> at reap. A setup failure is fail-closed: the partial netns is torn down
     /// immediately and SetupOk=false is returned. <paramref name="runId"/> seeds the unique (and teardown-reconstructable)
     /// netns/veth/table names.
     /// </summary>
-    public static async Task<SetupResult> SetupAsync(string runId, IReadOnlyList<string> allowedIps, int timeoutSeconds, CancellationToken cancellationToken)
+    public static Task<SetupResult> SetupAsync(string runId, IReadOnlyList<string> allowedIps, int timeoutSeconds, CancellationToken cancellationToken) => SetupAsync(runId, allowedIps, NamespaceResolvers.ResolvConfPath, timeoutSeconds, cancellationToken);
+
+    /// <summary><see cref="SetupAsync(string, IReadOnlyList{string}, int, CancellationToken)"/> with DNS admitted to the resolvers of the resolv.conf at <paramref name="resolvConfPath"/>, read here, at setup — so a real-kernel test can hand the rules the same file it points the namespace's view at.</summary>
+    internal static async Task<SetupResult> SetupAsync(string runId, IReadOnlyList<string> allowedIps, string resolvConfPath, int timeoutSeconds, CancellationToken cancellationToken)
     {
         // Reserve a COLLISION-FREE /30 so no other run ON THIS HOST — this worker process or any other — shares a
         // subnet (a host-global nft-chain hazard). Released in TeardownAsync; the netns/table NAMES stay runId-derived
@@ -147,7 +151,7 @@ public static class FilteredEgressNetns
         var (subnet, exhausted) = Reserve(EgressSubnetAllocator.Host, runId, routes);
         if (subnet is null) return new SetupResult { SetupOk = false, SetupError = exhausted };
 
-        return await ApplyAsync(runId, FilteredEgressPlan.Build(runId, allowedIps, subnet), timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        return await ApplyAsync(runId, FilteredEgressPlan.Build(runId, allowedIps, subnet, NamespaceResolvers.Read(resolvConfPath)), timeoutSeconds, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -236,8 +240,8 @@ public static class FilteredEgressNetns
 
     /// <summary>
     /// Run <paramref name="command"/> inside a fresh filtered netns whose only egress is <paramref name="allowedIps"/>
-    /// (+ DNS). Sets up, runs, and ALWAYS tears down — the SYNCHRONOUS path the B3.2a CI E2E drives. The durable launch
-    /// uses <see cref="SetupAsync"/> + <see cref="TeardownAsync"/> directly instead.
+    /// (+ DNS to its resolvers). Sets up, runs, and ALWAYS tears down — the SYNCHRONOUS path the B3.2a CI E2E drives. The
+    /// durable launch uses <see cref="SetupAsync(string, IReadOnlyList{string}, int, CancellationToken)"/> + <see cref="TeardownAsync"/> directly instead.
     /// </summary>
     public static async Task<Outcome> RunAsync(string runId, IReadOnlyList<string> allowedIps, string command, IReadOnlyList<string> args, int timeoutSeconds, CancellationToken cancellationToken)
     {
