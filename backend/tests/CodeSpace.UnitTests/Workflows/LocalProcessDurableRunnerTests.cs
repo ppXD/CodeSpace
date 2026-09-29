@@ -1242,6 +1242,103 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         probe.State.ShouldBe(SandboxRunState.Gone);
     }
 
+    [Theory]
+    [InlineData(false, false, SandboxStatus.Failed)]             // killed while its deadline was still ahead: a vanish, as before
+    [InlineData(true, false, SandboxStatus.TimedOut)]            // a native run gone past its deadline with no readable deadline stop
+    [InlineData(true, true, SandboxStatus.ResourceExhausted)]    // OOM evidence keeps its verdict even when observed past the deadline
+    [InlineData(false, true, SandboxStatus.ResourceExhausted)]   // ...as it always did before the deadline
+    public async Task A_killed_supervisor_is_timed_out_only_as_a_plain_failure_observed_past_its_deadline(bool pastDeadline, bool oomKilled, SandboxStatus expected)
+    {
+        // The observe loop reads the stop file, the marker and the wall deadline, then — after the progress watch — whether
+        // the supervisor is gone, and VanishedAsync re-checks after a beat. Nothing signals when the loop is between those
+        // reads, so the corpse is made for real and handed to the classification the loop lands on. The handle's Deadline is
+        // where the observer reads the clock; the OOM counter is ExitStatusFor's own input, written where a cgroup-capped
+        // launch keeps it, because a launch on a host without cgroup v2 carries no cgroup (CgroupResourceLimit.IsSupported).
+        if (OperatingSystem.IsWindows()) return;
+
+        var launched = await LaunchAsync(ContractSpecs.Sleep(60) with { TimeoutSeconds = 30 });
+        var cgroupRoot = Directory.CreateTempSubdirectory("cs-oom-").FullName;
+
+        try
+        {
+            KillTree(launched.ProcessId);
+            await WaitForSupervisorGoneAsync(launched, deadlineStop: false);
+
+            var key = Path.GetFileName(launched.SpoolDirectory);
+            if (oomKilled) WriteOomKillCount(cgroupRoot, key);
+
+            using var cgroup = RuntimeSettings.Override(s => s with { AgentCgroupRoot = cgroupRoot });
+            var handle = launched with { Deadline = pastDeadline ? DateTimeOffset.UtcNow.AddSeconds(-1) : launched.Deadline, CgroupRunKey = oomKilled ? key : launched.CgroupRunKey };
+
+            var result = await _runner.VanishedAsync(handle, 0, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+            result.Status.ShouldBe(expected, Why(handle, result, $"a killed supervisor (past its deadline: {pastDeadline}, OOM on the counter: {oomKilled}) is timed out only as a plain failure past its deadline"));
+            result.ExitCode.ShouldBe(-1);
+        }
+        finally { await CleanUpGoneRunAsync(launched, cgroupRoot); }
+    }
+
+    [Fact]
+    public async Task A_controllers_deadline_stop_is_timed_out_whatever_the_clock_or_the_oom_counter_reads()
+    {
+        // One real deadline kill — the broker and guardian enforce a 10 s deadline, write their stop record, then kill the
+        // session — classified three ways: as observed; after a clock step-back, the handle's Deadline being where the
+        // observer reads the clock; and with an earlier child OOM the run survived already on the cumulative counter.
+        if (OperatingSystem.IsWindows()) return;
+
+        var launched = await LaunchAsync(ContractSpecs.Sleep(60) with { TimeoutSeconds = 10 });
+        var cgroupRoot = Directory.CreateTempSubdirectory("cs-oom-").FullName;
+
+        try
+        {
+            launched.Deadline.ShouldBeGreaterThan(DateTimeOffset.UtcNow, $"the launch must be ready while its deadline is still ahead; {ProcessLiveness.DescribeBootstrap(launched.SpoolDirectory)}");
+
+            await WaitForSupervisorGoneAsync(launched, deadlineStop: true);
+
+            NativeLaunchFiles.Read<NativeLaunchStop>(NativeLaunchFiles.DirectoryFor(launched.SpoolDirectory), NativeLaunchProtocol.StopFile).Reason.ShouldBe("deadline", $"the stop on record must be the controllers' deadline stop; {ProcessLiveness.DescribeBootstrap(launched.SpoolDirectory)}");
+
+            var key = Path.GetFileName(launched.SpoolDirectory);
+            WriteOomKillCount(cgroupRoot, key);
+
+            using var cgroup = RuntimeSettings.Override(s => s with { AgentCgroupRoot = cgroupRoot });
+            var views = new[] { ("as observed", launched), ("after a clock step-back", launched with { Deadline = DateTimeOffset.UtcNow.AddMinutes(5) }), ("with an earlier child OOM on the counter", launched with { CgroupRunKey = key }) };
+
+            foreach (var (view, handle) in views)
+            {
+                var result = await _runner.VanishedAsync(handle, 0, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+                result.Status.ShouldBe(SandboxStatus.TimedOut, Why(handle, result, $"the controllers' deadline stop decides a supervisor found gone {view}"));
+            }
+        }
+        finally { await CleanUpGoneRunAsync(launched, cgroupRoot); }
+    }
+
+    /// <summary>Wait for the supervisor to be gone — and, for a deadline kill, for the controllers' stop record that precedes their kill (RunnerHost Stop writes it first).</summary>
+    private static async Task WaitForSupervisorGoneAsync(SandboxHandle handle, bool deadlineStop)
+    {
+        var stop = Path.Combine(NativeLaunchFiles.DirectoryFor(handle.SpoolDirectory), NativeLaunchProtocol.StopFile);
+
+        for (var i = 0; i < 400 && (ProcessIsAlive(handle.ProcessId) || deadlineStop && !File.Exists(stop)); i++) await Task.Delay(50);
+
+        ProcessIsAlive(handle.ProcessId).ShouldBeFalse($"the supervisor must be gone within 20 s before it is classified; {ProcessLiveness.Describe(handle)}");
+        File.Exists(stop).ShouldBe(deadlineStop, $"only the controllers' own deadline stop writes {stop}; {ProcessLiveness.DescribeBootstrap(handle.SpoolDirectory)}");
+    }
+
+    /// <summary>The kernel's record of a cgroup OOM kill (<c>memory.events</c>), written where ExitStatusFor reads it for a run capped under <paramref name="cgroupRoot"/>.</summary>
+    private static void WriteOomKillCount(string cgroupRoot, string runKey)
+    {
+        var leaf = Directory.CreateDirectory(CgroupResourcePlan.PathFor(cgroupRoot, runKey)).FullName;
+        File.WriteAllText(Path.Combine(leaf, "memory.events"), "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n");
+    }
+
+    /// <summary>Rule 12.3 on every path: terminate the launch through its own bound handle (a birth-key-checked kill, a no-op for a tree already gone), then drop the stand-in cgroup root.</summary>
+    private async Task CleanUpGoneRunAsync(SandboxHandle launched, string cgroupRoot)
+    {
+        await _runner.TerminateAsync(launched, CancellationToken.None);
+
+        try { Directory.Delete(cgroupRoot, recursive: true); } catch { /* best-effort */ }
+    }
+
     [Fact]
     public async Task Probe_refuses_to_answer_liveness_for_a_handle_another_host_minted()
     {
