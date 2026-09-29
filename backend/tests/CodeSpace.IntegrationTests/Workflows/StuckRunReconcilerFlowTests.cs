@@ -670,7 +670,7 @@ public class StuckRunReconcilerFlowTests
         var workflowId = await CreateWorkflowAsync(teamId, userId);
         var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
 
-        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 2);
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 2);
 
         var summary = await ReconcileAsync();
 
@@ -686,6 +686,35 @@ public class StuckRunReconcilerFlowTests
         var payload = JsonDocument.Parse(wait.PayloadJson!).RootElement;
         payload.GetProperty("infraPark").GetBoolean().ShouldBeTrue("the resume payload is the SAME marker the deadline job would have injected — the ladder position rides to the re-entered turn intact");
         payload.GetProperty("parks").GetInt32().ShouldBe(2, "the ladder position is preserved verbatim, not reset — a re-fire must never look like a fresh outage");
+    }
+
+    [Fact]
+    public async Task A_stranded_actor_identity_link_wait_past_its_deadline_is_re_fired_by_the_same_sweep()
+    {
+        // The act-as-user identity-link ladder is the SECOND self-waking park, and it strands exactly like the
+        // first: its deadline IS its wake, so a lost ResumeByDeadlineAsync job would leave the run waiting for a
+        // link forever — even after the person connected their account. It must inherit the backstop by being in
+        // the swept set, not by anyone remembering to write a third sweep.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+
+        await SeedActorIdentityLinkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 3);
+
+        var summary = await ReconcileAsync();
+
+        // >= not == : the tally is deployment-wide (see the class note); the row assertions below are the proof.
+        summary.RecoveredStrandedSupervisorInfraParkWait.ShouldBeGreaterThanOrEqualTo(1, "the park tally counts every self-waking park kind, not just the model-plane one");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the re-fire resolved the wait + flipped Suspended → Pending → Enqueued, exactly as the scheduled deadline job would");
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.ActorIdentityLink);
+
+        wait.Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+        var payload = JsonDocument.Parse(wait.PayloadJson!).RootElement;
+        payload.GetProperty("actorIdentityLink").GetBoolean().ShouldBeTrue("the resume payload is the SAME marker the deadline job would have injected — the ladder position rides to the re-entered node intact");
+        payload.GetProperty("parks").GetInt32().ShouldBe(3, "the ladder position is preserved verbatim, not reset — a re-fire must never look like a fresh park");
     }
 
     [Fact]
@@ -716,7 +745,7 @@ public class StuckRunReconcilerFlowTests
         var workflowId = await CreateWorkflowAsync(teamId, userId);
         var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
 
-        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1, payloadJson: null);
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1, payloadJson: null);
 
         await ReconcileAsync();
 
@@ -736,7 +765,7 @@ public class StuckRunReconcilerFlowTests
         var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
 
         var firstParkedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromHours(25);
-        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 4, firstParkedAtUtc: firstParkedAtUtc);
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 4, firstParkedAtUtc: firstParkedAtUtc);
 
         var summary = await ReconcileAsync();
 
@@ -754,7 +783,7 @@ public class StuckRunReconcilerFlowTests
         var workflowId = await CreateWorkflowAsync(teamId, userId);
         var runId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Running, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
 
-        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
+        await SeedSupervisorInfraParkWaitAsync(runId, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
 
         await ReconcileAsync();
 
@@ -775,8 +804,8 @@ public class StuckRunReconcilerFlowTests
         var runA = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
         var runB = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
 
-        await SeedSupervisorInfraParkWaitAsync(runA, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
-        await SeedSupervisorInfraParkWaitAsync(runB, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.SupervisorInfraParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 3);
+        await SeedSupervisorInfraParkWaitAsync(runA, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 1);
+        await SeedSupervisorInfraParkWaitAsync(runB, wakeAt: DateTimeOffset.UtcNow - StuckRunReconcilerService.ParkWakeLostAfter - TimeSpan.FromMinutes(1), parks: 3);
 
         var summary = await ReconcileAsync();
 
@@ -882,6 +911,36 @@ public class StuckRunReconcilerFlowTests
             WakeAt = wakeAt,
             Status = WorkflowWaitStatuses.Pending,
             PayloadJson = null,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>An act-as-user identity-link park row as the engine writes it: the marker is BOTH the stored payload and the TimeoutPayload, which is what lets the sweep re-fire from the row.</summary>
+    private async Task SeedActorIdentityLinkWaitAsync(Guid runId, DateTimeOffset wakeAt, int parks)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = "review",
+            IterationKey = "",
+            WaitKind = WorkflowWaitKinds.ActorIdentityLink,
+            Token = Guid.NewGuid().ToString("N"),
+            WakeAt = wakeAt,
+            Status = WorkflowWaitStatuses.Pending,
+            PayloadJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["actorIdentityLink"] = true,
+                ["parks"] = parks,
+                ["firstParkedAtUtc"] = DateTimeOffset.UtcNow.AddMinutes(-30).ToString("o"),
+                ["actorUserId"] = Guid.NewGuid(),
+                ["provider"] = "Git",
+            }),
             CreatedAt = DateTimeOffset.UtcNow,
         });
 

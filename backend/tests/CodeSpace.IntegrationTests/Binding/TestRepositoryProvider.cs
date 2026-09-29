@@ -128,6 +128,28 @@ public sealed class TestPullRequestOpenCapture
     }
 }
 
+/// <summary>
+/// Records every review write-back the test provider performs, keyed by repository so one test's count is not
+/// polluted by another's (the capture is a fixture-wide singleton, repo paths are GUID-suffixed per test).
+/// Lets a test assert "the provider was called EXACTLY once" — the only way to prove a park/resume cycle did not
+/// re-fire a side effect, which no amount of run-record reading can show.
+/// </summary>
+public sealed class TestPullRequestReviewCapture
+{
+    private readonly object _lock = new();
+    private readonly List<(string RepositoryFullPath, int Number, PullRequestReviewVerdict Verdict)> _calls = new();
+
+    public IReadOnlyList<(string RepositoryFullPath, int Number, PullRequestReviewVerdict Verdict)> For(string repositoryFullPath)
+    {
+        lock (_lock) { return _calls.Where(c => c.RepositoryFullPath == repositoryFullPath).ToList(); }
+    }
+
+    public void Record(string repositoryFullPath, int number, PullRequestReviewVerdict verdict)
+    {
+        lock (_lock) { _calls.Add((repositoryFullPath, number, verdict)); }
+    }
+}
+
 public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IConnectionWebhookRegistrationCapability, IWebhookRepositoryIdentifier, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
@@ -135,11 +157,13 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
 
     private readonly TestRemoteHookStore _hookStore;
     private readonly TestPullRequestOpenCapture _pullRequestOpens;
+    private readonly TestPullRequestReviewCapture _pullRequestReviews;
 
-    public TestRepositoryProvider(TestRemoteHookStore hookStore, TestPullRequestOpenCapture pullRequestOpens)
+    public TestRepositoryProvider(TestRemoteHookStore hookStore, TestPullRequestOpenCapture pullRequestOpens, TestPullRequestReviewCapture pullRequestReviews)
     {
         _hookStore = hookStore;
         _pullRequestOpens = pullRequestOpens;
+        _pullRequestReviews = pullRequestReviews;
     }
 
     public ProviderKind Kind => ProviderKind.Git;
@@ -188,13 +212,17 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
 
     // Echoes the acting credential's id back as the review's ExternalId so a test can assert WHICH
     // credential made the write-back call (actor vs connection) without a shared recorder.
-    public Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken) =>
-        Task.FromResult(new RemotePullRequestReview
+    public Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    {
+        _pullRequestReviews.Record(repository.FullPath, number, verdict);
+
+        return Task.FromResult(new RemotePullRequestReview
         {
             Verdict = verdict,
             ExternalId = context.Credential.Id.ToString(),
             WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
         });
+    }
 
     // Echoes the acting credential's id back as the created PR's ExternalId (same trick as the review
     // echo) so a test can assert WHICH credential opened it (actor vs connection). Reflects the input.
