@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.Services.Tasks.SpecPreview;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Planning;
@@ -9,24 +10,45 @@ namespace CodeSpace.UnitTests.Workflows;
 public sealed class TypedModelSchemaBranchTests
 {
     [Fact]
-    public void Every_oracle_branch_is_self_describing_for_structured_output_generators()
+    public void The_generator_sees_every_field_an_oracle_branch_requires_on_one_flat_acceptance()
     {
+        // The per-kind branches no longer reach a structured-output generator: a hosted vLLM backend answered every
+        // planner call that carried them with an empty HTTP 500, so the provider is handed PlannerSchema.WireSchema.
+        // The branches still VALIDATE each reply — one per oracle kind — and the generator can only emit a field the
+        // wire declares, so every field any branch requires must be declared on the wire's flat acceptance.
         var branches = AcceptanceSchema().GetProperty("oneOf").EnumerateArray().ToArray();
+        var kinds = AcceptanceSchema().GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(kind => kind.GetString()).ToArray();
 
-        branches.Length.ShouldBe(5);
-        foreach (var branch in branches)
-        {
-            var properties = branch.GetProperty("properties");
-            var required = branch.GetProperty("required").EnumerateArray().Select(value => value.GetString()).ToArray();
-            var kind = properties.GetProperty("kind").GetProperty("enum")[0].GetString();
-            var payload = kind == "TestsPass" ? "argv" : "artifactPaths";
+        branches.Select(branch => branch.GetProperty("properties").GetProperty("kind").GetProperty("enum")[0].GetString()).ShouldBe(kinds, ignoreOrder: true, "one validating branch per oracle kind");
 
-            properties.TryGetProperty("formatVersion", out _).ShouldBeTrue("a generator may interpret a oneOf branch without merging its parent's properties");
-            properties.TryGetProperty(payload, out _).ShouldBeTrue($"the {kind} branch must expose its required payload shape where that requirement is declared");
-            required.ShouldContain("formatVersion");
-            required.ShouldContain("kind");
-            required.ShouldContain(payload);
-        }
+        var wire = WireAcceptanceSchema();
+        wire.TryGetProperty("oneOf", out _).ShouldBeFalse();
+
+        foreach (var field in branches.SelectMany(branch => branch.GetProperty("required").EnumerateArray()).Select(name => name.GetString()!).Distinct())
+            wire.GetProperty("properties").TryGetProperty(field, out _).ShouldBeTrue($"a branch requires '{field}', so the wire acceptance must declare it or the generator can never emit it");
+
+        wire.GetProperty("required").EnumerateArray().Select(name => name.GetString()).ShouldBe(new[] { "formatVersion", "kind" }, "the requirement every branch shares stays on the wire");
+    }
+
+    [Fact]
+    public void The_wire_schema_is_the_validation_schema_minus_only_the_acceptance_branches()
+    {
+        // Dropping a combinator only removes a constraint, so this equality is what makes the wire a SUPERSET of the
+        // contract: it can never forbid a reply the validation schema accepts, and it lost nothing else on the way.
+        var expected = JsonNode.Parse(PlannerSchema.ResponseSchema.GetRawText())!;
+        expected["properties"]!["subtasks"]!["items"]!["properties"]!["acceptance"]!.AsObject().Remove("oneOf");
+
+        JsonNode.DeepEquals(JsonNode.Parse(PlannerSchema.WireSchema.GetRawText()), expected).ShouldBeTrue();
+    }
+
+    [Theory]
+    [MemberData(nameof(ValidOracles))]
+    public void Every_valid_oracle_reply_is_also_valid_on_the_wire(string acceptance)
+    {
+        var reply = JsonDocument.Parse($$"""{"goal":"g","subtasks":[{"id":"s1","title":"t","instruction":"i","acceptance":{{acceptance}}}]}""").RootElement;
+
+        JsonSchemaValidator.Validate(reply, PlannerSchema.ResponseSchema).ShouldBeEmpty("precondition: the validation schema accepts this reply");
+        JsonSchemaValidator.Validate(reply, PlannerSchema.WireSchema).ShouldBeEmpty("the wire schema may never forbid a reply the validation schema accepts");
     }
 
     [Theory]
@@ -51,12 +73,15 @@ public sealed class TypedModelSchemaBranchTests
     public void A_present_but_empty_conflicting_or_incomplete_payload_does_not_satisfy_the_model_schema(string response) =>
         JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, AcceptanceSchema()).ShouldNotBeEmpty();
 
+    public static TheoryData<string> ValidOracles => new(
+        """{"formatVersion":2,"kind":"TestsPass","argv":["sh","","  ","Δ"]}""",
+        """{"formatVersion":2,"kind":"ArtifactPresent","artifactPaths":["out.txt"]}""",
+        """{"formatVersion":2,"kind":"CitationsResolve","artifactPaths":["out.txt"]}""",
+        """{"formatVersion":2,"kind":"LlmJudge","artifactPaths":["out.txt"],"rubric":{"criteria":[{"id":"a","requirement":"explains findings"}]}}""",
+        """{"formatVersion":2,"kind":"ArtifactSchema","artifactPaths":["out.txt"],"schema":{"type":"object"}}""");
+
     [Theory]
-    [InlineData("""{"formatVersion":2,"kind":"TestsPass","argv":["sh","","  ","Δ"]}""")]
-    [InlineData("""{"formatVersion":2,"kind":"ArtifactPresent","artifactPaths":["out.txt"]}""")]
-    [InlineData("""{"formatVersion":2,"kind":"CitationsResolve","artifactPaths":["out.txt"]}""")]
-    [InlineData("""{"formatVersion":2,"kind":"LlmJudge","artifactPaths":["out.txt"],"rubric":{"criteria":[{"id":"a","requirement":"explains findings"}]}}""")]
-    [InlineData("""{"formatVersion":2,"kind":"ArtifactSchema","artifactPaths":["out.txt"],"schema":{"type":"object"}}""")]
+    [MemberData(nameof(ValidOracles))]
     public void Every_valid_oracle_remains_expressible_without_altering_its_data(string response) =>
         JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, AcceptanceSchema()).ShouldBeEmpty();
 
@@ -104,6 +129,8 @@ public sealed class TypedModelSchemaBranchTests
         (JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, JsonDocument.Parse(schema).RootElement).Count == 0).ShouldBe(valid);
 
     private static JsonElement AcceptanceSchema() => PlannerSchema.ResponseSchema.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance");
+
+    private static JsonElement WireAcceptanceSchema() => PlannerSchema.WireSchema.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance");
 
     [Fact]
     public void Deeply_branching_schema_validation_is_bounded_and_cannot_turn_exhaustion_into_success()

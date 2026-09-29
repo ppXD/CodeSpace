@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -159,7 +160,18 @@ public static class InfraParkRide
 
     private static string Unresolved(ParkedCell cell, int wakes, TimeSpan wakePause) =>
         $"node '{cell.NodeId}' was STILL parked on {WorkflowWaitKinds.SupervisorInfraPark} after {wakes} deadline wake(s) over ~{(wakes * wakePause).TotalSeconds:0}s "
-      + "— the model plane never came back inside the ride's budget. That is INFRA, not a model verdict, and it is NOT a pass: nothing was driven to completion.";
+      + "— the model plane never came back inside the ride's budget. That is INFRA, not a model verdict, and it is NOT a pass: nothing was driven to completion. "
+      + $"The park's last fault: {ParkFault(cell)}";
+
+    /// <summary>The fault the park stored on its own marker — the gateway's own words — so a park that outlives the ride names its cause in the job summary, not only its duration.</summary>
+    private static string ParkFault(ParkedCell cell)
+    {
+        if (cell.WaitPayloadJson is null) return "(none recorded)";
+
+        using var marker = JsonDocument.Parse(cell.WaitPayloadJson);
+
+        return marker.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String ? error.GetString()! : "(none recorded)";
+    }
 
     /// <summary>Read the run's newest pending infra park plus the projected status of the cell it holds. No park pending ⇒ a Settled cell (there is nothing for the ride to wake).</summary>
     private static async Task<ParkedCell> ReadCellAsync(PostgresFixture fixture, Guid runId)

@@ -213,7 +213,7 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
             StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages,
-            Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.JsonSchema } },
+            Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.WireJsonSchema ?? request.JsonSchema } },
             ToolChoice = new AnthropicToolChoice { Type = "tool", Name = StructuredToolName }
         };
 

@@ -91,6 +91,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         SystemPrompt = SystemPrompt,
         UserPrompt = BuildUserPrompt(request, catalog, lessons),
         JsonSchema = PlannerSchema.ResponseSchema,
+        WireJsonSchema = PlannerSchema.WireSchema,
         ResponseValidator = ValidateModelResponse,
         ResponseAdvisor = AdviseModelResponse,
         MaxOutputTokens = 4096,

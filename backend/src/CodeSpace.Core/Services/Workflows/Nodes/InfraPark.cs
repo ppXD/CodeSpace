@@ -54,7 +54,7 @@ public static class InfraPark
         var delay = SupervisorInfraPark.DelayFor(state.Parks);
         var marker = SupervisorInfraPark.Marker(state, fault.Message);
 
-        context.Logger.LogWarning("Node {NodeId}: model call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run", context.NodeId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc);
+        context.Logger.LogWarning("Node {NodeId}: model call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run: {Fault}", context.NodeId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc, fault.Message);
 
         return NodeResult.Suspend(new SuspensionToken
         {
