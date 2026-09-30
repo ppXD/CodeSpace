@@ -105,6 +105,11 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         outputs.GetProperty("integrationStatus").GetString().ShouldBe("Clean");
         outputs.GetProperty("integratedBranch").GetString().ShouldBe(integrationBranch);
         outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the synth still narrates — the code reduce rides beside it, not instead of it");
+
+        // …and what the synth was SHOWN: the integrate node's own account of what landed. The fake synth echoes its
+        // prompt, so `combined` is the output of the real node → VariableResolver → llm.complete path, not a re-derivation.
+        outputs.GetProperty("combined").GetString()!.ShouldContain($"Integration outcome:\nIntegration: 2 contribution(s) landed on {integrationBranch}.",
+            customMessage: "the reduce is handed what actually landed, in one factual sentence, beside the results it qualifies");
     }
 
     /// <summary>
@@ -114,10 +119,12 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
     /// candidate and the run's outputs were empty. With the projection declaring <c>continue</c>, the map finishes,
     /// the integrate step runs over the run's publish ledger, and the reduce narrates with the failure counted.
     ///
-    /// <para>Which contributions integrate is a LEDGER question, not an outcome one (<c>RunIntegrationContributions</c>
-    /// deliberately applies no outcome filter): a unit that captured a diff contributes even if its own gate later
-    /// flunked it, so a human reviews the produced work instead of losing it. What this test pins is the part that
-    /// was broken — that the candidate exists at all, and that the SUCCEEDED sibling's work is in its tree.</para>
+    /// <para>Which contributions integrate is a LEDGER question with exactly ONE verdict gate
+    /// (<c>RunIntegrationContributions</c>): a unit whose own definition-of-done REJECTED it (or whose verification a
+    /// human waived) is withheld from the candidate, while a unit that merely ended badly but captured a diff still
+    /// contributes. This test pins the part that was broken — the candidate exists at all, with the SUCCEEDED sibling's
+    /// work in its tree and the flunked unit's work off it — and that the reduce is TOLD the flunked unit was withheld,
+    /// by name, instead of narrating a whole deliverable over a candidate that lacks it.</para>
     /// </summary>
     [Fact]
     public async Task A_flunked_item_still_leaves_its_siblings_work_on_one_reviewable_candidate()
@@ -189,7 +196,18 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor("do the second thing")))
                 .ShouldBeFalse(customMessage: "the flunked item's work must be withheld from the candidate — continue-on-error must not turn 'keep the siblings' into 'ship the rejected work'");
 
-            outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
+            var combined = outputs.GetProperty("combined").GetString();
+
+            combined.ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
+
+            // What the synth was SHOWN: the flunked unit never reached the integrator, so the integration outcome alone
+            // would read as a clean, complete candidate. The integrate node names it as withheld — the label is the unit
+            // id of the failed attempts' shared (node, iteration) cell, read off the ledger rather than assumed.
+            var flunked = agentRuns.First(r => r.Status == AgentRunStatus.Failed);
+            var flunkedLabel = Core.Services.Agents.AgentAcceptanceContract.UnitId(flunked.NodeId, flunked.IterationKey ?? "");
+
+            combined.ShouldContain($"Integration outcome:\nIntegration: 1 contribution(s) landed on {integrationBranch}. Withheld before integration: {flunkedLabel} — acceptance Failed.",
+                customMessage: "the reduce must be told the flunked unit was withheld from the candidate — without it the candidate reads as the whole deliverable");
         }
         finally
         {
@@ -261,12 +279,35 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
                 .ShouldBeFalse("no clean candidate ⇒ no candidate row");
 
             (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}")).ShouldBeFalse("nothing was pushed for a conflicted set — the fragments stay the only branches");
+
+            // What the synth was SHOWN. The two items run in parallel, so which agent run is created — and therefore
+            // applied first — is not fixed, and neither is WHICH unit conflicts. It is read from ground truth instead:
+            // the fallback branch the park itself named, mapped back to its unit through the publish ledger.
+            var conflictedBranch = JsonDocument.Parse(wait.PayloadJson!).RootElement.GetProperty("fallbackBranches")[0].GetString()!;
+            var conflictedLabel = await UnitLabelOfBranchAsync(verify.Resolve<CodeSpaceDbContext>(), runId, conflictedBranch);
+            var combined = outputs.GetProperty("combined").GetString()!;
+
+            combined.ShouldContain("Integration outcome:\nIntegration conflicted: no integrated branch was published",
+                customMessage: "the reduce is told the candidate conflicted and that nothing landed on an integrated branch");
+            combined.ShouldContain($"{conflictedLabel} → {conflictedBranch}",
+                customMessage: "…and which contribution conflicted, with the branch that still keeps its work — the fragments the reviewer was asked about");
+            combined.ShouldNotContain($"landed on codespace/integration/{runId:N}",
+                customMessage: "a conflicted set published no branch, so the reduce must never be handed one as where the work landed");
         }
         finally
         {
             using var reset = _fixture.BeginScope();
             reset.Resolve<WorkPlanPlanScript>().Reset();
         }
+    }
+
+    /// <summary>The unit label the integration outcome names a contribution by, found from ground truth: the agent attempt that pushed <paramref name="branch"/> (the run's publish ledger), then that agent run's (node, iteration) cell.</summary>
+    private static async Task<string> UnitLabelOfBranchAsync(CodeSpaceDbContext db, Guid runId, string branch)
+    {
+        var manifest = await db.PublishManifest.AsNoTracking().SingleAsync(m => m.WorkflowRunId == runId && m.Kind == PublishManifestKind.Agent && m.Branch == branch);
+        var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == manifest.AgentRunId);
+
+        return Core.Services.Agents.AgentAcceptanceContract.UnitId(agentRun.NodeId, agentRun.IterationKey ?? "");
     }
 
     // ─── Projection (the production builder, planner pinned to the work-plan fake, synth retargeted) ───

@@ -347,6 +347,49 @@ public class PlanMapSynthDefinitionBuilderTests
             customMessage: "the failed count is a persisted fact on the map bag + the run row — it is not furniture on every happy run's prompt");
     }
 
+    /// <summary>
+    /// A repo-bound reduce used to narrate over an integration it was never told about: the integrate step's outputs
+    /// reached only the done terminal, so a candidate that conflicted — or a unit withheld from it — was summarised as
+    /// a whole deliverable. The integrate node authors one account of the outcome (<c>summary</c>); the data half of
+    /// the prompt carries it, and the system prompt says what to do with it.
+    ///
+    /// <para>That is not the "failure furniture" the test above forbids: on a clean run the account is ONE factual
+    /// sentence (<c>Integration: N contribution(s) landed on {branch}.</c>) — the fact the reduce needs in order to call
+    /// the work delivered — and it is a RUN-time fact the node renders, not a build-time conditional.</para>
+    /// </summary>
+    [Fact]
+    public void A_repo_bound_reduce_is_shown_what_actually_landed_and_told_to_name_what_did_not()
+    {
+        var def = Builder.Build(Context(new ResolvedAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "claude-code" }));
+        var synth = def.Nodes.Single(n => n.Id == "synth").Inputs;
+
+        synth.GetProperty("userPrompt").GetString().ShouldBe(
+            $"Goal: Improve the onboarding module\n\nPer-subtask results:\n{{{{nodes.map.outputs.{WorkflowOutputKeys.MapResultsPrompt}}}}}\n\nIntegration outcome:\n{{{{nodes.integrate.outputs.summary}}}}",
+            customMessage: "the integrate node's own account of what landed rides the data half of the reduce prompt, after the results it qualifies");
+
+        var systemPrompt = synth.GetProperty("systemPrompt").GetString()!;
+
+        systemPrompt.ShouldStartWith(PlanMapBuilderBase.SynthSystemPrompt, customMessage: "the failure clause is kept verbatim — the integration instruction is added to it, never in place of it");
+        systemPrompt.ShouldContain("what actually landed on the integrated branch", customMessage: "the reduce is told what the integration outcome IS");
+        systemPrompt.ShouldContain("NOT delivered", customMessage: "anything conflicted or withheld must be named as not delivered");
+        systemPrompt.ShouldContain("never narrate withheld work as done", customMessage: "the one thing the reduce must not do");
+
+        var validation = RealValidator().Validate(def);
+
+        validation.IsValid.ShouldBeTrue(customMessage: "the binding resolves against the integrate node's declared outputs: " + string.Join(" | ", validation.Errors));
+    }
+
+    /// <summary>The other arm, and the byte pin's reach: a repo-less graph has no integrate node, so neither half of its reduce prompt may mention an integration — a sentence about an outcome that does not exist would only invite the model to invent one.</summary>
+    [Fact]
+    public void A_repo_less_reduce_is_never_told_about_an_integration_it_does_not_have()
+    {
+        var synth = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth").Inputs;
+
+        synth.GetProperty("userPrompt").GetString()!.ShouldNotContain("integrat", Case.Insensitive, customMessage: "no integrate node ⇒ no integration outcome in the data half");
+        synth.GetProperty("systemPrompt").GetString().ShouldBe(PlanMapBuilderBase.SynthSystemPrompt, customMessage: "a repo-less reduce keeps its system prompt byte-for-byte");
+        synth.GetProperty("systemPrompt").GetString()!.ShouldNotContain("integrat", Case.Insensitive);
+    }
+
     /// <summary>The other half of the same fact: the failed-branch count reaches the RUN ROW beside the combined answer, so a partial result is legible from the run's outcome and not only from the map node's bag (the coverage binding's reasoning, applied to the second way an answer can be less than whole).</summary>
     [Fact]
     public void The_done_terminal_surfaces_the_failed_branch_count_beside_the_combined_answer()
