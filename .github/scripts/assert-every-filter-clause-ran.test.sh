@@ -172,16 +172,33 @@ fi
 history="${tmp}/history"
 stub_bin="${tmp}/stub-bin"
 summary="${tmp}/step-summary.md"
+gh_requests="${tmp}/gh-requests.log"
 mkdir -p "$history" "$stub_bin"
 
-# The `gh` stub answers the only two calls the guard makes — list this workflow's completed runs, and download one
-# run's log archive. Stubbing the CLI rather than the guard's own lookup keeps the guard's real endpoints, its real
-# `unzip -p` streaming and its real census parser under test; only the network is replaced.
+# The `gh` stub answers the only two calls the guard makes — list ONE PAGE of this workflow's completed runs, and
+# download one run's log archive. Stubbing the CLI rather than the guard's own lookup keeps the guard's real endpoints,
+# its real `unzip -p` streaming and its real census parser under test; only the network is replaced. Every request is
+# appended to a log, because "the guard stopped paging" is visible nowhere else.
 cat > "${stub_bin}/gh" <<'STUB'
 #!/usr/bin/env bash
 endpoint="$2"
+printf '%s\n' "$endpoint" >> "${GUARD_TEST_GH_LOG:-/dev/null}"
+
 case "$endpoint" in
-  *"/runs?branch="*) cat "${GUARD_TEST_HISTORY}/run-ids" ;;
+  *"/runs?branch="*)
+    page=1
+    case "$endpoint" in *"&page="*) page="${endpoint##*&page=}" ;; esac
+
+    # A guard that keeps asking for pages once the history has run out would loop forever; fail the listing instead,
+    # so that regression fails the suite rather than hanging it. No case here stages more than 6 pages.
+    if [ "$(grep -c 'page=' "${GUARD_TEST_GH_LOG:-/dev/null}")" -gt 8 ]; then exit 1; fi
+
+    # A page nobody staged is past the end of the history, which the API answers with an empty page — except page 1,
+    # where a missing listing stands for the listing call itself failing.
+    if [ -f "${GUARD_TEST_HISTORY}/run-ids.${page}" ]; then exec cat "${GUARD_TEST_HISTORY}/run-ids.${page}"; fi
+    if [ "$page" -gt 1 ]; then exit 0; fi
+    exit 1
+    ;;
   */logs) run_id="${endpoint%/logs}"; exec cat "${GUARD_TEST_HISTORY}/${run_id##*/}.zip" ;;
   *) exit 1 ;;
 esac
@@ -238,7 +255,9 @@ make_censusless_predecessor() {
   (cd "$dir" && zip -qq "${history}/${run_id}.zip" "0_real model (a lane).txt")
 }
 
-set_history() { printf '%s\n' "$@" > "${history}/run-ids"; }
+# A run listing is one file per page, `run-ids.<page>`; set_history stages page 1, the only page most cases ever need.
+set_history_page() { local page="$1"; shift; printf '%s\n' "$@" > "${history}/run-ids.${page}"; }
+set_history() { set_history_page 1 "$@"; }
 
 # The guard as GitHub runs it on the streak branch: run 999 is THIS run and must be skipped in its own history.
 # The history read's two fallible prerequisites — the token and the listing endpoint — are parameters, because the
@@ -247,8 +266,10 @@ run_on_history() {
   local token="$1" history_dir="$2" ref="$3"; shift 3
 
   : > "$summary"
+  : > "$gh_requests"
   env PATH="${stub_bin}:${PATH}" \
     GUARD_TEST_HISTORY="$history_dir" \
+    GUARD_TEST_GH_LOG="$gh_requests" \
     GH_TOKEN="$token" \
     GITHUB_TOKEN="$token" \
     GITHUB_REF="$ref" \
@@ -274,16 +295,35 @@ expect_summary() {
   fi
 }
 
+# Which pages of run history the guard asked for, in order. Where paging STOPPED is visible nowhere else: reading page 3
+# as well can end in exactly the same verdict, and only the requests tell the two apart.
+expect_pages() {
+  local want="$1" name="$2" got; shift 2
+  "$@" >/dev/null 2>&1
+  got="$(sed -nE 's/.*[?&]page=([0-9]+).*/\1/p' "$gh_requests" | tr '\n' ' ' | sed 's/ $//')"
+
+  if [ "$got" = "$want" ]; then
+    echo "  ok      ${name}"
+  else
+    echo "  FAILED  ${name} — the guard asked for history pages '${got}', expected '${want}'"
+    failures=$((failures + 1))
+  fi
+}
+
 # Rule 8: the threshold is a named constant, changed by a PR. Pinned literally, because moving it silently changes
 # how long a gate may report green over an instrument that never ran.
 expect_output has "readonly DARK_RUNS_TO_RED=3" "the dark-run threshold is pinned at 3" \
   grep -F "readonly DARK_RUNS_TO_RED=3" "$guard"
 
-# The other two knobs decide the same thing from the other side: how far back evidence is looked for, and whose
-# history counts as a streak at all. Raising the scan bound silently changes how many censusless runs can be stepped
-# over; changing the branch silently turns the streak off everywhere. Pinned for the same reason as the threshold.
+# The other knobs decide the same thing from the other side: how many runs one page of history holds, how many runs the
+# pages may add up to, and whose history counts as a streak at all. Raising the cap silently changes how many censusless
+# runs can be stepped over — and how many log archives one guard run downloads; changing the branch silently turns the
+# streak off everywhere. Pinned for the same reason as the threshold.
 expect_output has "readonly DARK_HISTORY_RUNS_TO_SCAN=12" "the history scan bound is pinned at 12" \
   grep -F "readonly DARK_HISTORY_RUNS_TO_SCAN=12" "$guard"
+
+expect_output has "readonly DARK_HISTORY_RUNS_CAP=60" "the history cap is pinned at 60" \
+  grep -F "readonly DARK_HISTORY_RUNS_CAP=60" "$guard"
 
 expect_output has "readonly DARK_STREAK_BRANCH=main" "the streak branch is pinned to main" \
   grep -F "readonly DARK_STREAK_BRANCH=main" "$guard"
@@ -410,6 +450,157 @@ expect 0 "a predecessor that recorded the clause MISSING breaks the streak — t
 # ...and the streak it reports is the one a human can check: 1, over the evidence of exactly one predecessor.
 expect_summary '| `RealModelBenchmark` | UNMEASURED | 0 | 0 | 1 | 1 |' \
   "a MISSING predecessor resets the streak to 1 rather than stepping over it" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# ── Paging: the evidence for a streak can sit several pages back ──────────────────────────────────────────────────
+#
+# A predecessor with no census is stepped over, and a burst of pushes makes exactly those — each push cancels the run
+# before it — so the newest page of history can hold fewer census-bearing runs than a streak needs. Read as ONE page,
+# that shortfall looked like a short streak: a real main run went green over two UNMEASURED clauses in the middle of a
+# 69-run dark streak. The history below is staged as pages of 12 (runs 101..112 are page 1, 201..212 page 2, and so
+# on) with every run starting out as a cancelled, census-less one; each case turns only the few it needs into
+# census-bearing ones.
+
+# `pages` full pages of 12 census-less runs, and no page beyond them.
+reset_paged_history() {
+  local pages="$1" page run_id
+
+  rm -f "${history}"/run-ids.*
+  make_censusless_predecessor 100
+
+  for page in $(seq 1 "$pages"); do
+    set_history_page "$page" $(seq "${page}01" "${page}12")
+
+    for run_id in $(seq "${page}01" "${page}12"); do cp "${history}/100.zip" "${history}/${run_id}.zip"; done
+  done
+}
+
+# THE regression. Page 1 holds one dark census among eleven cancelled runs, page 2 two more dark ones. One page alone
+# read a streak of 2 and stayed green; paged, the guard finds three dark predecessors — a streak of 4 with this run —
+# and reds.
+reset_paged_history 5
+make_predecessor 105 "$dark_trx" RealModelBenchmark
+make_predecessor 203 "$dark_trx" RealModelBenchmark
+make_predecessor 209 "$dark_trx" RealModelBenchmark
+
+expect 1 "a streak whose evidence sits on page 2 REDS the lane — one page alone read streak 2 and stayed green" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "::error::RealModelBenchmark has now measured NOTHING on 4 consecutive main runs" \
+  "the paged streak counts the dark runs of every page it read" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "3 of the 24 predecessor runs scanned carried a census" \
+  "the error's evidence base is the whole paged scan, not its first page" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# ...and it read exactly as far as it needed: pages 3-5 are staged and never asked for.
+expect_pages "1 2" "paging stops at the page that settles the streak" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A run that MEASURED the clause settles it alone. Page 1 holds one dark census, page 2 a measuring run: the streak is
+# cut at 2 and nothing older can change that, so page 3 — staged with two dark runs — must never be asked for.
+reset_paged_history 5
+make_predecessor 104 "$dark_trx" RealModelBenchmark
+make_predecessor 202 "$measured_trx" RealModelBenchmark
+make_predecessor 301 "$dark_trx" RealModelBenchmark
+make_predecessor 302 "$dark_trx" RealModelBenchmark
+
+expect 0 "a measuring run on page 2 cuts the streak: the lane only warns" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_pages "1 2" "a measuring run on page 2 stops the paging — page 3 is never asked for" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary '| `RealModelBenchmark` | UNMEASURED | 0 | 0 | 1 | 2 |' \
+  "the streak it stops at is the one the evidence shows" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary "Streaks read from 2 of the 14 predecessor runs scanned" \
+  "it stops reading at the run that settled the streak, mid-page" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output lacks "INCONCLUSIVE" "a settled streak is never reported as inconclusive" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# Nothing settles it. One dark census on page 1 and, on page 3, a census-bearing run whose lane never reported this
+# clause, then silence: the scan reads exactly DARK_HISTORY_RUNS_CAP runs — page 6, staged with the two dark runs that
+# WOULD red the lane, is never read — and says so, rather than passing the streak of 2 it found off as the whole story.
+# Still not red: a run that said nothing is not a dark run.
+reset_paged_history 5
+make_predecessor 106 "$dark_trx" RealModelBenchmark
+make_predecessor 302 "$trx" RealModelSupervisor
+make_predecessor 601 "$dark_trx" RealModelBenchmark
+make_predecessor 602 "$dark_trx" RealModelBenchmark
+set_history_page 6 601 602
+
+expect 0 "a scan that reaches the cap unsettled warns instead of redding the lane" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "is INCONCLUSIVE: only 2 of the 60 predecessor runs scanned carried a census" \
+  "an unsettled scan says INCONCLUSIVE, with how many census-bearing runs it found in how many it scanned" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary "Streaks read from 2 of the 60 predecessor runs scanned" \
+  "the step summary names the same paged evidence base" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_pages "1 2 3 4 5" "the cap is hard: nothing beyond DARK_HISTORY_RUNS_CAP runs is requested" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A run that finishes while the pages are being read shifts every older run down a slot, so the LAST run of page 1 comes
+# back as the FIRST of page 2. A dark run read twice must still count once: here the double count would turn a streak
+# of 2 into a red.
+reset_paged_history 2
+make_predecessor 112 "$dark_trx" RealModelBenchmark
+set_history_page 2 112 201 202 203 204 205 206 207 208 209 210 211
+
+expect 0 "a run listed on two pages counts once" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_summary "Streaks read from 1 of the 23 predecessor runs scanned" "a run listed on two pages is scanned once" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# The cap counts RUNS, not pages. That same shifted boundary makes page 2 add only 11 new runs, so five pages come to 59
+# and the 60th run is the first of page 6. The scan must take that one run and stop — not the rest of the page, whose
+# second run is another dark one that would make the streak 4 over 61 runs.
+reset_paged_history 5
+make_predecessor 106 "$dark_trx" RealModelBenchmark
+make_predecessor 601 "$dark_trx" RealModelBenchmark
+make_predecessor 602 "$dark_trx" RealModelBenchmark
+set_history_page 2 112 201 202 203 204 205 206 207 208 209 210 211
+set_history_page 6 601 602
+
+expect_output has "reds at 3; 2 of the 60 predecessor runs scanned carried a census" \
+  "the cap counts runs, not pages: the scan stops at the 60th run, mid-page" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A census that never mentions the clause — another lane's tables from a run this lane was cancelled in — is evidence of
+# nothing for THIS clause, so it cannot count toward "read enough" either. Page 1 holds three census-bearing runs but
+# only one dark reading of the clause: counting census-bearing runs would stop there at a streak of 2 and stay green.
+# The guard has to read on to page 2, where the second dark reading makes three.
+reset_paged_history 5
+make_predecessor 101 "$dark_trx" RealModelBenchmark
+make_predecessor 102 "$trx" RealModelSupervisor
+make_predecessor 103 "$trx" RealModelSupervisor
+make_predecessor 201 "$dark_trx" RealModelBenchmark
+
+expect 1 "census-bearing runs that never mention the clause are not enough evidence to stop paging" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_pages "1 2" "...and the paging still stops once the clause's own streak is long enough" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+# A history where no run carried a census (every one cancelled before the guard) gives a streak nothing to be
+# consecutive with. That already warned; now it must say how many runs it looked through, or "found no census" reads
+# the same after 12 runs as after 60.
+reset_paged_history 1
+
+expect 0 "a history with no census at all warns instead of redding the lane" \
+  run_on refs/heads/main "$dark_trx" RealModelBenchmark
+
+expect_output has "could NOT run (INCONCLUSIVE: 0 of the 12 completed main runs scanned carried a clause census" \
+  "the no-census warning names how many runs it looked through" \
   run_on refs/heads/main "$dark_trx" RealModelBenchmark
 
 if [ "$failures" -ne 0 ]; then

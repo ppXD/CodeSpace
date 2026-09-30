@@ -36,11 +36,17 @@ set -euo pipefail
 # goes red. Below it the run keeps today's warning: one dark run really can be a one-off gateway fault.
 readonly DARK_RUNS_TO_RED=3
 
-# How many completed runs to page through while looking for census-bearing predecessors. A run whose job never
-# reached this guard — cancelled by concurrency, or red before it — recorded no census and is therefore evidence of
-# NOTHING; it is stepped over rather than counted as a reset, and this bound keeps that stepping-over from paging
-# back through the whole history.
+# How many completed runs one page of the history holds. A run whose job never reached this guard — cancelled by
+# concurrency, or red before it — recorded no census and is therefore evidence of NOTHING; it is stepped over rather
+# than counted as a reset, which is why a single page is sometimes not enough and DARK_HISTORY_RUNS_CAP exists.
 readonly DARK_HISTORY_RUNS_TO_SCAN=12
+
+# The most predecessor runs the history read scans in total, however many pages that takes. Stepping over census-less
+# runs lets a burst of cancelled ones push the evidence several pages back, and this bound keeps the search from paging
+# through the whole history — every run scanned is a log archive download — when the evidence is simply not there. A
+# scan that reaches it with a clause still unsettled says so, INCONCLUSIVE, instead of reporting the short streak it
+# found as though it were the answer.
+readonly DARK_HISTORY_RUNS_CAP=60
 
 # Only this branch carries a streak. A branch run is a one-off by construction — it has no predecessors to be
 # consecutive with — so it keeps the warning and never reds on persistence.
@@ -127,6 +133,14 @@ fi
 # workflow on the streak branch and downloads each one's log archive; `unzip -p` streams it and the table rows are
 # read straight back out. That needs only the GITHUB_TOKEN with `actions: read` — no new secret, no extra artifact,
 # and no seeding period, because the runs that already went dark recorded their census the same way.
+#
+# The history is read PAGE BY PAGE, and only as far back as the answer needs. A run that recorded no census is stepped
+# over, and a burst of pushes makes exactly those — each push cancels the run before it — so the newest page can hold
+# fewer census-bearing predecessors than a streak needs to red the lane. Reading that one page alone reported the
+# shortfall as a short streak and left the lane green over a clause that had measured nothing for far longer. So the
+# pages keep coming until every unmeasured clause is settled — its streak cut by a run that measured it, or already
+# long enough to red the lane — or DARK_HISTORY_RUNS_CAP runs have been scanned, and a scan that ends unsettled says
+# INCONCLUSIVE rather than passing the short streak it found off as the answer.
 
 census_count=0
 # How many predecessors were downloaded and looked at, census-bearing or not. The streak is only as trustworthy as
@@ -135,6 +149,10 @@ census_count=0
 history_runs_seen=0
 streaks_measured=0
 history_blocker=""
+# Every run id the scan has already taken, space-delimited and space-bounded. The pages are read one request at a time
+# while runs keep finishing, and a run that completes in between shifts every older one down a slot — so the last run
+# of one page can come back as the first of the next, and a dark run read twice would count as two.
+history_run_ids=" "
 
 # Every prerequisite the history read needs, named individually: "the streak could not be checked" must say WHICH
 # piece is missing, or it becomes the same silent nothing this guard exists to abolish.
@@ -202,40 +220,87 @@ streak_of() {
   printf '%s' "$streak"
 }
 
-# Stop paging the moment every unmeasured clause has had its streak broken by a run that measured it — there is
-# nothing left to learn, and every further page is another log archive download.
-any_clause_still_dark() {
-  local token census
+# Whether a run that MEASURED the clause has already cut its streak. Nothing further back can change a streak a
+# measuring run has cut, which makes this the one fact that settles a clause for good.
+streak_is_broken() {
+  local token="$1" census
 
-  for token in $unmeasured_tokens; do
-    for census in "$censuses"/*; do
-      [ -e "$census" ] || break
-      if [ "$(state_in "$census" "$token")" = MEASURED ]; then continue 2; fi
-    done
-
-    return 0
+  for census in "$censuses"/*; do
+    [ -e "$census" ] || break
+    if [ "$(state_in "$census" "$token")" = MEASURED ]; then return 0; fi
   done
 
   return 1
 }
 
-collect_history() {
-  local workflow runs run_id archive log
+# Stop paging the moment every unmeasured clause has had its streak broken by a run that measured it — there is
+# nothing left to learn, and every further page is another log archive download.
+any_clause_still_dark() {
+  local token
 
-  workflow="${GITHUB_WORKFLOW_REF%%@*}"
-  workflow="${workflow##*/}"
+  for token in $unmeasured_tokens; do
+    if ! streak_is_broken "$token"; then return 0; fi
+  done
 
-  if ! runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${DARK_STREAK_BRANCH}&status=completed&per_page=${DARK_HISTORY_RUNS_TO_SCAN}" --jq '.workflow_runs[].id' 2>/dev/null)"; then
-    history_blocker="the workflow's run history could not be listed (is \`actions: read\` granted?)"
-    return 1
-  fi
+  return 1
+}
+
+# A clause the evidence has not settled: no run that measured it has cut its streak, and the streak has not reached
+# the length that reds the lane either — so reading further back could still change what the lane says about it.
+clause_undecided() {
+  local token="$1"
+
+  if streak_is_broken "$token"; then return 1; fi
+
+  [ "$(streak_of "$token")" -lt "$DARK_RUNS_TO_RED" ]
+}
+
+any_clause_undecided() {
+  local token
+
+  for token in $unmeasured_tokens; do
+    if clause_undecided "$token"; then return 0; fi
+  done
+
+  return 1
+}
+
+# Whether another page is worth its requests: the cap has room left, and some unmeasured clause is still undecided.
+history_needs_more_runs() {
+  [ "$history_runs_seen" -lt "$DARK_HISTORY_RUNS_CAP" ] && any_clause_undecided
+}
+
+# One page of this workflow's completed runs on the streak branch, newest first: one run id per line. Not
+# `gh api --paginate`, which reads EVERY page — stopping at the first page that settles the answer is the whole point
+# of paging by hand.
+list_history_page() {
+  local workflow="$1" page="$2"
+
+  gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${DARK_STREAK_BRANCH}&status=completed&per_page=${DARK_HISTORY_RUNS_TO_SCAN}&page=${page}" --jq '.workflow_runs[].id' 2>/dev/null
+}
+
+run_already_scanned() {
+  case "$history_run_ids" in
+    *" $1 "*) return 0 ;;
+  esac
+
+  return 1
+}
+
+# Read the census out of each run on one listed page, newest first, stopping early the moment no clause has anything
+# left to learn — or the cap says enough.
+scan_history_page() {
+  local runs="$1" run_id archive log
 
   archive="${work}/predecessor-logs.zip"
   log="${work}/predecessor.log"
 
   for run_id in $runs; do
     if [ "$run_id" = "${GITHUB_RUN_ID}" ]; then continue; fi
+    if run_already_scanned "$run_id"; then continue; fi
+    if [ "$history_runs_seen" -ge "$DARK_HISTORY_RUNS_CAP" ]; then break; fi
 
+    history_run_ids="${history_run_ids}${run_id} "
     history_runs_seen=$((history_runs_seen + 1))
 
     # `unzip -p` streams every member to stdout, so the whole run's log is read in one pass without extracting a
@@ -254,12 +319,35 @@ collect_history() {
 
     if ! any_clause_still_dark; then break; fi
   done
+}
+
+collect_history() {
+  local workflow page=1 runs scanned_before
+
+  workflow="${GITHUB_WORKFLOW_REF%%@*}"
+  workflow="${workflow##*/}"
+
+  while history_needs_more_runs; do
+    if ! runs="$(list_history_page "$workflow" "$page")"; then
+      history_blocker="the workflow's run history could not be listed (is \`actions: read\` granted?)"
+      return 1
+    fi
+
+    scanned_before="$history_runs_seen"
+    scan_history_page "$runs"
+
+    # A page that added no run the scan had not already taken is the end of the history — or an API that ignores
+    # `page` — so there is nothing further back to ask for.
+    if [ "$history_runs_seen" -eq "$scanned_before" ]; then break; fi
+
+    page=$((page + 1))
+  done
 
   # No predecessor recorded a census at all — the workflow's first run on this branch, a retention gap, or a token
   # that can list runs but not read their logs. Whatever the cause, there is nothing to be consecutive WITH, so say
   # so rather than reporting a confident streak of one.
   if [ "$census_count" -eq 0 ]; then
-    history_blocker="no completed ${DARK_STREAK_BRANCH} run carried a clause census to compare against"
+    history_blocker="INCONCLUSIVE: 0 of the ${history_runs_seen} completed ${DARK_STREAK_BRANCH} runs scanned carried a clause census to compare against"
     return 1
   fi
 
@@ -284,6 +372,13 @@ fi
 # every branch run would be the noise that made the warning above easy to ignore in the first place.
 if [ -n "$unmeasured_tokens" ] && [ "$streaks_measured" -ne 1 ] && [ "${GITHUB_REF:-}" = "refs/heads/${DARK_STREAK_BRANCH}" ]; then
   echo "::warning::…and the consecutive-dark check could NOT run (${history_blocker}), so a clause that has measured nothing for runs on end still reads here as a one-off."
+fi
+
+# A scan that ended — the cap reached, or the history itself — with a clause still unsettled has not found a short
+# streak, it has found no answer. Reporting it as the one-off it looks like is how a burst of cancelled runs used to
+# read green, so say what the verdict rests on instead.
+if [ "$streaks_measured" -eq 1 ] && any_clause_undecided; then
+  echo "::warning::…and the consecutive-dark check is INCONCLUSIVE: only ${census_count} of the ${history_runs_seen} predecessor runs scanned carried a census, and too few of those recorded the clause to settle its streak (the scan stops at ${DARK_HISTORY_RUNS_CAP} runs), so a clause that has measured nothing for runs on end may still read here as a one-off."
 fi
 
 # The skip reason RealModelGate recorded for this clause's first skipped test. The streak says the instrument is
