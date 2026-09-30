@@ -53,7 +53,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     public static int SynthesisPromptBudgetChars => SupervisorSynthesisBudget.Normalize(int.TryParse(Environment.GetEnvironmentVariable(SynthesisPromptBudgetCharsEnvVar), out var value) ? value : null);
 
     public string ProjectionKind => TaskProjectionKinds.Supervisor;
-    public TaskProjectionAcceptanceContract OperatorAcceptance => new(true, Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass);
+
+    /// <summary>The terminal stop grades the operator's argv against the branch the run publishes; a branchless stop leaves the floor ungraded, so a repository-free workspace cannot carry one here.</summary>
+    public TaskProjectionAcceptanceContract OperatorAcceptance => new(true, Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, RequiresRepository: true);
 
     public WorkflowDefinition Build(TaskBuildContext context) => new()
     {

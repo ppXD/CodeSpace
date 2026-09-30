@@ -57,10 +57,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         var (structured, pick) = pickedBrain;
 
-        // P2 — render the capability catalog (harnesses + drivable providers, the team's whole credentialed pool) so the
-        // planner allocates a provider-compatible harness + model PER subtask informed, not blind. The run-time
-        // reconciler is the backstop.
-        var pool = await _modelSelector.ListPoolAsync(request.TeamId, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
+        // P2 — render the capability catalog (harnesses + drivable providers, the team's credentialed pool bounded to the
+        // operator's allowed models when the launch set any) so the planner allocates a provider-compatible harness + model
+        // PER subtask informed, not blind. The run-time reconciler is the backstop — for the pool too.
+        var pool = await _modelSelector.ListPoolAsync(request.TeamId, request.AllowedModelIds, cancellationToken).ConfigureAwait(false);
         var catalog = CapabilityCatalog.Render(_harnesses.All, pool);
 
         // D2 (cross-run learning): the distilled lessons ride the plan prompt — under a deterministic, toggle-free

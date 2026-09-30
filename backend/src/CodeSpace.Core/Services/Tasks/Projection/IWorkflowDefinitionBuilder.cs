@@ -28,4 +28,15 @@ public interface IWorkflowDefinitionBuilder
     WorkflowDefinition Build(TaskBuildContext context);
 }
 
-public sealed record TaskProjectionAcceptanceContract(bool? AcceptsCommand, BenchmarkGradingKind? GradingKind);
+/// <summary>
+/// The operator-command adapter a builder emits. <paramref name="RequiresRepository"/> says whether it can grade an argv
+/// floor only against a repository: the supervisor grades its terminal stop against the branch it publishes, so a
+/// repository-free run leaves the floor ungraded, while a single agent's own oracle runs in whatever workspace the agent
+/// ran in, a repository-free scratch one included. Defaults to requiring one, so an adapter that never says so is never
+/// trusted to grade a floor it may not be able to run.
+/// </summary>
+public sealed record TaskProjectionAcceptanceContract(bool? AcceptsCommand, BenchmarkGradingKind? GradingKind, bool RequiresRepository = true)
+{
+    /// <summary>Whether this adapter grades an operator argv floor in a workspace that does, or does not, bind a repository — the one test the floor's disposition, the tier's mandate and an auto route's floor rule all apply.</summary>
+    public bool GradesCommand(bool hasRepository) => AcceptsCommand == true && GradingKind == BenchmarkGradingKind.TestsPass && (hasRepository || !RequiresRepository);
+}

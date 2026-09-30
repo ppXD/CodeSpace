@@ -133,6 +133,25 @@ public class AgentDefinitionResolverCredentialedModelFlowTests
     }
 
     [Fact]
+    public async Task A_bounded_task_whose_picked_model_cannot_run_is_left_for_the_dispatchs_pool_choice()
+    {
+        // The operator named the allowed pool as the fallback, and the dispatch owns that choice: it moves to another
+        // pooled row and names the move, or fails with agent_model_pool_unresolvable. Failing here would end the run
+        // before any pooled row was tried. The pin stays on the task, unexpanded, for the dispatch to read.
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic");
+        var rowId = await AddModelAsync(credId, "claude-opus-4-8");
+        var otherRow = await AddModelAsync(await SeedCredentialAsync(teamId, "Anthropic"), "claude-sonnet-4-6");
+        await RevokeCredentialAsync(credId);
+
+        var task = new AgentTask { Goal = "g", Harness = "claude-code", ModelCredentialModelId = rowId, AllowedModelIds = [rowId, otherRow] };
+
+        var resolved = await ResolveAsync(task, teamId);
+
+        resolved.ShouldBe(task, "nothing is substituted here — the pool choice is the dispatch's");
+    }
+
+    [Fact]
     public async Task A_missing_model_row_fails_closed()
     {
         var teamId = await SeedTeamAsync();

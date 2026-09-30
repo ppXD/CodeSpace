@@ -498,6 +498,39 @@ public sealed class AgentRunReviseLoopFlowTests
     }
 
     [Fact]
+    public async Task A_run_bound_to_an_allowed_model_pool_never_escalates_outside_it()
+    {
+        // The operator's pool holds only the Basic model; a Frontier one sits on the run's OWN credential, outside it.
+        // A Quick launch at Delivery now always carries a check, so a failing check is the ordinary path — and it used
+        // to climb straight past the pool ("test-model → test-model-ultra"), in the revise round and for the next attempt.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        var pooled = await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        await SeedTieredModelAsync(credentialId, "test-model-ultra", ModelCapabilityTier.Frontier);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round asks to escalate
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1, AllowedModelIds = [pooled] });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (_, result) = await LoadAsync(runId);
+
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model" },
+            customMessage: "the revise round asked for a stronger model — and the pool holds none, so it re-ran the pooled one instead of test-model-ultra");
+        result.ModelEscalation.ShouldNotBeNull("the run still reached for a stronger model and said it could not");
+        result.ModelEscalation!.To.ShouldBeNull("nothing stronger is INSIDE the pool");
+        result.ProposedEscalation.ShouldNotBeNull("the run ended failing, so it answers for the next attempt too");
+        result.ProposedEscalation!.To.ShouldBeNull("the next attempt may not climb past the pool either — the node keeps the failure terminal instead of respawning onto test-model-ultra");
+    }
+
+    [Fact]
     public async Task A_one_model_team_keeps_its_only_model_and_says_no_stronger_one_exists_ONCE()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -647,15 +680,17 @@ public sealed class AgentRunReviseLoopFlowTests
         return credentialId;
     }
 
-    /// <summary>One credentialed pool model with a DECLARED capability tier — the ordering the escalation pick reads (<c>WorkflowsTestSeed.SeedCredentialedModelAsync</c> leaves the tier Unknown, which no escalation can rank).</summary>
-    private async Task SeedTieredModelAsync(Guid credentialId, string modelId, ModelCapabilityTier tier)
+    /// <summary>One credentialed pool model with a DECLARED capability tier — the ordering the escalation pick reads (<c>WorkflowsTestSeed.SeedCredentialedModelAsync</c> leaves the tier Unknown, which no escalation can rank). Returns the row id — an allowed-pool entry.</summary>
+    private async Task<Guid> SeedTieredModelAsync(Guid credentialId, string modelId, ModelCapabilityTier tier)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
 
         await db.SaveChangesAsync();
+        return rowId;
     }
 
     /// <summary>The reviewer model row under the content-keyed critic fake's provider tag — pinned onto the task so the reviewer resolution is deterministic even beside other seeded rows.</summary>

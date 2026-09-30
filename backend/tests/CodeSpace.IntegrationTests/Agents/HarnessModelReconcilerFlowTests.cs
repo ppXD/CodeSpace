@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -195,6 +196,138 @@ public class HarnessModelReconcilerFlowTests
 
         result.Repaired.ShouldBeFalse();
         result.HarnessKind.ShouldBe("codex-cli", "a missing credential is not a harness mismatch — leave it for the resolver's precise error");
+    }
+
+    // ── The run's allowed model pool: a bounded task runs on a POOLED ROW, and the harness follows that row ──
+
+    [Fact]
+    public async Task A_bounded_task_naming_a_model_outside_its_pool_runs_the_pools_default_row_and_says_so()
+    {
+        // The plan-map shape: the planner authored a model the operator's pool excludes. It runs the pool's default row
+        // on that row's own credential, and the harness is reconciled to THAT row's provider, not the authored model's.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-claude", "Anthropic");
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "outside-gpt", "OpenAI");
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", Model = "outside-gpt", AllowedModelIds = [pooled.RowId] };
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(task, teamId, CancellationToken.None);
+
+        result.PooledModel.ShouldNotBeNull("a bounded task always runs on a pooled row");
+        result.PooledModel.ModelId.ShouldBe("pooled-claude");
+        result.PooledModel.ModelCredentialId.ShouldBe(pooled.CredentialId, "names repeat across credentials — the row decides the key the agent runs on");
+        result.PoolNote.ShouldNotBeNull().ShouldContain("outside-gpt", customMessage: "the note names the model that did not fit…");
+        result.PoolNote.ShouldContain("pooled-claude", customMessage: "…and the one that runs instead");
+        result.HarnessKind.ShouldBe("claude-code", "the harness follows the pooled row's provider (Anthropic), not the excluded OpenAI model's");
+    }
+
+    [Fact]
+    public async Task A_bounded_task_naming_a_pooled_model_runs_that_row_with_no_note()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-gpt", "OpenAI");
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", Model = "POOLED-GPT", AllowedModelIds = [pooled.RowId] };
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(task, teamId, CancellationToken.None);
+
+        result.PooledModel.ShouldNotBeNull().ModelCredentialId.ShouldBe(pooled.CredentialId, "the pooled row's credential, so a loose name cannot resolve to a key outside the pool");
+        result.PoolNote.ShouldBeNull("a pooled model (matched case-insensitively, like every pool lookup) did not move");
+        result.HarnessKind.ShouldBe("codex-cli");
+    }
+
+    [Fact]
+    public async Task A_bounded_task_naming_no_model_runs_the_pools_default_row_with_no_note()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-claude", "Anthropic");
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", AllowedModelIds = [pooled.RowId] };
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(task, teamId, CancellationToken.None);
+
+        result.PooledModel.ShouldNotBeNull().ModelId.ShouldBe("pooled-claude", "no name must not escape to the unbounded team default");
+        result.PoolNote.ShouldBeNull("nothing authored moved — the pool's default is simply the model that runs");
+    }
+
+    [Fact]
+    public async Task A_bounded_task_whose_pool_resolves_nothing_any_more_is_named_and_an_unbounded_one_is_untouched()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-claude", "Anthropic");
+        await DisableModelRowAsync(pooled.RowId);
+
+        using var scope = _fixture.BeginScope();
+        var reconciler = scope.Resolve<IHarnessModelReconciler>();
+        var bounded = await reconciler.ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", Model = "pooled-claude", AllowedModelIds = [pooled.RowId] }, teamId, CancellationToken.None);
+        var unbounded = await reconciler.ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", Model = "pooled-claude" }, teamId, CancellationToken.None);
+
+        bounded.PooledModel.ShouldBeNull();
+        bounded.PoolNote.ShouldNotBeNull("the executor fails the run on this note rather than let the agent run outside its pool");
+        unbounded.PooledModel.ShouldBeNull();
+        unbounded.PoolNote.ShouldBeNull("an unbounded task is reconciled exactly as before");
+    }
+
+    [Fact]
+    public async Task A_pinned_row_runs_as_pinned_even_when_its_same_named_twin_would_win_a_name_lookup()
+    {
+        // A model NAME is unique only per credential. The dispatch used to resolve the name inside the pool, so the twin
+        // the name lookup ranks first silently replaced the operator's pinned row — another key billed, no note.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var first = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "sonnet", "Anthropic");
+        var second = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "sonnet", "Anthropic");
+        IReadOnlyList<Guid> pool = [first.RowId, second.RowId];
+
+        using var scope = _fixture.BeginScope();
+        var nameWinner = (await scope.Resolve<IModelPoolSelector>().ResolveDispatchAsync(teamId, "sonnet", pool, CancellationToken.None))!.ModelCredentialId;
+        var pinned = nameWinner == first.CredentialId ? second : first;   // pin the row a name lookup would NOT pick
+
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", Model = "sonnet", ModelCredentialId = pinned.CredentialId, ModelCredentialModelId = pinned.RowId, AllowedModelIds = pool }, teamId, CancellationToken.None);
+
+        result.PooledModel.ShouldNotBeNull().Id.ShouldBe(pinned.RowId, "the pinned row runs — on its own credential");
+        result.PooledModel.ModelCredentialId.ShouldBe(pinned.CredentialId);
+        result.PoolNote.ShouldBeNull("nothing moved");
+    }
+
+    [Fact]
+    public async Task A_persona_that_supplies_only_a_credential_runs_that_credentials_pooled_row()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var personaKey = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "persona-model", "Anthropic");
+        var other = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "other-model", "Anthropic");
+
+        using var scope = _fixture.BeginScope();
+        var reconciler = scope.Resolve<IHarnessModelReconciler>();
+
+        var honoured = await reconciler.ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", ModelCredentialId = personaKey.CredentialId, AllowedModelIds = [personaKey.RowId, other.RowId] }, teamId, CancellationToken.None);
+        var moved = await reconciler.ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", ModelCredentialId = personaKey.CredentialId, AllowedModelIds = [other.RowId] }, teamId, CancellationToken.None);
+
+        honoured.PooledModel.ShouldNotBeNull().Id.ShouldBe(personaKey.RowId, "the pool holds the persona's credential, so the persona's credential runs");
+        honoured.PoolNote.ShouldBeNull();
+        moved.PooledModel.ShouldNotBeNull().Id.ShouldBe(other.RowId);
+        moved.PoolNote.ShouldNotBeNull("the credential moved, so the run's timeline says so").ShouldContain("credential");
+    }
+
+    [Fact]
+    public async Task The_same_model_on_another_pooled_credential_is_named_as_a_credential_move()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var gateway = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "sonnet", "Anthropic");
+        var directCredential = await SeedCredentialAsync(teamId, "Anthropic");
+
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IHarnessModelReconciler>().ReconcileAsync(new AgentTask { Goal = "g", Harness = "codex-cli", Model = "sonnet", ModelCredentialId = directCredential, AllowedModelIds = [gateway.RowId] }, teamId, CancellationToken.None);
+
+        result.PooledModel.ShouldNotBeNull().ModelCredentialId.ShouldBe(gateway.CredentialId);
+        result.PoolNote.ShouldNotBeNull().ShouldStartWith("Model 'sonnet' has no usable row on the credential it was pinned to", customMessage: "the same model on another key is a credential move — named, never silent");
+    }
+
+    private async Task DisableModelRowAsync(Guid rowId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId)).Enabled = false;
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedCredentialAsync(Guid teamId, string provider)
