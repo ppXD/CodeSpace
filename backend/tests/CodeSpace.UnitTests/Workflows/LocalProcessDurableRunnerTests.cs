@@ -1313,6 +1313,74 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         finally { await CleanUpGoneRunAsync(launched, cgroupRoot); }
     }
 
+    [Theory]
+    [InlineData(true, SandboxStatus.ResourceExhausted)]   // the OOM killer took the supervisor: the counter says how it died, however late the loop first looked
+    [InlineData(false, SandboxStatus.TimedOut)]           // no OOM evidence: a plain failure seen past its deadline is the clock's
+    public async Task The_observe_loop_classifies_a_corpse_first_seen_past_its_deadline_by_how_it_died(bool oomKilled, SandboxStatus expected)
+    {
+        // The same corpse as above, reached through the LOOP rather than handed to VanishedAsync: a re-attach after an outage,
+        // or a slow worker, first looks at a run whose supervisor is already gone and whose deadline has already passed. The
+        // loop read the clock before asking whether the supervisor was gone, so that corpse never reached VanishedAsync's
+        // OOM check and an OOM-killed run read TimedOut, which is retried under the same ceiling.
+        if (OperatingSystem.IsWindows()) return;
+
+        var launched = await LaunchAsync(ContractSpecs.Sleep(60) with { TimeoutSeconds = 30 });
+        var cgroupRoot = Directory.CreateTempSubdirectory("cs-oom-").FullName;
+
+        try
+        {
+            KillTree(launched.ProcessId);
+            await WaitForSupervisorGoneAsync(launched, deadlineStop: false);
+
+            var key = Path.GetFileName(launched.SpoolDirectory);
+            if (oomKilled) WriteOomKillCount(cgroupRoot, key);
+
+            CgroupResourceLimit.OomKillCount(cgroupRoot, key).ShouldBe(oomKilled ? 1 : 0, "fixture check: the counter the loop will read through ExitStatusFor must say what this row stages");
+
+            using var cgroup = RuntimeSettings.Override(s => s with { AgentCgroupRoot = cgroupRoot });
+            var handle = launched with { Deadline = DateTimeOffset.UtcNow.AddSeconds(-1), CgroupRunKey = oomKilled ? key : launched.CgroupRunKey };
+
+            var result = await AttachBoundedAsync(handle);
+
+            result.Status.ShouldBe(expected, Why(handle, result, $"a corpse first observed past its deadline (OOM on the counter: {oomKilled}) is classified by how it died"));
+            result.ExitCode.ShouldBe(-1);
+        }
+        finally { await CleanUpGoneRunAsync(launched, cgroupRoot); }
+    }
+
+    [Fact]
+    public async Task The_observe_loop_still_times_out_and_kills_a_live_supervisor_past_its_deadline()
+    {
+        // Only a corpse is left to VanishedAsync: the clock stays the authority over a supervisor that is still running. The
+        // launch's own deadline is 120 s away, beyond the 60 s this test allows the loop, so no controller's stop record can
+        // settle the run in time — only the observer's clock can.
+        if (OperatingSystem.IsWindows()) return;
+
+        var launched = await LaunchAsync(ContractSpecs.Sleep(300) with { TimeoutSeconds = 120 });
+
+        try
+        {
+            ProcessIsAlive(launched.ProcessId).ShouldBeTrue($"fixture check: the supervisor must be running when the loop first looks; {ProcessLiveness.Describe(launched)}");
+
+            var handle = launched with { Deadline = DateTimeOffset.UtcNow.AddSeconds(-1) };
+            var result = await AttachBoundedAsync(handle);
+            for (var i = 0; i < 100 && ProcessIsAlive(handle.ProcessId); i++) await Task.Delay(50);
+
+            result.Status.ShouldBe(SandboxStatus.TimedOut, Why(handle, result, "a supervisor still running past its deadline is the observer clock's to stop"));
+            ProcessIsAlive(handle.ProcessId).ShouldBeFalse(Why(handle, result, "the clock kill must leave no live supervisor"));
+        }
+        finally { KillTree(launched.ProcessId); }
+    }
+
+    /// <summary>The observe loop, bounded: one that never settles the run fails naming it instead of hanging the suite (Rule 12.10).</summary>
+    private async Task<SandboxResult> AttachBoundedAsync(SandboxHandle handle)
+    {
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        try { return (await AttachCollectAsync(handle, bound.Token)).Result; }
+        catch (OperationCanceledException) when (bound.IsCancellationRequested) { throw new Xunit.Sdk.XunitException($"the observe loop did not settle the run within 60 s; {ProcessLiveness.Describe(handle)}"); }
+    }
+
     /// <summary>Wait for the supervisor to be gone — and, for a deadline kill, for the controllers' stop record that precedes their kill (RunnerHost Stop writes it first).</summary>
     private static async Task WaitForSupervisorGoneAsync(SandboxHandle handle, bool deadlineStop)
     {

@@ -521,8 +521,10 @@ public sealed partial class LocalProcessRunner
 
             // The execution wall deadline is checked BEFORE the lease and nothing can renew past it. It is not the whole
             // safety argument though — it is optional (TimeoutSeconds ≤0 ⇒ MaxValue), and a run without one refuses the
-            // lease outright so this watchdog keeps its pre-lease bound.
-            if (DateTimeOffset.UtcNow >= handle.Deadline)
+            // lease outright so this watchdog keeps its pre-lease bound. A supervisor already gone is not the clock's to
+            // stop: VanishedAsync classifies that corpse by how it died, where OOM evidence keeps its own verdict and only
+            // a plain failure past the deadline becomes a timeout. A pid this worker cannot resolve is not provably gone.
+            if (DateTimeOffset.UtcNow >= handle.Deadline && !IsSupervisorGone(handle))
                 return await TimeoutAsync(handle, offset, onStdoutFrame, cancellationToken).ConfigureAwait(false);
 
             if (progress is not null)
