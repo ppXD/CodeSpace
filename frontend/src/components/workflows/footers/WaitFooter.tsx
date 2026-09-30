@@ -33,7 +33,7 @@ export function WaitFooter(props: NodeFooterProps) {
 }
 
 type WaitSignal = NonNullable<NodeLiveSignals["wait"]>;
-type WaitKind = "approval" | "planConfirm" | "action" | "callback" | "timer" | "decision" | "subworkflow" | "message" | "generic";
+type WaitKind = "approval" | "planConfirm" | "action" | "callback" | "timer" | "decision" | "subworkflow" | "message" | "identity" | "generic";
 
 /**
  * The canonical wait kind. The node's typeKey is the authoritative classifier for the builtin family (a
@@ -53,6 +53,9 @@ function classifyWaitKind(typeKey: string, liveKind?: string): WaitKind {
   }
 
   const k = (liveKind ?? "").toLowerCase();
+  // Checked FIRST and by live kind alone: an identity park is a property of the WAIT, not of the node — any node
+  // that acts as a person can park on it, and its typeKey (git.pr_review, git.merge_pr, …) says nothing about it.
+  if (k.includes("actoridentity")) return "identity";
   if (k.includes("approv")) return "approval";
   if (k.includes("action")) return "action";
   if (k.includes("callback")) return "callback";
@@ -75,6 +78,7 @@ function kindPresentation(kind: WaitKind): { label: string; glyph: ReactNode } {
     case "decision": return { label: "Awaiting decision", glyph: <Ic.Help size={12} /> };
     case "subworkflow": return { label: "Awaiting subworkflow", glyph: <Ic.ArrowOut size={12} /> };
     case "message": return { label: "Waiting", glyph: <Ic.Bell size={12} /> };
+    case "identity": return { label: "Waiting on a connected account", glyph: <Ic.Link size={12} /> };
     default: return { label: "Waiting", glyph: <Ic.Pause size={12} /> };
   }
 }
@@ -110,7 +114,7 @@ function SuspendedWait({ data, rows, wait, now }: { data: NodeFooterProps["data"
       <div className="wf-rf-result-bar wf-wait-bar">
         <span className="wf-rf-result-glyph" aria-hidden="true">{pres.glyph}</span>
         <span className="wf-rf-result-label">{headline}</span>
-        <WaitTiming wait={wait} now={now} payload={payload} />
+        <WaitTiming kind={kind} wait={wait} now={now} payload={payload} />
       </div>
 
       <WaitDetail kind={kind} payload={payload} wait={wait} rows={rows} />
@@ -119,9 +123,14 @@ function SuspendedWait({ data, rows, wait, now }: { data: NodeFooterProps["data"
   );
 }
 
-/** The timing region: a depleting `.wf-ring` + countdown when the wait has a deadline; otherwise a "parked" elapsed marker. */
-function WaitTiming({ wait, now, payload }: { wait: WaitSignal | null; now: number; payload: Record<string, unknown> | null }) {
-  if (wait?.deadlineAtMs) {
+/**
+ * The timing region: a depleting `.wf-ring` + countdown when the wait has a deadline; otherwise a "parked" elapsed
+ * marker. An `identity` park is deliberately shown as PARKED even though it carries a deadline: that deadline is the
+ * next re-check of whether the person has connected their account, not a moment anything is promised to happen, and
+ * a ticking countdown would read as "done in 28s".
+ */
+function WaitTiming({ kind, wait, now, payload }: { kind: WaitKind; wait: WaitSignal | null; now: number; payload: Record<string, unknown> | null }) {
+  if (kind !== "identity" && wait?.deadlineAtMs) {
     const total = Math.max(1, wait.deadlineAtMs - wait.sinceMs);
     const remaining = Math.max(0, wait.deadlineAtMs - now);
     const pct = Math.max(0, Math.min(100, (remaining / total) * 100));

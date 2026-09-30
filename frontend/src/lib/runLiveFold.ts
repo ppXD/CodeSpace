@@ -117,7 +117,10 @@ function foldNodeRecord(prev: NodeLiveSignals | undefined, r: RunRecordView, pay
 
     case "node.suspended": {
       const d = draft();
-      d.wait = { kind: readString(payload, "waitKind") ?? readString(payload, "kind") ?? "", sinceMs: Date.parse(r.occurredAt), deadlineAtMs: parseDeadline(payload), payload };
+      // `wait_kind` / `wake_at` FIRST: that is what RunRecordLogger.NodeSuspendedAsync actually writes, and the
+      // record's payload reaches us verbatim (no key transformation anywhere on the way out). The camelCase
+      // spellings stay as fallbacks for any other producer.
+      d.wait = { kind: readString(payload, "wait_kind") ?? readString(payload, "waitKind") ?? readString(payload, "kind") ?? "", sinceMs: Date.parse(r.occurredAt), deadlineAtMs: parseDeadline(payload), payload };
       const applied = applyBranch(tracks, r.nodeId ?? "", r.iterationKey, "waiting");
       newTracks = applied.tracks;
       d.branches = applied.counts;
@@ -200,9 +203,13 @@ function readString(payload: Record<string, unknown>, key: string): string | und
   return typeof value === "string" ? value : undefined;
 }
 
-/** The suspend deadline in epoch ms from whichever of deadline/wakeAt/timeoutAt is present; undefined when none parses. */
+/**
+ * The suspend deadline in epoch ms from whichever of wake_at/deadline/wakeAt/timeoutAt is present; undefined when
+ * none parses. `wake_at` leads because it is the key the engine writes — every bounded wait's deadline lands in the
+ * `node.suspended` record under that name, and the payload reaches us verbatim.
+ */
 function parseDeadline(payload: Record<string, unknown>): number | undefined {
-  return parseInstant(payload["deadline"]) ?? parseInstant(payload["wakeAt"]) ?? parseInstant(payload["timeoutAt"]);
+  return parseInstant(payload["wake_at"]) ?? parseInstant(payload["deadline"]) ?? parseInstant(payload["wakeAt"]) ?? parseInstant(payload["timeoutAt"]);
 }
 
 /** Coerce a payload instant (epoch-ms number or ISO string) to epoch ms; undefined when unparseable. */
