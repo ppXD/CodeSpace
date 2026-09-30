@@ -253,17 +253,34 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
     /// is the identical serialization of the identical array, so an ordinary run's prompt does not change by a
     /// character; over budget the model is handed a fair share of every included branch and TOLD, in the prompt's
     /// first sentence, that it is reading an excerpt.</para>
+    ///
+    /// <para>A repo-bound graph's reduce is ALSO handed the integrate node's own account of what landed
+    /// (<see cref="IntegrationOutcomeSection"/>) and told what to do with it (<see cref="SynthIntegrationInstruction"/>).
+    /// The integrate step's outputs used to reach only <see cref="DoneInputs"/>: nothing the reduce reads said that a
+    /// candidate conflicted, or that a unit whose own check rejected it was withheld from it, so a partial integration
+    /// was narrated as a whole deliverable. Whether the graph integrates is a BUILD-time fact (the integrate node exists
+    /// or it does not), so the conditional is legitimate here — and a repo-less graph keeps both halves of its prompt
+    /// byte-for-byte. The account itself is a RUN-time fact the node renders; the prompt only binds it. It sits OUTSIDE
+    /// the map's <c>promptBudgetChars</c>, which bounds the results projection alone — the node bounds the account
+    /// instead (<c>RunIntegrationSummary.MaxChars</c>, 2,000 characters against a 120,000-character default budget).</para>
     /// </summary>
-    private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
+    private static JsonElement SynthInputs(TaskBuildContext context)
     {
-        systemPrompt = SynthSystemPrompt,
-        // BYTE-IDENTICAL to the pre-continue prompt: the data half of the reduce carries the goal and the results,
-        // and nothing else. The failure half rides the SYSTEM prompt instead, so a run in which nothing failed is
-        // never handed a "Subtasks that failed: 0" line — the reduce learns about a failure from the marker actually
-        // sitting in its results, which is the only place the fact exists per-run. (A build-time conditional cannot
-        // express this: the failure count is a RUN-time fact and the prompt is frozen into the definition.)
-        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n" + SynthResultsRef,
-    });
+        var integrates = context.AgentProfile?.RepositoryId is not null;
+
+        return JsonSerializer.SerializeToElement(new
+        {
+            systemPrompt = integrates ? SynthSystemPrompt + SynthIntegrationInstruction : SynthSystemPrompt,
+            // BYTE-IDENTICAL to the pre-continue prompt on a repo-less graph: the data half of the reduce carries the
+            // goal and the results, and nothing else. The failure half rides the SYSTEM prompt instead, so a run in
+            // which nothing failed is never handed a "Subtasks that failed: 0" line — the reduce learns about a failure
+            // from the marker actually sitting in its results, which is the only place the fact exists per-run. (A
+            // build-time conditional cannot express this: the failure count is a RUN-time fact and the prompt is frozen
+            // into the definition.) A repo-bound graph also carries what landed — on a clean run ONE factual sentence —
+            // because that is the fact the reduce needs in order to call the work delivered, not failure furniture.
+            userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n" + SynthResultsRef + (integrates ? IntegrationOutcomeSection : ""),
+        });
+    }
 
     /// <summary>
     /// The reduce's instruction. The failure clause is what continue-on-error requires of it: the run now reaches
@@ -277,6 +294,19 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         "Combine the per-subtask results into one coherent answer that addresses the goal. "
         + "A subtask that FAILED appears in the results as an {\"error\": ...} entry instead of a result: never present its work as done — "
         + "say which subtasks failed, what they were meant to deliver, and what is therefore missing from the answer.";
+
+    /// <summary>
+    /// What a REPO-BOUND reduce is told about the integration outcome it is shown, appended to
+    /// <see cref="SynthSystemPrompt"/> only when the graph has an integrate node — a repo-less reduce has no such
+    /// outcome, and a sentence about one would only invite the model to invent it. The two verbs carry the honesty
+    /// contract: what landed is stated as delivered, and anything conflicted or withheld is named as NOT delivered.
+    /// </summary>
+    internal const string SynthIntegrationInstruction =
+        " The integration outcome tells you what actually landed on the integrated branch; state what landed, "
+        + "and name anything conflicted or withheld as NOT delivered — never narrate withheld work as done.";
+
+    /// <summary>The data half's integration section (repo-bound graphs only): the integrate node's own rendering of what landed, bound whole into the prompt. The key is one <c>git.integrate_run</c> declares in its OutputSchema, which <c>DefinitionValidator</c> enforces at build.</summary>
+    private const string IntegrationOutcomeSection = "\n\nIntegration outcome:\n{{nodes.integrate.outputs.summary}}";
 
     /// <summary>The reduce's results binding, composed from <see cref="WorkflowOutputKeys.MapResultsPrompt"/> so the prompt and the key the reducer writes cannot drift apart.</summary>
     private const string SynthResultsRef = "{{nodes.map.outputs." + WorkflowOutputKeys.MapResultsPrompt + "}}";

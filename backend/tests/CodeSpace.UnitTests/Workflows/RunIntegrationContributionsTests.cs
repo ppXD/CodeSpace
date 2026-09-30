@@ -233,6 +233,145 @@ public class RunIntegrationContributionsTests
         contributions.ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/passed");
     }
 
+    // ─── What the head withheld is NAMED, not just dropped ───────────────────────────
+    //
+    // The withhold gate above removes a unit from every outcome the integration reports, so a reader of the outcome —
+    // the plan-map synth first — could not tell a run that integrated everything from one that integrated everything
+    // except the unit its own definition-of-done rejected. `Withheld` is the gate's other face: the same verdict, the
+    // same rows, reported instead of discarded.
+
+    [Theory]
+    [InlineData(PublishAcceptanceState.Failed, "acceptance Failed")]
+    [InlineData(PublishAcceptanceState.Waived, "acceptance Waived")]
+    public void A_unit_the_head_withheld_is_named_with_the_verdict_that_withheld_it(PublishAcceptanceState state, string reason)
+    {
+        var runId = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: state) },
+            new[] { Work(runId, "agent", "map#0", minute: 1) });
+
+        withheld.ShouldHaveSingleItem().ShouldBe(new WithheldContribution("agent#map#0", reason),
+            customMessage: "the label is the unit id the integration outcome names its contributions by — so a reader can line the two up");
+    }
+
+    [Theory]
+    [InlineData(PublishAcceptanceState.Passed)]
+    [InlineData(PublishAcceptanceState.NotApplicable)]
+    public void A_unit_the_head_kept_is_never_reported_withheld(PublishAcceptanceState state)
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: state) },
+            new[] { Work(runId, "agent", "map#0", minute: 1) })
+            .ShouldBeEmpty("a unit that reaches the candidate is not withheld — naming it would contradict the integration outcome");
+    }
+
+    /// <summary>The two views partition the produced units: every unit is either a contribution or withheld, never both and never neither — which is the property that makes "what landed" plus "what was withheld" a complete account.</summary>
+    [Fact]
+    public void What_landed_and_what_was_withheld_partition_the_produced_units()
+    {
+        var flunked = Guid.NewGuid();
+        var passed = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(flunked, Repo, PublishState.Pushed, branch: "codespace/agent/flunked", acceptance: PublishAcceptanceState.Failed),
+            Manifest(passed, Repo, PublishState.Pushed, branch: "codespace/agent/passed", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { Work(flunked, "agent", "map#0", minute: 1), Work(passed, "agent", "map#1", minute: 2) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).Select(c => c.Label).ShouldBe(new[] { "agent#map#1" });
+        RunIntegrationContributions.Withheld(Repo, manifests, work).Select(w => w.Label).ShouldBe(new[] { "agent#map#0" });
+    }
+
+    /// <summary>A retry respawns a fresh agent run, so a unit whose first attempt flunked and whose second passed has BOTH rows in the ledger — and its work landed. Reporting the flunked attempt would tell the reduce that delivered work was not delivered.</summary>
+    [Fact]
+    public void A_unit_whose_retry_landed_is_not_reported_withheld_for_its_abandoned_attempt()
+    {
+        var abandoned = Guid.NewGuid();
+        var respawned = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(abandoned, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+            Manifest(respawned, Repo, PublishState.Pushed, branch: "codespace/agent/a2", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { Work(abandoned, "agent", "map#0", minute: 1), Work(respawned, "agent", "map#0", minute: 7) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldHaveSingleItem();
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldBeEmpty("the unit's work reached the candidate through its second attempt");
+    }
+
+    [Fact]
+    public void Every_attempt_of_a_withheld_unit_is_reported_once_under_its_latest_verdict()
+    {
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var third = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[]
+            {
+                Manifest(first, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(second, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(third, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Waived),
+            },
+            new[] { Work(first, "agent", "map#0", minute: 1), Work(second, "agent", "map#0", minute: 4), Work(third, "agent", "map#0", minute: 8) });
+
+        withheld.ShouldHaveSingleItem(customMessage: "the retries of one unit are one unit — a row per attempt would name it three times")
+            .Reason.ShouldBe("acceptance Waived", "the unit stands at its latest attempt's verdict");
+    }
+
+    /// <summary>The supervisor lane's cell is a whole turn, so its K agents share one label while being K distinct deliverables: a peer that landed must not hide the one that was withheld, which is why "did the unit land" is keyed on the agent there and on the cell everywhere else.</summary>
+    [Fact]
+    public void A_supervisor_turns_withheld_agent_is_named_even_though_a_peer_sharing_its_cell_landed()
+    {
+        var alpha = Guid.NewGuid();
+        var beta = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(alpha, Repo, PublishState.Pushed, branch: "codespace/agent/s1", acceptance: PublishAcceptanceState.Failed),
+            Manifest(beta, Repo, PublishState.Pushed, branch: "codespace/agent/s2", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { PlannedSupervisorWork(alpha, "sup#turn1", "subtask-a", minute: 1), PlannedSupervisorWork(beta, "sup#turn1", "subtask-b", minute: 2) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/s2");
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldHaveSingleItem().ShouldBe(new WithheldContribution("sup#sup#turn1", "acceptance Failed"));
+    }
+
+    [Fact]
+    public void Only_work_this_repository_actually_produced_can_be_withheld_from_it()
+    {
+        var foreignRepo = Guid.NewGuid();
+        var foreign = Guid.NewGuid();
+        var nothingProduced = Guid.NewGuid();
+        var mine = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[]
+            {
+                Manifest(foreign, foreignRepo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(nothingProduced, Repo, PublishState.None, acceptance: PublishAcceptanceState.Failed),
+                Manifest(mine, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+            },
+            new[] { Work(foreign, "agent", "map#0", minute: 1), Work(nothingProduced, "agent", "map#1", minute: 2), Work(mine, "agent", "map#2", minute: 3) });
+
+        withheld.Select(w => w.Label).ShouldBe(new[] { "agent#map#2" }, "another repository's verdict, and a row that produced nothing, are not this repository's withheld work");
+    }
+
+    [Fact]
+    public void Withheld_units_list_in_agent_run_creation_order_whatever_order_the_rows_arrive_in()
+    {
+        var late = Guid.NewGuid();
+        var early = Guid.NewGuid();
+        var middle = Guid.NewGuid();
+        var manifests = new[] { late, early, middle }.Select(id => Manifest(id, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed)).ToArray();
+        var work = new[] { Work(late, "agent", "map#2", minute: 9), Work(early, "agent", "map#0", minute: 3), Work(middle, "agent", "map#1", minute: 6) };
+
+        RunIntegrationContributions.Withheld(Repo, manifests, work).Select(w => w.Label).ShouldBe(new[] { "agent#map#0", "agent#map#1", "agent#map#2" });
+        RunIntegrationContributions.Withheld(Repo, manifests.Reverse().ToArray(), work.Reverse().ToArray()).Select(w => w.Label).ShouldBe(new[] { "agent#map#0", "agent#map#1", "agent#map#2" });
+    }
+
     [Fact]
     public void A_surviving_attempts_sibling_alias_rows_all_stay()
     {

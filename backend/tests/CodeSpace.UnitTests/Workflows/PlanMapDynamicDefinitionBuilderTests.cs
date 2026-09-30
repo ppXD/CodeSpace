@@ -167,6 +167,25 @@ public class PlanMapDynamicDefinitionBuilderTests
         done.Inputs.GetProperty("combined").GetString().ShouldBe("{{nodes.synth.outputs.text}}");
     }
 
+    /// <summary>The dynamic variant shares the base's reduce, so a repo-bound graph hands its synth the integrate node's account of what landed exactly as plan-map-synth does (the sibling's pin carries the exact prompt text) — and a repo-less one keeps its prompt untouched.</summary>
+    [Fact]
+    public void A_repo_bound_reduce_is_shown_what_actually_landed_like_its_sibling()
+    {
+        var bound = Builder.Build(Context(new ResolvedAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "claude-code" }));
+        var synth = bound.Nodes.Single(n => n.Id == "synth").Inputs;
+
+        synth.GetProperty("userPrompt").GetString()!.ShouldEndWith("\n\nIntegration outcome:\n{{nodes.integrate.outputs.summary}}",
+            customMessage: "the integrate node's own account of what landed rides the reduce prompt on this variant too");
+        synth.GetProperty("systemPrompt").GetString()!.ShouldContain("NOT delivered", customMessage: "and the reduce is told to name anything conflicted or withheld as not delivered");
+
+        var validation = RealValidator().Validate(bound);
+
+        validation.IsValid.ShouldBeTrue(customMessage: "the binding resolves against the integrate node's declared outputs: " + string.Join(" | ", validation.Errors));
+
+        Builder.Build(Context()).Nodes.Single(n => n.Id == "synth").Inputs.GetProperty("userPrompt").GetString()!
+            .ShouldNotContain("Integration outcome", customMessage: "a repo-less graph has no integrate node and keeps its prompt byte-for-byte");
+    }
+
     [Fact]
     public void Profile_maps_onto_the_planner_model_and_the_agent_body()
     {
