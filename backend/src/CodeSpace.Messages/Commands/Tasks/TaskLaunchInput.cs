@@ -82,9 +82,10 @@ public abstract record TaskLaunchInput
     /// credentialed-model ROW ids (<c>ModelCredentialModel</c> ids, NOT model names). EVERY id is validated TEAM-SCOPED
     /// by the service (fail-closed, exactly like the repos): a foreign / disabled / deleted-credential row rejects the
     /// whole launch. Baked into the projected <c>agent.supervisor</c> node's <c>allowedModelIds</c>, where every
-    /// dispatched agent's model must resolve to a row in the pool (out of pool ⇒ fails closed at dispatch). Null /
-    /// empty ⇒ the pool is ALL the team's credentialed models (byte-identical to no pool). Inert on a non-supervisor
-    /// projection (single-agent / map ignore it).
+    /// dispatched agent's model must resolve to a row in the pool (out of pool ⇒ fails closed at dispatch). A plan-map
+    /// run offers its planner only the pool and holds every branch to it; a single-agent run holds its one agent to it
+    /// (a pinned model outside it is clamped to the pool's default). Null / empty ⇒ the pool is ALL the team's
+    /// credentialed models (byte-identical to no pool). Its disposition on the route is reported on the launch result.
     /// </summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
@@ -94,8 +95,9 @@ public abstract record TaskLaunchInput
     /// validated TEAM-SCOPED by the service (fail-closed, exactly like the repos / model pool): a foreign / deleted
     /// persona rejects the whole launch. Baked into the projected <c>agent.supervisor</c> node's
     /// <c>allowedAgentDefinitionIds</c>, where every dispatched agent's effective persona (model-authored slug OR the
-    /// profile default) must be in the pool (out of pool ⇒ fails closed at dispatch). Null / empty ⇒ the pool is ALL
-    /// the team's personas (byte-identical to no pool). Inert on a non-supervisor projection.
+    /// profile default) must be in the pool (out of pool ⇒ fails closed at dispatch). On a plan-map / single-agent run
+    /// the launch's own persona is the only one any agent runs as, so a persona outside the pool refuses the launch.
+    /// Null / empty ⇒ the pool is ALL the team's personas (byte-identical to no pool).
     /// </summary>
     public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
 
@@ -132,7 +134,7 @@ public abstract record TaskLaunchInput
     /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): the plan-map tiers bake it into plan.author/plan.confirm's <c>reviewMode</c>; Deep bakes it into the supervisor's plan-scoped <c>planReviewMode</c> (plans only — never a critic call on every spawn/merge/stop). None (default, byte-identical) / Gate / Improve. Runs on <see cref="ReviewerModelId"/> when set. Inert on quick (no plan).</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
 
-    /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv (e.g. ["sh","check.sh"]) run against the run's reviewable head at the terminal stop; a non-zero exit fails the stop and withholds the branch. DISTINCT from the free-text <see cref="AcceptanceCriteria"/> (prompt-rendered, never executed). Null / empty ⇒ omitted ⇒ byte-identical. Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b) — an argv (e.g. ["sh","check.sh"]) graded on every route that advertises an operator-command adapter: Deep runs it against the run's reviewable head at the terminal stop (a non-zero exit fails the stop and withholds the branch), Quick grades its single agent with it. A plan-map route grades none, so a floor sent there refuses the launch — and on Auto it keeps the route off plan-map. DISTINCT from the free-text <see cref="AcceptanceCriteria"/> (prompt-rendered, never executed). Null / empty ⇒ omitted ⇒ byte-identical.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
     /// <summary>

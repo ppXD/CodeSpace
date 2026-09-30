@@ -62,10 +62,10 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's safety-budget caps projected onto the router's <c>CapsOverride</c> seam (the numeric caps only — autonomy/approval merge tighten-only). Null ⇒ the effort preset's caps stand. The router TIGHTENS the preset with a set cap; a cost cap force-stops the run via the supervisor's bounds.</summary>
     public RouteCaps? CapsOverride { get; init; }
 
-    /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches — validated TEAM-SCOPED (fail-closed) + baked into the supervisor node's <c>allowedModelIds</c>. Null / empty ⇒ all the team's models (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's allowed model pool (credentialed-model ROW ids) the run's agents are held to — validated TEAM-SCOPED (fail-closed). The supervisor gates every spawn inside it; plan-map offers its planner only the pool and holds every branch to it; single-agent holds its one agent to it (a pinned model outside it is clamped to the pool's default). Null / empty ⇒ all the team's models (byte-identical). Its disposition on the route is reported on the launch result.</summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
-    /// <summary>The operator's allowed AGENT (persona) pool (<c>AgentDefinition</c> ROW ids) for the agents a Deep run dispatches — validated TEAM-SCOPED (fail-closed) + baked into the supervisor node's <c>allowedAgentDefinitionIds</c>. Null / empty ⇒ all the team's personas (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's allowed AGENT (persona) pool (<c>AgentDefinition</c> ROW ids) — validated TEAM-SCOPED (fail-closed). The supervisor gates every spawn inside it; on plan-map / single-agent the launch's own persona is the only one any agent runs as, so a persona outside the pool refuses the launch. Null / empty ⇒ all the team's personas (byte-identical). Its disposition on the route is reported on the launch result.</summary>
     public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
 
     /// <summary>The operator's free-text ACCEPTANCE CRITERIA — rendered into the supervisor decider prompt as the definition of done (NOT executed; distinct from the <c>acceptanceChecks</c> argv floor). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
@@ -77,7 +77,7 @@ public sealed record TaskLaunchRequest
     /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): plan.author/plan.confirm <c>reviewMode</c> on the plan-map tiers, the supervisor's plan-scoped <c>planReviewMode</c> on Deep. <see cref="ReviewMode.None"/> (default) ⇒ omitted (byte-identical). Inert on quick.</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
 
-    /// <summary>The operator's EXECUTABLE acceptance floor (S4b, Deep only) — an argv baked into the supervisor node's <c>acceptanceChecks</c>, enforced at the terminal stop. Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b) — an argv graded on every route whose builder advertises an operator-command adapter: the supervisor's terminal stop, the single agent's own oracle. A plan-map route grades none, so a floor sent to it refuses the launch, and on the auto path a floor keeps the route off plan-map. Null / empty ⇒ omitted (byte-identical).</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
     /// <summary>DC-2a: the operator's OWN pre-declared delivery preference — baked into the supervisor node's <c>deliverySpec</c>, PER FIELD authoritative over the model's plan-time proposal. Null ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>

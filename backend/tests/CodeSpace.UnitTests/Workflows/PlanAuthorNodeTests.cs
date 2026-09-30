@@ -103,6 +103,18 @@ public class PlanAuthorNodeTests
     }
 
     [Fact]
+    public void The_allowed_model_pool_maps_into_the_planner_request_and_an_absent_one_is_unbounded()
+    {
+        // The pool bounds the capability catalog the planner allocates subtasks from; each branch's agent.run is where
+        // it is enforced, so the node reads it defensively like every other planner knob.
+        var pooled = Guid.NewGuid();
+
+        PlanAuthorNode.BuildPlanRequest(Config($$"""{"allowedModelIds":["{{pooled}}","not-a-uuid"]}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).AllowedModelIds.ShouldBe(new[] { pooled });
+        PlanAuthorNode.BuildPlanRequest(Config("""{"allowedModelIds":["not-a-uuid"]}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).AllowedModelIds.ShouldBeNull();
+        PlanAuthorNode.BuildPlanRequest(Config("""{}"""), Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).AllowedModelIds.ShouldBeNull("no pool ⇒ the whole team pool — the catalog the planner has always seen");
+    }
+
+    [Fact]
     public void The_launch_base_pin_maps_into_the_planner_request_and_a_blank_pin_is_omitted()
     {
         // S1: the projection's pinnedSha config reaches the plan request, so the grounded reviewer clones the SAME

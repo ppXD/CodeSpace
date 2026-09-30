@@ -1,4 +1,9 @@
 using CodeSpace.Core.Services.Tasks;
+using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapDynamic;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
@@ -7,11 +12,12 @@ namespace CodeSpace.UnitTests.Tasks;
 
 /// <summary>
 /// Pins P3.2's two tier-mandate choke points: <see cref="TaskLaunchService.EnsureAcceptanceMandate"/> (Delivery/
-/// Unattended on a SUPERVISOR-projected launch must carry an executable <c>acceptanceChecks</c> floor, fail-loud
-/// otherwise) and <see cref="TaskLaunchService.BuildAgentProfile"/>'s tier-aware <c>OutputReviewMode</c> floor
-/// (Delivery ⇒ at least Gate, Unattended ⇒ at least Improve — a MINIMUM an operator's explicit choice can only
-/// raise, never lower). Both are pure, so they're unit-pinned directly here (no DB) — the integration tier proves
-/// a Delivery launch without an acceptance check is rejected through the REAL <c>ITaskLaunchService</c>.
+/// Unattended on a launch whose route GRADES an operator floor — the supervisor and the single agent both do — must
+/// carry an executable <c>acceptanceChecks</c> floor, fail-loud otherwise) and <see cref="TaskLaunchService.BuildAgentProfile"/>'s
+/// tier-aware <c>OutputReviewMode</c> floor (Delivery ⇒ at least Gate, Unattended ⇒ at least Improve — a MINIMUM an
+/// operator's explicit choice can only raise, never lower). Both are pure, so they're unit-pinned directly here (no
+/// DB) — the integration tier proves a Delivery launch without an acceptance check is rejected through the REAL
+/// <c>ITaskLaunchService</c>. "Grades a floor" is read the way the launch reads it: the REAL builder's own advertisement.
 /// </summary>
 [Trait("Category", "Unit")]
 public class TaskLaunchServiceQualityTierTests
@@ -29,45 +35,67 @@ public class TaskLaunchServiceQualityTierTests
         AcceptanceChecks = acceptanceChecks,
     };
 
-    // ── EnsureAcceptanceMandate — Delivery/Unattended on a supervisor launch must carry an acceptance floor ──
+    // ── EnsureAcceptanceMandate — Delivery/Unattended on a route that grades a floor must carry one ──
+
+    /// <summary>Whether the builder's route grades an operator floor — the SAME advertisement the launch's control resolution reads.</summary>
+    private static bool GradesFloor(IWorkflowDefinitionBuilder builder) => builder.OperatorAcceptance.AcceptsCommand == true;
+
+    public static IEnumerable<object[]> FloorGradingRoutesAtMandatedTiers()
+    {
+        foreach (var tier in new[] { QualityTier.Delivery, QualityTier.Unattended })
+        {
+            yield return new object[] { tier, TaskProjectionKinds.Supervisor };
+            yield return new object[] { tier, TaskProjectionKinds.SingleAgent };
+        }
+    }
+
+    private static IWorkflowDefinitionBuilder Builder(string projectionKind) => projectionKind switch
+    {
+        TaskProjectionKinds.Supervisor => new SupervisorDefinitionBuilder(),
+        TaskProjectionKinds.SingleAgent => new SingleAgentDefinitionBuilder(),
+        TaskProjectionKinds.PlanMapSynth => new PlanMapSynthDefinitionBuilder(),
+        _ => new PlanMapDynamicDefinitionBuilder(),
+    };
 
     [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_supervisor_launch_at_delivery_or_unattended_quality_without_an_acceptance_check_is_rejected(QualityTier tier)
+    [MemberData(nameof(FloorGradingRoutesAtMandatedTiers))]
+    public void A_launch_whose_route_grades_a_floor_at_delivery_or_unattended_quality_without_an_acceptance_check_is_rejected(QualityTier tier, string projectionKind)
     {
+        // Quick grades its single agent with the operator's argv exactly as Deep grades its terminal stop, so claiming
+        // Delivery there without one is the same unverified claim — it used to launch because the mandate asked
+        // "is this the supervisor?" rather than "does this route grade a floor?".
         var ex = Should.Throw<ArgumentException>(() =>
-            TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.Supervisor)));
+            TaskLaunchService.EnsureAcceptanceMandate(Request(tier), GradesFloor(Builder(projectionKind))));
 
         ex.Message.ShouldContain("acceptanceChecks", Case.Insensitive, "the operator needs an actionable name for the missing lever");
         ex.Message.ShouldContain(tier.ToString());
     }
 
     [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_supervisor_launch_with_an_authored_acceptance_check_is_not_rejected(QualityTier tier)
+    [MemberData(nameof(FloorGradingRoutesAtMandatedTiers))]
+    public void A_launch_with_an_authored_acceptance_check_is_not_rejected(QualityTier tier, string projectionKind)
     {
         Should.NotThrow(() =>
-            TaskLaunchService.EnsureAcceptanceMandate(Request(tier, new[] { "sh", "check.sh" }), Route(TaskProjectionKinds.Supervisor)));
+            TaskLaunchService.EnsureAcceptanceMandate(Request(tier, new[] { "sh", "check.sh" }), GradesFloor(Builder(projectionKind))));
     }
 
     [Fact]
-    public void A_supervisor_launch_at_prototype_quality_or_no_tier_is_never_rejected()
+    public void A_launch_at_prototype_quality_or_no_tier_is_never_rejected()
     {
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(QualityTier.Prototype), Route(TaskProjectionKinds.Supervisor)));
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier: null), Route(TaskProjectionKinds.Supervisor)));
+        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(QualityTier.Prototype), GradesFloor(Builder(TaskProjectionKinds.Supervisor))));
+        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier: null), GradesFloor(Builder(TaskProjectionKinds.SingleAgent))));
     }
 
     [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_non_supervisor_launch_at_delivery_or_unattended_quality_is_never_rejected(QualityTier tier)
+    [InlineData(QualityTier.Delivery, TaskProjectionKinds.PlanMapSynth)]
+    [InlineData(QualityTier.Delivery, TaskProjectionKinds.PlanMapDynamic)]
+    [InlineData(QualityTier.Unattended, TaskProjectionKinds.PlanMapSynth)]
+    [InlineData(QualityTier.Unattended, TaskProjectionKinds.PlanMapDynamic)]
+    public void A_plan_map_launch_at_delivery_or_unattended_quality_is_not_asked_for_a_floor_it_cannot_grade(QualityTier tier, string projectionKind)
     {
-        // AcceptanceChecks is inert on a non-supervisor projection today — this PR doesn't invent new acceptance-floor
-        // plumbing for single-agent/plan-map launches, so the mandate is inert there too, matching that existing shape.
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.SingleAgent)));
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.PlanMapDynamic)));
+        // Plan-map grades no operator floor (its items carry their own contracts), and a floor sent to it is refused
+        // before the mandate runs — demanding one here would make the lane unlaunchable at these tiers.
+        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier), GradesFloor(Builder(projectionKind))));
     }
 
     // ── BuildAgentProfile's tier-aware OutputReviewMode floor ──

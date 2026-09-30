@@ -44,17 +44,23 @@ public class TaskRoutePreviewServiceTests
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    private static TaskProjectionRegistry Projections() => new([new SingleAgentDefinitionBuilder(), new SupervisorDefinitionBuilder(), new PlanMapSynthDefinitionBuilder()]);
+
     private static IEffortRouter Router() => new EffortRouter(
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
         new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }),
         new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+        Projections());
+
+    /// <summary>The launch's own control resolver over the same builders. No preview here sets a model pool, so the pool is never consulted — a lookup would throw.</summary>
+    private static LaunchControlResolver Controls() => new(Projections(), new UnconsultedModelPool());
 
     private static TaskRoutePreviewService Preview(IEffortRouter router) => new(
         new TaskLaunchSeedProviderRegistry(new ITaskLaunchSeedProvider[] { new ChatSeedProvider() }),
         new AllRepositoriesInTeam(),
-        new RoutingOnlySnapshotStore(router), new TaskProjectionRegistry([new SingleAgentDefinitionBuilder(), new SupervisorDefinitionBuilder(), new PlanMapSynthDefinitionBuilder()]),
-        new ModeProfileRegistry());
+        new RoutingOnlySnapshotStore(router), Projections(),
+        new ModeProfileRegistry(), Controls());
 
     private static TaskLaunchRequest Request(string goal, string? effort = null, string? recipe = null, RouteCaps? caps = null, string? shape = null, string? autonomy = null, string? completionMode = null) => new()
     {
@@ -156,11 +162,47 @@ public class TaskRoutePreviewServiceTests
     public async Task Unadvertised_projection_compatibility_stays_unknown_without_changing_the_route_identity()
     {
         var request = Request("Inspect this task", TaskEffortModes.Quick) with { RepositoryId = Guid.NewGuid() };
-        var service = new TaskRoutePreviewService(new TaskLaunchSeedProviderRegistry([new ChatSeedProvider()]), new AllRepositoriesInTeam(), new RoutingOnlySnapshotStore(Router()), new TaskProjectionRegistry([]), new ModeProfileRegistry());
+        var service = new TaskRoutePreviewService(new TaskLaunchSeedProviderRegistry([new ChatSeedProvider()]), new AllRepositoriesInTeam(), new RoutingOnlySnapshotStore(Router()), new TaskProjectionRegistry([]), new ModeProfileRegistry(), Controls());
         var unknown = await service.PreviewAsync(request, CancellationToken.None);
         var known = await Preview(Router()).PreviewAsync(request, CancellationToken.None);
         unknown.AcceptanceCompatibility!.State.ShouldBe(TaskAcceptanceCompatibilityState.Unknown);
         JsonSerializer.Serialize(unknown.Route, Json).ShouldBe(JsonSerializer.Serialize(known.Route, Json));
+    }
+
+    // ─── Control dispositions: the preview states what the launch will do with each route-dependent control ─────────
+
+    [Fact]
+    public async Task Preview_reports_the_same_control_dispositions_the_launch_resolves_for_the_same_input()
+    {
+        // An explicit Standard launch carrying an operator floor and a decision critic: plan-map grades no floor (the
+        // launch refuses it — with the preview's own acceptance verdict as the reason) and reviews no decisions.
+        var request = Request("Validate the report", TaskEffortModes.Standard) with { AcceptanceChecks = ["sh", "check.sh"], DecisionReviewMode = Messages.Enums.ReviewMode.Gate, RepositoryId = Guid.NewGuid() };
+
+        var preview = await Preview(Router()).PreviewAsync(request, CancellationToken.None);
+        var launch = await Controls().ResolveAsync(request, preview.Route, CancellationToken.None);
+
+        preview.ControlDispositions.ShouldNotBeNull();
+        JsonSerializer.Serialize(preview.ControlDispositions, Json).ShouldBe(JsonSerializer.Serialize(launch.Dispositions, Json),
+            customMessage: "the preview must call the launch's own resolver — a divergence here is a preview promising a launch it will not get");
+
+        var floor = preview.ControlDispositions!.Single(d => d.Control == LaunchControls.AcceptanceChecks);
+        floor.Outcome.ShouldBe(LaunchControlOutcome.Refused);
+        floor.Reason.ShouldBe(preview.AcceptanceCompatibility!.Detail, "the refusal names the same reason the preview's acceptance verdict gives");
+
+        preview.ControlDispositions!.Single(d => d.Control == LaunchControls.DecisionReviewMode).Outcome.ShouldBe(LaunchControlOutcome.NotApplicable);
+    }
+
+    [Fact]
+    public async Task A_disposition_serializes_its_outcome_by_name_and_a_control_free_input_reports_none()
+    {
+        var preview = await Preview(Router()).PreviewAsync(Request("Fix a small typo", TaskEffortModes.Quick) with { DeliverySpec = new DeliverySpec { OpenPullRequest = true } }, CancellationToken.None);
+
+        var wire = JsonSerializer.SerializeToElement(preview, Json).GetProperty("controlDispositions").EnumerateArray().Single();
+        wire.GetProperty("control").GetString().ShouldBe("deliverySpec");
+        wire.GetProperty("outcome").GetString().ShouldBe("NotApplicable", "the wire carries the outcome's name, not an ordinal a client would have to decode");
+        wire.GetProperty("reason").GetString().ShouldNotBeNullOrWhiteSpace();
+
+        (await Preview(Router()).PreviewAsync(Request("Fix a small typo", TaskEffortModes.Quick), CancellationToken.None)).ControlDispositions.ShouldBeEmpty();
     }
 
     // ─── Posture (arc3 item 3.2): "preview is not the run" ─────────────────────────────────────────────────────
@@ -258,6 +300,18 @@ public class TaskRoutePreviewServiceTests
         public async Task<TaskRoutePreviewResult> CreateAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken) => new() { Route = await router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed, request), cancellationToken), DeploymentAutonomyCeiling = "Unleashed" };
         public Task<TaskRouteSnapshotDecision> ReadAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<LaunchTaskResult> ConsumeAsync(TaskRouteSnapshotConsumption consumption, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    /// <summary>A model pool no preview here may consult: none of them sets <c>allowedModelIds</c>, so any lookup is a resolver reaching for the pool when it has nothing to bound.</summary>
+    private sealed class UnconsultedModelPool : Core.Services.Agents.ModelCredentials.IModelPoolSelector
+    {
+        public Task<Core.Services.Agents.ModelCredentials.ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Core.Services.Agents.ModelCredentials.ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Core.Services.Agents.ModelCredentials.ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> ResolvePinnedBrainRowIdAsync(Guid teamId, Guid modelCredentialModelId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<string?> ResolveTeamDefaultProviderAsync(Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     /// <summary>A guard that accepts every repo — tenancy itself is proven against real Postgres in the integration tier; these tests pin the routing, not the query.</summary>

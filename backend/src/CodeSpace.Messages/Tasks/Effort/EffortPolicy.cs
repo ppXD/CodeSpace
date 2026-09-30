@@ -29,6 +29,18 @@ public static class EffortPolicy
         return Rows.First(row => row.Matches(signals)).Mode;
     }
 
+    /// <summary>
+    /// The tier for <paramref name="signals"/> among the tiers <paramref name="admits"/> accepts: the table's first row
+    /// that both matches and is admitted, so a set-aside tier falls to the next matching row down. When no admitted
+    /// row matches, the unconstrained pick stands and the caller decides what a tier it cannot use means.
+    /// </summary>
+    public static string Decide(EffortSignals signals, string? requestedEffort, Func<string, bool> admits)
+    {
+        if (IsExplicitOperatorTier(requestedEffort)) return requestedEffort!.Trim();
+
+        return Rows.FirstOrDefault(row => row.Matches(signals) && admits(row.Mode))?.Mode ?? Decide(signals, requestedEffort);
+    }
+
     /// <summary>An operator tier is explicit when it is non-blank and not the <c>"auto"</c> sentinel — those are honoured verbatim, the rest classify.</summary>
     private static bool IsExplicitOperatorTier(string? requestedEffort) =>
         !string.IsNullOrWhiteSpace(requestedEffort) && !string.Equals(requestedEffort.Trim(), TaskEffortModes.Auto, StringComparison.OrdinalIgnoreCase);

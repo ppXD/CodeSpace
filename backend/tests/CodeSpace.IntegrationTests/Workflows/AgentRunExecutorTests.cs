@@ -686,6 +686,62 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_bounded_run_naming_a_model_outside_its_pool_runs_the_pooled_row_persists_it_and_names_the_move()
+    {
+        // The plan-map branch shape: the planner authored a model the operator's pool excludes, pinned to that model's
+        // own credential. At launch the executor must run the POOLED row — its model on its own key — persist it so a
+        // re-attach and every reader agree, and say on the run's timeline why the model moved.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var pooledCredential = await SeedModelCredentialAsync(teamId, "scripted-provider", "sk-pooled-key");
+        var pooledRow = await SeedModelRowAsync(pooledCredential, "pooled-model");
+        var outsideCredential = await SeedModelCredentialAsync(teamId, "scripted-provider", "sk-outside-key");
+        await SeedModelRowAsync(outsideCredential, "outside-model");
+
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "outside-model", ModelCredentialId = outsideCredential, AllowedModelIds = [pooledRow] });
+
+        await ExecuteAsync(runId, new ProjectingScriptedHarness("scripted-provider", "SCRIPTED_MODEL_KEY", "if [ \"$SCRIPTED_MODEL_KEY\" = 'sk-pooled-key' ]; then echo POOLED_KEY; else echo OTHER_KEY; fi"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        var persisted = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)!;
+        persisted.Model.ShouldBe("pooled-model", "the persisted task is the one that ran — a re-attach redacts and folds against it");
+        persisted.ModelCredentialId.ShouldBe(pooledCredential);
+
+        var events = (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ToList();
+        events.Select(e => e.Text).ShouldContain("POOLED_KEY", "the REAL child process ran on the pooled row's credential, not the excluded model's");
+        events.ShouldContain(e => e.Kind == AgentEventKind.Warning && e.Text.Contains("outside-model") && e.Text.Contains("pooled-model"),
+            customMessage: "the move is named on the run's timeline — never a silent swap");
+    }
+
+    [Fact]
+    public async Task A_bounded_run_whose_pool_resolves_nothing_fails_rather_than_run_outside_it()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var credential = await SeedModelCredentialAsync(teamId, "scripted-provider", "sk-only-key");
+        var pooledRow = await SeedModelRowAsync(credential, "pooled-model");
+        await DisableModelRowAsync(pooledRow);   // the operator disabled every pooled model after the launch was staged
+
+        var runId = await CreateTaskRunAsync(teamId, new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "pooled-model", ModelCredentialId = credential, AllowedModelIds = [pooledRow] });
+
+        await ExecuteAsync(runId, new ProjectingScriptedHarness("scripted-provider", "SCRIPTED_MODEL_KEY", "echo should-not-run"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "an agent bound to a pool that resolves nothing must not run on a model outside it");
+        run.Error.ShouldNotBeNull().ShouldContain("allowed model pool");
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text).ShouldNotContain("should-not-run");
+    }
+
+    [Fact]
     public async Task A_pinned_credential_from_another_team_lands_the_run_failed_clean()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1485,6 +1541,26 @@ public partial class AgentRunExecutorTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = modelCredentialId, ModelId = modelId, IsDefault = true, Enabled = true });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed one enabled credentialed-model row under <paramref name="modelCredentialId"/> and return its id — an allowed-pool entry.</summary>
+    private async Task<Guid> SeedModelRowAsync(Guid modelCredentialId, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = modelCredentialId, ModelId = modelId, Enabled = true });
+        await db.SaveChangesAsync();
+        return rowId;
+    }
+
+    private async Task DisableModelRowAsync(Guid rowId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId)).Enabled = false;
         await db.SaveChangesAsync();
     }
 

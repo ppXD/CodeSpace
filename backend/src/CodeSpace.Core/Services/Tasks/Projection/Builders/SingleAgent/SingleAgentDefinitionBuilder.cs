@@ -92,10 +92,12 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
                 // staked requirement rows never credit the operator with a shape-derived contract the server composed.
                 // B2: the SHAPE decides the agent's mode (a question is not a coding run) and, absent an operator floor,
                 // which oracle grades it — a code-shaped launch with no floor stays byte-identical (no mode, no oracle).
-                Config = AgentNodeMapping.WithCostCap(AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, mode: DeliverableShapes.AgentModeFor(context.Route.DeliverableShape),
+                // The operator's allowed model pool rides the node too, so the one agent is held to it at dispatch — the
+                // launch already clamped a pinned model outside it, and this covers the model a persona supplies.
+                Config = AgentNodeMapping.WithAllowedModels(AgentNodeMapping.WithCostCap(AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, mode: DeliverableShapes.AgentModeFor(context.Route.DeliverableShape),
                                                            grounding: context.GroundingContext, acceptance: QuickAcceptance(context), criteria: context.AcceptanceCriteria,
                                                            acceptanceAuthority: OperatorArgv(context) is null ? null : nameof(Messages.Contracts.ContractAuthority.Operator),
-                                                           deliverablePath: DeliverablePath(context)), context.Route.Caps.MaxCostUsd), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                                                           deliverablePath: DeliverablePath(context)), context.Route.Caps.MaxCostUsd), context.AllowedModelIds), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
                 Inputs = TerminalInputs(IsMultiRepo(context)) },
