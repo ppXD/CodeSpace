@@ -95,7 +95,20 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
                 else counts.Record(settlement.State);
             }
         }
-        return counts.Summary();
+        var summary = counts.Summary();
+
+        LogReconciledWave(summary);
+
+        return summary;
+    }
+
+    // The recurring job discards the summary, so this line is the only reader of the wave's tally, lost leases included.
+    // A wave that claimed nothing has nothing to report, and every idle worker would otherwise log it each minute.
+    private void LogReconciledWave(AgentRunLogCaptureRecoverySummary summary)
+    {
+        if (summary.Claimed == 0) return;
+
+        _logger.LogInformation("Agent run log capture recovery claimed {Claimed} intent(s): {Completed} completed, {CaptureFailed} capture-failed, {Superseded} superseded, {ExternalStateIndeterminate} indeterminate, {Retried} retried, {LostLease} lost their lease or could not settle", summary.Claimed, summary.Completed, summary.CaptureFailed, summary.Superseded, summary.ExternalStateIndeterminate, summary.Retried, summary.LostLease);
     }
 
     private async Task<RecoverySettlement> RecoverClaimAsync(RecoveryClaim claim, CancellationToken cancellationToken)
@@ -109,9 +122,10 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         {
             outcome = RecoveryOutcome.Retry(claim.StreamId, claim.State, "recovery-operation-timeout", "The bounded log recovery operation timed out.");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             outcome = RecoveryOutcome.Retry(claim.StreamId, claim.State, "recovery-operation-exception", "The log recovery operation raised an unexpected error.");
+            LogFailedRecovery(claim, outcome, exception);
         }
 
         using var settlement = new CancellationTokenSource(_options.OperationTimeout);
@@ -125,6 +139,17 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             LogUnsettledClaim(claim, attempt.Outcome, exception);
             return new RecoverySettlement(outcome.State, true);
         }
+    }
+
+    // An unexpected error from the recovery step becomes a typed retry whose last_error_code names no cause, so a
+    // deterministic one repeats on every retry until the intent is exhausted, and its cause is visible only here. The
+    // line is written before the settlement runs, so it names the step's outcome and promises nothing the settlement
+    // decides: the settlement may supersede or exhaust the intent instead, or write nothing at all.
+    private void LogFailedRecovery(RecoveryClaim claim, RecoveryOutcome outcome, Exception exception)
+    {
+        var refusal = DatabaseRefusal(exception);
+
+        _logger.LogWarning(exception, "Agent run {RunId} log capture intent {IntentId} could not be recovered: the recovery step raised an unexpected error (SQLSTATE {SqlState}: {MessageText}); the step's outcome is a typed retry as {Outcome} with last_error_code {OutcomeCode}, which the settlement writes unless the settlement supersedes or exhausts the intent, or cannot settle it", claim.AgentRunId, claim.Id, refusal?.SqlState, refusal?.MessageText, outcome.State, outcome.ErrorCode);
     }
 
     // A settlement that raises is treated as unwritten: its claim keeps this wave's owner and lease, so nothing re-claims
@@ -273,7 +298,10 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
         var now = await DatabaseClockAsync(db, cancellationToken).ConfigureAwait(false);
         if (run == null || row == null || row.RecoveryOwnerId != claim.RecoveryOwnerId || row.RecoveryFenceEpoch != claim.RecoveryFenceEpoch || row.RecoveryLeaseExpiresAt <= now)
+        {
+            LogLostClaim(claim, outcome, LostClaimCause(claim, run, row), null);
             return new RecoverySettlement(outcome.State, true);
+        }
 
         var manifestStreamId = await db.AgentRunLogStream.Where(value => value.TeamId == row.TeamId && value.AgentRunId == row.AgentRunId && value.StreamKind == row.StreamKind && value.SchemaVersion == 3)
             .Select(value => (Guid?)value.Id).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -318,7 +346,28 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new RecoverySettlement(settled.State, false);
         }
-        catch (DbUpdateConcurrencyException) { return new RecoverySettlement(settled.State, true); }
+        catch (DbUpdateConcurrencyException exception)
+        {
+            LogLostClaim(claim, settled, "row-version-changed", exception);
+            return new RecoverySettlement(settled.State, true);
+        }
+    }
+
+    /// <summary>Why a settlement whose claim no longer holds lost it; call it only once the lease re-check has failed.</summary>
+    private static string LostClaimCause(RecoveryClaim claim, AgentRun? run, AgentRunLogCaptureIntent? row)
+    {
+        if (run == null || row == null) return "claim-row-missing";
+
+        return row.RecoveryOwnerId != claim.RecoveryOwnerId || row.RecoveryFenceEpoch != claim.RecoveryFenceEpoch ? "reclaimed" : "lease-expired";
+    }
+
+    // A lease outlives both bounded steps of a claim, so a live worker loses one only when a step overran the bound its
+    // cancellation set, the process stalled, or the row changed under the settlement's own lock. The fence keeps that
+    // safe, but the discarded settlement is redone by a later claim, which spends another recovery attempt, and only
+    // this line says which claim it was and why.
+    private void LogLostClaim(RecoveryClaim claim, RecoveryOutcome outcome, string cause, Exception? exception)
+    {
+        _logger.LogWarning(exception, "Agent run {RunId} log capture intent {IntentId} lost its recovery claim ({Cause}) before it could settle as {Outcome} with last_error_code {OutcomeCode}; the settlement is discarded, and the claim's current holder, or the wave that re-claims it once its lease expires, settles the intent instead", claim.AgentRunId, claim.Id, cause, outcome.State, outcome.ErrorCode);
     }
 
     private CodeSpaceDbContext CreateDb() => new(_dbOptions);
