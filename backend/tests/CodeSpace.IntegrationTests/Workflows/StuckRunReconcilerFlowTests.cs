@@ -11,6 +11,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -625,6 +626,82 @@ public class StuckRunReconcilerFlowTests
             "window must protect it so we don't race the concurrent Suspended→Pending flip");
     }
 
+    [Theory]
+    [InlineData(WorkflowRunStatus.Cancelled)]
+    [InlineData(WorkflowRunStatus.Failure)]
+    [InlineData(WorkflowRunStatus.Success)]
+    public async Task A_stranded_suspended_sub_workflow_under_a_finished_parent_is_never_redispatched(WorkflowRunStatus finished)
+    {
+        // A child whose cancel failed during its parent's stop, and whose waits were then closed, sits Suspended with no
+        // pending wait — exactly what this sweep revives. Revived, it ran under a finished parent toward a wait that parent
+        // no longer holds open, spending on work no one is waiting for. The guard the Pending sweep has: a finished parent's
+        // child is not work anyone wants done.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var parentId = await StageStuckRunAsync(workflowId, teamId, finished, createdAgo: TimeSpan.FromHours(1));
+        var childId = await StageStrandedSuspendedUnderAsync(workflowId, teamId, parentId, WorkflowRunSourceTypes.ChildWorkflow);
+
+        var versionBefore = await ReadRowVersionAsync(childId);
+
+        await ReconcileAsync();
+
+        (await ReadRowVersionAsync(childId)).ShouldBe(versionBefore, $"a stranded sub-workflow under a {finished} parent must not be revived — nor touched at all");
+        (await ReadStatusAsync(childId)).ShouldBe(WorkflowRunStatus.Suspended);
+    }
+
+    [Theory]
+    [InlineData(WorkflowRunStatus.Running)]     // the parent walking on while its child is stranded
+    [InlineData(WorkflowRunStatus.Suspended)]   // the parent parked on its child's Subworkflow wait — how production holds a live parent
+    public async Task A_stranded_suspended_sub_workflow_under_a_live_parent_is_still_redispatched(WorkflowRunStatus live)
+    {
+        // The guard is on the parent having finished. A child stranded under a parent that still lives is what this sweep
+        // exists to revive — that parent is waiting on it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var parentId = await StageStuckRunAsync(workflowId, teamId, live, createdAgo: TimeSpan.FromMinutes(1), startedAtAgo: TimeSpan.FromMinutes(1));
+        var childId = await StageStrandedSuspendedUnderAsync(workflowId, teamId, parentId, WorkflowRunSourceTypes.ChildWorkflow);
+
+        if (live == WorkflowRunStatus.Suspended) await SeedSubworkflowWaitAsync(parentId, childId);
+
+        await ReconcileAsync();
+
+        (await ReadStatusAsync(childId)).ShouldBe(WorkflowRunStatus.Enqueued, $"a stranded sub-workflow under a {live} parent is revived like any stranded run");
+    }
+
+    [Fact]
+    public async Task A_stranded_suspended_rerun_of_a_finished_run_is_still_redispatched()
+    {
+        // The other meaning of ParentRunId: a rerun's parent is its lineage, which has finished by definition. The
+        // finished-parent guard is for sub-workflow children only — a rerun it swallowed would never be revived.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var originalId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Failure, createdAgo: TimeSpan.FromHours(1));
+        var rerunId = await StageStrandedSuspendedUnderAsync(workflowId, teamId, originalId, WorkflowRunSourceTypes.Rerun);
+
+        await ReconcileAsync();
+
+        (await ReadStatusAsync(rerunId)).ShouldBe(WorkflowRunStatus.Enqueued, "a stranded rerun of a finished run is revived like any stranded run");
+    }
+
+    [Fact]
+    public async Task The_sweep_says_how_many_stranded_sub_workflows_it_left_alone()
+    {
+        // The children it leaves Suspended stay Suspended, so without a line they would linger unseen.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var parentId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Cancelled, createdAgo: TimeSpan.FromHours(1));
+        await StageStrandedSuspendedUnderAsync(workflowId, teamId, parentId, WorkflowRunSourceTypes.ChildWorkflow);
+
+        var log = new RecordingLogger<StuckRunReconcilerService>();
+
+        await ReconcileAsync(log);
+
+        var entry = log.Entries.Where(e => e.Level == LogLevel.Information && e.Message.Contains("parent has finished")).ShouldHaveSingleItem("one line per sweep says so");
+
+        // >= not == : the count is deployment-wide (see the class note); the child this test staged is one of them.
+        ((int)entry.Properties["Count"]!).ShouldBeGreaterThanOrEqualTo(1, "the line carries the count as a structured property, not interpolated text");
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────────
 
     private async Task RunEngineAsync(Guid runId)
@@ -895,9 +972,9 @@ public class StuckRunReconcilerFlowTests
             WaitKind = WorkflowWaitKinds.Approval,
             Token = Guid.NewGuid().ToString("N"),
             Status = status,
-            PayloadJson = status == WorkflowWaitStatuses.Resolved ? "{}" : null,
+            PayloadJson = status != WorkflowWaitStatuses.Pending ? "{}" : null,
             CreatedAt = DateTimeOffset.UtcNow,
-            ResolvedAt = status == WorkflowWaitStatuses.Resolved ? DateTimeOffset.UtcNow : null,
+            ResolvedAt = status != WorkflowWaitStatuses.Pending ? DateTimeOffset.UtcNow : null,
         });
 
         await db.SaveChangesAsync();
@@ -1130,10 +1207,27 @@ public class StuckRunReconcilerFlowTests
     {
         var runId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Pending, createdAgo: StuckRunReconcilerService.PendingStuckAfter + TimeSpan.FromMinutes(1));
 
-        using var scope = _fixture.BeginScope();
-        await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.ParentRunId, parentRunId).SetProperty(r => r.SourceType, sourceType));
+        await LinkUnderAsync(runId, parentRunId, sourceType);
 
         return runId;
+    }
+
+    /// <summary>A Suspended run stranded past the grace window — no pending wait, the one wait it had closed Discarded, as a stop's teardown closes it — started under <paramref name="parentRunId"/> as <paramref name="sourceType"/>: a sub-workflow child, or a rerun whose parent is only its lineage.</summary>
+    private async Task<Guid> StageStrandedSuspendedUnderAsync(Guid workflowId, Guid teamId, Guid parentRunId, string sourceType)
+    {
+        var runId = await StageStuckRunAsync(workflowId, teamId, WorkflowRunStatus.Suspended, createdAgo: StuckRunReconcilerService.SuspendedStrandedAfter + TimeSpan.FromMinutes(5), backdateLastModified: true);
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Discarded);
+
+        await LinkUnderAsync(runId, parentRunId, sourceType);
+
+        return runId;
+    }
+
+    /// <summary>Point the run at its parent and say what kind of child it is. Written with ExecuteUpdate, which leaves the backdated timestamps the staging set alone.</summary>
+    private async Task LinkUnderAsync(Guid runId, Guid parentRunId, string sourceType)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.ParentRunId, parentRunId).SetProperty(r => r.SourceType, sourceType));
     }
 
     private async Task SeedLedgerRecordAsync(Guid runId, string recordType, DateTimeOffset occurredAt)
@@ -1162,6 +1256,13 @@ public class StuckRunReconcilerFlowTests
         using var scope = _fixture.BeginScope();
         var mediator = scope.Resolve<IMediator>();
         return await mediator.Send(new ReconcileStuckRunsCommand());
+    }
+
+    /// <summary>As <see cref="ReconcileAsync()"/>, in a scope whose reconciler logs to <paramref name="log"/>.</summary>
+    private async Task<ReconcileStuckRunsResponse> ReconcileAsync(ILogger<StuckRunReconcilerService> log)
+    {
+        using var scope = _fixture.BeginScope(b => b.RegisterInstance(log).As<ILogger<StuckRunReconcilerService>>());
+        return await scope.Resolve<IMediator>().Send(new ReconcileStuckRunsCommand());
     }
 
     /// <summary>The Postgres row version. Changes on any write, so it answers "was this row touched" rather than "what does it say now".</summary>
@@ -1197,5 +1298,18 @@ public class StuckRunReconcilerFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpace.Core.Services.Workflows.IWorkflowService>().ContinueRunAsync(runId, teamId, CancellationToken.None);
+    }
+
+    /// <summary>Keeps each entry's level, formatted message and structured properties — the named template values an interpolated message would not carry.</summary>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message, IReadOnlyDictionary<string, object?> Properties)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception), (state as IEnumerable<KeyValuePair<string, object?>> ?? []).ToDictionary(p => p.Key, p => p.Value)));
     }
 }

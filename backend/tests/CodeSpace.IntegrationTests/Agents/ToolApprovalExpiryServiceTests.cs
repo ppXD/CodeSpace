@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -13,6 +15,8 @@ using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Shouldly;
 
@@ -117,6 +121,58 @@ public class ToolApprovalExpiryServiceTests
             customMessage: "the durable CAS must be COMMITTED before the wake — a fresh-connection read at signal time saw the row as Expired, not the pre-commit AwaitingApproval. If this fails, the signal is firing inside the command transaction (see ExpireDueAsync deferring via IPostCommitActions).");
     }
 
+    [Theory]
+    [InlineData(false)]   // the service called with no transaction open: each row's follow-ups run inline, as the sweep reaches it
+    [InlineData(true)]    // the recurring job's command: one transaction, the follow-ups drained once it commits
+    public async Task A_card_mirror_that_fails_to_save_leaves_the_other_expired_approvals_woken_and_mirrored(bool throughTheCommand)
+    {
+        // The sweep expires its whole batch, then wakes each row's blocked call and mirrors its card. With no drain to
+        // swallow it, one card's failed save used to end those follow-ups right there: every later row unwoken, its card
+        // Open, and no tick to come back for it, since the sweep selects only rows still awaiting approval. The drain
+        // contains that per row but cannot name the row. And a card whose save failed must not stay tracked: the next
+        // card's save would write it as if it had landed.
+        var (teamId, channelId) = await SeedTeamChannelAsync();
+        var first = await ParkOverdueApprovalAsync(teamId, channelId, LongAgo);
+        var faulted = await ParkOverdueApprovalAsync(teamId, channelId, LongAgo.AddSeconds(1));
+        var last = await ParkOverdueApprovalAsync(teamId, channelId, LongAgo.AddSeconds(2));
+
+        var log = new RecordingLogger<ToolApprovalExpiryService>();
+        using var scope = BeginScopeFailingCardSaveOf(faulted.MessageId, log);
+        var waiters = scope.Resolve<IToolApprovalWaiterRegistry>();
+        var firstCall = waiters.Register(first.LedgerId);
+        var faultedCall = waiters.Register(faulted.LedgerId);
+        var lastCall = waiters.Register(last.LedgerId);
+
+        try
+        {
+            var expired = 0;
+            (await Record.ExceptionAsync(async () => expired = await SweepAsync(scope, throughTheCommand))).ShouldBeNull("one card's failed mirror is that card's, not the sweep's");
+
+            // >= not == : the tally is deployment-wide; the rows this test owns are the proof.
+            expired.ShouldBeGreaterThanOrEqualTo(3, "all three approvals were durably expired, whatever their follow-ups did");
+
+            foreach (var approval in new[] { first, faulted, last })
+                (await ReadRowAsync(approval.LedgerId)).Status.ShouldBe(ToolCallLedgerStatus.Expired, "the ledger row is the authority, and it stands");
+
+            (await WokenAsync(firstCall, "the first approval's blocked call")).ShouldBe(ToolApprovalOutcome.Expired);
+            (await WokenAsync(faultedCall, "the blocked call of the approval whose card failed to mirror")).ShouldBe(ToolApprovalOutcome.Expired, customMessage: "the wake is its own step: a failed mirror costs the call nothing");
+            (await WokenAsync(lastCall, "the last approval's blocked call, behind the failed card")).ShouldBe(ToolApprovalOutcome.Expired, customMessage: "check ToolApprovalExpiryService reached the rows after the failed mirror");
+
+            (await ReadInteractionStateAsync(first.MessageId)).ShouldBe(InteractionState.Resolved, "the card before the failed one is mirrored");
+            (await ReadInteractionStateAsync(last.MessageId)).ShouldBe(InteractionState.Resolved, "and the card after it is mirrored too");
+            (await ReadInteractionStateAsync(faulted.MessageId)).ShouldBe(InteractionState.Open, "only the failed card's display mirror was lost — a late click on it is refused, its row being Expired — and no later save wrote it");
+
+            log.Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message).ShouldContain(m => m.Contains(faulted.LedgerId.ToString()), "the failed mirror is logged against its own ledger row");
+            scope.Resolve<CodeSpaceDbContext>().ChangeTracker.HasChanges().ShouldBeFalse("a card whose save failed is forgotten, not left tracked for the next save");
+        }
+        finally
+        {
+            waiters.Remove(first.LedgerId);
+            waiters.Remove(faulted.LedgerId);
+            waiters.Remove(last.LedgerId);
+        }
+    }
+
     // ─── Park a real approval card through the real handler (times out fast → row stays AwaitingApproval, then back-date the deadline) ───
 
     private async Task<(Guid LedgerId, Guid MessageId)> ParkApprovalAsync(Guid teamId, Guid runId, Guid channelId)
@@ -156,6 +212,112 @@ public class ToolApprovalExpiryServiceTests
         new(new SingleToolRegistry(tool), AgentAutonomyLevel.Standard, teamId, null, runId,
             scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: true, approvalConversationId: channelId,
             scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+
+    /// <summary>Overdue ahead of anything else overdue in this shared database, so the sweep reaches these rows first.</summary>
+    private static readonly DateTimeOffset LongAgo = new(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    /// <summary>An undecided approval exactly as a parked call leaves it — claimed, parked with its token and deadline, its card posted and recorded on the row — without the handler's bounded wait.</summary>
+    private async Task<(Guid LedgerId, Guid MessageId)> ParkOverdueApprovalAsync(Guid teamId, Guid channelId, DateTimeOffset deadlineAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IToolCallLedgerService>();
+        var token = Guid.NewGuid().ToString("N");
+
+        var claim = await ledger.TryClaimAsync(Guid.NewGuid(), teamId, "git.open_pr", Guid.NewGuid().ToString("N"), "input-hash", 0, CancellationToken.None);
+        (await ledger.TryBeginApprovalAsync(claim.LedgerId, teamId, token, deadlineAt, CancellationToken.None)).ShouldBeTrue("fixture check: the claimed row parks for approval");
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent
+            {
+                Buttons = new List<InteractionButton>
+                {
+                    new() { Key = "approve", Label = "Approve", Style = InteractionButtonStyle.Primary },                          // McpRequestHandler.ApprovalButtonsConfig
+                    new() { Key = "reject", Label = "Reject", Style = InteractionButtonStyle.Danger, RequiresComment = true },
+                },
+            },
+            Target = new ToolCallApprovalTarget { Token = token },
+            AllowedResponderUserIds = null,
+            Resolve = new ResolvePolicy(),
+        };
+
+        var posted = await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Agent run requests approval to run **git.open_pr**. Approve to let it proceed, or reject to refuse it.", card, CancellationToken.None);
+        await ledger.SetApprovalMessageAsync(claim.LedgerId, teamId, posted.Id, CancellationToken.None);
+
+        return (claim.LedgerId, posted.Id);
+    }
+
+    /// <summary>A scope whose database commands pass the interceptor that fails one card's mirror, and whose expiry service logs to <paramref name="log"/>.</summary>
+    private ILifetimeScope BeginScopeFailingCardSaveOf(Guid messageId, ILogger<ToolApprovalExpiryService> log)
+    {
+        DbContextOptions<CodeSpaceDbContext> production;
+        using (var probe = _fixture.BeginScope())
+            production = probe.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>(production).AddInterceptors(new FailCardSaveOf(messageId)).Options;
+
+        return _fixture.BeginScope(b =>
+        {
+            b.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+            b.RegisterInstance<ILogger<ToolApprovalExpiryService>>(log);
+        });
+    }
+
+    /// <summary>One sweep: the service called straight, with no transaction open, or the command the recurring job sends, through the mediator's own transaction and post-commit drain.</summary>
+    private static async Task<int> SweepAsync(ILifetimeScope scope, bool throughTheCommand) =>
+        throughTheCommand
+            ? (await scope.Resolve<IMediator>().Send(new ExpireStaleToolApprovalsCommand(), CancellationToken.None)).Expired
+            : await scope.Resolve<IToolApprovalExpiryService>().ExpireDueAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+
+    /// <summary>The outcome <paramref name="signal"/> was woken with; fails by its name when it is not woken within five seconds.</summary>
+    private static async Task<ToolApprovalOutcome> WokenAsync(IToolApprovalWaiter call, string signal)
+    {
+        var first = await Task.WhenAny(call.Completion, Task.Delay(TimeSpan.FromSeconds(5)));
+
+        (first == call.Completion).ShouldBeTrue($"{signal} was not woken within 5s — check ToolApprovalExpiryService.ResolveAsync reached it");
+
+        return await call.Completion;
+    }
+
+    /// <summary>Fails the save of one card's timed-out mirror, once.</summary>
+    private sealed class FailCardSaveOf : DbCommandInterceptor
+    {
+        private readonly Guid _messageId;
+        private int _fired;
+
+        public FailCardSaveOf(Guid messageId) { _messageId = messageId; }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            Fail(command);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            Fail(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private void Fail(DbCommand command)
+        {
+            if (command.CommandText.Contains("UPDATE message", StringComparison.Ordinal) && Carries(command, _messageId) && Interlocked.Exchange(ref _fired, 1) == 0)
+                throw new TimeoutException($"saving card {_messageId} timed out");
+        }
+
+        private static bool Carries(DbCommand command, Guid value) => command.Parameters.Cast<DbParameter>().Any(parameter => parameter.Value is Guid id && id == value);
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public ConcurrentQueue<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Entries.Enqueue((logLevel, formatter(state, exception), exception));
+    }
 
     // ─── Reads ───────────────────────────────────────────────────────────────────
 

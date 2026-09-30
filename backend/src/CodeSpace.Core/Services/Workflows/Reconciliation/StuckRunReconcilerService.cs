@@ -308,21 +308,14 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// concurrent resume that already drove the run (its flip won) leaves us with 0 rows → we skip,
     /// no double-dispatch. The resolved waits rehydrate as the suspended nodes' ResumePayloads on the
     /// re-walk, so the run continues from where it stranded.</para>
+    /// <para>Never a sub-workflow child whose parent has finished — one whose cancel failed during its parent's stop and whose
+    /// waits were then closed, say. Revived, it would run under the finished parent toward a wait that parent no longer holds
+    /// open; no one is waiting for it. It is left as it is and counted in the log, so it does not linger unseen. The guard is
+    /// by source type, as the Pending sweep's is, because <c>ParentRunId</c> is also a rerun's lineage, finished by definition.</para>
     /// </summary>
     private async Task<int> RedispatchStrandedSuspendedAsync(CancellationToken cancellationToken)
     {
-        var threshold = DateTimeOffset.UtcNow - SuspendedStrandedAfter;
-
-        var strandedIds = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.Status == WorkflowRunStatus.Suspended
-                        && r.LastModifiedDate < threshold
-                        && r.CompletionParkedAt == null
-                        && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
-            .OrderBy(r => r.LastModifiedDate)
-            .Take(BatchSize)
-            .Select(r => r.Id)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
+        var strandedIds = await FindStrandedSuspendedIdsAsync(cancellationToken).ConfigureAwait(false);
 
         var redispatched = 0;
         foreach (var runId in strandedIds)
@@ -350,6 +343,32 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         }
 
         return redispatched;
+    }
+
+    /// <summary>
+    /// The stranded Suspended runs to revive this tick, oldest first, at most <see cref="BatchSize"/> — leaving out each
+    /// sub-workflow child whose parent has finished, and saying in the log how many it left. The exclusion is in the query,
+    /// not the loop: a child left alone stays Suspended, so one that took a place in the batch would take it every tick and
+    /// crowd out the runs that are wanted.
+    /// </summary>
+    private async Task<List<Guid>> FindStrandedSuspendedIdsAsync(CancellationToken cancellationToken)
+    {
+        var threshold = DateTimeOffset.UtcNow - SuspendedStrandedAfter;
+
+        var stranded = _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Status == WorkflowRunStatus.Suspended
+                        && r.LastModifiedDate < threshold
+                        && r.CompletionParkedAt == null
+                        && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
+            .Select(r => new { r.Id, r.LastModifiedDate, ParentFinished = r.SourceType == WorkflowRunSourceTypes.ChildWorkflow && _db.WorkflowRun.Any(p => p.Id == r.ParentRunId && TerminalRunStatuses.Contains(p.Status)) });
+
+        var strandedIds = await stranded.Where(r => !r.ParentFinished).OrderBy(r => r.LastModifiedDate).Take(BatchSize).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var leftAlone = await stranded.CountAsync(r => r.ParentFinished, cancellationToken).ConfigureAwait(false);
+
+        if (leftAlone > 0) _logger.LogInformation("StuckRunReconciler: left {Count} stranded Suspended sub-workflow(s) alone because their parent has finished", leftAlone);
+
+        return strandedIds;
     }
 
     /// <summary>

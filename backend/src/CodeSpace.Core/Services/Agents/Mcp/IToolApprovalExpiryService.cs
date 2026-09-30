@@ -20,6 +20,12 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// connection — sees the COMMITTED <c>Expired</c> terminal and replays it (not the pre-commit <c>AwaitingApproval</c>,
 /// which would lose the same-pod fast-path the design promises). Called outside a transaction (ad-hoc / tests), the
 /// deferred action runs inline since the CAS already auto-committed.</para>
+///
+/// <para>Each row's wake and card mirror are best-effort, the two on their own. The drain swallows an action that throws,
+/// one row at a time and without naming the row; a caller with no transaction runs them inline with nothing to swallow,
+/// and there one card's failed mirror would cost every later row its wake and its mirror. So each step catches its own
+/// failure and logs the ledger row: a failed mirror still leaves its call woken, and the next row woken and mirrored. The
+/// row stands Expired either way; a card left Open is refused a click, the row being the authority.</para>
 /// </summary>
 public interface IToolApprovalExpiryService
 {
@@ -59,17 +65,45 @@ public sealed class ToolApprovalExpiryService : IToolApprovalExpiryService, ISco
 
     private async Task ResolveAsync(ExpiredToolApproval row, CancellationToken cancellationToken)
     {
-        // Best-effort SAME-POD fast-path: wake a handler blocked on THIS pod immediately. It re-reads the now-committed
-        // Expired terminal on its own connection and replays it. Cross-pod it harmlessly returns false — and that's
-        // fine: the durable Expired row + the blocked call's bounded-elapse → pending-ticket → a re-call that replays
-        // the Expired terminal IS the cross-pod guarantee. No wake, no decision lost.
-        _waiters.TrySignal(row.LedgerId, ToolApprovalOutcome.Expired);
+        WakeQuietly(row);
 
-        // Best-effort + idempotent: mirror the approval card to timed-out (no-ops if a human already resolved it, or if
-        // no card was ever posted). The ledger row is the authority; this is its display mirror.
-        if (row.ApprovalMessageId is { } messageId)
+        await MirrorQuietlyAsync(row, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Tool call approval expired. LedgerId={LedgerId} TeamId={TeamId}", row.LedgerId, row.TeamId);
+    }
+
+    // Best-effort SAME-POD fast-path: wake a handler blocked on THIS pod immediately. It re-reads the now-committed
+    // Expired terminal on its own connection and replays it. Cross-pod it harmlessly returns false — and that's
+    // fine: the durable Expired row + the blocked call's bounded-elapse → pending-ticket → a re-call that replays
+    // the Expired terminal IS the cross-pod guarantee. No wake, no decision lost. A wake that throws costs its card
+    // nothing: the mirror is its own step.
+    private void WakeQuietly(ExpiredToolApproval row)
+    {
+        try
+        {
+            _waiters.TrySignal(row.LedgerId, ToolApprovalOutcome.Expired);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Tool call approval {LedgerId} expired, but waking its call failed; the call reads the Expired terminal when it next looks", row.LedgerId);
+        }
+    }
+
+    // Best-effort + idempotent: mirror the approval card to timed-out (no-ops if a human already resolved it, or if no
+    // card was ever posted). The ledger row is the authority; this is its display mirror. A failed mirror leaves nothing
+    // tracked on the context (the interaction service forgets the card whose save failed), so the next row's mirror is
+    // not the one that writes it.
+    private async Task MirrorQuietlyAsync(ExpiredToolApproval row, CancellationToken cancellationToken)
+    {
+        if (row.ApprovalMessageId is not { } messageId) return;
+
+        try
+        {
             await _interactions.MarkTimedOutAsync(messageId, "expired", cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation("Tool call approval expired and mirrored. LedgerId={LedgerId} TeamId={TeamId}", row.LedgerId, row.TeamId);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(exception, "Tool call approval {LedgerId} expired, but mirroring its card failed; the ledger row stands as the verdict", row.LedgerId);
+        }
     }
 }
