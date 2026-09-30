@@ -2,6 +2,9 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using System.Text.RegularExpressions;
 
 namespace CodeSpace.Core.Services.Agents.AgentRunLogging;
@@ -18,10 +21,11 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
     private readonly DbContextOptions<CodeSpaceDbContext> _dbOptions;
     private readonly IAgentRunLogService _logs;
     private readonly AgentRunLogCaptureRecoveryOptions _options;
+    private readonly ILogger<AgentRunLogCaptureRecoveryService> _logger;
 
-    public AgentRunLogCaptureRecoveryService(DbContextOptions<CodeSpaceDbContext> dbOptions, IAgentRunLogService logs) : this(dbOptions, logs, Defaults) { }
+    public AgentRunLogCaptureRecoveryService(DbContextOptions<CodeSpaceDbContext> dbOptions, IAgentRunLogService logs, ILogger<AgentRunLogCaptureRecoveryService> logger) : this(dbOptions, logs, Defaults, logger) { }
 
-    internal AgentRunLogCaptureRecoveryService(DbContextOptions<CodeSpaceDbContext> dbOptions, IAgentRunLogService logs, AgentRunLogCaptureRecoveryOptions options)
+    internal AgentRunLogCaptureRecoveryService(DbContextOptions<CodeSpaceDbContext> dbOptions, IAgentRunLogService logs, AgentRunLogCaptureRecoveryOptions options, ILogger<AgentRunLogCaptureRecoveryService>? logger = null)
     {
         if (options.BatchSize is <= 0 or > 500 || options.MaxConcurrency is <= 0 or > 32 || options.MaxConcurrency > options.BatchSize
             || options.LeaseDuration <= options.OperationTimeout + options.OperationTimeout + MinimumLeaseMargin || options.OperationTimeout <= TimeSpan.Zero
@@ -31,6 +35,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         _dbOptions = dbOptions;
         _logs = logs;
         _options = options;
+        _logger = logger ?? NullLogger<AgentRunLogCaptureRecoveryService>.Instance;
     }
 
     public async Task<AgentRunLogCaptureDeclarationResult> DeclareAsync(AgentRunLogCaptureDeclarationRequest request, CancellationToken cancellationToken)
@@ -110,11 +115,26 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
         }
 
         using var settlement = new CancellationTokenSource(_options.OperationTimeout);
+        var attempt = new SettlementAttempt(outcome);
         try
         {
-            return await SettleAsync(claim, outcome, settlement.Token).ConfigureAwait(false);
+            return await SettleAsync(claim, attempt, settlement.Token).ConfigureAwait(false);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested) { return new RecoverySettlement(outcome.State, true); }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            LogUnsettledClaim(claim, attempt.Outcome, exception);
+            return new RecoverySettlement(outcome.State, true);
+        }
+    }
+
+    // A settlement that raises is treated as unwritten: its claim keeps this wave's owner and lease, so nothing re-claims
+    // it until the lease expires. It is counted as a lost lease, and its cause is visible only here. The outcome named is
+    // the one the settlement was writing, which may have replaced the observed one; the guard judges that write.
+    private void LogUnsettledClaim(RecoveryClaim claim, RecoveryOutcome outcome, Exception exception)
+    {
+        var refusal = DatabaseRefusal(exception);
+
+        _logger.LogWarning(exception, "Agent run {RunId} log capture intent {IntentId} could not settle as {Outcome} with last_error_code {OutcomeCode} (SQLSTATE {SqlState}: {MessageText}); its claim stays leased until its recovery lease expires, then a later wave re-claims it", claim.AgentRunId, claim.Id, outcome.State, outcome.ErrorCode, refusal?.SqlState, refusal?.MessageText);
     }
 
     private async Task<IReadOnlyList<RecoveryClaim>> ClaimBatchAsync(Guid ownerId, DateTimeOffset cutoff, int limit, CancellationToken cancellationToken)
@@ -242,8 +262,9 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             : RecoveryOutcome.Retry(stream.Id, claim.State, $"fail-{Code(problem.Code)}", "The stream health transition could not yet be persisted.");
     }
 
-    private async Task<RecoverySettlement> SettleAsync(RecoveryClaim claim, RecoveryOutcome outcome, CancellationToken cancellationToken)
+    private async Task<RecoverySettlement> SettleAsync(RecoveryClaim claim, SettlementAttempt attempt, CancellationToken cancellationToken)
     {
+        var outcome = attempt.Outcome;
         await using var db = CreateDb();
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var run = await db.AgentRun.FromSqlInterpolated($"SELECT agent_run.*, xmin FROM agent_run WHERE team_id = {claim.TeamId} AND id = {claim.AgentRunId} FOR UPDATE")
@@ -278,6 +299,7 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
             && ((isManifest ? row.VerificationStalledAttempts : row.RecoveryAttemptCount) >= _options.RetryPolicy.MaxAttempts
                 || now - (isManifest ? row.LastVerificationProgressAt ?? row.RecoveryStartedAt!.Value : row.RecoveryStartedAt!.Value) >= _options.RetryPolicy.MaxAge))
             settled = RecoveryOutcome.Indeterminate(outcome.StreamId, "recovery-exhausted", $"Recovery exhausted its bounded attempts or age after '{outcome.ErrorCode}'.");
+        attempt.Outcome = settled;
 
         row.StreamId = settled.StreamId ?? row.StreamId;
         row.State = settled.State;
@@ -338,6 +360,14 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
     private static string Code<T>(T value) where T : struct, Enum => string.Concat(value.ToString().Select((character, index) => char.IsUpper(character) && index > 0 ? $"-{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
     private static AgentRunLogRecoveryClaimRef Fence(RecoveryClaim claim) => new(claim.Id, claim.RecoveryOwnerId, claim.RecoveryFenceEpoch);
 
+    private static PostgresException? DatabaseRefusal(Exception exception)
+    {
+        for (Exception? current = exception; current != null; current = current.InnerException)
+            if (current is PostgresException postgres) return postgres;
+
+        return null;
+    }
+
     private sealed record RecoveryClaim(Guid Id, Guid TeamId, Guid AgentRunId, long WorkerFenceEpoch, Guid CaptureSessionId, string StreamKind,
         string ContentType, string? ContentEncoding, string CaptureSource, Guid? StreamId, AgentRunLogCaptureIntentState State,
         DateTimeOffset NextRecoveryAt, DateTimeOffset? TerminalObservedAt, Guid RecoveryOwnerId, long RecoveryFenceEpoch)
@@ -347,6 +377,12 @@ public sealed partial class AgentRunLogCaptureRecoveryService : IAgentRunLogCapt
     }
 
     private sealed record RecoverySettlement(AgentRunLogCaptureIntentState State, bool LostLease);
+
+    /// <summary>The outcome a settlement is writing: the observed one until the settlement supersedes or exhausts it.</summary>
+    private sealed class SettlementAttempt(RecoveryOutcome outcome)
+    {
+        public RecoveryOutcome Outcome { get; set; } = outcome;
+    }
 
     private sealed record RecoveryOutcome(Guid? StreamId, AgentRunLogCaptureIntentState State, string? ErrorCode, string? ErrorMessage, RecoveryRetryDirective? RetryDirective)
     {
