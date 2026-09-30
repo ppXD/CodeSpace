@@ -213,20 +213,20 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
     [Fact]
     public async Task A_bounded_worker_claims_only_the_wave_it_can_start_before_its_lease_budget()
     {
+        var neighbour = await SeedDueFinalizedStreamNeighbourAsync();
         var first = await SeedWorldAsync();
         var second = await SeedWorldAsync();
         var logs = LogService();
         var firstSession = Guid.NewGuid();
         var secondSession = Guid.NewGuid();
-        var gated = new GateFirstCompleteLogService(logs);
+        var gated = new GateFirstCompleteLogService(logs, first.AgentRunId, second.AgentRunId);
         var recovery = Recovery(gated, new RecoveryTestOptions { MaxConcurrency = 1 });
         await recovery.DeclareAsync(Declaration(first, firstSession, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
         await recovery.DeclareAsync(Declaration(second, secondSession, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
         await SeedFinalizedTerminalStreamAsync(first, logs, firstSession);
         await SeedFinalizedTerminalStreamAsync(second, logs, secondSession);
 
-        var reconcile = recovery.ReconcileAsync(CancellationToken.None);
-        await gated.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+        var reconcile = await ReconcileUntilPausedAsync(recovery, gated.Entered, first);
         using (var scope = _fixture.BeginScope())
         {
             var rows = await scope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent
@@ -234,15 +234,12 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
             rows.Count(value => value.RecoveryOwnerId != null).ShouldBe(1, "later work must remain unclaimed until a worker can start it inside a fresh lease");
             rows.Count(value => value.RecoveryOwnerId == null).ShouldBe(1);
         }
-        gated.Release();
 
-        var summary = await reconcile;
+        var intents = await ReleaseAndReconcileUntilCompletedAsync(recovery, reconcile, gated.Release, first, second);
 
-        summary.Completed.ShouldBeGreaterThanOrEqualTo(2);
-        using var finalScope = _fixture.BeginScope();
-        var intents = await finalScope.Resolve<CodeSpaceDbContext>().AgentRunLogCaptureIntent
-            .Where(value => value.AgentRunId == first.AgentRunId || value.AgentRunId == second.AgentRunId).ToListAsync();
-        intents.ShouldAllBe(value => value.State == AgentRunLogCaptureIntentState.Completed && value.RecoveryAttemptCount == 1);
+        intents.ShouldAllBe(value => value.RecoveryAttemptCount == 1, "each owned intent is claimed once, by a wave that could start it inside its lease");
+        (await IntentAsync(neighbour)).State.ShouldBe(AgentRunLogCaptureIntentState.Completed,
+            "the neighbour's CompleteAsync ran first through the same gated waves, so the gate was exercised against a stranger and stayed shut");
     }
 
     [Fact]
@@ -391,18 +388,18 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
     [Fact]
     public async Task A_worker_fence_bump_after_the_stream_effect_but_before_settlement_atomically_supersedes_the_intent()
     {
+        var neighbour = await SeedDueOpenStreamNeighbourAsync();
         var world = await SeedWorldAsync();
         var logs = LogService();
-        var gated = new GateAfterFailLogService(logs);
+        var gated = new GateAfterFailLogService(logs, world.AgentRunId);
         var recovery = Recovery(gated, new RecoveryTestOptions { TerminalGrace = TimeSpan.Zero });
         var sessionId = Guid.NewGuid();
         await recovery.DeclareAsync(Declaration(world, sessionId, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
         var opened = (await logs.OpenAsync(Open(world, sessionId, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
         await MarkTerminalAsync(world, AgentRunStatus.Succeeded, "{\"status\":\"Succeeded\"}");
 
-        await recovery.ReconcileAsync(CancellationToken.None);
-        var reconcile = recovery.ReconcileAsync(CancellationToken.None);
-        await gated.EffectCommitted.WaitAsync(TimeSpan.FromSeconds(2));
+        await ReconcileUntilAsync(recovery, world, value => value.TerminalObservedAt != null, "terminal grace armed by a first terminal observation");
+        var reconcile = await ReconcileUntilPausedAsync(recovery, gated.EffectCommitted, world);
         await RaiseFenceAsync(world, 8);
         gated.Release();
 
@@ -418,10 +415,13 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         intent.State.ShouldBe(AgentRunLogCaptureIntentState.Superseded,
             "the observation made under fence 7 cannot settle terminal intent state after fence 8 owns the run");
         intent.LastErrorCode.ShouldBe("worker-fence-changed-before-settlement");
-        (await db.AgentRunLogStream.SingleAsync(value => value.Id == opened.Metadata.StreamId)).State.ShouldBe(AgentRunLogStreamState.CaptureFailed);
+        (await db.AgentRunLogStream.SingleAsync(value => value.Id == opened.Metadata.StreamId)).State.ShouldBe(AgentRunLogStreamState.CaptureFailed,
+            "the fence bump landed after this stream's committed effect; Open would mean it landed before the effect, which is a different interleaving");
         var run = await db.AgentRun.AsNoTracking().SingleAsync(value => value.Id == world.AgentRunId);
         run.FenceEpoch.ShouldBe(8);
         run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        (await db.AgentRunLogStream.SingleAsync(value => value.AgentRunId == neighbour.AgentRunId)).State.ShouldBe(AgentRunLogStreamState.CaptureFailed,
+            "the neighbour's effect ran through the same gated waves, so the gate was exercised against a stranger and stayed shut");
     }
 
     [Fact]
@@ -680,6 +680,70 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
             + "Reconcile waves are deployment-wide and bounded, so check whether earlier tests left enough due intents to crowd this one out.");
     }
 
+    /// <summary>
+    /// Starts reconcile waves until one pauses inside THIS test's gated provider call — <paramref name="paused"/> is the
+    /// gate's signal — and returns that wave still in flight. A wave is deployment-wide and bounded, so one start is not
+    /// guaranteed to reach the target; a wave that finishes without pausing missed it, and the next one is started.
+    ///
+    /// <para>The gate must still be shut when this is called, and that is asserted rather than assumed: a gate that
+    /// opened earlier — on a neighbour's call, or on this test's call in an earlier wave — returns at once, and whatever
+    /// the caller checks or changes next lands outside the pause it meant to hold.</para>
+    /// </summary>
+    private async Task<Task<AgentRunLogCaptureRecoverySummary>> ReconcileUntilPausedAsync(AgentRunLogCaptureRecoveryService recovery, Task paused, World world)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        paused.IsCompleted.ShouldBeFalse("the gate opened before any wave was started to reach this test's own provider call");
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var wave = recovery.ReconcileAsync(CancellationToken.None);
+
+            if (await Task.WhenAny(paused, wave) == paused) return wave;
+
+            await wave;
+        }
+
+        var seen = await IntentAsync(world);
+        throw new Xunit.Sdk.XunitException(
+            $"No reconcile wave paused inside a gated provider call for agent run {world.AgentRunId} (intent last seen {seen.State}, "
+            + $"attempts {seen.RecoveryAttemptCount}, last error {seen.LastErrorCode ?? "none"}). "
+            + "Reconcile waves are deployment-wide and bounded, so check whether earlier tests left enough due intents to crowd this one out.");
+    }
+
+    /// <summary>
+    /// Releases a wave held inside a gated provider call, then reconciles until every intent of <paramref name="worlds"/>
+    /// is Completed, and returns them. The released wave is bounded, so it may run out of budget before reaching them all;
+    /// later waves finish the rest.
+    ///
+    /// <para>None of the intents may be Completed while the wave is still held, and that is asserted before the release:
+    /// the released wave usually finishes them itself, so the first look after it already sees the result, and only this
+    /// guard shows the result was produced after the pause rather than held before it.</para>
+    /// </summary>
+    private async Task<AgentRunLogCaptureIntent[]> ReleaseAndReconcileUntilCompletedAsync(AgentRunLogCaptureRecoveryService recovery, Task held, Action release, params World[] worlds)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        var seen = await Task.WhenAll(worlds.Select(IntentAsync));
+        seen.ShouldAllBe(value => value.State != AgentRunLogCaptureIntentState.Completed, "an owned intent was already Completed while the wave was still held");
+
+        release();
+        await held;
+        seen = await Task.WhenAll(worlds.Select(IntentAsync));
+
+        while (!seen.All(value => value.State == AgentRunLogCaptureIntentState.Completed))
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+                throw new Xunit.Sdk.XunitException(
+                    "The owned capture intents never all reached Completed after the held wave was released (last seen "
+                    + string.Join(", ", seen.Select(value => $"{value.AgentRunId}: {value.State}, attempts {value.RecoveryAttemptCount}, last error {value.LastErrorCode ?? "none"}"))
+                    + "). Reconcile waves are deployment-wide and bounded, so check whether earlier tests left enough due intents to crowd these out.");
+
+            await recovery.ReconcileAsync(CancellationToken.None);
+            seen = await Task.WhenAll(worlds.Select(IntentAsync));
+        }
+
+        return seen;
+    }
+
     private async Task<AgentRunLogCaptureIntent> IntentAsync(World world)
     {
         using var scope = _fixture.BeginScope();
@@ -751,6 +815,42 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         await db.AgentRun.Where(value => value.Id == world.AgentRunId).ExecuteUpdateAsync(update => update.SetProperty(value => value.FenceEpoch, fence));
+    }
+
+    /// <summary>
+    /// Seeds another tenant's terminal run whose open stream the next wave will fail through FailCaptureAsync — the shape
+    /// an earlier test, or another tenant in production, leaves behind. Recovery takes no team, so that effect runs through
+    /// whatever log service the next wave's recovery holds, including a test's gate.
+    /// </summary>
+    private async Task<World> SeedDueOpenStreamNeighbourAsync()
+    {
+        var neighbour = await SeedWorldAsync();
+        var logs = LogService();
+        var recovery = Recovery(logs, new RecoveryTestOptions { TerminalGrace = TimeSpan.Zero });
+        var sessionId = Guid.NewGuid();
+        await recovery.DeclareAsync(Declaration(neighbour, sessionId, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        (await logs.OpenAsync(Open(neighbour, sessionId, AgentRunLogKinds.StandardOutput), CancellationToken.None)).ShouldBeOfType<AgentRunLogOpenResult.Opened>();
+        await MarkTerminalAsync(neighbour, AgentRunStatus.Succeeded, "{}");
+
+        await ReconcileUntilAsync(recovery, neighbour, value => value.TerminalObservedAt != null, "neighbour terminal grace armed");
+
+        return neighbour;
+    }
+
+    /// <summary>
+    /// Seeds another tenant's terminal run whose finalized stream the next wave will complete through CompleteAsync. It is
+    /// due at once and ahead of anything seeded after it, so that effect runs first through whatever log service the next
+    /// wave's recovery holds, including a test's gate.
+    /// </summary>
+    private async Task<World> SeedDueFinalizedStreamNeighbourAsync()
+    {
+        var neighbour = await SeedWorldAsync();
+        var logs = LogService();
+        var sessionId = Guid.NewGuid();
+        await Recovery(logs).DeclareAsync(Declaration(neighbour, sessionId, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        await SeedFinalizedTerminalStreamAsync(neighbour, logs, sessionId);
+
+        return neighbour;
     }
 
     private async Task SeedFinalizedTerminalStreamAsync(World world, IAgentRunLogService logs, Guid sessionId)
@@ -836,7 +936,12 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => inner.ReadRangeAsync(request, cancellationToken);
     }
 
-    private sealed class GateFirstCompleteLogService(IAgentRunLogService inner) : IAgentRunLogService
+    /// <summary>
+    /// Holds the first CompleteAsync of an owned run until released. Only an owned run's call opens the gate: a reconcile
+    /// wave is deployment-wide, so every neighbour's call in the wave runs through this same instance, and a gate opened
+    /// by a stranger holds the wave before any owned intent has been claimed.
+    /// </summary>
+    private sealed class GateFirstCompleteLogService(IAgentRunLogService inner, params Guid[] agentRunIds) : IAgentRunLogService
     {
         private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -849,7 +954,7 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         public Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken) => inner.FinalizeSourceAsync(request, cancellationToken);
         public async Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken)
         {
-            if (Interlocked.Increment(ref _calls) == 1)
+            if (agentRunIds.Contains(request.AgentRunId) && Interlocked.Increment(ref _calls) == 1)
             {
                 _entered.TrySetResult();
                 await _release.Task.WaitAsync(cancellationToken);
@@ -864,7 +969,12 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => inner.ReadRangeAsync(request, cancellationToken);
     }
 
-    private sealed class GateAfterFailLogService(IAgentRunLogService inner) : IAgentRunLogService
+    /// <summary>
+    /// Pauses after the owning run's FailCaptureAsync has committed. Only that run's effect opens the gate: a reconcile
+    /// wave is deployment-wide, so every neighbour's effect in the wave runs through this same instance, and a gate opened
+    /// by a stranger lets the caller bump the fence before this run's effect instead of after it.
+    /// </summary>
+    private sealed class GateAfterFailLogService(IAgentRunLogService inner, Guid agentRunId) : IAgentRunLogService
     {
         private readonly TaskCompletionSource _effectCommitted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -878,6 +988,9 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         public async Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken)
         {
             var result = await inner.FailCaptureAsync(request, cancellationToken);
+
+            if (request.AgentRunId != agentRunId) return result;
+
             _effectCommitted.TrySetResult();
             await _release.Task.WaitAsync(cancellationToken);
             return result;
