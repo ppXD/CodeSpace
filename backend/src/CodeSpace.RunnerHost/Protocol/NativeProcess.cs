@@ -17,7 +17,9 @@ internal static class NativeProcess
             var info = ReadDarwinProcess(pid) ?? throw new IOException("Cannot identify a terminated native process.");
             return new NativeProcessIdentity(pid, DarwinStartTicks(info), BootId, $"darwin:{info.StartSeconds}:{info.StartMicroseconds}");
         }
-        var fields = LinuxProcessFields(pid);
+        string[] fields;
+        try { fields = LinuxProcessFields(pid); }
+        catch (IOException error) when (TreatsAsGone(pid, error)) { throw new IOException("Cannot identify a terminated native process.", error); }
         if (fields[0] is "Z" or "X") throw new IOException("Cannot identify a terminated native process.");
         using var process = Process.GetProcessById(pid);
         return new NativeProcessIdentity(pid, process.StartTime.ToUniversalTime().Ticks, BootId, "linux:" + fields[19]);
@@ -44,6 +46,7 @@ internal static class NativeProcess
         catch (InvalidOperationException) { return false; }
         catch (FileNotFoundException) { return false; }
         catch (DirectoryNotFoundException) { return false; }
+        catch (IOException error) when (TreatsAsGone(identity.ProcessId, error)) { return false; }
         catch (Win32Exception) when (IsAbsent(identity.ProcessId)) { return false; }
     }
 
@@ -68,6 +71,7 @@ internal static class NativeProcess
         catch (InvalidOperationException) { return false; }
         catch (FileNotFoundException) { return false; }
         catch (DirectoryNotFoundException) { return false; }
+        catch (IOException error) when (TreatsAsGone(pid, error)) { return false; }
         catch (Win32Exception) when (IsAbsent(pid)) { return false; }
     }
 
@@ -189,11 +193,22 @@ internal static class NativeProcess
         catch (InvalidOperationException) { }
         catch (FileNotFoundException) { }
         catch (DirectoryNotFoundException) { }
+        catch (IOException error) when (TreatsAsGone(identity.ProcessId, error)) { }
         catch (Win32Exception) when (IsAbsent(identity.ProcessId) || OperatingSystem.IsMacOS() && ReadDarwinProcess(identity.ProcessId) is null) { }
         kill(-identity.ProcessId, 9);
     }
 
     private static bool IsAbsent(int pid) => kill(pid, 0) != 0 && Marshal.GetLastPInvokeError() == 3; // ESRCH, never "permission denied".
+
+    /// <summary>
+    /// Whether <paramref name="failure"/>, thrown while reading <paramref name="pid"/>'s <c>/proc</c> entry, means the process
+    /// is GONE rather than that its state cannot be read. A process that exits between the directory lookup and the
+    /// <c>read</c> is answered by the kernel with ESRCH, which .NET raises as a plain <see cref="IOException"/> — the fact
+    /// <see cref="DirectoryNotFoundException"/> reports an instant later, so it must not surface as "unknowable". The
+    /// evidence is the kernel's own answer (<see cref="IsAbsent"/>), never the exception's message: any other
+    /// <see cref="IOException"/> about a pid that still exists (EIO, EMFILE) stays unknowable and reaches the caller.
+    /// </summary>
+    internal static bool TreatsAsGone(int pid, Exception failure) => failure is IOException && IsAbsent(pid);
 
     public static bool Same(NativeProcessIdentity left, NativeProcessIdentity right) => left.ProcessId == right.ProcessId && left.BootId == right.BootId && !string.IsNullOrEmpty(left.StartKey) && left.StartKey == right.StartKey;
 
