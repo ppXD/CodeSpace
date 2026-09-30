@@ -70,7 +70,7 @@ internal static class McpDeclarationWriter
     }
 
     /// <summary>Quote a value as a TOML basic string: wrap in double quotes and escape backslash, double-quote, and the control chars TOML requires. A base64url token / a filesystem path contains none of these, so this is a safety net, not a hot path.</summary>
-    private static string TomlString(string value)
+    internal static string TomlString(string value)
     {
         var sb = new StringBuilder(value.Length + 2);
         sb.Append('"');

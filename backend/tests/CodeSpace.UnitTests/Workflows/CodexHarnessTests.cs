@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Failures;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
+using System.Diagnostics;
 using System.Globalization;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents;
@@ -20,6 +21,9 @@ namespace CodeSpace.UnitTests.Workflows;
 public class CodexHarnessTests
 {
     private static readonly CodexHarness Harness = new();
+
+    /// <summary>The override every run whose workspace is <c>/tmp/ws</c> carries, so the target repository's own <c>.codex</c> config never loads.</summary>
+    private const string WorkspaceDistrust = "projects={\"/tmp/ws\"={trust_level=\"untrusted\"}}";
 
     private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "gpt-5.3-codex", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
     {
@@ -272,9 +276,92 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("codex");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
+    }
+
+    public static TheoryData<string, AgentTask> EveryRunShape() => new()
+    {
+        { "fresh", Task() },
+        { "resume", Task() with { ResumeFromSessionId = "thr-1" } },
+        { "acceptance", Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } } },
+        { "read-only", Task(scope: AgentWriteScope.ReadOnly) },
+        { "allowlist egress", Task() with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } } },
+    };
+
+    [Theory]
+    [MemberData(nameof(EveryRunShape))]
+    public void Every_run_distrusts_its_workspace_so_the_repositorys_own_codex_config_never_loads(string shape, AgentTask task)
+    {
+        // With no trust entry the real CLI loaded the target repository's .codex/config.toml (its [mcp_servers] were
+        // spawned) and, on an acceptance-bearing run, ran its .codex/hooks.json (RepositoryConfigE2ETests). A flag — so it
+        // sits before the stdin `-`, which stays last.
+        var args = Harness.BuildInvocation(task).Args.ToList();
+
+        var at = args.IndexOf(WorkspaceDistrust);
+        at.ShouldBeGreaterThan(0, $"a {shape} run must mark its workspace untrusted");
+        args[at - 1].ShouldBe("-c", "the distrust rides as a config override");
+        args.Count(a => a == WorkspaceDistrust).ShouldBe(1);
+        args[^1].ShouldBe("-", "the stdin positional stays last");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_run_with_no_workspace_emits_no_trust_override(string? workspace) =>
+        Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace }).Args.ShouldNotContain(a => a.StartsWith("projects=", StringComparison.Ordinal), "there is no project to distrust");
+
+    [Fact]
+    public void The_workspace_is_a_quoted_toml_key_so_a_dot_or_a_quote_in_its_path_cannot_split_it()
+    {
+        // A dotted-key spelling (projects.<path>.trust_level) would split a path containing a dot into two keys and match nothing.
+        var args = Harness.BuildInvocation(Task() with { WorkspaceDirectory = "/srv/ws.v2/a\"b\\c" }).Args;
+
+        args.ShouldContain("projects={\"/srv/ws.v2/a\\\"b\\\\c\"={trust_level=\"untrusted\"}}");
+    }
+
+    [Theory]
+    [InlineData("link/ws")]   // a symlinked parent, as macOS's /var → /private/var is for every workspace under its temp dir
+    [InlineData("deep")]      // a symlink whose own target runs through another one
+    public void A_workspace_reached_through_a_symlink_is_also_distrusted_at_the_physical_path_codex_resolves(string reachedThrough)
+    {
+        // Codex looks its trust entry up by the physical directory it resolves as its cwd. Keyed only by the path as given,
+        // a workspace reached through a symlink matched nothing, and the real CLI loaded the repository's project config as
+        // if there were no distrust at all (RepositoryConfigE2ETests, run on macOS against the unresolved temp path).
+        if (OperatingSystem.IsWindows()) return;   // creating a symlink needs a privilege Windows does not grant by default
+
+        using var layout = new SymlinkedWorkspace();
+        var workspace = Path.Combine(layout.Root, reachedThrough);
+        var physical = SymlinkedWorkspace.PhysicalByShell(workspace);
+
+        physical.ShouldNotBe(workspace, "fixture check: the workspace must be reached through a symlink, or this says nothing");
+
+        Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace }).Args.ShouldContain($"projects={{\"{workspace}\"={{trust_level=\"untrusted\"}},\"{physical}\"={{trust_level=\"untrusted\"}}}}");
+    }
+
+    [Fact]
+    public void A_workspace_with_no_symlink_on_its_path_is_distrusted_under_its_one_spelling()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var layout = new SymlinkedWorkspace();
+        var workspace = SymlinkedWorkspace.PhysicalByShell(Path.Combine(layout.Root, "real", "ws"));
+
+        Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace }).Args.ShouldContain($"projects={{\"{workspace}\"={{trust_level=\"untrusted\"}}}}");
+    }
+
+    [Fact]
+    public void A_workspace_that_does_not_exist_keeps_its_one_spelling()
+    {
+        // No cwd can resolve to a directory that does not exist, so there is no physical spelling to add for it.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var layout = new SymlinkedWorkspace();
+        var workspace = Path.Combine(layout.Root, "link", "missing");
+
+        Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace }).Args.ShouldContain($"projects={{\"{workspace}\"={{trust_level=\"untrusted\"}}}}");
     }
 
     [Fact]
@@ -286,7 +373,7 @@ public class CodexHarnessTests
         // while -c is accepted on it and sandbox_mode is the config key the flag maps to. The Goal stays last.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-" });
+        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", WorkspaceDistrust, "-" });
     }
 
     [Fact]
@@ -338,7 +425,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("resume");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
     }
 
     [Fact]
@@ -409,7 +496,7 @@ public class CodexHarnessTests
     {
         var spec = Harness.BuildInvocation(Task(model: model));
 
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "-" },
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
             customMessage: "a blank model must omit --model entirely (not emit `--model \"\"`, which Codex rejects) so the CLI uses its default");
     }
 
@@ -421,7 +508,7 @@ public class CodexHarnessTests
         var withTools = Harness.BuildInvocation(Task() with { Tools = new[] { "Read", "Grep" } });
 
         withTools.Args.ShouldNotContain("--allowed-tools");
-        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-" },
+        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
             customMessage: "a tools list must not change the Codex invocation — it has no faithful projection there");
     }
 
@@ -1004,5 +1091,38 @@ public class CodexHarnessTests
     {
         CodexHarness.TryReadModelFromRollout("").ShouldBeNull();
         CodexHarness.TryReadModelFromRollout("   \n  \n").ShouldBeNull();
+    }
+
+    /// <summary>A temp tree holding <c>real/ws</c>, <c>link</c> → <c>real</c>, and <c>deep</c> → <c>link/ws</c>, a symlink whose target runs through another.</summary>
+    private sealed class SymlinkedWorkspace : IDisposable
+    {
+        public string Root { get; } = Directory.CreateTempSubdirectory("codex-trust-").FullName;
+
+        public SymlinkedWorkspace()
+        {
+            Directory.CreateDirectory(Path.Combine(Root, "real", "ws"));
+            Directory.CreateSymbolicLink(Path.Combine(Root, "link"), Path.Combine(Root, "real"));
+            Directory.CreateSymbolicLink(Path.Combine(Root, "deep"), Path.Combine(Root, "link", "ws"));
+        }
+
+        /// <summary>The directory the kernel resolves <paramref name="directory"/> to, as the shell's <c>pwd -P</c> reports it — never the harness's own resolution, which is what it checks.</summary>
+        public static string PhysicalByShell(string directory)
+        {
+            var info = new ProcessStartInfo("/bin/sh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var arg in new[] { "-c", "cd \"$1\" && pwd -P", "sh", directory }) info.ArgumentList.Add(arg);
+
+            using var process = Process.Start(info)!;
+            var stdout = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+
+            process.ExitCode.ShouldBe(0, $"fixture check: the shell could not enter {directory}: {process.StandardError.ReadToEnd()}");
+
+            return stdout.Trim();
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Root, recursive: true); } catch { /* best-effort cleanup of a temp directory */ }
+        }
     }
 }
