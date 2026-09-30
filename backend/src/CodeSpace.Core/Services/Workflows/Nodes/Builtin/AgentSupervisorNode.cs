@@ -230,9 +230,10 @@ public sealed class AgentSupervisorNode : INodeRuntime
         }
 
         var delay = SupervisorInfraPark.DelayFor(state.Parks);
-        var marker = SupervisorInfraPark.Marker(state, fault.Message);
+        var said = InfraPark.FaultText(context.Scope, fault);
+        var marker = SupervisorInfraPark.Marker(state, said);
 
-        context.Logger.LogWarning("agent.supervisor run {RunId}: brain call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run", supervisorRunId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc);
+        context.Logger.LogWarning("agent.supervisor run {RunId}: brain call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run: {Fault}", supervisorRunId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc, said);
 
         return NodeResult.Suspend(new SuspensionToken
         {

@@ -16,10 +16,11 @@ namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
 /// Pins the combinator-free WIRE form of a structured-output schema: what <see cref="JsonSchemaCombinators.Strip"/>
-/// removes and what it must leave alone, and the portability rule that every schema the code hands a model reaches the
-/// provider with no combinator at any depth. A hosted vLLM backend compiles that schema into a decoding grammar, and a
-/// combinator shape it cannot compile costs the whole call an empty HTTP 500 — so the rule is pinned per schema rather
-/// than rediscovered per outage.
+/// removes and what it must leave alone, and the portability rules that every schema the code hands a model reaches the
+/// provider with no combinator at any depth and with every array typed by its <c>items</c>. A hosted vLLM backend compiles
+/// that schema into a decoding grammar, and a shape it cannot compile costs the whole call an empty HTTP 500 — so the
+/// rules are pinned per schema rather than rediscovered per outage. The 500 named no keyword, and the schema that drew
+/// it carried both a combinator and an <c>items</c>-less array, so both are guarded.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class JsonSchemaCombinatorsTests
@@ -60,10 +61,22 @@ public sealed class JsonSchemaCombinatorsTests
     public void Every_schema_the_code_sends_to_a_model_is_combinator_free_on_the_wire(string schema) =>
         CombinatorPaths(WireForms[schema]).ShouldBeEmpty($"{schema} reaches the provider's constrained decoder; carry the combinator in a validation-only JsonSchema and send JsonSchemaCombinators.Strip of it as the WireJsonSchema");
 
+    [Theory]
+    [MemberData(nameof(WireFormNames))]
+    public void Every_array_in_a_schema_the_code_sends_to_a_model_declares_its_items(string schema)
+    {
+        // The schema that drew the empty 500 carried an array with no `items` (rubric.criteria, inside a per-kind branch)
+        // beside its combinators, and the error names no keyword — so this second candidate is guarded too. A decoding
+        // grammar has no element type to build for an array that does not say what it holds.
+        var untyped = ArraysWithoutItems(WireForms[schema]);
+
+        untyped.ShouldBeEmpty($"{schema} declares an array with no `items` at {string.Join(", ", untyped)}; declare the element schema, because the provider's grammar compiler needs one");
+    }
+
     [Fact]
     public void Every_schema_constant_in_core_is_either_sent_on_the_wire_or_only_validates()
     {
-        // The guard above is only as good as its list. Every schema a model is handed today is a static *Schema field,
+        // The guards above are only as good as their list. Every schema a model is handed today is a static *Schema field,
         // so a new one lands here and must be sorted: sent to a provider (combinator-free) or validation-only.
         var declared = typeof(PlannerSchema).Assembly.GetTypes()
             .SelectMany(type => type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Where(field => field.FieldType == typeof(JsonElement) && field.Name.EndsWith("Schema", StringComparison.Ordinal)).Select(field => $"{type.Name}.{field.Name}"));
@@ -112,6 +125,44 @@ public sealed class JsonSchemaCombinatorsTests
         JsonValueKind.Array => node.EnumerateArray().SelectMany((item, index) => CombinatorPaths(item, $"{path}[{index}]")).ToArray(),
         _ => [],
     };
+
+    /// <summary>Every path at which an array-typed schema node declares no <c>items</c>, at ANY depth. Blind to what a key means, like <see cref="CombinatorPaths"/>, so it is stricter than it needs to be: any object whose <c>type</c> names <c>array</c> must say what its elements are.</summary>
+    private static IReadOnlyList<string> ArraysWithoutItems(JsonElement node, string path = "$") => node.ValueKind switch
+    {
+        JsonValueKind.Object => (DeclaresArray(node) && !node.TryGetProperty("items", out _) ? [path] : Array.Empty<string>()).Concat(node.EnumerateObject().SelectMany(property => ArraysWithoutItems(property.Value, $"{path}.{property.Name}"))).ToArray(),
+        JsonValueKind.Array => node.EnumerateArray().SelectMany((item, index) => ArraysWithoutItems(item, $"{path}[{index}]")).ToArray(),
+        _ => [],
+    };
+
+    /// <summary>Whether the node's <c>type</c> is, or lists, <c>array</c>.</summary>
+    private static bool DeclaresArray(JsonElement node) => node.TryGetProperty("type", out var type) && type.ValueKind switch
+    {
+        JsonValueKind.String => type.GetString() == "array",
+        JsonValueKind.Array => type.EnumerateArray().Any(entry => entry.ValueKind == JsonValueKind.String && entry.GetString() == "array"),
+        _ => false,
+    };
+
+    [Fact]
+    public void ArraysWithoutItems_names_every_array_typed_node_that_declares_no_items_and_only_those()
+    {
+        // The guard is only as good as its walker: it must find a bare array at any depth and in either spelling of
+        // `type`, and must not flag a declared one — nor a property that merely happens to be NAMED "type".
+        const string schema = """
+            {
+              "type": "object",
+              "properties": {
+                "declared": { "type": "array", "items": { "type": "string" } },
+                "bare": { "type": "array", "minItems": 1 },
+                "nullable": { "type": ["null", "array"] },
+                "nested": { "type": "object", "properties": { "inner": { "type": "array" } } },
+                "listOfLists": { "type": "array", "items": { "type": "array" } },
+                "type": { "type": "string" }
+              }
+            }
+            """;
+
+        ArraysWithoutItems(JsonDocument.Parse(schema).RootElement).ShouldBe(new[] { "$.properties.bare", "$.properties.nullable", "$.properties.nested.properties.inner", "$.properties.listOfLists.items" }, ignoreOrder: true);
+    }
 
     /// <summary>One schema with <paramref name="keyword"/> beside a sibling at every position a subschema can sit — or, for a null keyword, the same schema written without it.</summary>
     private static string SchemaAtEveryPosition(string? keyword)

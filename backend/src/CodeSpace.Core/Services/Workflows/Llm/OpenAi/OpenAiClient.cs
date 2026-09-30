@@ -18,8 +18,8 @@ namespace CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 /// post-S6b) — a call without a credential fails closed.
 ///
 /// Implements <see cref="ILLMClient"/> (free-text) AND <see cref="IStructuredLLMClient"/> (schema-constrained
-/// JSON). Structured output uses FORCED FUNCTION-CALLING — a single function whose <c>parameters</c> IS the
-/// requested schema, with <c>tool_choice</c> pinned to it — rather than <c>response_format: json_schema</c>,
+/// JSON). Structured output uses FORCED FUNCTION-CALLING — a single function whose <c>parameters</c> is the request's
+/// <c>WireJsonSchema ?? JsonSchema</c> (every reply is validated against <c>JsonSchema</c>), with <c>tool_choice</c> pinned to it — rather than <c>response_format: json_schema</c>,
 /// because function-calling is supported by far more OpenAI-compatible gateways than the newer structured-outputs
 /// feature, and it mirrors the Anthropic client's forced-tool design exactly (one coercion mechanism to reason
 /// about). The model's <c>tool_calls[0].function.arguments</c> is the schema-SHAPED JSON (classic function-calling
@@ -229,7 +229,7 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
     }
 
     /// <summary>
-    /// Attempt 1: forced function-calling — a single function whose parameters IS the schema, tool_choice pinned to it.
+    /// Attempt 1: forced function-calling — a single function whose parameters is <c>WireJsonSchema ?? JsonSchema</c> (validation still uses <c>JsonSchema</c>), tool_choice pinned to it.
     /// Returns the recovered JSON (or null to degrade to the prompt-only floor) PLUS the parsed response — so the caller
     /// can accumulate the BILLED usage even when the JSON is null (a 200 that produced no usable function call still
     /// cost tokens). On a 400/422 reject the request was never generated, so both are null (nothing to bill).
@@ -254,7 +254,7 @@ public sealed class OpenAiClient : ILLMClient, IPhysicalStructuredLLMClient, ISt
             Stop = request.Sampling?.Stop,
             ReasoningEffort = LlmModelCapabilities.SupportsReasoningEffort(request.Model) ? request.ReasoningEffort : null,   // sent ONLY to a reasoning model (a plain chat model 400s on it); the value rides verbatim (the API validates it per model)
             Messages = BuildMessages(system, request.UserPrompt),
-            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.WireJsonSchema ?? request.JsonSchema } } },
+            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.ProviderSchema } } },
             ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
         };
 

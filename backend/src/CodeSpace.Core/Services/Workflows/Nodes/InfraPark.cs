@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 using Microsoft.Extensions.Logging;
 
@@ -43,18 +44,19 @@ public static class InfraPark
     public static NodeResult Park(NodeRunContext context, LlmApiException fault, DateTimeOffset now)
     {
         var state = SupervisorInfraPark.Next(context.ResumePayload, now);
+        var said = FaultText(context.Scope, fault);
 
         if (state.WindowExhausted)
         {
             context.Logger.LogWarning("Node {NodeId}: the model plane stayed unavailable past the whole {Window} park window — failing the node honestly", context.NodeId, SupervisorInfraPark.MaxParkWindow);
 
-            return NodeResult.Fail($"The model plane stayed unavailable for {SupervisorInfraPark.MaxParkWindow.TotalHours:0}h: {fault.Message}", retryable: false);
+            return NodeResult.Fail($"The model plane stayed unavailable for {SupervisorInfraPark.MaxParkWindow.TotalHours:0}h: {said}", retryable: false);
         }
 
         var delay = SupervisorInfraPark.DelayFor(state.Parks);
-        var marker = SupervisorInfraPark.Marker(state, fault.Message);
+        var marker = SupervisorInfraPark.Marker(state, said);
 
-        context.Logger.LogWarning("Node {NodeId}: model call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run: {Fault}", context.NodeId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc, fault.Message);
+        context.Logger.LogWarning("Node {NodeId}: model call hit a {Category} infra fault — parking {Delay} (park {Parks} since {First:o}) instead of failing the run: {Fault}", context.NodeId, fault.Category, delay, state.Parks, state.FirstParkedAtUtc, said);
 
         return NodeResult.Suspend(new SuspensionToken
         {
@@ -67,5 +69,32 @@ public static class InfraPark
             DeadlineAt = now + delay,
             TimeoutPayload = marker,
         });
+    }
+
+    /// <summary>The most characters of a fault's text a park writes down. The gateway's own words are what a reader needs; the provider's whole error body, which <see cref="Exception.Message"/> ends with, is not.</summary>
+    internal const int MaxFaultChars = 512;
+
+    /// <summary>
+    /// The fault's own words in the form everything that OUTLIVES the call may hold — the park marker (durable, and what the
+    /// run detail shows while parked), the honest failure text and the park log all take this, never the raw
+    /// <see cref="Exception.Message"/>, which ends with the provider's error body verbatim and unbounded. Scope secrets are
+    /// redacted FIRST and the result is clamped to <see cref="MaxFaultChars"/> after: a clamp that ran first could cut a
+    /// secret in half and leave a fragment no redactor would recognise.
+    /// </summary>
+    internal static string FaultText(NodeRunScope scope, LlmApiException fault)
+    {
+        var redacted = PersistenceSecretRedactor.FromScope(scope).Redact(fault.Message).Value ?? PersistenceSecretRedactor.Marker;
+
+        return Clamp(redacted, MaxFaultChars);
+    }
+
+    /// <summary>The first <paramref name="max"/> characters plus an ellipsis, never ending inside a surrogate pair — a lone half is ill-formed text that Npgsql's strict UTF-8 encoder refuses to write.</summary>
+    private static string Clamp(string text, int max)
+    {
+        if (text.Length <= max) return text;
+
+        var cut = char.IsHighSurrogate(text[max - 1]) ? max - 1 : max;
+
+        return text[..cut] + "…";
     }
 }

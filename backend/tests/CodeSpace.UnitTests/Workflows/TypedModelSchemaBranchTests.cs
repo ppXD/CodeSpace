@@ -10,12 +10,14 @@ namespace CodeSpace.UnitTests.Workflows;
 public sealed class TypedModelSchemaBranchTests
 {
     [Fact]
-    public void The_generator_sees_every_field_an_oracle_branch_requires_on_one_flat_acceptance()
+    public void The_generator_sees_every_field_an_oracle_branch_declares_or_requires_on_one_flat_acceptance()
     {
         // The per-kind branches no longer reach a structured-output generator: a hosted vLLM backend answered every
         // planner call that carried them with an empty HTTP 500, so the provider is handed PlannerSchema.WireSchema.
         // The branches still VALIDATE each reply — one per oracle kind — and the generator can only emit a field the
-        // wire declares, so every field any branch requires must be declared on the wire's flat acceptance.
+        // wire declares, so every field any branch declares OR requires must be declared on the wire's flat acceptance.
+        // Declares, not only requires: an optional property that only a branch mentions is just as unreachable, because
+        // the flat acceptance is additionalProperties:false and nothing else on the wire would let the generator write it.
         var branches = AcceptanceSchema().GetProperty("oneOf").EnumerateArray().ToArray();
         var kinds = AcceptanceSchema().GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(kind => kind.GetString()).ToArray();
 
@@ -23,9 +25,13 @@ public sealed class TypedModelSchemaBranchTests
 
         var wire = WireAcceptanceSchema();
         wire.TryGetProperty("oneOf", out _).ShouldBeFalse();
+        wire.GetProperty("additionalProperties").ValueKind.ShouldBe(JsonValueKind.False, "premise: a field the wire acceptance does not declare is one the generator cannot write");
 
-        foreach (var field in branches.SelectMany(branch => branch.GetProperty("required").EnumerateArray()).Select(name => name.GetString()!).Distinct())
-            wire.GetProperty("properties").TryGetProperty(field, out _).ShouldBeTrue($"a branch requires '{field}', so the wire acceptance must declare it or the generator can never emit it");
+        var fields = branches.SelectMany(BranchFields).Distinct().ToArray();
+        fields.ShouldContain("kind", "fixture check: the walk reads the branches' own property names");
+
+        foreach (var field in fields)
+            wire.GetProperty("properties").TryGetProperty(field, out _).ShouldBeTrue($"a branch declares or requires '{field}', so the wire acceptance must declare it or the generator can never emit it");
 
         wire.GetProperty("required").EnumerateArray().Select(name => name.GetString()).ShouldBe(new[] { "formatVersion", "kind" }, "the requirement every branch shares stays on the wire");
     }
@@ -51,17 +57,18 @@ public sealed class TypedModelSchemaBranchTests
         JsonSchemaValidator.Validate(reply, PlannerSchema.WireSchema).ShouldBeEmpty("the wire schema may never forbid a reply the validation schema accepts");
     }
 
+    /// <summary>The VALIDATION schema — the one every reply is checked against and the prompt quotes — requires the payload of the oracle kind a reply selects. The decoder is handed the wire form instead, which no longer says so (see <see cref="The_generator_sees_every_field_an_oracle_branch_declares_or_requires_on_one_flat_acceptance"/>).</summary>
     [Theory]
     [InlineData("TestsPass")]
     [InlineData("ArtifactPresent")]
     [InlineData("LlmJudge")]
     [InlineData("CitationsResolve")]
     [InlineData("ArtifactSchema")]
-    public void The_model_visible_schema_itself_requires_the_selected_oracle_payload(string kind)
+    public void The_validation_schema_itself_requires_the_selected_oracle_payload(string kind)
     {
         var schema = AcceptanceSchema();
         var missing = JsonSerializer.SerializeToElement(new { formatVersion = 2, kind });
-        JsonSchemaValidator.Validate(missing, schema).ShouldNotBeEmpty("model-visible structural constraints must express the same required payload as the runtime converter");
+        JsonSchemaValidator.Validate(missing, schema).ShouldNotBeEmpty("the validation schema's structural constraints must express the same required payload as the runtime converter");
     }
 
     [Theory]
@@ -70,7 +77,7 @@ public sealed class TypedModelSchemaBranchTests
     [InlineData("""{"formatVersion":2,"kind":"TestsPass","argv":["sh"],"artifactPaths":["out.txt"]}""")]
     [InlineData("""{"formatVersion":2,"kind":"LlmJudge","artifactPaths":["out.txt"]}""")]
     [InlineData("""{"formatVersion":2,"kind":"ArtifactSchema","artifactPaths":["out.txt"]}""")]
-    public void A_present_but_empty_conflicting_or_incomplete_payload_does_not_satisfy_the_model_schema(string response) =>
+    public void A_present_but_empty_conflicting_or_incomplete_payload_does_not_satisfy_the_validation_schema(string response) =>
         JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, AcceptanceSchema()).ShouldNotBeEmpty();
 
     public static TheoryData<string> ValidOracles => new(
@@ -128,9 +135,15 @@ public sealed class TypedModelSchemaBranchTests
     public void Alternative_schemas_enforce_their_actual_matching_semantics(string schema, string response, bool valid) =>
         (JsonSchemaValidator.Validate(JsonDocument.Parse(response).RootElement, JsonDocument.Parse(schema).RootElement).Count == 0).ShouldBe(valid);
 
+    /// <summary>The acceptance inside the VALIDATION schema, per-kind branches and all: what every reply is checked against and the prompt quotes.</summary>
     private static JsonElement AcceptanceSchema() => PlannerSchema.ResponseSchema.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance");
 
+    /// <summary>The acceptance inside the WIRE schema: the flat, branch-free object the provider's decoder is handed.</summary>
     private static JsonElement WireAcceptanceSchema() => PlannerSchema.WireSchema.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance");
+
+    /// <summary>Every field name one branch mentions: the ones it declares under <c>properties</c> and the ones it requires.</summary>
+    private static IEnumerable<string> BranchFields(JsonElement branch) =>
+        branch.GetProperty("properties").EnumerateObject().Select(property => property.Name).Concat(branch.GetProperty("required").EnumerateArray().Select(name => name.GetString()!));
 
     [Fact]
     public void Deeply_branching_schema_validation_is_bounded_and_cannot_turn_exhaustion_into_success()
