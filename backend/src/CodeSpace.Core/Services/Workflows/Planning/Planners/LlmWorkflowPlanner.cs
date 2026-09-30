@@ -13,8 +13,8 @@ namespace CodeSpace.Core.Services.Workflows.Planning.Planners;
 /// <summary>
 /// The structured-LLM <see cref="IWorkflowPlanner"/> (Rule 18.3 — an impl in the <c>Planners/</c> variant
 /// folder). It resolves a structured-capable LLM client through the SAME <see cref="ILLMClientRegistry"/>
-/// the <c>llm.complete</c> node uses, sends a system+user prompt constrained by
-/// <see cref="PlannerSchema.ResponseSchema"/>, and deserializes the schema-valid object into a
+/// the <c>llm.complete</c> node uses, sends a system+user prompt whose reply is validated against
+/// <see cref="PlannerSchema.ResponseSchema"/> (the provider is handed the combinator-free <see cref="PlannerSchema.WireSchema"/>), and deserializes the schema-valid object into a
 /// <see cref="PlannedWorkflow"/>. Fails cleanly when no registered provider offers structured output.
 ///
 /// <para>The planner produces DATA only — it never wires nodes or runs anything. The grounding context

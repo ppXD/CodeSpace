@@ -17,8 +17,9 @@ namespace CodeSpace.UnitTests.Workflows;
 /// blip a Deep run sleeps through killed a Standard run in minutes.
 ///
 /// <para>What these pin: the fault classes worth parking for (and the ones that must stay fail-fast), the ladder
-/// continuing across wakes from its OWN marker only, the honest failure once the window is spent, and the
-/// iteration-key choice that keeps a parked map-branch node inside its own branch cell.</para>
+/// continuing across wakes from its OWN marker only, the honest failure once the window is spent, the
+/// iteration-key choice that keeps a parked map-branch node inside its own branch cell, and the text the park
+/// writes down about the fault — redacted of scope secrets first, then clamped.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class InfraParkTests
@@ -37,6 +38,39 @@ public class InfraParkTests
     };
 
     private static LlmApiException Fault(LlmErrorCategory category) => new("Anthropic", 503, category, "upstream unavailable");
+
+    private static LlmApiException FaultWith(string providerMessage) => new("Anthropic", 500, LlmErrorCategory.Transient, providerMessage);
+
+    /// <summary>A value the run treats as secret — a team variable, listed on <c>SecretPaths</c> under the engine's own spelling (<c>&lt;bucket&gt;.&lt;variable&gt;</c>).</summary>
+    private const string GatewayToken = "gw-tok-7f3a9c2e41d8";
+
+    private static NodeRunContext ContextHoldingSecret() => Context() with
+    {
+        Scope = new NodeRunScope
+        {
+            Trigger = new Dictionary<string, JsonElement>(),
+            Sys = new Dictionary<string, JsonElement>(),
+            Team = new Dictionary<string, JsonElement> { ["GATEWAY_TOKEN"] = JsonSerializer.SerializeToElement(GatewayToken) },
+            SecretPaths = new HashSet<string> { "team.GATEWAY_TOKEN" },
+        },
+    };
+
+    /// <summary>The fault's text as each place the park writes it shows it: the marker's <c>error</c> on a park, that park's log line, and the honest failure once the whole window is spent.</summary>
+    private static Dictionary<string, string> TextsWritten(NodeRunContext context, LlmApiException fault)
+    {
+        var logger = new CapturingLogger();
+        var now = DateTimeOffset.UtcNow;
+
+        var parked = InfraPark.Park(context with { Logger = logger }, fault, now);
+        var failed = InfraPark.Park(context with { ResumePayload = parked.SuspendUntil!.TimeoutPayload }, fault, now + SupervisorInfraPark.MaxParkWindow);
+
+        return new Dictionary<string, string>
+        {
+            ["marker"] = parked.SuspendUntil.Payload.GetProperty("error").GetString()!,
+            ["log"] = logger.Messages.ShouldHaveSingleItem(),
+            ["failure"] = failed.Error!,
+        };
+    }
 
     // ── Which faults park, and which must never ──────────────────────────────────────
 
@@ -74,6 +108,68 @@ public class InfraParkTests
         InfraPark.Park(Context() with { Logger = logger }, Fault(LlmErrorCategory.Transient), DateTimeOffset.UtcNow);
 
         logger.Messages.ShouldHaveSingleItem().ShouldContain("upstream unavailable");
+    }
+
+    // ── What the park writes down about the fault ────────────────────────────────────
+
+    [Fact]
+    public void A_scope_secret_in_the_faults_text_is_redacted_from_the_marker_the_log_and_the_failure()
+    {
+        // LlmApiException.Message ends with the provider's error body verbatim, and a gateway that rejects a request can
+        // echo the credential it was sent. The marker is durable and shown on the run detail, the failure is the run's
+        // own error and the log line leaves the process — none of the three may carry a value the run treats as secret.
+        var fault = FaultWith($"gateway rejected bearer {GatewayToken} on /v1/messages");
+        fault.Message.ShouldContain(GatewayToken, Case.Sensitive, "fixture check: the raw fault carries the secret, or the redaction asserted below proves nothing");
+
+        foreach (var (place, text) in TextsWritten(ContextHoldingSecret(), fault))
+        {
+            text.ShouldNotContain(GatewayToken, Case.Sensitive, $"the {place} must never carry a scope secret");
+            text.ShouldContain(PersistenceSecretRedactor.Marker, Case.Sensitive, $"the {place} says a value was withheld rather than silently losing words");
+        }
+    }
+
+    [Fact]
+    public void A_provider_body_of_thousands_of_characters_is_clamped_in_the_marker_the_log_and_the_failure()
+    {
+        // The same Message tail carries a gateway's WHOLE answer — an HTML page, a stack trace — onto the run row and
+        // into the log line. 512 characters of it and the ellipsis is what a reader needs; the rest is noise at rest.
+        var fault = FaultWith(new string('x', 5_000));
+        var clamped = fault.Message[..512] + "…";
+
+        var written = TextsWritten(Context(), fault);
+
+        written["marker"].ShouldBe(clamped);
+        written["log"].ShouldEndWith(clamped, Case.Sensitive);
+        written["failure"].ShouldEndWith(clamped, Case.Sensitive);
+    }
+
+    [Fact]
+    public void A_secret_that_straddles_the_clamp_is_redacted_whole_and_never_left_as_a_fragment()
+    {
+        // Redaction runs BEFORE the clamp. Clamped first, the cut would land inside the token and leave its opening
+        // characters behind — a fragment no exact-value redactor would ever recognise.
+        var fault = FaultWith(new string('x', 512 - FaultWith("").Message.Length - 4) + GatewayToken + new string('y', 200));
+        fault.Message.IndexOf(GatewayToken, StringComparison.Ordinal).ShouldBe(508, "fixture check: the token starts four characters before the 512-character cut");
+
+        foreach (var (place, text) in TextsWritten(ContextHoldingSecret(), fault))
+            text.ShouldNotContain(GatewayToken[..4], Case.Sensitive, $"the {place} kept the opening of a secret that the clamp cut in half");
+    }
+
+    [Fact]
+    public void The_clamp_never_cuts_a_surrogate_pair_in_half()
+    {
+        // A lone surrogate is ill-formed UTF-16. System.Text.Json quietly swaps it for U+FFFD on the marker, but the
+        // failure text reaches the run row through Npgsql, whose strict UTF-8 encoder throws on it — so an emoji that
+        // straddles the cut goes whole or not at all.
+        var fault = FaultWith(new string('x', 511 - FaultWith("").Message.Length) + "\U0001F600tail");
+        char.IsHighSurrogate(fault.Message[511]).ShouldBeTrue("fixture check: the 512-character cut would fall between the emoji's two halves");
+        var clamped = fault.Message[..511] + "…";
+
+        var written = TextsWritten(Context(), fault);
+
+        written["marker"].ShouldBe(clamped);
+        written["log"].ShouldEndWith(clamped, Case.Sensitive);
+        written["failure"].ShouldEndWith(clamped, Case.Sensitive);
     }
 
     [Fact]

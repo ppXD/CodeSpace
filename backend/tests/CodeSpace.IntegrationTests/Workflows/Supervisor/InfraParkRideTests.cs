@@ -1,6 +1,11 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -138,6 +143,21 @@ public sealed class InfraParkRideTests
     }
 
     [Fact]
+    public async Task An_unresolved_park_quotes_the_clamped_text_the_production_park_stored()
+    {
+        // The park clamps the gateway's words before it stores them, so a provider that answers with a whole page no
+        // longer floods the job summary: the skip quotes the first 512 characters and stops. The marker is minted by the
+        // production park (InfraPark.Park) and read back by the ride's own reader, not built by hand.
+        var fault = new LlmApiException("Anthropic", 500, LlmErrorCategory.Transient, new string('x', 5_000));
+        var park = InfraPark.Park(ParkingContext(), fault, DateTimeOffset.UtcNow);
+        var cell = Parked() with { WaitPayloadJson = park.SuspendUntil!.Payload.GetRawText() };
+
+        var ex = await Should.ThrowAsync<InfraParkUnresolvedException>(() => InfraParkRide.RideAsync(() => Task.FromResult(cell), _ => Task.CompletedTask, maxWakes: 1, wakePause: TimeSpan.Zero));
+
+        ex.Message.ShouldEndWith("The park's last fault: " + fault.Message[..512] + "…", Case.Sensitive);
+    }
+
+    [Fact]
     public void The_ride_pauses_for_real_between_wakes_so_a_recovery_can_actually_be_observed()
     {
         // A zero pause would make "riding" a busy-loop that burns the whole budget in one instant — it could never
@@ -149,4 +169,16 @@ public sealed class InfraParkRideTests
     private static ParkedCell Parked() => new() { CellStatus = NodeStatus.Suspended, PendingWaitKind = WorkflowWaitKinds.SupervisorInfraPark, NodeId = "planner" };
 
     private static ParkedCell Settled() => new() { CellStatus = NodeStatus.Success, PendingWaitKind = null, NodeId = "planner" };
+
+    private static NodeRunContext ParkingContext() => new()
+    {
+        Inputs = new Dictionary<string, JsonElement>(),
+        Config = new Dictionary<string, JsonElement>(),
+        RawInputs = JsonDocument.Parse("{}").RootElement,
+        RawConfig = JsonDocument.Parse("{}").RootElement,
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = new Dictionary<string, JsonElement>() },
+        Logger = NullLogger.Instance,
+        Observability = NodeObservability.NoOp,
+        NodeId = "planner",
+    };
 }

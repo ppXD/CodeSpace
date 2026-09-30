@@ -21,7 +21,9 @@ public interface IStructuredLLMClient
     /// <summary>
     /// One LLM call constrained to return JSON matching <see cref="StructuredLLMCompletionRequest.JsonSchema"/>.
     /// The provider impl maps the schema to whatever its API offers (Anthropic forces a single tool whose
-    /// input_schema IS the schema; OpenAI would use response_format json_schema, …).
+    /// input_schema carries the schema; OpenAI would use response_format json_schema, …). The provider receives
+    /// <see cref="StructuredLLMCompletionRequest.WireJsonSchema"/> when the request sets one, else <see cref="StructuredLLMCompletionRequest.JsonSchema"/>;
+    /// every reply is validated against <see cref="StructuredLLMCompletionRequest.JsonSchema"/> either way.
     /// </summary>
     Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken);
 }
@@ -44,6 +46,9 @@ public sealed record StructuredLLMCompletionRequest
     /// quotes, so a narrower wire schema would forbid the model an answer the contract allows.
     /// </summary>
     public JsonElement? WireJsonSchema { get; init; }
+
+    /// <summary>The schema the provider is actually handed: <see cref="WireJsonSchema"/> when set, else <see cref="JsonSchema"/>. A <c>default</c> wire schema (kind Undefined) counts as unset — a nullable struct admits it as a non-null value, and it cannot be serialized.</summary>
+    internal JsonElement ProviderSchema => WireJsonSchema is { ValueKind: not JsonValueKind.Undefined } wire ? wire : JsonSchema;
 
     /// <summary>Server-only validation of the consumer contract, alongside JSON schema. Violations enter the same bounded model re-ask; this callback never rewrites output.</summary>
     [JsonIgnore]

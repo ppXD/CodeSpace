@@ -1,11 +1,13 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 using Shouldly;
@@ -409,7 +411,7 @@ public sealed class StructuredResponseContractTests
     [Theory]
     [InlineData("Anthropic")]
     [InlineData("OpenAI")]
-    public async Task The_planner_request_sends_the_provider_a_combinator_free_schema_that_still_declares_every_acceptance_field(string provider)
+    public async Task The_planner_request_sends_the_provider_a_combinator_free_schema_and_its_prompt_still_quotes_the_full_one(string provider)
     {
         // A hosted vLLM backend compiles the forced tool's schema into its decoding grammar. The per-kind oneOf
         // branches (#1854) broke that compile: every planner call came back an EMPTY HTTP 500, the planner parked,
@@ -421,6 +423,13 @@ public sealed class StructuredResponseContractTests
 
         var sent = SentToolSchema(provider, handler.Bodies[0]);
         JsonSchemaCombinatorsTests.CombinatorPaths(sent).ShouldBeEmpty("the provider's constrained decoder must never be handed a combinator");
+
+        // The tool schema lost its per-kind branches, so the SYSTEM prompt — which quotes the FULL contract schema — is
+        // now the only place the model reads which payload each oracle kind requires. Handing the prompt the wire form
+        // too would leave the model no statement of those requirements at all, and nothing else would notice.
+        var system = SentSystemText(provider, handler.Bodies[0]);
+        system.ShouldContain("\"oneOf\"", Case.Sensitive, "the prompt is where the model learns the per-kind acceptance requirements now that the tool schema has no branches");
+        system.ShouldContain(PlannerSchema.ResponseSchema.GetRawText(), Case.Sensitive, "the prompt quotes the full contract schema verbatim, not the wire form");
 
         var acceptance = sent.GetProperty("properties").GetProperty("subtasks").GetProperty("items").GetProperty("properties").GetProperty("acceptance").GetProperty("properties");
         foreach (var field in new[] { "formatVersion", "kind", "argv", "artifactPaths" })
@@ -450,6 +459,23 @@ public sealed class StructuredResponseContractTests
         handler.Bodies.Count.ShouldBe(2, "the combinator the wire dropped still earned its one re-ask");
         handler.Bodies[1].ShouldContain("oneOf requires exactly one matching schema");
         JsonSchemaCombinatorsTests.CombinatorPaths(SentToolSchema(provider, handler.Bodies[0])).ShouldBeEmpty("the provider was handed the wire schema, not the contract");
+        SameJson(SentToolSchema(provider, handler.Bodies[1]), request.WireJsonSchema!.Value).ShouldBeTrue("the re-ask is a second request through the same wire — its tool schema is the wire schema too, never the contract");
+        SentSystemText(provider, handler.Bodies[1]).ShouldContain("\"oneOf\"", Case.Sensitive, "the re-ask's prompt still quotes the full contract beside the violations it names");
+    }
+
+    [Theory]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAI")]
+    public async Task An_undefined_wire_schema_counts_as_unset_and_the_provider_gets_the_contract_schema(string provider)
+    {
+        // WireJsonSchema is a nullable struct, so default(JsonElement) is a NON-null value of kind Undefined. A bare `??`
+        // would pick it over the contract and the request body could not even be serialized.
+        var request = Request(provider) with { WireJsonSchema = default(JsonElement) };
+        var handler = new WireHandler(provider, ["""{"argv":["sh"]}"""]);
+
+        await Client(provider, handler).CompleteStructuredAsync(request, CancellationToken.None);
+
+        SameJson(SentToolSchema(provider, handler.Bodies[0]), request.JsonSchema).ShouldBeTrue("an Undefined wire schema is no schema at all — the provider is handed the contract's own");
     }
 
     /// <summary>The live regression shape: one subtask that names an oracle kind and authors NO payload for it — a consumer-contract defect the model-visible schema ALSO faults (no per-kind <c>oneOf</c> branch matches), which is why the two must be read as one severity. <paramref name="payload"/> appends raw acceptance keys, so an EMPTY payload can be authored too.</summary>
@@ -487,6 +513,16 @@ public sealed class StructuredResponseContractTests
 
         return provider == "Anthropic" ? tool.GetProperty("input_schema").Clone() : tool.GetProperty("function").GetProperty("parameters").Clone();
     }
+
+    /// <summary>The system text the request carried, which is where the prompt quotes the schema: Anthropic's top-level <c>system</c>, the OpenAI wire's first (system-role) message.</summary>
+    private static string SentSystemText(string provider, string body)
+    {
+        var root = JsonDocument.Parse(body).RootElement;
+
+        return (provider == "Anthropic" ? root.GetProperty("system") : root.GetProperty("messages")[0].GetProperty("content")).GetString()!;
+    }
+
+    private static bool SameJson(JsonElement actual, JsonElement expected) => JsonNode.DeepEquals(JsonNode.Parse(actual.GetRawText()), JsonNode.Parse(expected.GetRawText()));
 
     private static IStructuredLLMClient Client(string provider, WireHandler handler) => provider == "Anthropic" ? new AnthropicClient(new Factory(handler)) : new OpenAiClient(new Factory(handler));
     private sealed class Factory(HttpMessageHandler handler) : IHttpClientFactory

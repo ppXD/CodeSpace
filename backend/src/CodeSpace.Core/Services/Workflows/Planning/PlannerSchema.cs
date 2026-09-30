@@ -5,8 +5,8 @@ using CodeSpace.Core.Services.Workflows.Llm;
 namespace CodeSpace.Core.Services.Workflows.Planning;
 
 /// <summary>
-/// The planner's COMMIT-CONTRACT: the JSON Schema the model is constrained to (via the structured-output
-/// path) and the matching deserialization options. Co-located with the planner concern (Rule 18) and
+/// The planner's COMMIT-CONTRACT: the JSON Schema every reply is VALIDATED against (and the prompt quotes) and the
+/// matching deserialization options; the provider itself is handed the combinator-free <see cref="WireSchema"/> instead. Co-located with the planner concern (Rule 18) and
 /// pinned by a unit test — a drift in either the schema or the property mapping is a contract change a
 /// reviewer must see, not an invisible refactor.
 ///
@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// </summary>
 public static class PlannerSchema
 {
-    /// <summary>The JSON schema constraining fresh model output. PlannerAcceptanceDraft maps its typed acceptance payloads before the normalized PlannedWorkflow reaches persistence or execution.</summary>
+    /// <summary>The JSON schema every fresh model reply is VALIDATED against and the prompt quotes; the provider is handed <see cref="WireSchema"/>, not this. PlannerAcceptanceDraft maps its typed acceptance payloads before the normalized PlannedWorkflow reaches persistence or execution.</summary>
     public static readonly JsonElement ResponseSchema = JsonDocument.Parse("""
         {
           "type": "object",

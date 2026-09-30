@@ -14,8 +14,8 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 ///
 /// Implements <see cref="ILLMClient"/> (free-text completion) AND the sibling
 /// <see cref="IStructuredLLMClient"/> (schema-constrained JSON) — the latter via Anthropic's
-/// forced tool-use: a single tool whose <c>input_schema</c> IS the requested schema, with
-/// <c>tool_choice</c> pinned to it, so the model's <c>tool_use</c> block carries schema-valid JSON.
+/// forced tool-use: a single tool whose <c>input_schema</c> is the request's <c>WireJsonSchema ?? JsonSchema</c> (every reply
+/// is validated against <c>JsonSchema</c>), with <c>tool_choice</c> pinned to it, so the model's <c>tool_use</c> block carries schema-valid JSON.
 ///
 /// Keep ONLY the wire-shape concerns here. Anything node-facing (prompt assembly, output
 /// trimming, retry policy) belongs in the llm.complete node or the LLM-side resilience
@@ -195,7 +195,7 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
     }
 
     /// <summary>
-    /// Attempt 1: forced tool-use — a single tool whose input_schema IS the schema, tool_choice pinned to it. Returns
+    /// Attempt 1: forced tool-use — a single tool whose input_schema is <c>WireJsonSchema ?? JsonSchema</c> (validation still uses <c>JsonSchema</c>), tool_choice pinned to it. Returns
     /// the recovered JSON (or null to degrade to the prompt-only floor) PLUS the parsed response — so the caller can
     /// accumulate the BILLED usage even when the JSON is null (a 200 that produced no usable tool call still cost
     /// tokens). On a 400/422 reject the request was never generated, so both are null (nothing to bill).
@@ -213,7 +213,7 @@ public sealed class AnthropicClient : ILLMClient, IPhysicalStructuredLLMClient, 
             StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages,
-            Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.WireJsonSchema ?? request.JsonSchema } },
+            Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.ProviderSchema } },
             ToolChoice = new AnthropicToolChoice { Type = "tool", Name = StructuredToolName }
         };
 
