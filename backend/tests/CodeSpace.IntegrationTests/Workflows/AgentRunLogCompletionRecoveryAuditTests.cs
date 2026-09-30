@@ -29,6 +29,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(ITestOutputH
 {
     private const int SegmentBytes = 1024 * 1024;
     private const int SegmentCount = 4;
+    private static readonly AgentRunLogCaptureRecoveryOptions RecoveryOptions = new(1, 1, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5), new AgentRunLogCaptureRetryPolicy(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), 3, TimeSpan.FromMinutes(5), TimeSpan.Zero));
     private readonly List<string> _roots = [];
     // Recovery scans the whole deployment. Each case needs its own real database, so another test's abandoned
     // terminal intent cannot be mistaken for this case's claimed attempt or exhaust its counted step budget.
@@ -267,8 +268,7 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests(ITestOutputH
     }
 
     private static AgentRunLogService Logs(ILifetimeScope scope, IArtifactCasRuntimeCoordinator cas) => new(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), cas, TimeProvider.System);
-    private static AgentRunLogCaptureRecoveryService Recovery(ILifetimeScope scope, IAgentRunLogService logs) => new(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), logs,
-        new AgentRunLogCaptureRecoveryOptions(1, 1, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5), new AgentRunLogCaptureRetryPolicy(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), 3, TimeSpan.FromMinutes(5), TimeSpan.Zero)));
+    private static AgentRunLogCaptureRecoveryService Recovery(ILifetimeScope scope, IAgentRunLogService logs) => new(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), logs, RecoveryOptions);
     private static string Ordinals(World world, IReadOnlyList<LogSegmentReadObservation> reads) => string.Join(",", reads.Select(value => Array.IndexOf(world.ObjectIds, value.ArtifactObjectId) + 1));
     private static void AssertReads(IReadOnlyList<LogSegmentReadObservation> reads, IEnumerable<Guid> expectedObjects)
     {

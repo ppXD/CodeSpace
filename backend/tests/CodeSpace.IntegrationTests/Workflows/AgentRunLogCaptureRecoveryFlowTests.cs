@@ -4,9 +4,11 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -558,6 +560,71 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
     }
 
     [Fact]
+    public async Task A_settlement_slower_than_the_retry_it_schedules_still_releases_its_claim()
+    {
+        // A settlement reads its DB clock, schedules the retry from it, then reads verification progress before it
+        // writes. Holding THIS intent's settlement between the two for longer than the retry it schedules leaves the
+        // retry instant in the past when the write lands, which a cold or loaded worker does with nothing held. Refused,
+        // the intent stays leased and idle until the lease expires, and the re-claim spends another attempt.
+        var world = await SeedWorldAsync();
+        var logs = LogService();
+        var sessionId = Guid.NewGuid();
+        await Recovery(logs).DeclareAsync(Declaration(world, sessionId, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        await SeedFinalizedTerminalStreamAsync(world, logs, sessionId);
+
+        var retryDelay = TimeSpan.FromMilliseconds(100);
+        var slowSettlement = new SlowCaptureSettlementInterceptor(world.AgentRunId, retryDelay * 3);
+        var recovery = Recovery(new AlwaysRetryableCompleteLogService(logs), new RecoveryTestOptions { BaseDelay = retryDelay, MaxDelay = retryDelay }, slowSettlement);
+
+        var intent = await ReconcileUntilAsync(recovery, world, value => value.RecoveryAttemptCount > 0, "claimed by a recovery wave");
+
+        slowSettlement.Held.ShouldBeTrue("the seam never held this intent's settlement, so its write was never slower than its retry");
+        intent.RecoveryOwnerId.ShouldBeNull("a settlement slower than the retry it scheduled must still commit and release its claim");
+        intent.State.ShouldBe(AgentRunLogCaptureIntentState.SourceFinalized);
+        intent.LastErrorCode.ShouldBe("complete-backend-unavailable");
+        intent.RecoveryAttemptCount.ShouldBe(1);
+        intent.VerificationStalledAttempts.ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData("transaction_timestamp()", false)]                              // due the instant its settlement began: nothing was scheduled
+    [InlineData("transaction_timestamp() + interval '50 milliseconds'", true)] // due after its settlement began, though the write lands later
+    public async Task A_retry_must_be_due_after_the_settlement_that_scheduled_it_began_not_after_its_write(string nextRecoveryAt, bool admitted)
+    {
+        var world = await SeedWorldAsync();
+        await Recovery(LogService()).DeclareAsync(Declaration(world, Guid.NewGuid(), 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var intent = await db.AgentRunLogCaptureIntent.SingleAsync(value => value.AgentRunId == world.AgentRunId);
+        var owner = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run_log_capture_intent SET recovery_owner_id = {owner}, recovery_fence_epoch = 1, recovery_attempt_count = 1, recovery_started_at = clock_timestamp(), recovery_lease_expires_at = clock_timestamp() + interval '5 minutes', revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {intent.Id}");
+
+        var refusal = await Record.ExceptionAsync(() => SettleRetryAfterPauseAsync(db, intent.Id, nextRecoveryAt));
+
+        (refusal == null).ShouldBe(admitted, refusal?.Message);
+        (refusal?.Message.Contains("retry outcome requires a typed future retry") ?? false).ShouldBe(!admitted, refusal?.Message);
+        db.ChangeTracker.Clear();
+        (await db.AgentRunLogCaptureIntent.AsNoTracking().SingleAsync(value => value.Id == intent.Id)).RecoveryOwnerId.ShouldBe(admitted ? null : owner);
+    }
+
+    /// <summary>
+    /// Settles a claimed intent as a typed retry due at <paramref name="nextRecoveryAt"/>, a SQL expression, after a pause
+    /// longer than that retry's delay. The pause stands in for the reads a real settlement makes between the clock read it
+    /// schedules from and the write the guard inspects.
+    /// </summary>
+    private static async Task SettleRetryAfterPauseAsync(CodeSpaceDbContext db, Guid intentId, string nextRecoveryAt)
+    {
+        var settle = "UPDATE agent_run_log_capture_intent SET recovery_owner_id = NULL, recovery_lease_expires_at = NULL, last_error_code = 'complete-backend-unavailable', "
+            + "last_error_message = 'The finalized stream could not yet be verified.', next_recovery_at = " + nextRecoveryAt + ", revision = revision + 1, last_modified_at = clock_timestamp() WHERE id = {0}";
+        await using var transaction = await db.Database.BeginTransactionAsync();
+
+        await db.Database.ExecuteSqlRawAsync("SELECT pg_sleep(0.2)");
+        await db.Database.ExecuteSqlRawAsync(settle, intentId);
+
+        await transaction.CommitAsync();
+    }
+
+    [Fact]
     public async Task Terminal_grace_uses_database_observation_time_not_positive_or_negative_application_clock_skew()
     {
         var early = await SeedWorldAsync();
@@ -752,11 +819,14 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
             .SingleAsync(value => value.AgentRunId == world.AgentRunId);
     }
 
-    private AgentRunLogCaptureRecoveryService Recovery(IAgentRunLogService logs, RecoveryTestOptions? options = null)
+    private AgentRunLogCaptureRecoveryService Recovery(IAgentRunLogService logs, RecoveryTestOptions? options = null, IInterceptor? interceptor = null)
     {
         options ??= new RecoveryTestOptions();
         using var scope = _fixture.BeginScope();
-        return new AgentRunLogCaptureRecoveryService(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), logs,
+        var dbOptions = scope.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+        if (interceptor != null) dbOptions = new DbContextOptionsBuilder<CodeSpaceDbContext>(dbOptions).AddInterceptors(interceptor).Options;
+
+        return new AgentRunLogCaptureRecoveryService(dbOptions, logs,
             new AgentRunLogCaptureRecoveryOptions(20, options.MaxConcurrency, TimeSpan.FromSeconds(6), options.OperationTimeout,
                 new AgentRunLogCaptureRetryPolicy(options.BaseDelay, options.MaxDelay, options.MaxAttempts, options.MaxAge, options.TerminalGrace)));
     }

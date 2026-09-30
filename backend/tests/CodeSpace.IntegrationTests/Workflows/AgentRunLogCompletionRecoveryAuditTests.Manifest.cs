@@ -7,6 +7,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.StorageTestWorker;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -161,5 +162,32 @@ public sealed partial class AgentRunLogCompletionRecoveryAuditTests
             }
         }
         throw new Xunit.Sdk.XunitException("Healthy progress did not finish after more than eight bounded steps.");
+    }
+
+    [Fact]
+    public async Task A_progress_settlement_slower_than_its_progress_retry_still_records_progress_and_releases_its_claim()
+    {
+        // A progress settlement schedules its short retry from its DB clock read, then reads the durable verification
+        // checkpoint before it writes. Holding that read for longer than the retry leaves the retry instant in the past
+        // when the write lands, as a settlement that stalls past the 1 s production retry does with nothing held.
+        // Refused, the progress write is lost and the intent sits leased and idle until its lease expires.
+        var world = await SeedAsync(declareRecovery: true, segmentCount: AgentRunLogService.VerificationSegmentsPerStep * 2, segmentBytes: 4096);
+        await MarkTerminalAsync(world);
+        using var scope = fixture.BeginScope();
+        var progressDelay = TimeSpan.FromMilliseconds(50);
+        var slowSettlement = new SlowCaptureSettlementInterceptor(world.Complete.AgentRunId, progressDelay * 5);
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>()).AddInterceptors(slowSettlement).Options;
+        var recovery = new AgentRunLogCaptureRecoveryService(options, Logs(scope, scope.Resolve<IArtifactCasRuntimeCoordinator>()), RecoveryOptions with { VerificationProgressDelay = progressDelay });
+
+        var summary = await recovery.ReconcileAsync(CancellationToken.None);
+
+        slowSettlement.Held.ShouldBeTrue("the seam never held this intent's settlement, so its write was never slower than its retry");
+        summary.Claimed.ShouldBe(1);
+        summary.LostLease.ShouldBe(0, "a progress settlement slower than the retry it scheduled must still commit");
+        var intent = await IntentAsync(world);
+        intent.RecoveryOwnerId.ShouldBeNull("the refused settlement would leave its claim leased until the lease expires");
+        intent.LastErrorCode.ShouldBeNull("only an untyped progress retry exercises the progress clause of the guard");
+        intent.VerificationProgressOrdinal.ShouldBe(AgentRunLogService.VerificationSegmentsPerStep);
+        intent.VerificationStalledAttempts.ShouldBe(0);
     }
 }
