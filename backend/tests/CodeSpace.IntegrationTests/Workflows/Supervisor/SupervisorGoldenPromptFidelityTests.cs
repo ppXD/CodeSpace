@@ -631,7 +631,38 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// THIS RE-PIN: <c>merge</c> is withheld from a tape whose newest staged work is a reconciliation the tape
+    /// THIS RE-PIN: the prompt gained the OPERATOR ACCEPTANCE FLOOR block — the argv the server runs on every branch a
+    /// stop ships (<see cref="SupervisorTurnContext.AcceptanceChecks"/>) — rendered right after the acceptance-criteria
+    /// block by <c>LlmSupervisorDecider.AppendOperatorAcceptanceFloor</c>, and ONLY when the context carries one. Until
+    /// now the brain drove every run blind to the one check that decides it: a failing floor withholds those branches and
+    /// ends the run <c>AcceptanceFailed</c>, and a stop is final, so no turn is left to fix it — yet the decider rendered
+    /// only the free-text criteria, and the system prompt said "the operator's floor" without ever showing it. The block
+    /// states what runs (the argv, written as a JSON array because the grader spawns it with no shell), the timeout, the
+    /// consequence, and that repeating the floor as the stop payload's <c>acceptance</c> only runs it twice. It says
+    /// "before declaring success" rather than "before stopping", so it never contradicts the honest exits
+    /// (<c>gave_up</c>, <c>ask_human</c>) the system prompt and the closing move still offer.
+    ///
+    /// <para>The moved bytes are attributed per tape, not claimed: the block renders on exactly
+    /// <see cref="CarriesAnOperatorFloor"/> — the one scenario whose context declares a floor,
+    /// <c>repeat-failure-under-a-declared-check</c> (<c>["dotnet", "test"]</c>) — and nothing else moves.
+    /// <see cref="Only_the_tape_that_carries_an_operator_floor_gains_the_floor_block"/> derives that rather than
+    /// restating it: it renders every scenario with and without its floor and requires the movers to be exactly that
+    /// set; it requires the carrier's prompt, minus the block's own lines (taken from the decider's constants, never
+    /// retyped), to equal its floor-withheld prompt, so the block is the ONLY thing that moved; and it requires the
+    /// corpus rendered with every floor withheld to digest to <see cref="PreOperatorFloorCorpusDigest"/> — the pin this
+    /// constant held before the block existed. So the other 28 scenarios are byte-identical and their scores stay
+    /// comparable across the change. The three older anchors need no edit: each is recomputed over a subset that
+    /// already excludes this scenario (<see cref="AddedSinceTheSupersededPins"/>, <see cref="AddedSinceTheRosterPin"/>),
+    /// so none of them was ever measured over it.</para>
+    ///
+    /// <para>What did NOT move, on purpose: the SYSTEM prompt (its digest gates paid qualification through
+    /// <c>QualificationRuntimeGate</c>), the stopped-now recital (precomposed from the durable tape, and mirrored by
+    /// this corpus's own <c>RenderStoppedNowRecital</c>), and <c>SupervisorQualityFacts</c> — the floor is a run-level
+    /// gate, not a unit-level declared check, which
+    /// <see cref="Only_one_corpus_plan_authors_a_per_unit_oracle_so_only_two_units_in_it_have_a_declared_check"/>
+    /// still pins.</para>
+    ///
+    /// PREVIOUS RE-PIN: <c>merge</c> is withheld from a tape whose newest staged work is a reconciliation the tape
     /// records as NOT verified, and the two blocks that still named the verb unconditionally now defer to that mask —
     /// the CURRENT PLAN STATE block's finished-plan line (<see cref="SupervisorRecitation.FinishedCannotMerge"/>) and,
     /// for the budget-remaining half of the pair, the closing move
@@ -745,7 +776,17 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "2dafcdc7e52c3d22d1d2d209bb05bbe701191131defeb9e11f26360ef70bf5fb";
+    private const string GoldenPromptDigest = "6b9c621bf49c7e5858a1289f62581319c3974d8f86cab3272c54d1574084c893";
+
+    /// <summary>
+    /// The pin this corpus carried while the operator's acceptance floor never reached the prompt: the decider read
+    /// the free-text criteria and nothing else, so a floor on a context changed not one byte of the rendering.
+    /// Superseded, never deleted — it is the fixed point
+    /// <see cref="Only_the_tape_that_carries_an_operator_floor_gains_the_floor_block"/> measures today's rendering
+    /// against: the corpus with every floor withheld must still digest to it over all 29 scenarios, so the move is
+    /// the floor block and nothing else. A digest whose predecessor is deleted can only ever be compared with itself.
+    /// </summary>
+    private const string PreOperatorFloorCorpusDigest = "2dafcdc7e52c3d22d1d2d209bb05bbe701191131defeb9e11f26360ef70bf5fb";
 
     /// <summary>
     /// The pin this corpus carried while the VERB ROSTER was a static sentence in the turn-invariant system prompt —
@@ -1038,6 +1079,62 @@ public class SupervisorGoldenPromptFidelityTests
             SupervisorQualityRecitation.Render(scenario.Context.QualityDecisions).ShouldBeNull("…so the wind-back for this tape is a no-op, which is what makes its bytes identical rather than merely reconstructible");
         }
     }
+
+    /// <summary>
+    /// The scenarios whose context carries an operator acceptance floor — the named receipt for the current
+    /// <see cref="GoldenPromptDigest"/>, exactly like <see cref="ConflictedScenarios"/> and
+    /// <see cref="MissingARequiredStage"/> are for theirs. A ONE-element set because the floor is the run-level argv the
+    /// stop path runs, and this corpus declares it in one place: <c>repeat-failure-under-a-declared-check</c>, whose
+    /// <c>["dotnet", "test"]</c> is also the argv s1's own per-unit oracle declares (the fixture reuses one argv for
+    /// both grains, so the floor block and the plan-state check line name the same command there).
+    /// </summary>
+    private static readonly HashSet<string> CarriesAnOperatorFloor = new(StringComparer.Ordinal)
+    {
+        "repeat-failure-under-a-declared-check",
+    };
+
+    /// <summary>
+    /// The named receipt for <see cref="GoldenPromptDigest"/>'s move: the OPERATOR ACCEPTANCE FLOOR block renders on
+    /// the tape that carries a floor and on no other, and it is the ONLY thing that moved. Derived, not claimed —
+    /// every scenario is rendered as carried and with its floor withheld, and the set that differs must be exactly the
+    /// named one; the carrier's prompt minus the block's own lines must equal its floor-withheld prompt; and the
+    /// wind-back anchors the "before" half: the corpus with every floor withheld must digest to
+    /// <see cref="PreOperatorFloorCorpusDigest"/>, the pin held before the block existed. Without that anchor the
+    /// receipt would compare today's code with itself, and a corpus that drifted for an unrelated reason would still
+    /// report a clean, attributable re-pin.
+    ///
+    /// <para>Presence, not wording: the block's header and closing note are taken FROM the decider's constants and
+    /// never retyped (this file pins arms and presence, and the copy is the decider's own unit tests' job); the only
+    /// line spelled out here is the argv, which is the fixture's own floor.</para>
+    /// </summary>
+    [Fact]
+    public void Only_the_tape_that_carries_an_operator_floor_gains_the_floor_block()
+    {
+        SupervisorDecisionGoldenScenarios.All.Where(s => s.Context.AcceptanceChecks is { Count: > 0 }).Select(s => s.Name).ShouldBe(CarriesAnOperatorFloor.ToList(), ignoreOrder: true,
+            "the set of scenarios whose context declares an operator floor must match the named receipt beside the digest — a floor added to another tape moves that tape's prompt, so it must be re-pinned and attributed");
+
+        var moved = SupervisorDecisionGoldenScenarios.All.Where(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context) != FloorWithheld(s)).Select(s => s.Name).ToList();
+
+        moved.ShouldBe(CarriesAnOperatorFloor.ToList(), ignoreOrder: true,
+            "the set of scenarios whose prompt moved must match the named receipt — a tape whose floor the block did not render, or a tape that gained the block without one, is a re-pin nobody attributed");
+
+        Digest(RenderedCorpus(FloorWithheld)).ShouldBe(PreOperatorFloorCorpusDigest,
+            "with every floor withheld the corpus must digest to the pin it carried before the block existed — anything else drifted into the same commit, so the move is then not the floor block alone");
+
+        var carrier = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "repeat-failure-under-a-declared-check");
+        var withFloor = LlmSupervisorDecider.BuildUserPromptForTest(carrier.Context);
+        var block = string.Join(Environment.NewLine, LlmSupervisorDecider.OperatorFloorHeader, """  ["dotnet","test"]""", LlmSupervisorDecider.DoNotRepeatTheFloorAsTheStopAcceptance) + Environment.NewLine + Environment.NewLine;
+
+        FloorWithheld(carrier).ShouldNotContain("""["dotnet","test"]""", Case.Sensitive,
+            "fixture check: that argv line must come from the floor block alone — if the tape already shows it elsewhere, the presence assertion below proves nothing");
+        withFloor.ShouldContain(block, Case.Sensitive,
+            "the tape that carries the floor shows the model that floor's block — present, and not merely some other byte moved");
+        withFloor.Replace(block, string.Empty, StringComparison.Ordinal).ShouldBe(FloorWithheld(carrier),
+            "the carrier's prompt minus the block's own lines must be exactly its floor-withheld prompt — so the block is the ONLY thing that moved");
+    }
+
+    /// <summary>One scenario's prompt with its operator floor withheld — what every prompt read before the floor reached the brain, since the decider rendered the free-text criteria and never this field.</summary>
+    private static string FloorWithheld(SupervisorGoldenScenario scenario) => LlmSupervisorDecider.BuildUserPromptForTest(scenario.Context with { AcceptanceChecks = null });
 
     private static string PromptFor(string name) =>
         LlmSupervisorDecider.BuildUserPromptForTest(SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name).Context);

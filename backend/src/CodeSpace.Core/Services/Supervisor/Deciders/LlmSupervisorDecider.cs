@@ -844,6 +844,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine();
         }
 
+        // The operator's acceptance FLOOR — the argv the server runs on every branch a stop ships. Unlike the criteria above,
+        // which are only a yardstick, this one RUNS, and a failure ends the run. Null / empty ⇒ no block ⇒ byte-identical prompt.
+        AppendOperatorAcceptanceFloor(builder, context);
+
         // DC-2a: the operator's OWN pre-declared delivery preference — tell the model WHY a delivery proposal it
         // authors may be overridden, so it stops re-proposing an already-vetoed contract turn after turn. Only
         // an OPERATOR declaration renders here (never the model's own prior proposal, which needs no explaining
@@ -1045,6 +1049,62 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // The resolve-naming arm is gated on the reach as well as on the reason, so the one sentence that names a
         // verb only ever names one this same prompt still offers.
         return reach == SupervisorLandingReach.ReconcileFirst && withheld == SupervisorActionMask.UnacceptedReconciliation ? ClosingReconcileBeforeLanding : ClosingAlreadyIntegrated;
+    }
+
+    /// <summary>
+    /// The operator-floor block's header — a stable prompt landmark the tests key on, like
+    /// <see cref="SupervisorQualityRecitation.Header"/>. The timeout and the outcome word are the stop path's own
+    /// constants, so the copy cannot drift from what the stop does.
+    ///
+    /// <para>"Every branch a stop ships", because a stop that published no branch has nothing to grade and records the
+    /// floor as not graded rather than passed. It ends on "before declaring success", not "before stopping": the model
+    /// can never observe the floor's verdict before it stops, and an honest exit (<c>gave_up</c>, <c>ask_human</c>)
+    /// stays open on a run that cannot pass — the instruction is how to reach a SUCCESS stop, never a reason to keep
+    /// working forever.</para>
+    ///
+    /// <para>A <c>static readonly</c> rather than a <c>const</c> only because C# cannot fold an <c>int</c> constant into a
+    /// constant string — the alternative is retyping the timeout here, which is exactly the drift this avoids.</para>
+    /// </summary>
+    internal static readonly string OperatorFloorHeader = $"Operator acceptance floor (the server runs this argv on every branch a stop ships, {SupervisorLane.AcceptanceGradeTimeoutSeconds} s timeout each; if it fails, those branches are withheld and the run ends as {SupervisorOutcome.AcceptanceFailedOutcome} — a stop is final, so no turn is left to fix it; drive the work until it passes before declaring success):";
+
+    /// <summary>
+    /// The operator-floor block's last line. The STOP payload's own <c>acceptance</c> is a second gate, graded beside the
+    /// floor and never in place of it, so repeating the floor there only runs it twice on every branch, each in its own
+    /// clone and each up to the timeout. It names the stop payload because a subtask's (or a phase's, or an amendment's)
+    /// <c>acceptance</c> is a different field — and a per-unit check that runs the same command is the ONE way the model
+    /// can see a verdict before it stops, so that use is welcome.
+    /// </summary>
+    internal const string DoNotRepeatTheFloorAsTheStopAcceptance = "Do not repeat it as the stop payload's acceptance: the stop runs it regardless, so a copy only runs it twice on every branch. A subtask's own acceptance is a separate per-unit check.";
+
+    /// <summary>
+    /// The operator's acceptance FLOOR, recited: the argv <c>ApplyStopAcceptanceGradeAsync</c> runs on every branch a
+    /// stop ships. A failing floor withholds those branches and ends the run
+    /// <see cref="SupervisorOutcome.AcceptanceFailedOutcome"/>, and a stop is final, so no turn is left to fix it — yet the
+    /// decider rendered only the free-text criteria and the system prompt names "the operator's floor" without showing
+    /// it, so the brain drove the work blind to the one check that decides the run.
+    ///
+    /// <para>The argv is written as a JSON array of strings, never as shell text. The grader spawns it with NO shell
+    /// (<c>TestsPassGrader</c> hands the first element to the runner as the program and the rest as its arguments), so a
+    /// shell-looking line misleads: <c>--filter Category=Unit|Category=Smoke</c> reads as a pipe, and a joined line cannot
+    /// tell <c>["sh", " ", "check.sh"]</c> from two arguments. The array keeps every element boundary and every
+    /// character — <c>WorkflowJson.InterpolatedText</c>, the repo's own way to write an array into prompt text, leaves
+    /// the quote, pipe, ampersand, angle brackets and plus as themselves — and it escapes a newline, which
+    /// <see cref="BoundOneLine"/> would otherwise flatten into a space.</para>
+    ///
+    /// <para>The line is bounded like the per-subtask check line: the argv is unbounded operator config and this block is
+    /// a fixed per-turn cost the tape compaction cannot shrink, so a longer one is cut and marked with the class's
+    /// ellipsis. Null / empty ⇒ no block ⇒ byte-identical prompt.</para>
+    /// </summary>
+    private static void AppendOperatorAcceptanceFloor(StringBuilder builder, SupervisorTurnContext context)
+    {
+        const int maxChars = 400;
+
+        if (context.AcceptanceChecks is not { Count: > 0 } floor) return;
+
+        builder.AppendLine(OperatorFloorHeader);
+        builder.AppendLine($"  {BoundOneLine(JsonSerializer.Serialize(floor, Workflows.WorkflowJson.InterpolatedText), maxChars)}");
+        builder.AppendLine(DoNotRepeatTheFloorAsTheStopAcceptance);
+        builder.AppendLine();
     }
 
     /// <summary>
