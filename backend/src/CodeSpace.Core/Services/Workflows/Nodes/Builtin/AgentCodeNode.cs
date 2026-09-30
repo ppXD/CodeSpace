@@ -148,6 +148,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (!TryReadModelCredentialModelId(context, out var modelCredentialModelId)) return Fail("Config 'modelCredentialModelId' must be a credentialed-model id (uuid).");
 
+        if (!TryReadAllowedModelIds(context.Config, out var allowedModelIds)) return Fail("Config 'allowedModelIds' must be an array of credentialed-model ids (uuid).");
+
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
 
         // A persona supplies the prompt floor (its system prompt), so 'goal' is only required without one.
@@ -182,6 +184,7 @@ public sealed class AgentCodeNode : INodeRuntime
             AgentDefinitionId = agentDefinitionId,
             ModelCredentialId = modelCredentialId,
             ModelCredentialModelId = modelCredentialModelId,
+            AllowedModelIds = allowedModelIds,
             Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
             Workspace = workspace,
@@ -683,6 +686,25 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!Guid.TryParse(raw, out var id)) return false;
 
         modelCredentialModelId = id;
+        return true;
+    }
+
+    /// <summary>Read the optional <c>allowedModelIds</c> config — the operator's allowed model pool a task-launch projection bakes, as string uuids. Absent / empty → null (unbounded, byte-identical). Any entry that is not a uuid → false (a clean node failure): a pool is a bound, and one that half-parsed would silently bound the run to a different set of models — or, emptied, to none at all.</summary>
+    private static bool TryReadAllowedModelIds(IReadOnlyDictionary<string, JsonElement> config, out IReadOnlyList<Guid>? allowedModelIds)
+    {
+        allowedModelIds = null;
+
+        if (!config.TryGetValue("allowedModelIds", out var raw) || raw.ValueKind == JsonValueKind.Null) return true;
+        if (raw.ValueKind != JsonValueKind.Array) return false;
+
+        var ids = new List<Guid>();
+        foreach (var entry in raw.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.String || !Guid.TryParse(entry.GetString(), out var id)) return false;
+            ids.Add(id);
+        }
+
+        allowedModelIds = ids.Count > 0 ? ids : null;
         return true;
     }
 

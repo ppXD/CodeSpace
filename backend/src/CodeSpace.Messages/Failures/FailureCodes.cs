@@ -56,6 +56,9 @@ public static class FailureCodes
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
     public const string TaskRouteSnapshotMismatch = "task_route_snapshot_mismatch";
+
+    /// <summary>The resolved route cannot honour a launch control the operator set (an acceptance check a plan-map route cannot grade, a persona the allowed pool excludes, …), so the launch stopped before any session or run. The details name each control and why. Remedy: drop the control or choose a route that consumes it — a retry of the same input is refused again.</summary>
+    public const string TaskLaunchControlRefused = "task_launch_control_refused";
     public const string WorkspaceUnresolvable = "workspace_unresolvable";
     public const string RerunAlreadyInProgress = "rerun_already_in_progress";
     public const string RerunTargetInvalid = "rerun_target_invalid";

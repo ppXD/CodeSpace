@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
+using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -31,7 +32,8 @@ public class EffortRouterTests
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
         new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }),
         new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+        new TaskProjectionRegistry(Array.Empty<IWorkflowDefinitionBuilder>()));
 
     private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null, string? deliverableShape = null) => new()
     {

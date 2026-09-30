@@ -334,6 +334,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var reconciliation = await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             var harness = _harnesses.Resolve(reconciliation.HarnessKind);
 
+            task = await HoldToModelPoolAsync(owner, task, reconciliation, cancellationToken).ConfigureAwait(false);
+
             if (reconciliation.Repaired)
             {
                 _logger.LogWarning("AgentRun {RunId}: {Note}", agentRunId, reconciliation.Note);
@@ -4025,6 +4027,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             yield return pair[(separator + 1)..];
             yield return Uri.UnescapeDataString(pair[(separator + 1)..]);
         }
+    }
+
+    /// <summary>
+    /// Hold a bounded run to its allowed model pool (<see cref="AgentTask.AllowedModelIds"/>): run the reconciler's pooled
+    /// row — its model on its own credential — and persist it, so a re-attach and every reader see the model the agent
+    /// actually runs; a model that had to move is named on the run's timeline. A pool that resolves nothing any more fails
+    /// the run rather than let the agent run outside it. An unbounded task passes through untouched (byte-identical). The
+    /// task is still the ORIGINAL (no injected secret env), so serializing it is safe.
+    /// </summary>
+    private async Task<AgentTask> HoldToModelPoolAsync(AgentRunOwnerToken owner, AgentTask task, HarnessReconciliation reconciliation, CancellationToken cancellationToken)
+    {
+        if (task.AllowedModelIds is not { Count: > 0 }) return task;
+
+        if (reconciliation.PooledModel is not { } pooled)
+            throw new InvalidOperationException(reconciliation.PoolNote);
+
+        if (reconciliation.PoolNote is { } note)
+        {
+            _logger.LogWarning("AgentRun {RunId}: {Note}", owner.RunId, note);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = note }, cancellationToken).ConfigureAwait(false);
+        }
+
+        var held = task with { Model = pooled.ModelId, ModelCredentialId = pooled.ModelCredentialId, ModelCredentialModelId = null };
+        await PersistRuntimeIdentityAsync(owner, null, JsonSerializer.Serialize(held, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+
+        return held;
     }
 
     /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>

@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.Launch.Exceptions;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Completion;
@@ -25,7 +26,8 @@ namespace CodeSpace.Core.Services.Tasks;
 
 /// <summary>
 /// Default <see cref="ITaskLaunchService"/> — a flat named-method pipeline (Rule 4/5): resolve the seed provider by
-/// the open surface kind → seed → validate the repo TEAM-SCOPED (fail-closed) → route → build the agent profile →
+/// the open surface kind → seed → validate the repo TEAM-SCOPED (fail-closed) → ground → route → resolve every
+/// route-dependent control (applied / clamped / not applicable, or the launch is refused) → build the agent profile →
 /// project + start the snapshot run → return the handle + route. Holds no per-surface logic: the ONLY surface
 /// dispatch is <c>_seedProviders.Resolve(surfaceKind)</c>, and the core NEVER reads the surface payload (only the
 /// resolved provider does), so a new surface plugs in by registering a provider with zero edit here (the generic
@@ -39,8 +41,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ITaskRouteSnapshotService _routeSnapshots;
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
-    private readonly ISessionContextBuilder _sessionContext;
-    private readonly ISessionSummarizer _sessionSummarizer;
+    private readonly ILaunchGroundingResolver _grounding;
+    private readonly ILaunchControlResolver _controls;
     private readonly ISessionBranchResolver _sessionBranches;
     private readonly ILaunchBasePinResolver _basePins;
     private readonly IModelPoolSelector _modelSelector;
@@ -48,7 +50,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<TaskLaunchService> _logger;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, IEffortRouter router, ITaskRouteSnapshotService routeSnapshots, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, IEffortRouter router, ITaskRouteSnapshotService routeSnapshots, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ILaunchGroundingResolver grounding, ILaunchControlResolver controls, ISessionBranchResolver sessionBranches, ILaunchBasePinResolver basePins, IModelPoolSelector modelSelector, ILLMClientRegistry llm, CodeSpaceDbContext db, ILogger<TaskLaunchService> logger)
     {
         _seedProviders = seedProviders;
         _repositoryScope = repositoryScope;
@@ -56,8 +58,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         _routeSnapshots = routeSnapshots;
         _factory = factory;
         _sessions = sessions;
-        _sessionContext = sessionContext;
-        _sessionSummarizer = sessionSummarizer;
+        _grounding = grounding;
+        _controls = controls;
         _sessionBranches = sessionBranches;
         _basePins = basePins;
         _modelSelector = modelSelector;
@@ -78,19 +80,28 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var preview = request.RouteSnapshotId is not null ? await _routeSnapshots.ReadAsync(request, seed, cancellationToken).ConfigureAwait(false) : null;
         if (preview?.PreviousResult is { } previous) return previous;
-        var route = preview?.Route ?? await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
-
-        EnsureRouteConfirmed(route);
-
-        EnsureAcceptanceMandate(request, route);
 
         await EnsureSessionCanContinueAsync(request, cancellationToken).ConfigureAwait(false);
 
-        var profile = BuildAgentProfile(request, seed, route);
-
         // On a CONTINUE, prime the run with the thread's prior-turn digest — the projection folds this grounding into
-        // the agent's prompt so the follow-up builds on earlier work. A fresh launch carries only the seed's own grounding.
-        var grounding = await ResolveGroundingAsync(request, seed, cancellationToken).ConfigureAwait(false);
+        // the agent's prompt so the follow-up builds on earlier work. Resolved BEFORE routing: the classifier reads the
+        // same grounding, and a follow-up it cannot see is classified as a fresh task. A fresh launch carries only the
+        // seed's own grounding (so its route request is unchanged).
+        var grounding = await _grounding.ResolveAsync(request, seed, cancellationToken).ConfigureAwait(false);
+
+        var route = preview?.Route ?? await _router.RouteAsync(BuildRouteRequest(seed with { GroundingContext = grounding }, request), cancellationToken).ConfigureAwait(false);
+
+        EnsureRouteConfirmed(route);
+
+        // Every route-dependent control the operator set is applied, clamped, named as not applicable, or refused — the
+        // same resolution the route preview reports. A refusal stops the launch here, before any session or run exists.
+        var controls = await _controls.ResolveAsync(request, route, cancellationToken).ConfigureAwait(false);
+
+        EnsureControlsHonoured(controls);
+
+        EnsureAcceptanceMandate(request, controls.GradesOperatorFloor);
+
+        var profile = ClampAgentModel(BuildAgentProfile(request, seed, route), controls.ModelClamp);
 
         // …and clone EACH repo (primary + related) at the prior turn's produced branch for it, so the follow-up builds
         // on earlier CODE (not just the narrative). Empty on a fresh launch / no repo / no prior branch ⇒ default branches.
@@ -115,9 +126,22 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // Potential model/Git preparation above runs without holding the snapshot row lock. The callback below
         // performs only transactional session/run staging and is entered once across competing workers.
         return request.RouteSnapshotId is not null
-            ? await _routeSnapshots.ConsumeAsync(new TaskRouteSnapshotConsumption(request, seed, () => StageAsync(request, context, cancellationToken)), cancellationToken).ConfigureAwait(false)
-            : await StageAsync(request, context, cancellationToken).ConfigureAwait(false);
+            ? await _routeSnapshots.ConsumeAsync(new TaskRouteSnapshotConsumption(request, seed, () => StageAsync(request, context, controls.Dispositions, cancellationToken)), cancellationToken).ConfigureAwait(false)
+            : await StageAsync(request, context, controls.Dispositions, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>A control the resolved route refuses stops the launch before any session or run exists, named with its reason — never silently dropped.</summary>
+    private static void EnsureControlsHonoured(LaunchControlResolution controls)
+    {
+        var refused = controls.Dispositions.Where(d => d.Outcome == LaunchControlOutcome.Refused).ToList();
+
+        if (refused.Count > 0)
+            throw new TaskLaunchControlRefusedException(refused);
+    }
+
+    /// <summary>The single agent's model when its pinned one fell outside the allowed pool: the pool's default row — its model on its own credential — so the frozen agent config shows the model that actually runs. No clamp ⇒ the profile verbatim.</summary>
+    private static ResolvedAgentProfile ClampAgentModel(ResolvedAgentProfile profile, ModelDispatchRef? clamp) =>
+        clamp is null ? profile : profile with { Model = clamp.ModelId, ModelCredentialId = clamp.ModelCredentialId, ModelCredentialModelId = null };
 
     /// <summary>
     /// A low-confidence or risky auto route is a question, not authorization to execute. The router owns the generic
@@ -138,7 +162,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         if (status != WorkSessionStatus.Open) throw new InvalidOperationException($"Session {id} is {status} and cannot take a new turn.");
     }
 
-    private async Task<LaunchTaskResult> StageAsync(TaskLaunchRequest request, TaskBuildContext context, CancellationToken cancellationToken)
+    private async Task<LaunchTaskResult> StageAsync(TaskLaunchRequest request, TaskBuildContext context, IReadOnlyList<LaunchControlDisposition> dispositions, CancellationToken cancellationToken)
     {
         var seed = context.Seed;
         var route = context.Route;
@@ -171,6 +195,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             Route = route,
             SurfaceKind = seed.SurfaceKind,
             LinkedEntity = seed.LinkedEntity,
+            ControlDispositions = dispositions,
         };
     }
 
@@ -245,29 +270,6 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
     private sealed record StructuredBrainSelection(Guid RowId, bool PinIneligible, bool Pinned, ModelSelectionReceipt Receipt);
 
-    /// <summary>The grounding the run is primed with: on a CONTINUE, the session's prior-turn digest composed over any seed grounding; on a fresh launch, only the seed's own grounding (null for chat). The projection folds this into the agent prompt.</summary>
-    private async Task<string?> ResolveGroundingAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
-    {
-        if (request.ContinueSessionId is not { } sessionId) return seed.GroundingContext;
-
-        // Fold any turns that scrolled out of the recent window into the thread's rolling summary BEFORE building the
-        // digest, so a long thread's early context is preserved. Best-effort + fail-open (no model / error leaves it).
-        await _sessionSummarizer.EnsureSummaryUpToDateAsync(sessionId, request.TeamId, cancellationToken).ConfigureAwait(false);
-
-        var priorTurns = await _sessionContext.BuildAsync(sessionId, request.TeamId, cancellationToken).ConfigureAwait(false);
-
-        return ComposeGrounding(priorTurns, seed.GroundingContext);
-    }
-
-    /// <summary>Join the prior-turn digest and the seed's own grounding (either may be absent) into one block, digest first.</summary>
-    private static string? ComposeGrounding(string? priorTurns, string? seedGrounding)
-    {
-        if (string.IsNullOrWhiteSpace(priorTurns)) return seedGrounding;
-        if (string.IsNullOrWhiteSpace(seedGrounding)) return priorTurns;
-
-        return $"{priorTurns}\n\n{seedGrounding}";
-    }
-
     /// <summary>On a CONTINUE, the prior turn's produced branch for EACH repo the run touches (primary + related) — the projection clones each repo's workspace at its own ref. Empty on a fresh launch, an analysis-only run (no repos), or when no prior turn produced a branch for any (⇒ default branches — the safe fallback). A repo absent from the map clones at its default.</summary>
     private async Task<IReadOnlyDictionary<Guid, SessionStartRef>> ResolveBaseRefsAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
     {
@@ -333,7 +335,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             throw new KeyNotFoundException($"Agent {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
     }
 
-    /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical). Internal (not private) so the read-only route PREVIEW routes through the SAME mapping — a preview that built its own request would be free to drift from the launch it claims to predict.</summary>
+    /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps + acceptance floor onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical) and keeps an auto route with an operator floor on a projection that grades it. Internal (not private) so the read-only route PREVIEW routes through the SAME mapping — a preview that built its own request would be free to drift from the launch it claims to predict.</summary>
     internal static EffortRouteRequest BuildRouteRequest(TaskLaunchSeed seed, TaskLaunchRequest request) => new()
     {
         Seed = seed,
@@ -341,6 +343,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         RequestedRecipe = request.RequestedRecipe,
         CapsOverride = request.CapsOverride,
         DeliverableShape = request.DeliverableShape,
+        HasOperatorFloor = request.AcceptanceChecks is { Count: > 0 },
     };
 
     /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + each related repo + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.run's own defaults. Related repos require a primary (fail-loud, mirroring the agent.run node — a workspace has nowhere to anchor without one). Internal (not private) so the clamp + related-repo choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
@@ -410,20 +413,20 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     }
 
     /// <summary>
-    /// P3.2: Delivery/Unattended quality on a SUPERVISOR-projected launch (the only projection <c>AcceptanceChecks</c>
-    /// already has any effect on — S4b) MUST carry an executable acceptance floor, so a caller cannot claim
-    /// Delivery-grade verification while skipping the one lever that actually gates the terminal stop. Prototype (or
-    /// an unset tier) is unchanged — self-report stands, byte-identical. Inert on a non-supervisor projection — this
-    /// doesn't invent new acceptance-floor plumbing for single-agent/plan-map launches (AcceptanceChecks has no
-    /// effect there today either); such a launch still gets its output-review floor (<see cref="EffectiveOutputReviewMode"/>)
-    /// even though this specific mandate is inert for it. There is no sensible SERVER-SYNTHESIZED check to default to
-    /// (the argv is domain-specific) — an omission fails LOUD here rather than silently shipping ungated, mirroring
+    /// P3.2: Delivery/Unattended quality on a launch whose route GRADES an operator floor (its builder advertises an
+    /// operator-command adapter — the supervisor's terminal stop and the single agent's own oracle both do) MUST carry
+    /// an executable acceptance floor, so a caller cannot claim Delivery-grade verification while skipping the one lever
+    /// that actually gates the result. A plan-map route grades no operator floor — its plan items carry their own
+    /// contracts, and a floor sent to it is refused before this point — so the mandate asks nothing of it; it still gets
+    /// its output-review floor (<see cref="EffectiveOutputReviewMode"/>). Prototype (or an unset tier) is unchanged —
+    /// self-report stands, byte-identical. There is no sensible SERVER-SYNTHESIZED check to default to (the argv is
+    /// domain-specific) — an omission fails LOUD here rather than silently shipping ungated, mirroring
     /// <c>ILaunchRepositoryScopeGuard</c>'s fail-closed launch-time rejection shape (before the session opens).
     /// </summary>
-    internal static void EnsureAcceptanceMandate(TaskLaunchRequest request, RoutePlan route)
+    internal static void EnsureAcceptanceMandate(TaskLaunchRequest request, bool gradesOperatorFloor)
     {
         if (request.Tier is not (QualityTier.Delivery or QualityTier.Unattended)) return;
-        if (route.ProjectionKind != TaskProjectionKinds.Supervisor) return;
+        if (!gradesOperatorFloor) return;
         if (request.AcceptanceChecks is { Count: > 0 }) return;
 
         throw new ArgumentException($"{request.Tier} quality requires an executable acceptance check (acceptanceChecks) — author one, or launch at Prototype quality for a self-reported result.");

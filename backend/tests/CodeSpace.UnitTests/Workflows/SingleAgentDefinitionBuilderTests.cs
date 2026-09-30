@@ -292,6 +292,23 @@ public class SingleAgentDefinitionBuilderTests
     private static JsonElement AgentInputsOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "agent").Inputs;
     private static JsonElement TerminalInputsOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "done").Inputs;
 
+    // ── The operator's allowed model pool rides the one agent, where dispatch holds its model to the pool ──
+
+    [Fact]
+    public void The_allowed_model_pool_rides_the_agent_node_and_an_unbounded_launch_is_byte_identical()
+    {
+        var pool = new[] { Guid.NewGuid(), Guid.NewGuid() };
+
+        var bounded = Builder.Build(Context(Seed(), profile: null) with { AllowedModelIds = pool });
+        var unbounded = AgentConfigOf(Builder.Build(Context(Seed(), profile: null)));
+
+        AgentConfigOf(bounded).GetProperty("allowedModelIds").EnumerateArray().Select(e => Guid.Parse(e.GetString()!)).ShouldBe(pool, "the agent.run carries the pool onto its AgentTask, where dispatch holds the model to it");
+        RealValidator().Validate(bounded).IsValid.ShouldBeTrue();
+
+        unbounded.TryGetProperty("allowedModelIds", out _).ShouldBeFalse("no pool ⇒ the key is omitted");
+        AgentConfigOf(Builder.Build(Context(Seed(), profile: null) with { AllowedModelIds = [] })).GetRawText().ShouldBe(unbounded.GetRawText(), "an empty pool is the whole team pool — byte-identical");
+    }
+
     // ── S5: the quick tier's operator checks floor becomes the single agent's contract ──
 
     [Fact]

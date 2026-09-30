@@ -36,6 +36,12 @@ namespace CodeSpace.Core.Services.Agents;
 /// row, so a pin repair makes the whole (harness, model, credential) triple runnable. Blanking the model here would
 /// drop a VALID operator choice in the common consistent case, so this layer never does; it only swaps the harness for
 /// one that can drive the model's provider.</para>
+///
+/// <para>The ONE exception is the run's allowed model pool (<see cref="AgentTask.AllowedModelIds"/>, the model analogue of
+/// the harness allow-list): a bounded task runs on a POOLED ROW — its named model's pooled row, else (no name, or a name
+/// no pooled row carries, such as a planner-authored model outside the pool) the pool's default row — reported as
+/// <see cref="HarnessReconciliation.PooledModel"/> for the executor to run and persist, and the harness is reconciled
+/// against THAT row's provider. An unbounded task is reconciled exactly as before.</para>
 /// </summary>
 public interface IHarnessModelReconciler
 {
@@ -43,8 +49,8 @@ public interface IHarnessModelReconciler
     Task<HarnessReconciliation> ReconcileAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
 }
 
-/// <summary>The harness KIND to run, whether it was REPAIRED away from the authored one, and a human-facing note for the timeline when it was.</summary>
-public sealed record HarnessReconciliation(string HarnessKind, bool Repaired, string? Note);
+/// <summary>The harness KIND to run, whether it was REPAIRED away from the authored one, and a human-facing note for the timeline when it was — plus, for a task bounded to an allowed model pool, the pooled row it runs on (null when unbounded, or when the pool resolves nothing any more) and a note when the authored model had to move or cannot be honoured.</summary>
+public sealed record HarnessReconciliation(string HarnessKind, bool Repaired, string? Note, ModelDispatchRef? PooledModel = null, string? PoolNote = null);
 
 public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDependency
 {
@@ -61,11 +67,15 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
 
     public async Task<HarnessReconciliation> ReconcileAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
-        var provider = await ResolveModelProviderAsync(task, teamId, cancellationToken).ConfigureAwait(false);
+        var pooled = await ResolvePooledModelAsync(task, teamId, cancellationToken).ConfigureAwait(false);
+        var poolNote = DescribePoolBound(task, pooled);
+
+        // A bounded task runs on its pooled row, so the harness follows THAT row's provider, not the authored model's.
+        var provider = pooled?.Provider ?? await ResolveModelProviderAsync(task, teamId, cancellationToken).ConfigureAwait(false);
 
         // No provider to reconcile against (no pin AND no pooled model name) → return the authored kind verbatim (the
         // caller's registry resolves it; a genuinely-unregistered kind surfaces there, unchanged).
-        if (provider is null) return new HarnessReconciliation(task.Harness, false, null);
+        if (provider is null) return new HarnessReconciliation(task.Harness, false, null, pooled, poolNote);
 
         // The repair chooses from the registry CLAMPED to the run's harness allow-list (null/empty = the whole registry,
         // which is every non-supervisor path and every pre-field task envelope). Without this clamp the run-time repair
@@ -75,7 +85,32 @@ public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDep
         // admitted one, so the floor stays inside the list too.
         var pool = AgentHarnessPool.Clamp(_harnesses.All, task.AllowedHarnessKinds);
 
-        return Reconcile(task.Harness, provider, pool, AgentHarnessDefaults.DefaultHarness);
+        return Reconcile(task.Harness, provider, pool, AgentHarnessDefaults.DefaultHarness) with { PooledModel = pooled, PoolNote = poolNote };
+    }
+
+    /// <summary>
+    /// The allowed-pool row a bounded task runs on: its named model's pooled row, else — no name, or a name no pooled row
+    /// carries — the pool's default row, ranked by the same agent-plane precedence the supervisor's pool-bound default uses
+    /// (names repeat across credentials, so both lookups are over the pool's ROWS). Null for an unbounded task, and when
+    /// nothing in the pool resolves any more.
+    /// </summary>
+    private async Task<ModelDispatchRef?> ResolvePooledModelAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (task.AllowedModelIds is not { Count: > 0 } pool) return null;
+
+        var named = string.IsNullOrWhiteSpace(task.Model) ? null : await _modelSelector.ResolveDispatchAsync(teamId, task.Model, pool, cancellationToken).ConfigureAwait(false);
+
+        return named ?? await _modelSelector.ResolvePoolDefaultAsync(teamId, pool, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Why a bounded task's model did not run as authored — it was outside the pool, or nothing in the pool resolves any more. Null when unbounded, when the named model is pooled, and when no model was named (the pool's default is then simply the model it runs).</summary>
+    private static string? DescribePoolBound(AgentTask task, ModelDispatchRef? pooled)
+    {
+        if (task.AllowedModelIds is not { Count: > 0 }) return null;
+        if (pooled is null) return "None of this run's allowed models resolves to an enabled model under an active credential, so the agent cannot run inside its allowed model pool.";
+        if (string.IsNullOrWhiteSpace(task.Model) || string.Equals(task.Model.Trim(), pooled.ModelId, StringComparison.OrdinalIgnoreCase)) return null;
+
+        return $"Model '{task.Model}' is not in this run's allowed model pool; running the pool's default, '{pooled.ModelId}', instead.";
     }
 
     /// <summary>
