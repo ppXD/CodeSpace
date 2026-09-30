@@ -21,8 +21,12 @@ internal static class NativeProcess
         try { fields = LinuxProcessFields(pid); }
         catch (IOException error) when (TreatsAsGone(pid, error)) { throw new IOException("Cannot identify a terminated native process.", error); }
         if (fields[0] is "Z" or "X") throw new IOException("Cannot identify a terminated native process.");
-        using var process = Process.GetProcessById(pid);
-        return new NativeProcessIdentity(pid, process.StartTime.ToUniversalTime().Ticks, BootId, "linux:" + fields[19]);
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return new NativeProcessIdentity(pid, process.StartTime.ToUniversalTime().Ticks, BootId, "linux:" + fields[19]);
+        }
+        catch (Exception error) when (TreatsAsGone(pid, error)) { throw new IOException("Cannot identify a terminated native process.", error); }
     }
 
     /// <summary>
@@ -207,8 +211,13 @@ internal static class NativeProcess
     /// <see cref="DirectoryNotFoundException"/> reports an instant later, so it must not surface as "unknowable". The
     /// evidence is the kernel's own answer (<see cref="IsAbsent"/>), never the exception's message: any other
     /// <see cref="IOException"/> about a pid that still exists (EIO, EMFILE) stays unknowable and reaches the caller.
+    ///
+    /// <para>The same holds one step later, when the read is the runtime's instead of the kernel's: a process that exits after
+    /// <c>stat</c> was read but before <see cref="Process.GetProcessById(int)"/> or <see cref="Process.StartTime"/> asks for it is refused
+    /// with an <see cref="ArgumentException"/> ("not running") or a <see cref="Win32Exception"/> ("may have exited or may be
+    /// privileged"). The second message names the ambiguity, so both count as gone only on the probe's evidence.</para>
     /// </summary>
-    internal static bool TreatsAsGone(int pid, Exception failure) => failure is IOException && IsAbsent(pid);
+    internal static bool TreatsAsGone(int pid, Exception failure) => failure is (IOException or ArgumentException or Win32Exception) && IsAbsent(pid);
 
     public static bool Same(NativeProcessIdentity left, NativeProcessIdentity right) => left.ProcessId == right.ProcessId && left.BootId == right.BootId && !string.IsNullOrEmpty(left.StartKey) && left.StartKey == right.StartKey;
 
