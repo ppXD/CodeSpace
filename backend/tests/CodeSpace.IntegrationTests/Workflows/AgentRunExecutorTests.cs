@@ -1227,6 +1227,27 @@ public partial class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_multi_repo_claude_run_adds_every_repository_of_its_workspace_so_each_ones_memory_loads()
+    {
+        // A multi-repo run's cwd is the workspace root, which holds no CLAUDE.md of its own. The executor stamps every
+        // materialised repository directory onto the task it launches, and the real Claude adapter adds each one, so
+        // every repository's memory loads under the settings pin (RepositoryConfigE2ETests runs it with the real CLI).
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateMultiRepoRunAsync(teamId, push: false, ("web", Guid.NewGuid(), WorkspaceAccess.Write, true), ("docs", Guid.NewGuid(), WorkspaceAccess.Read, false));
+        var harness = new ClaudeSpecScriptedHarness("printf 'done\\n'");
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, harness, new MultiRepoRecordingWorkspaceProvider(repos: new[] { ("web", WorkspaceAccess.Write, true), ("docs", WorkspaceAccess.Read, false) }), CancellationToken.None);
+
+        var spec = harness.Specs.ShouldHaveSingleItem("one launch, built once");
+        var root = spec.WorkingDirectory.ShouldNotBeNull();
+        var args = spec.Args.ToList();
+
+        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(new[] { root, Path.Combine(root, "web"), Path.Combine(root, "docs") }, "the workspace root, then every repository in it, read-only context included");
+    }
+
+    [Fact]
     public async Task A_single_repo_run_leaves_repository_results_empty_and_no_change_set_id()
     {
         // The byte-identical acceptance gate: a single-repo workspace (Repositories.Count == 1) takes the unchanged

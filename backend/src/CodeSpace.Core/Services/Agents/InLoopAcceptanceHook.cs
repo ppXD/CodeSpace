@@ -61,7 +61,7 @@ public static class InLoopAcceptanceHook
     /// </summary>
     public static bool AppliesTo(AgentTask task) => task.Permissions.WriteScope == AgentWriteScope.Workspace && HasRunnableOracle(task);
 
-    /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands. The shape alone, whatever the write scope — which is what a harness keys its settings pin on, so a read-only run keeps the pin it always had.</summary>
+    /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands. The shape alone, whatever the write scope.</summary>
     public static bool HasRunnableOracle(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, Command.Count: > 0 } spec
         && !string.IsNullOrWhiteSpace(spec.Command[0]) && spec.Command.All(value => value != null && !value.Contains('\0'));
 

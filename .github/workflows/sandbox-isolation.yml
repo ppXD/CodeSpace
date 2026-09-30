@@ -234,8 +234,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 87 ]; then
-            echo "::error::Expected >=87 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run reaching its broker through the relay and nothing else + an allowlist run relayed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart + a pre-relay namespaced run re-bound at its gateway and torn down with its seal + an allowlist run's veth guarded both ways, a flow the worker opened before the run included + forwarding a root worker may not write named before an allowlist is planned + an allowlist run's port 53 open only at the resolvers of the resolv.conf its namespace reads, and still to a resolver address the worker's own NAT rewrites before its forward and its input hooks), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
+          if [ "${executed:-0}" -lt 90 ]; then
+            echo "::error::Expected >=90 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring + argv/envp per-string kernel ceiling + a prompt past it riding stdin + a read-only workspace mount + a network-off run reaching its broker through the relay and nothing else + an allowlist run relayed to its broker + a read-only reviewer reading its diff with the real CLIs + a bwrap probe that runs the launch argv + the MCP helper bound file by file behind a read-only socket dir + a CLI reaching its broker socket through the relay + a severed child reaching its broker over the lease socket across a worker restart + a pre-relay namespaced run re-bound at its gateway and torn down with its seal + an allowlist run's veth guarded both ways, a flow the worker opened before the run included + forwarding a root worker may not write named before an allowlist is planned + an allowlist run's port 53 open only at the resolvers of the resolv.conf its namespace reads, and still to a resolver address the worker's own NAT rewrites before its forward and its input hooks + a target repository's own CLI config kept out of the run with the real CLIs, every repository's memory read in a multi-repo workspace included), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?). If a case was deliberately removed, lower this number in the same PR."
             exit 1
           fi
 
@@ -266,6 +266,14 @@ jobs:
               cases = [r for r in results if 'ReviewerReadsItsDiffE2ETests.' + method in r.get('testName', '')]
               assert len(cases) == rows and all(r.get('outcome') == 'Passed' for r in cases), f'{method}: all {rows} case(s) must pass'
           print(f'All {len(arms)} reviewer E2E arms ran and passed.')
+
+          # The repository-config E2E is armed by the same CLI pins and returns early the same way; require each arm's marker.
+          for arm in ('claude-code single-repo Confined', 'claude-code multi-repo Confined', 'codex-cli'):
+              assert f'[repo-config-e2e] ran {arm}' in text, f'repository-config E2E arm "{arm}" did not run — check CODESPACE_REQUIRE_REVIEW_CLIS and the CLI install step'
+          for method in ('A_claude_run_ignores_the_settings_its_repository_commits_and_still_reads_its_memory', 'A_multi_repo_claude_run_reads_every_repositorys_memory_and_none_of_its_settings', 'A_codex_run_ignores_the_config_and_hooks_its_repository_commits_and_still_reads_its_agents_md'):
+              cases = [r for r in results if 'RepositoryConfigE2ETests.' + method in r.get('testName', '')]
+              assert len(cases) == 1 and cases[0].get('outcome') == 'Passed', f'{method}: must pass'
+          print('All 3 repository-config E2E arms ran and passed.')
 
           # The sealed-egress E2E returns early on a host that cannot confine, which reads as Passed; require each arm's marker.
           for arm in ('durable', 'non-durable', 'relay-ipv6', 'restart', 'relay-refused', 'relay-policy-route'):
@@ -379,9 +387,9 @@ jobs:
           root = ET.parse(path).getroot()
           counters = root.find('.//{*}Counters')
           executed, passed = int(counters.get('executed')), int(counters.get('passed'))
-          assert executed >= 10 and passed == executed, f'expected all 10 non-root arms to run and pass, got executed={executed} passed={passed}'
+          assert executed >= 11 and passed == executed, f'expected all 11 non-root arms to run and pass, got executed={executed} passed={passed}'
           text = open(path, encoding='utf-8').read()
-          for marker in ('[non-root-e2e] ran admission uid=1654', '[sealed-egress-e2e] ran non-root durable uid=1654', '[sealed-egress-e2e] ran non-root non-durable uid=1654', '[sealed-egress-e2e] ran non-root restart uid=1654', '[sealed-egress-e2e] ran non-root relay-refused uid=1654', '[sealed-egress-e2e] ran non-root relay-ipv6', '[broker-socket-e2e] ran non-root socket-channel uid=1654', '[review-diff-e2e] ran non-root network-off-relayed claude-code uid=1654', '[review-diff-e2e] ran non-root network-off-relayed codex-cli uid=1654', '[durable-egress-e2e] ran non-root allowlist-severed uid=1654'):
+          for marker in ('[non-root-e2e] ran admission uid=1654', '[sealed-egress-e2e] ran non-root durable uid=1654', '[sealed-egress-e2e] ran non-root non-durable uid=1654', '[sealed-egress-e2e] ran non-root restart uid=1654', '[sealed-egress-e2e] ran non-root relay-refused uid=1654', '[sealed-egress-e2e] ran non-root relay-ipv6', '[broker-socket-e2e] ran non-root socket-channel uid=1654', '[review-diff-e2e] ran non-root network-off-relayed claude-code uid=1654', '[review-diff-e2e] ran non-root network-off-relayed codex-cli uid=1654', '[durable-egress-e2e] ran non-root allowlist-severed uid=1654', '[repo-config-e2e] ran non-root claude-code single-repo Standard uid=1654'):
               assert marker in text, f'non-root arm marker "{marker}" is missing — the arm returned early or did not run as the worker uid'
           print(f'All {executed} non-root arms ran as uid 1654 and passed.')
           PY
