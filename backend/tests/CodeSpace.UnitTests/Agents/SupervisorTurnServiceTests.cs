@@ -45,6 +45,41 @@ public class SupervisorTurnServiceTests
         grader.LastCall!.Value.Command.ShouldBe(argv);
     }
 
+    [Fact]
+    public async Task The_decider_prompt_shows_the_rehydrated_operator_floor_with_its_argv_boundaries()
+    {
+        // Through the real writer: the operator's configured argv, as the rehydrate hands it to the decider — not a context built by hand.
+        var config = GoalConfigWithRepo() with { AcceptanceChecks = new[] { "custom-check", "", "  ", "quoted argument" } };
+
+        var context = await Service(new FakeSupervisorDecisionLog()).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", config, CancellationToken.None);
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(context);
+
+        prompt.ShouldContain(LlmSupervisorDecider.OperatorFloorHeader, Case.Sensitive, customMessage: "a rehydrated floor is recited at all");
+        prompt.ShouldContain("""  ["custom-check","","  ","quoted argument"]""", Case.Sensitive, customMessage: "the floor the stop grader runs is the floor the brain reads — element for element, blank ones included");
+    }
+
+    public static TheoryData<string[]?> FloorsTheRehydrateRefuses => new()
+    {
+        null,                         // no floor configured — the ordinary run
+        Array.Empty<string>(),        // an empty list
+        new[] { "", "x" },            // a blank executable never promotes a later argument
+        new[] { " ", "x" },
+        new[] { "x", "a\0b" },        // one NUL voids the whole argv, whichever element holds it
+    };
+
+    [Theory]
+    [MemberData(nameof(FloorsTheRehydrateRefuses))]
+    public async Task The_decider_prompt_has_no_floor_block_for_an_argv_the_rehydrate_refuses(string[]? argv)
+    {
+        var config = GoalConfigWithRepo() with { AcceptanceChecks = argv };
+
+        var context = await Service(new FakeSupervisorDecisionLog()).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", config, CancellationToken.None);
+
+        context.AcceptanceChecks.ShouldBeNull("fixture check: the rehydrate hands the decider NO floor for this argv — were it kept, the prompt assertion below would be answering a different question");
+        LlmSupervisorDecider.BuildUserPromptForTest(context).ShouldNotContain(LlmSupervisorDecider.OperatorFloorHeader, Case.Sensitive, customMessage: "a floor the stop path cannot run is a floor nothing is graded by, so there is nothing to recite");
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" ")]

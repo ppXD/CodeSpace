@@ -111,6 +111,74 @@ public class SupervisorDeciderTests
         prompt.ShouldContain("release", customMessage: "the operator's branch pin should still reach the model somehow");
     }
 
+    // ── The operator's acceptance FLOOR is told to the model: the server runs it on every branch a stop ships, so the work must be driven to IT ──
+
+    [Fact]
+    public void The_prompt_shows_the_model_the_operator_floor_its_stop_will_be_graded_by()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceChecks = new[] { "dotnet", "test", "--filter", "Category=Unit|Category=Smoke" } });
+
+        var block = string.Join(Environment.NewLine, LlmSupervisorDecider.OperatorFloorHeader, """  ["dotnet","test","--filter","Category=Unit|Category=Smoke"]""", LlmSupervisorDecider.DoNotRepeatTheFloorAsTheStopAcceptance) + Environment.NewLine + Environment.NewLine;
+
+        prompt.ShouldContain(block, Case.Sensitive, customMessage: "the whole block: the header, the argv as a JSON array with no shell prompt in front of it (the grader never runs it through a shell), the closing note, then a blank line");
+    }
+
+    [Fact]
+    public void The_floor_header_reads_its_timeout_and_outcome_word_from_the_stop_paths_own_constants()
+    {
+        LlmSupervisorDecider.OperatorFloorHeader.ShouldContain($"{SupervisorLane.AcceptanceGradeTimeoutSeconds} s timeout each", Case.Sensitive, customMessage: "the timeout the model reads is the grader's own constant, so the copy cannot drift from what actually kills the check");
+        LlmSupervisorDecider.OperatorFloorHeader.ShouldContain($"the run ends as {SupervisorOutcome.AcceptanceFailedOutcome}", Case.Sensitive, customMessage: "a failing floor's consequence is stated in the durable outcome's own word");
+    }
+
+    [Fact]
+    public void The_floor_line_keeps_every_argv_element_boundary_the_grader_will_run()
+    {
+        // A floor production CAN emit: the rehydrate keeps blank elements after the executable
+        // (SupervisorTurnServiceTests.Rehydrate_and_the_stop_grader_preserve_exact_operator_argv), and
+        // TaskLaunchFlowTests pins ["sh", " ", "check.sh"] surviving launch — so this is not a fixture the real system never holds.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceChecks = new[] { "sh", " ", "check.sh" } });
+
+        prompt.ShouldContain("""  ["sh"," ","check.sh"]""", Case.Sensitive, customMessage: "the whitespace element is ITS OWN argument — the grader runs it as one");
+        prompt.ShouldNotContain("sh   check.sh", customMessage: "a plain join reads that argv as two arguments, so the model would be told to satisfy a command that is not the one graded");
+    }
+
+    [Theory]
+    [InlineData(new[] { "dotnet", "test", "--filter", "Category=Unit|Category=Smoke" }, """["dotnet","test","--filter","Category=Unit|Category=Smoke"]""")]   // a pipe inside an argument is a character, not a pipeline
+    [InlineData(new[] { "echo", "it's & <b> +1" }, """["echo","it's & <b> +1"]""")]                                                                            // what the default encoder would turn into \u00XX codes
+    [InlineData(new[] { "sh", "-c", "a\nb" }, """["sh","-c","a\nb"]""")]                                                                                       // a newline stays a visible escape…
+    [InlineData(new[] { "sh", "-c", "a b" }, """["sh","-c","a b"]""")]                                                                                          // …so it never reads as the space a flattening would make of it
+    [InlineData(new[] { "custom-check", "", "  ", "quoted argument" }, """["custom-check","","  ","quoted argument"]""")]                                     // what the rehydrate keeps: empty, blank and space-bearing elements
+    public void The_floor_line_is_the_argv_as_a_json_array_with_nothing_a_reader_needs_lost(string[] argv, string expected)
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceChecks = argv });
+
+        prompt.ShouldContain($"  {expected}{Environment.NewLine}", Case.Sensitive, customMessage: "the grader spawns this argv with NO shell, so the line is the array itself: every element boundary and every character a reader needs, nothing escaped that JSON does not require");
+    }
+
+    [Theory]
+    [InlineData(400, false)]   // exactly at the bound — verbatim, no ellipsis
+    [InlineData(401, true)]    // one over — cut at 400 and marked with the class's ellipsis
+    public void The_floor_line_is_bounded_at_400_chars_like_the_per_subtask_check_line(int lineLength, bool bounded)
+    {
+        // A one-element argv is four characters of JSON punctuation (["…"]) around its text, so the line is exactly that long.
+        var element = new string('x', lineLength - 4);
+        var json = $"[\"{element}\"]";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceChecks = new[] { element } });
+
+        var shown = bounded ? json[..400] + "…" : json;
+
+        prompt.ShouldContain($"  {shown}{Environment.NewLine}", Case.Sensitive, customMessage: "the argv is unbounded operator config and this line is a fixed per-turn cost the tape compaction cannot shrink");
+    }
+
+    [Fact]
+    public void The_floor_block_follows_the_acceptance_criteria_it_is_the_executable_half_of()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceCriteria = new[] { "no regressions" }, AcceptanceChecks = new[] { "dotnet", "test" } });
+
+        prompt.ShouldContain($"- no regressions{Environment.NewLine}{Environment.NewLine}{LlmSupervisorDecider.OperatorFloorHeader}", Case.Sensitive, customMessage: "the criteria say what done means and the floor is the command that grades it — one after the other, nothing between them");
+    }
+
     // ── P1e compaction ladder: a re-planned run renders only the LATEST plan full; superseded plans collapse to a digest ──
 
     [Fact]
