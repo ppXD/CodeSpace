@@ -240,6 +240,17 @@ public sealed record AgentTask
     public string? WorkspaceDirectory { get; init; }
 
     /// <summary>
+    /// The directory of every repository materialised in the workspace, stamped by the executor beside
+    /// <see cref="WorkspaceDirectory"/> at launch: a single-repo workspace's one entry is that directory, a multi-repo
+    /// workspace's sit below its root. A harness that names directories to its CLI reads it — Claude Code adds each one
+    /// inside the workspace so every repository's memory loads. Empty for a scratch workspace that holds no repository;
+    /// null when no workspace was materialised, including a task that names its own <see cref="WorkspaceDirectory"/>.
+    /// <c>[JsonIgnore(WhenWritingNull)]</c>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? WorkspaceRepositoryDirectories { get; init; }
+
+    /// <summary>
     /// The single named autonomy tier chosen for this run — the one axis an operator sets. <see cref="Permissions"/>
     /// is DERIVED from it (via <c>AgentAutonomyPolicy</c>) and may then be overridden per-field. Carried as provenance
     /// so the run's intent is auditable independently of the concrete knobs.

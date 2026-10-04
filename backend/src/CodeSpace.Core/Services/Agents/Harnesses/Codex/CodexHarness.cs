@@ -175,6 +175,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         // overrides as flags, so they must precede it.
         AppendModelProviderConfig(args, task);
         AppendTelemetryConfig(args, task);
+        AppendWorkspaceDistrust(args, task);
 
         // P3.3: Codex's default hook trust-review flow requires an interactive decision before a NON-managed command
         // hook may run — a freshly generated per-run hook has no persisted trust record, and there is no human at a
@@ -559,6 +560,52 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
 
         args.Add("-c"); args.Add("otel.metrics_exporter=none");
         args.Add("-c"); args.Add("analytics.enabled=false");
+    }
+
+    /// <summary>
+    /// Mark the run's own workspace untrusted, so the target repository's project-local config never loads: its
+    /// <c>.codex/config.toml</c>, <c>.codex/hooks.json</c> and exec-policy rules. With no trust entry the pinned 0.142.2
+    /// CLI loaded them — a repository's <c>[mcp_servers]</c> entry was spawned on every run, and its hooks ran on every
+    /// acceptance-bearing run, whose <c>--dangerously-bypass-hook-trust</c> waives review for every enabled hook, not
+    /// only ours. Its model routing was not exposed: Codex itself ignores <c>model_provider</c>, <c>model_providers</c>
+    /// and <c>notify</c> from project-local config. The repository's <c>AGENTS.md</c> and skills still load untrusted.
+    ///
+    /// <para>The value is a TOML inline table so each path is a quoted key — a dotted-key spelling would split a path
+    /// that contains a dot. Codex looks the entry up by the physical directory it resolved as its cwd, so the workspace
+    /// is keyed under that spelling as well as the one it was given: keyed only as given, a workspace under a symlinked
+    /// parent (macOS's <c>/var</c> → <c>/private/var</c>, every temp workspace there) matched nothing and its project
+    /// config loaded as if there were no distrust. Both keys stay, because under confinement the cwd is the given path
+    /// bound into the sandbox, which the CLI may see without the host's symlink.</para>
+    /// </summary>
+    private static void AppendWorkspaceDistrust(List<string> args, AgentTask task)
+    {
+        if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return;
+
+        var entries = new[] { task.WorkspaceDirectory, PhysicalDirectory(task.WorkspaceDirectory) }.Distinct(StringComparer.Ordinal).Select(path => $"{McpDeclarationWriter.TomlString(path)}={{trust_level=\"untrusted\"}}");
+
+        args.Add("-c");
+        args.Add($"projects={{{string.Join(',', entries)}}}");
+    }
+
+    /// <summary>
+    /// The directory a process resolves <paramref name="path"/> to as its cwd: every component's symlink followed, a
+    /// link whose own target runs through another link included. A path that does not exist resolves to no cwd, so it
+    /// is returned as given.
+    /// </summary>
+    private static string PhysicalDirectory(string path)
+    {
+        if (!Directory.Exists(path)) return path;
+
+        var full = Path.GetFullPath(path);
+        var physical = Path.GetPathRoot(full)!;
+
+        foreach (var segment in full[physical.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var next = Path.Combine(physical, segment);
+            physical = new DirectoryInfo(next).ResolveLinkTarget(returnFinalTarget: true) is { } target ? PhysicalDirectory(target.FullName) : next;
+        }
+
+        return physical;
     }
 
     /// <summary>Codex hosts an MCP server from an <c>[mcp_servers.&lt;name&gt;]</c> table in its config home's <c>config.toml</c>. The harness owns the format — it renders the TOML content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>

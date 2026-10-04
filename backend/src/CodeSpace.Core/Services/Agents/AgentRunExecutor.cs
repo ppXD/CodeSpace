@@ -394,7 +394,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (string.IsNullOrWhiteSpace(task.Model) && !string.IsNullOrWhiteSpace(effectiveModel))
                 await PersistResolvedModelAsync(owner, task with { Model = effectiveModel }, cancellationToken).ConfigureAwait(false);
 
-            var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
+            var effectiveTask = InWorkspace(task, workspace) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
 
             // D3: an escalation the DISPATCHER already decided this attempt owes — the agent.run node's respawn after
             // an attempt whose own evidence said the MODEL was the limit. It arrives as a request (why + the prior
@@ -4112,6 +4112,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>The git clone URLs of every repo in the run's workspace provision (empty for a no-repo run) — the source of the allowlist's git hosts.</summary>
     private static IReadOnlyList<string> CloneUrlsOf(WorkspaceProvisionRequest? workspace) =>
         workspace is null ? Array.Empty<string>() : workspace.Repositories.Select(r => r.CloneRequest.RepositoryUrl).ToList();
+
+    /// <summary>The task as it runs in its materialised workspace: the workspace's cwd, and the directory of every repository in it, which a harness that names directories to its CLI needs beside the cwd. Unchanged when no workspace was materialised. In-memory only, like the rest of the effective task.</summary>
+    private static AgentTask InWorkspace(AgentTask task, IWorkspaceHandle? workspace) =>
+        workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory, WorkspaceRepositoryDirectories = workspace.Repositories.Select(repository => repository.Directory).ToList() };
 
     /// <summary>Layer the resolved credential's env onto the task's own non-secret env — the injected value wins for a shared key. In-memory only; the result is never re-persisted (an empty secret env returns the task env unchanged).</summary>
     internal static IReadOnlyDictionary<string, string> MergeEnvironment(IReadOnlyDictionary<string, string> taskEnv, IReadOnlyDictionary<string, string> secretEnv)

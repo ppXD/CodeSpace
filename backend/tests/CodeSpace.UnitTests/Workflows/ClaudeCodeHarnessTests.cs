@@ -57,13 +57,94 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
-    public void No_skills_means_no_config_home_files_and_no_setting_sources()
+    public void No_skills_means_no_config_home_files()
     {
-        var spec = Harness.BuildInvocation(Task());
-
-        spec.ConfigHomeFiles.ShouldBeEmpty();
-        spec.Args.ShouldNotContain("--setting-sources", "a bare / persona-only run is argv byte-identical — the setting-source pin rides ONLY with a projected skill");
+        Harness.BuildInvocation(Task()).ConfigHomeFiles.ShouldBeEmpty();
     }
+
+    public static TheoryData<string, AgentTask> EveryRunShape() => new()
+    {
+        { "bare", Task() },
+        { "persona", Task() with { SystemPrompt = "You are a meticulous reviewer." } },
+        { "skill", Task() with { Skills = new[] { new AgentSkill { Slug = "tdd", Description = "d", Body = "b" } } } },
+        { "acceptance", Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } } },
+        { "read-only acceptance", Task(scope: AgentWriteScope.ReadOnly) with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } } },
+        { "resume", Task() with { ResumeFromSessionId = "sess-1" } },
+        { "allowlist egress", Task() with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } } },
+        { "no workspace", Task() with { WorkspaceDirectory = null } },
+    };
+
+    [Theory]
+    [MemberData(nameof(EveryRunShape))]
+    public void Every_run_pins_its_settings_to_its_own_config_home(string shape, AgentTask task)
+    {
+        // A target repository's .claude/settings.json and settings.local.json are untrusted input for EVERY run, not only
+        // for one that writes settings of its own: unpinned, the real CLI sent the model call to the endpoint a planted
+        // env.ANTHROPIC_BASE_URL named and ran every planted hook (RepositoryConfigE2ETests). One pin, no per-run condition.
+        var args = Harness.BuildInvocation(task).Args.ToList();
+
+        var at = args.IndexOf("--setting-sources");
+        at.ShouldBeGreaterThanOrEqualTo(0, $"a {shape} run must pin its settings");
+        args[at + 1].ShouldBe("user", $"only the per-run-isolated user source loads for a {shape} run — never project/local (the target repo's .claude)");
+        args.Count(a => a == "--setting-sources").ShouldBe(1, "one pin, never a second, conflicting one");
+    }
+
+    [Fact]
+    public void The_workspace_comes_back_as_an_added_directory_so_its_memory_still_loads()
+    {
+        // `--setting-sources user` also switches off the project CLAUDE.md walk. The pinned CLI loads CLAUDE.md,
+        // .claude/CLAUDE.md and .claude/rules from an --add-dir directory whatever the setting sources — but only with
+        // the memory switch on (both halves observed against 2.1.263: either alone loads no project memory).
+        var spec = Harness.BuildInvocation(Task());
+        var args = spec.Args.ToList();
+
+        var at = args.IndexOf("--add-dir");
+        at.ShouldBeGreaterThanOrEqualTo(0, "the workspace must be added back for its memory to load");
+        args[at + 1].ShouldBe("/tmp/ws", "the directory added is the run's own workspace");
+        args[at + 2].ShouldStartWith("--", customMessage: "--add-dir is variadic: the next token must be a flag that terminates it, never a value it would swallow");
+        spec.Environment[ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar].ShouldBe("1", "without the switch the added directory contributes no memory");
+    }
+
+    public static TheoryData<string, string, string[]?, string[]> WorkspaceShapes() => new()
+    {
+        // shape, the workspace (the cwd), the repository directories the executor stamps, the directories added
+        { "single-repo", "/tmp/ws", new[] { "/tmp/ws" }, new[] { "/tmp/ws" } },
+        { "multi-repo at its root", "/tmp/ws", new[] { "/tmp/ws/web", "/tmp/ws/api" }, new[] { "/tmp/ws", "/tmp/ws/web", "/tmp/ws/api" } },
+        { "multi-repo at its primary repository", "/tmp/ws/web", new[] { "/tmp/ws/web", "/tmp/ws/api" }, new[] { "/tmp/ws/web" } },
+        { "named by its producer, no repositories stamped", "/tmp/ws", null, new[] { "/tmp/ws" } },
+    };
+
+    [Theory]
+    [MemberData(nameof(WorkspaceShapes))]
+    public void Every_repository_inside_the_workspace_is_added_so_each_ones_memory_loads(string shape, string workspace, string[]? repositories, string[] added)
+    {
+        // A multi-repo workspace runs at its root, which holds WORKSPACE.md and no CLAUDE.md; each repository's memory
+        // sits in its own directory below it. The pinned CLI loads every added directory's memory and none of its
+        // settings (RepositoryConfigE2ETests). A repository outside the cwd — a primary-repository cwd's siblings — is
+        // left out: the unpinned CLI never loaded its memory, and an added directory also widens what the CLI's tools may touch.
+        var args = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = repositories }).Args.ToList();
+
+        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(added, $"a {shape} workspace");
+        args.Count(arg => arg == "--add-dir").ShouldBe(1, "one variadic --add-dir carries every directory");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_run_with_no_workspace_adds_no_directory_and_no_memory_switch(string? workspace)
+    {
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace });
+
+        spec.Args.ShouldNotContain("--add-dir", "there is no workspace to add back");
+        spec.Environment.ContainsKey(ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar).ShouldBeFalse("the switch rides only with the directory it applies to");
+        spec.Args[spec.Args.ToList().IndexOf("--setting-sources") + 1].ShouldBe("user", "but the settings pin stays");
+    }
+
+    [Fact]
+    public void AdditionalDirectoriesMemoryEnvVar_constant_name_is_pinned() =>
+        // Rule 8: Claude Code reads this exact name; a rename silently drops every run's project memory.
+        ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar.ShouldBe("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD");
 
     // ── P3.3: the in-loop acceptance Stop hook ──
 
@@ -123,42 +204,20 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
-    public void An_acceptance_bearing_task_ALSO_pins_setting_sources_to_user_even_with_no_skills()
+    public void A_read_only_acceptance_bearing_task_gets_no_hook()
     {
-        // The same untrusted-input-vector concern that gates skills gates the Stop hook: without this pin, Claude
-        // would ALSO load the target repo's own project/local .claude settings — which could carry an untrusted
-        // hook of the repo's own.
-        var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } } };
-
-        var args = Harness.BuildInvocation(task).Args.ToList();
-
-        var at = args.IndexOf("--setting-sources");
-        at.ShouldBeGreaterThanOrEqualTo(0, "an acceptance-bearing run pins settings to the isolated user config home too");
-        args[at + 1].ShouldBe("user");
-    }
-
-    [Fact]
-    public void A_read_only_acceptance_bearing_task_keeps_the_pin_though_it_gets_no_hook()
-    {
-        // A read-only run carries no Stop hook — its workspace is mounted read-only, so the check could only fail with
-        // EROFS — but it must not start loading the target repo's own .claude settings for that: an untrusted repo
-        // hook in a read-only reviewer is the exact input vector the pin exists to close.
+        // A read-only run carries no Stop hook — its workspace is mounted read-only, so the check could only fail with EROFS.
         var task = Task() with { Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } }, Permissions = new AgentPermissions { WriteScope = AgentWriteScope.ReadOnly } };
 
-        var spec = Harness.BuildInvocation(task);
-        var args = spec.Args.ToList();
-
-        spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath, "no hook for a run that cannot act on its check");
-        args[args.IndexOf("--setting-sources") + 1].ShouldBe("user", "but the settings pin stays");
+        Harness.BuildInvocation(task).ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath, "no hook for a run that cannot act on its check");
     }
 
     [Fact]
-    public void A_task_with_neither_skills_nor_acceptance_gets_no_hook_files_and_no_setting_sources_pin()
+    public void A_task_with_neither_skills_nor_acceptance_gets_no_hook_files()
     {
         var spec = Harness.BuildInvocation(Task() with { Acceptance = null });
 
         spec.ConfigHomeFiles.ShouldNotContain(f => f.RelativePath == InLoopAcceptanceHook.ScriptRelativePath);
-        spec.Args.ShouldNotContain("--setting-sources");
     }
 
     [Fact]
@@ -389,7 +448,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("claude");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
         spec.StandardInput.ShouldBe("Fix the failing billing tests");
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
@@ -410,7 +469,7 @@ public class ClaudeCodeHarnessTests
         // trailing positional and the prompt is never swallowed.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]
@@ -420,7 +479,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("--resume");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Theory]
@@ -432,7 +491,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task(model: model));
 
         spec.Args.ShouldNotContain("--model", customMessage: "a blank model must omit --model so the CLI uses its own default (the Model=empty rule)");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]

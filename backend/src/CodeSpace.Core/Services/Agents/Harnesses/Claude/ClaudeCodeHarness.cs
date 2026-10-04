@@ -85,6 +85,14 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// </summary>
     public const string DisableNonEssentialTrafficEnvVar = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
+    /// <summary>
+    /// Claude Code's switch that loads <c>CLAUDE.md</c>, <c>.claude/CLAUDE.md</c> and <c>.claude/rules</c> from every
+    /// <c>--add-dir</c> directory — the one project-memory route the pinned CLI's loader does not gate on the
+    /// <c>project</c> setting source, which is how a run pinned to <c>--setting-sources user</c> keeps the repository's
+    /// memory (see <see cref="AppendSettingsPin"/>). Pinned by a test (Rule 8).
+    /// </summary>
+    public const string AdditionalDirectoriesMemoryEnvVar = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
+
     /// <summary>Claude Code's "small/fast" background model — used for title/summary generation, <c>/compact</c>, lightweight steps. Defaults to a haiku model NAME. Pinned by a test (Rule 8).</summary>
     public const string SmallFastModelEnvVar = "ANTHROPIC_SMALL_FAST_MODEL";
 
@@ -183,28 +191,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         args.Add("--append-system-prompt");
         args.Add(AgentOperatingContract.Compose(task.SystemPrompt));
 
-        // B1 config isolation (CORRECTED — the earlier "print is hermetic, skills need --setting-sources" rationale was
-        // wrong: that hermetic default is the programmatic Agent SDK's, NOT the `claude` CLI's). The CLI `claude -p`
-        // AUTO-DISCOVERS + loads personal skills from CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md by DEFAULT — official docs:
-        // headless.md "Without --bare, `claude -p` loads the same context an interactive session would, including
-        // anything configured in ... ~/.claude"; cli-reference `--bare` = "skip auto-discovery of ... skills". So our
-        // projected skills load with NO extra flag; the REAL requirement is that we NEVER pass --bare / --safe-mode
-        // (guarded by a unit test). `--setting-sources` (user|project|local) instead controls which settings.json LAYERS
-        // load (sdk-headless "To restrict which sources load, set settingSources"), NOT skill discovery. We pass
-        // `--setting-sources user` when we project skills to PIN settings to the isolated per-run user config home (§344)
-        // — so the run inherits ONLY our config, never the TARGET REPO's `.claude` project/local settings (an untrusted
-        // -input vector). Byte-identical argv for a skill-less run. The real-model E2E is the live arbiter of application.
-        // P3.3: the SAME pin is required when we project an in-loop acceptance Stop hook (BuildConfigHomeFiles writes a
-        // settings.json) — without it, Claude ALSO loads the target repo's own project/local .claude settings, which
-        // could carry an UNTRUSTED Stop hook of the repo's own. Widening this condition (not adding a second flag) keeps
-        // the pin's rule uniform: whenever WE write settings into the isolated config home, that's the ONLY layer that loads.
-        // Keyed on the oracle's SHAPE, not on whether the hook is wired: a read-only run carries no hook (its workspace
-        // is mounted read-only, see InLoopAcceptanceHook.AppliesTo) but must not start loading the repo's settings for it.
-        if (task.Skills is { Count: > 0 } || InLoopAcceptanceHook.HasRunnableOracle(task))
-        {
-            args.Add("--setting-sources");
-            args.Add("user");
-        }
+        // B1 config isolation: `claude -p` AUTO-DISCOVERS + loads personal skills from CLAUDE_CONFIG_DIR/skills/<slug>/SKILL.md
+        // by DEFAULT (headless.md "Without --bare, `claude -p` loads the same context an interactive session would";
+        // cli-reference `--bare` = "skip auto-discovery of ... skills"), so our projected skills load with NO extra flag
+        // and the requirement is that we NEVER pass --bare / --safe-mode (guarded by a unit test). What every run does
+        // get is the settings pin — one mechanism, no per-run condition: the target repository's own .claude settings
+        // are untrusted input whether or not this run writes settings of its own (see AppendSettingsPin).
+        AppendSettingsPin(args, task);
 
         AppendSealedEgressSettings(args, task);
 
@@ -510,15 +503,19 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// <summary>
     /// The child env: the task's env, plus harness-injected entries — the <see cref="DisableNonEssentialTrafficEnvVar"/>
     /// for an Allowlist (deny-by-default) egress run (so the CLI doesn't stall reaching telemetry hosts the allowlist
-    /// doesn't pin, B3.3c), and the gateway model-tier pins (<see cref="AddGatewayModelTiers"/>). An explicit
-    /// <see cref="AgentTask.Environment"/> entry WINS (operator intent — layered last), matching the runner's
-    /// NonInteractiveEnv "operator value wins" convention. When nothing is injected the task env is returned unchanged → byte-identical.
+    /// doesn't pin, B3.3c), the <see cref="AdditionalDirectoriesMemoryEnvVar"/> that makes the workspace's
+    /// <c>--add-dir</c> load its memory (<see cref="AppendSettingsPin"/>), and the gateway model-tier pins
+    /// (<see cref="AddGatewayModelTiers"/>). An explicit <see cref="AgentTask.Environment"/> entry WINS (operator intent —
+    /// layered last), matching the runner's NonInteractiveEnv "operator value wins" convention. When nothing is injected
+    /// the task env is returned unchanged → byte-identical.
     /// </summary>
     private static IReadOnlyDictionary<string, string> BuildEnvironment(AgentTask task)
     {
         var injected = new Dictionary<string, string>(StringComparer.Ordinal);
 
         if (task.Permissions.Egress == AgentEgressPolicy.Allowlist) injected[DisableNonEssentialTrafficEnvVar] = "1";
+
+        if (HasWorkspace(task)) injected[AdditionalDirectoriesMemoryEnvVar] = "1";
 
         AddGatewayModelTiers(injected, task);
 
@@ -546,6 +543,50 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
 
         foreach (var key in BackgroundModelEnvVars) env[key] = task.Model;
     }
+
+    /// <summary>
+    /// Pin every run's settings to its own isolated config home. <c>--setting-sources user</c> loads
+    /// <c>CLAUDE_CONFIG_DIR/settings.json</c> and nothing else, so the target repository's <c>.claude/settings.json</c>
+    /// and <c>.claude/settings.local.json</c> never apply. Unpinned, the pinned 2.1.263 CLI obeyed them completely: a
+    /// planted <c>env.ANTHROPIC_BASE_URL</c> took the model call off the run's broker to the repository's endpoint, with
+    /// the repository's <c>env.ANTHROPIC_AUTH_TOKEN</c> and its <c>apiKeyHelper</c>'s key; every planted hook ran; and a
+    /// project <c>.mcp.json</c> server was spawned whenever no declaration of ours made the MCP config strict.
+    ///
+    /// <para>The same source also gates project memory, so the pin alone drops the repository's <c>CLAUDE.md</c>. The
+    /// workspace comes back as an <c>--add-dir</c> with <see cref="AdditionalDirectoriesMemoryEnvVar"/> set: the loader
+    /// reads <c>CLAUDE.md</c>, <c>.claude/CLAUDE.md</c> and <c>.claude/rules</c> from an added directory whatever the
+    /// setting sources, and reads no settings from it. Project commands, agents and skills, and a subdirectory's own
+    /// <c>CLAUDE.md</c>, have no such route in 2.1.263 and stay unloaded. <c>--add-dir</c> is variadic; every flag that
+    /// follows it terminates the list.</para>
+    ///
+    /// <para>A multi-repo workspace runs at its root, which holds no <c>CLAUDE.md</c>, so every repository directory
+    /// inside the workspace is added too (<see cref="MemoryDirectories"/>), and each repository's memory loads.</para>
+    /// </summary>
+    private static void AppendSettingsPin(List<string> args, AgentTask task)
+    {
+        args.Add("--setting-sources");
+        args.Add("user");
+
+        if (!HasWorkspace(task)) return;
+
+        args.Add("--add-dir");
+        args.AddRange(MemoryDirectories(task));
+    }
+
+    /// <summary>
+    /// The workspace, then every repository directory inside it. A repository outside it — a sibling of a cwd at the
+    /// primary repository — is left out: the unpinned CLI never loaded its memory either, and an added directory also
+    /// widens what the CLI's tools may touch.
+    /// </summary>
+    private static IEnumerable<string> MemoryDirectories(AgentTask task)
+    {
+        var workspace = task.WorkspaceDirectory!;
+        var inside = Path.TrimEndingDirectorySeparator(workspace) + Path.DirectorySeparatorChar;
+
+        return new[] { workspace }.Concat((task.WorkspaceRepositoryDirectories ?? []).Where(directory => directory.StartsWith(inside, StringComparison.Ordinal))).Distinct(StringComparer.Ordinal);
+    }
+
+    private static bool HasWorkspace(AgentTask task) => !string.IsNullOrWhiteSpace(task.WorkspaceDirectory);
 
     /// <summary>
     /// On a deny-by-default (Allowlist) egress run, deliver <c>--settings {"<see cref="SkipWebFetchPreflightSetting"/>":true}</c>

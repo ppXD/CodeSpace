@@ -278,17 +278,17 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
     }
 
     /// <summary>The environment a brokered run's CLI is handed — the harness's own projection of the broker's address and run token, the way the executor builds it.</summary>
-    private static IReadOnlyDictionary<string, string> Brokered(IAgentHarness harness, BrokeredModelCredential brokered) => ((IBrokeredModelCredentialProjector)harness).ProjectBrokered(brokered);
+    internal static IReadOnlyDictionary<string, string> Brokered(IAgentHarness harness, BrokeredModelCredential brokered) => ((IBrokeredModelCredentialProjector)harness).ProjectBrokered(brokered);
 
-    private static IAgentHarness HarnessFor(string harnessKind) => harnessKind == ClaudeCodeHarness.HarnessKind ? new ClaudeCodeHarness() : new CodexHarness();
+    internal static IAgentHarness HarnessFor(string harnessKind) => harnessKind == ClaudeCodeHarness.HarnessKind ? new ClaudeCodeHarness() : new CodexHarness();
 
     /// <summary>The lane's switch, or a local run that points the harness at a binary of its own.</summary>
-    private static bool Armed(string harnessKind) =>
+    internal static bool Armed(string harnessKind) =>
         !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(RequireEnvVar))
         || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(harnessKind == ClaudeCodeHarness.HarnessKind ? ClaudeCodeHarness.CommandEnvVar : CodexHarness.CommandEnvVar));
 
     /// <summary>Armed means the binary is there and is the pin production installs — anything else fails, so the lane can never pass on a missing or drifted CLI.</summary>
-    private async Task RequirePinnedBinaryAsync(IAgentHarness harness, string harnessKind)
+    internal static async Task RequirePinnedBinaryAsync(IAgentHarness harness, string harnessKind)
     {
         var command = harness.BuildInvocation(new AgentTask { Goal = "version", Harness = harnessKind }).Command;
         var pinned = harnessKind == ClaudeCodeHarness.HarnessKind ? ClaudeCodeHarness.DefaultVersion : CodexHarness.DefaultVersion;
@@ -335,7 +335,7 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
     };
 
     /// <summary>The spec the executor would hand the runner: the harness invocation with its broker channel stamped when its network is off, and with its write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
-    private static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered) =>
+    internal static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered) =>
         AgentRunExecutor.ApplyWriteScope(AgentRunExecutor.ApplyModelBrokerChannel(harness.BuildInvocation(task), brokered), task.Permissions);
 
     private static async Task<ReviewRun> RunAsync(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered)
@@ -406,7 +406,7 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
 
     private static void Git(string directory, string arguments) => GitOut(directory, arguments);
 
-    private static string GitOut(string directory, string arguments)
+    internal static string GitOut(string directory, string arguments)
     {
         var info = new ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         foreach (var arg in new[] { "-c", "user.name=review-e2e", "-c", "user.email=review-e2e@codespace.test", "-c", "commit.gpgsign=false" }.Concat(arguments.Split(' '))) info.ArgumentList.Add(arg);
@@ -465,9 +465,9 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         return outputs.Count == 0 ? "(none)" : outputs.Distinct().Last();
     }
 
-    private static string Describe(IReadOnlyList<RecordedRequest> requests) => requests.Count == 0 ? "(none)" : string.Join("; ", requests.Select(r => $"{r.Method} {r.Path} ({r.Body.Length} chars)"));
+    internal static string Describe(IReadOnlyList<RecordedRequest> requests) => requests.Count == 0 ? "(none)" : string.Join("; ", requests.Select(r => $"{r.Method} {r.Path} ({r.Body.Length} chars)"));
 
-    private static string Tail(string text, int length = 600) => text.Length <= length ? text : "…" + text[^length..];
+    internal static string Tail(string text, int length = 600) => text.Length <= length ? text : "…" + text[^length..];
 
     private sealed record ReviewRepository(string Directory, string Base, string Head, string Nonce);
 

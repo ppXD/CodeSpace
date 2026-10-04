@@ -15,8 +15,9 @@ namespace CodeSpace.SandboxTests;
 /// refused every network-off brokered run before it spent; here the REAL runner admits it, and the real chain carries
 /// it to its broker through the relay and the lease's socket. Each arm asserts the posture first
 /// (<see cref="NonRootWorker.Require"/>), then runs the SAME arm the root lane runs, so both lanes pin one behaviour —
-/// but for the allowlist arm: this worker cannot filter, so its allowlist run is severed where the root lane's is
-/// filtered, and it still reaches its broker.
+/// but for two arms: this worker cannot filter, so its allowlist run is severed where the root lane's is filtered, and
+/// it still reaches its broker; and its repository-config arm runs Claude at Standard, the tier the root lane's uid 0
+/// cannot give it.
 ///
 /// <para>Selected by its trait alone (<c>--filter Category=SandboxNonRoot</c>), never by the root lane's
 /// <c>Category=Sandbox</c>. Every arm that ran prints its class's marker with <c>non-root</c> and its uid, which the
@@ -106,5 +107,17 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
 
         using var arms = new ReviewerReadsItsDiffE2ETests(output);
         await arms.NetworkOffReviewerAsync(harnessKind, Lane);
+    }
+
+    [Fact]
+    public async Task A_standard_claude_run_ignores_the_settings_its_repository_commits_and_still_reads_its_memory()
+    {
+        // The posture the worker ships Claude in — Standard, so bypassPermissions, which the pinned CLI refuses to the
+        // root lane's uid 0 — against a repository committing hostile settings. Every command they plant would leave a
+        // marker in the workspace this run may write.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new RepositoryConfigE2ETests(output);
+        await arms.ClaudeIgnoresRepositorySettingsAsync(AgentAutonomyLevel.Standard, repositories: 1, Lane);
     }
 }
