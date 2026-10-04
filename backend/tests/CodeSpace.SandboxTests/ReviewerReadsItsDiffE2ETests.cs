@@ -77,9 +77,15 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
 
         await RequirePinnedBinaryAsync(harness, CodexHarness.HarnessKind);
 
-        // A real repository, as every production workspace is: Codex refuses an untrusted non-git directory before it gets anywhere near the rollout.
-        var task = new AgentTask { Goal = "resume", Harness = CodexHarness.HarnessKind, WorkspaceDirectory = NewReviewRepository().Directory, ResumeFromSessionId = Guid.NewGuid().ToString(), TimeoutSeconds = 60, Environment = new Dictionary<string, string> { [CodexHarness.ApiKeyEnvVar] = "sk-review-e2e-resume", ["HOME"] = NewDirectory("resume-home") } };
+        // At a directory laid out like a multi-repo run's workspace root, which is no repository: Codex refuses such a cwd
+        // before it gets anywhere near the rollout unless the resume seed carries --skip-git-repo-check. The repositories
+        // below it ride the argv as writable roots of their own, so the pinned binary must accept those on resume too.
+        var (root, repositories) = NewWorkspaceRoot();
+        var task = new AgentTask { Goal = "resume", Harness = CodexHarness.HarnessKind, WorkspaceDirectory = root, WorkspaceRepositoryDirectories = repositories, ResumeFromSessionId = Guid.NewGuid().ToString(), TimeoutSeconds = 60, Environment = new Dictionary<string, string> { [CodexHarness.ApiKeyEnvVar] = "sk-review-e2e-resume", ["HOME"] = NewDirectory("resume-home") } };
         var spec = AgentRunExecutor.ApplyWriteScope(harness.BuildInvocation(task), task.Permissions);
+
+        spec.Args.ShouldContain(arg => arg.StartsWith("sandbox_workspace_write.writable_roots=", StringComparison.Ordinal), "fixture check: the repositories below the root must ride the resume argv, or this does not show the pinned binary accepts them");
+
         var bogus = spec with { Args = spec.Args.Select(arg => arg.StartsWith("sandbox_mode=", StringComparison.Ordinal) ? "sandbox_mode=not-a-mode" : arg).ToList(), WhenRunnerConfines = null };
 
         var accepted = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
@@ -391,6 +397,23 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         Git(directory, "commit -q -m head");
 
         return new ReviewRepository(RealPath(directory), head0, GitOut(directory, "rev-parse HEAD"), nonce);
+    }
+
+    /// <summary>A directory laid out like a multi-repo run's workspace root: a manifest and two repositories below it, and no repository itself.</summary>
+    private (string Root, IReadOnlyList<string> Repositories) NewWorkspaceRoot()
+    {
+        var root = NewDirectory("resume-workspace");
+        var repositories = new[] { "repo-1", "repo-2" }.Select(alias => Path.Combine(root, alias)).ToList();
+
+        File.WriteAllText(Path.Combine(root, "WORKSPACE.md"), "# Workspace\n\nThis is a MULTI-REPO workspace; each repository is a folder below.\n");
+
+        foreach (var repository in repositories)
+        {
+            Directory.CreateDirectory(repository);
+            Git(repository, "init -q -b main");
+        }
+
+        return (root, repositories);
     }
 
     private string NewDirectory(string label)

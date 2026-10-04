@@ -16,9 +16,14 @@ namespace CodeSpace.SandboxTests;
 /// on the binaries alone, as it always has, so the setup's refusal aborts the launch — durable or not — and the
 /// admission predicts that same namespace.
 ///
+/// <para>Unconfined, Codex's own sandbox is the only boundary its commands meet, so this lane also runs the
+/// repository-config arm that needs exactly that posture: a multi-repo Codex run whose agent must not be able to write
+/// any repository's <c>.git</c> or <c>.codex</c> (<see cref="RepositoryConfigE2ETests.CodexKeepsEveryRepositorysMetadataReadOnlyAsync"/>).</para>
+///
 /// <para>Selected by its trait alone (<c>--filter Category=SandboxUnconfined</c>); the lane runs it as uid 1654 with
 /// <c>CODESPACE_BWRAP_PATH</c> naming no binary and <c>Sandbox__RequireConfinement</c> unset. Each arm asserts that
-/// posture first (<see cref="RequirePosture"/>) and prints <see cref="RanMarker"/>, which the lane requires.</para>
+/// posture first (<see cref="RequirePosture"/>) and prints <see cref="RanMarker"/>, or for the Codex arm
+/// <see cref="RepositoryConfigE2ETests.RanMarker"/>, which the lane requires.</para>
 /// </summary>
 [Trait("Category", Category)]
 public sealed class UnconfinedWorkerE2ETests(ITestOutputHelper output)
@@ -72,6 +77,15 @@ public sealed class UnconfinedWorkerE2ETests(ITestOutputHelper output)
         refused.Cause.ShouldBe(SealedEgressUnavailableException.CauseBrokerSocketUnavailable);
 
         output.WriteLine($"{RanMarker} admission uid={NonRootWorker.EffectiveUid()}");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_codex_run_cannot_write_a_repositorys_git_metadata_where_its_own_sandbox_is_the_boundary()
+    {
+        if (!RequirePosture()) return;
+
+        using var arms = new RepositoryConfigE2ETests(output);
+        await arms.CodexKeepsEveryRepositorysMetadataReadOnlyAsync("unconfined");
     }
 
     /// <summary>

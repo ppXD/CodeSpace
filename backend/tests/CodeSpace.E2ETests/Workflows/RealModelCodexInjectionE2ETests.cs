@@ -216,7 +216,7 @@ public sealed class RealModelCodexInjectionE2ETests : IDisposable
         return credId;
     }
 
-    /// <summary>A fresh git-initialised temp workspace — <c>codex exec</c> refuses to run outside a trusted git repo, and the executor provisions NO workspace for a no-repo task, so the test supplies one (mirrors <see cref="RealCodexResumeE2ETests"/>). Tracked for teardown.</summary>
+    /// <summary>A fresh git-initialised temp workspace the test supplies (mirrors <see cref="RealCodexResumeE2ETests"/>). Tracked for teardown. The repository is this test's choice, not the CLI's: every Codex run passes <c>--skip-git-repo-check</c>, so a repo-less run's scratch directory starts too.</summary>
     private string NewGitWorkspace()
     {
         var ws = Path.Combine(Path.GetTempPath(), "cs-codex-inject-" + Guid.NewGuid().ToString("N"), "ws");

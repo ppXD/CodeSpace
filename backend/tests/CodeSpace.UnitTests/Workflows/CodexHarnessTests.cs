@@ -276,9 +276,64 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("codex");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
+    }
+
+    [Theory]
+    [InlineData(null, new[] { "exec", "--json", "--skip-git-repo-check" })]
+    [InlineData("thr-resume-1", new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check" })]
+    public void Every_run_may_start_in_a_workspace_root_that_is_not_a_git_repository(string? resumeFromSessionId, string[] seed)
+    {
+        // A multi-repo run's cwd is the workspace root, which holds each repository in a folder of its own and is no
+        // repository itself; a repo-less run's is a scratch directory with no git above it. Without this flag the pinned
+        // 0.142.2 refuses either cwd before any model request, for `exec` and `exec resume <id>` alike: exit 1, "Not
+        // inside a trusted directory and --skip-git-repo-check was not specified". A trust entry does not lift it.
+        // Inside a repository the flag changes nothing the model is sent.
+        var args = Harness.BuildInvocation(Task() with { ResumeFromSessionId = resumeFromSessionId }).Args;
+
+        args.Take(seed.Length).ShouldBe(seed);
+        args.Count(a => a == "--skip-git-repo-check").ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(null, new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-" })]
+    [InlineData("thr-resume-1", new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-" })]
+    public void A_run_at_a_workspace_root_names_each_repository_below_it_as_a_writable_root_of_its_own(string? resumeFromSessionId, string[] expected)
+    {
+        // Codex's workspace-write sandbox keeps .git, .codex and .agents read-only only at the top of each writable root.
+        // At a multi-repo root the repositories sit below the cwd, not at the top of a root, so each one's .git/hooks and
+        // .git/config were writable to the agent, and the platform's own commit and push run git in each repository with
+        // the run's credential. Named as roots of their own, the real 0.142.2 refuses those writes and still lets the agent
+        // change the repositories' files (observed on macOS; UnconfinedWorkerE2ETests runs it on Linux). No write access
+        // is added: each one is already inside the cwd.
+        var task = Task() with { ResumeFromSessionId = resumeFromSessionId, WorkspaceRepositoryDirectories = ["/tmp/ws/api", "/tmp/ws/web"] };
+
+        Harness.BuildInvocation(task).Args.ShouldBe(expected);
+    }
+
+    public static TheoryData<string, AgentTask> RunsWithNoRepositoryBelowAWritableCwd() => new()
+    {
+        { "single repo, which is the cwd itself", Task() with { WorkspaceRepositoryDirectories = ["/tmp/ws"] } },
+        { "scratch, which holds no repository", Task() with { WorkspaceRepositoryDirectories = [] } },
+        { "no workspace materialised", Task() },
+        { "a repository beside a cwd at the primary one, which a root would widen the sandbox to", Task() with { WorkspaceDirectory = "/tmp/ws/api", WorkspaceRepositoryDirectories = ["/tmp/ws/api", "/tmp/ws/web"] } },
+        { "a directory that only shares the cwd's prefix", Task() with { WorkspaceRepositoryDirectories = ["/tmp/ws-other"] } },
+        { "read-only, whose sandbox has no writable root", Task(scope: AgentWriteScope.ReadOnly) with { WorkspaceRepositoryDirectories = ["/tmp/ws/api"] } },
+    };
+
+    [Theory]
+    [MemberData(nameof(RunsWithNoRepositoryBelowAWritableCwd))]
+    public void A_run_with_no_repository_below_a_writable_cwd_names_no_writable_root(string shape, AgentTask task) =>
+        Harness.BuildInvocation(task).Args.ShouldNotContain(a => a.StartsWith("sandbox_workspace_write.", StringComparison.Ordinal), $"{shape}: nothing to carve out");
+
+    [Fact]
+    public void Each_writable_root_is_a_quoted_toml_string_so_a_quote_in_its_path_cannot_end_it()
+    {
+        var args = Harness.BuildInvocation(Task() with { WorkspaceRepositoryDirectories = ["/tmp/ws/a\"b\\c"] }).Args;
+
+        args.ShouldContain("sandbox_workspace_write.writable_roots=[\"/tmp/ws/a\\\"b\\\\c\"]");
     }
 
     public static TheoryData<string, AgentTask> EveryRunShape() => new()
@@ -373,7 +428,7 @@ public class CodexHarnessTests
         // while -c is accepted on it and sandbox_mode is the config key the flag maps to. The Goal stays last.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", WorkspaceDistrust, "-" });
     }
 
     [Fact]
@@ -425,7 +480,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("resume");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
     }
 
     [Fact]
@@ -496,7 +551,7 @@ public class CodexHarnessTests
     {
         var spec = Harness.BuildInvocation(Task(model: model));
 
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
             customMessage: "a blank model must omit --model entirely (not emit `--model \"\"`, which Codex rejects) so the CLI uses its default");
     }
 
@@ -508,7 +563,7 @@ public class CodexHarnessTests
         var withTools = Harness.BuildInvocation(Task() with { Tools = new[] { "Read", "Grep" } });
 
         withTools.Args.ShouldNotContain("--allowed-tools");
-        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
+        withTools.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
             customMessage: "a tools list must not change the Codex invocation — it has no faithful projection there");
     }
 
