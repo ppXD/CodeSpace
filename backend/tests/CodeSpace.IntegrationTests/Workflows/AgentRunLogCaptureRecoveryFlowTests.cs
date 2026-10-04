@@ -698,16 +698,8 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         // could only satisfy the tally falsely, never fail it.
         summary.LostLease.ShouldBeGreaterThanOrEqualTo(1, "a settlement that raises is still counted as a lost lease");
 
-        var intent = await IntentAsync(scene.Owned);
-        intent.RecoveryOwnerId.ShouldNotBeNull("the faulted write did not land, so the claim stays leased until its lease expires");
-        intent.RecoveryAttemptCount.ShouldBe(1);
-        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Expected);
-        intent.LastErrorCode.ShouldBeNull();
-
-        var stranger = await IntentAsync(scene.Neighbour);
-        stranger.RecoveryAttemptCount.ShouldBeGreaterThan(0, "the neighbour ahead of this intent was never claimed, so nothing showed the seam leaves it alone");
-        stranger.RecoveryOwnerId.ShouldBeNull("the seam faulted a neighbour's settlement; it must fault only this test's intent");
-        log.About(stranger.Id).ShouldBeEmpty();
+        await ShouldBeLeftLeasedAndUnwrittenAsync(scene.Owned);
+        await ShouldHaveLeftTheNeighbourAloneAsync(scene, log);
 
         var entry = log.About(scene.IntentId).ShouldHaveSingleItem("the faulted settlement must be logged once, naming its intent");
         entry.Level.ShouldBe(LogLevel.Warning);
@@ -715,6 +707,226 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         entry.Properties["{OriginalFormat}"].ShouldBeOfType<string>().ShouldContain("until its recovery lease expires");
 
         return entry;
+    }
+
+    private async Task ShouldBeLeftLeasedAndUnwrittenAsync(World owned)
+    {
+        var intent = await IntentAsync(owned);
+
+        intent.RecoveryOwnerId.ShouldNotBeNull("the faulted write did not land, so the claim stays leased until its lease expires");
+        intent.RecoveryAttemptCount.ShouldBe(1);
+        intent.State.ShouldBe(AgentRunLogCaptureIntentState.Expected);
+        intent.LastErrorCode.ShouldBeNull();
+    }
+
+    /// <summary>The neighbour ahead of this test's intent went through the same seam: it was claimed, settled, and never logged.</summary>
+    private async Task ShouldHaveLeftTheNeighbourAloneAsync(SettlementScene scene, RecordedRecoveryLog log)
+    {
+        var stranger = await IntentAsync(scene.Neighbour);
+
+        stranger.RecoveryAttemptCount.ShouldBeGreaterThan(0, "the neighbour ahead of this intent was never claimed, so nothing showed the seam leaves it alone");
+        stranger.RecoveryOwnerId.ShouldBeNull("the seam faulted a neighbour's settlement; it must fault only this test's intent");
+        log.About(stranger.Id).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_recovery_step_the_database_refuses_is_logged_with_its_cause_and_still_settles_as_a_typed_retry()
+    {
+        // An error the recovery step raises becomes a retry whose last_error_code, recovery-operation-exception, names no
+        // cause. A deterministic refusal then repeats on every retry until the intent is exhausted into
+        // ExternalStateIndeterminate, and without the cause in the log nothing says why.
+        var scene = await SeedOwnedIntentBehindDueNeighbourAsync();
+        var refusal = new RefusedCaptureRecoveryReadInterceptor(scene.Owned.TeamId);
+        var log = new RecordedRecoveryLog();
+        var recovery = Recovery(scene.Logs, interceptor: refusal, logger: log);
+
+        var entry = await ShouldSettleTheStepsRetryAloneAsync(scene, recovery, log, AgentRunLogCaptureIntentState.Expected, "recovery-operation-exception");
+
+        refusal.Refused.ShouldBeTrue("the seam never refused this intent's recovery read, so nothing was raised to log");
+        entry.Properties["SqlState"].ShouldBe(PostgresErrorCodes.RaiseException);
+        entry.Properties["MessageText"].ShouldBeOfType<string>().ShouldContain(scene.Owned.TeamId.ToString());
+        entry.Exception.ShouldBeOfType<PostgresException>();
+    }
+
+    [Theory]
+    [InlineData(8, AgentRunLogCaptureIntentState.Expected, "recovery-operation-exception")]         // the settlement writes the step's retry
+    [InlineData(1, AgentRunLogCaptureIntentState.ExternalStateIndeterminate, "recovery-exhausted")] // the settlement exhausts the step's retry on its last attempt
+    public async Task A_recovery_step_that_fails_outside_the_database_is_logged_without_a_database_cause_and_its_settlement_decides_the_retry(int maxAttempts, AgentRunLogCaptureIntentState settledState, string settledCode)
+    {
+        // A provider fault inside CompleteAsync carries no SQLSTATE. The exception is then the whole cause, and naming the
+        // absent database fields must not throw from inside the catch, where it would fault the wave and stop its claims.
+        // A deterministic fault repeats until the settlement exhausts the intent on its last attempt, and the line is
+        // written before that settlement runs, so it must not promise that attempt another retry.
+        var scene = await SeedOwnedIntentBehindDueNeighbourAsync();
+        var log = new RecordedRecoveryLog();
+        var recovery = Recovery(new ThrowingCompleteLogService(scene.Logs, scene.Owned.AgentRunId), new RecoveryTestOptions { MaxAttempts = maxAttempts }, logger: log);
+
+        var entry = await ShouldSettleTheStepsRetryAloneAsync(scene, recovery, log, settledState, settledCode);
+
+        entry.Properties["SqlState"].ShouldBeNull();
+        entry.Properties["MessageText"].ShouldBeNull();
+        entry.Exception.ShouldBeOfType<InvalidOperationException>().Message.ShouldContain(scene.Owned.AgentRunId.ToString());
+    }
+
+    /// <summary>
+    /// Reconciles until THIS test's intent settles the typed retry an unexpected recovery error becomes, as that retry or as
+    /// what its settlement replaced it with, asserts that the settlement released its claim as it did before the error was
+    /// logged and that the seam left the neighbour alone, then returns the one entry that names the intent.
+    /// </summary>
+    private async Task<RecordedEntry> ShouldSettleTheStepsRetryAloneAsync(SettlementScene scene, AgentRunLogCaptureRecoveryService recovery, RecordedRecoveryLog log, AgentRunLogCaptureIntentState settledState, string settledCode)
+    {
+        var intent = await ReconcileUntilAsync(recovery, scene.Owned, value => value.LastErrorCode == settledCode, $"settled the typed retry an unexpected recovery error becomes as {settledState}/{settledCode}");
+
+        intent.State.ShouldBe(settledState);
+        intent.RecoveryOwnerId.ShouldBeNull("a settlement releases its claim");
+        intent.RecoveryAttemptCount.ShouldBe(1);
+        await ShouldHaveLeftTheNeighbourAloneAsync(scene, log);
+
+        var entry = log.About(scene.IntentId).ShouldHaveSingleItem("the unexpected recovery error must be logged once, naming its intent");
+        entry.Level.ShouldBe(LogLevel.Warning);
+        entry.Properties["RunId"].ShouldBe(scene.Owned.AgentRunId);
+
+        // The line is written before the settlement runs, so it names the step's outcome and leaves the rest to the settlement.
+        entry.Properties["Outcome"].ShouldBe(AgentRunLogCaptureIntentState.Expected);
+        entry.Properties["OutcomeCode"].ShouldBe("recovery-operation-exception");
+        entry.Properties["{OriginalFormat}"].ShouldBeOfType<string>().ShouldContain("unless the settlement supersedes or exhausts the intent");
+
+        return entry;
+    }
+
+    [Theory]
+    [InlineData(false, "lease-expired")] // nothing re-claimed the intent: the claim is still this wave's, but its lease is gone
+    [InlineData(true, "reclaimed")]      // another worker re-claimed the intent once the lease expired, and settled it first
+    public async Task A_settlement_that_outlived_its_lease_is_logged_with_why_and_counted_in_the_summary_its_wave_logs(bool reclaimedByAnotherWorker, string cause)
+    {
+        // A lease outlives both bounded steps of a claim, so a live worker loses one only when a step overruns the bound
+        // its cancellation sets — here a provider call that ignores cancellation. The fence discards the late settlement,
+        // which is right, but it was counted as a lost lease with no log line, and nothing read that tally either.
+        var scene = await SeedOwnedIntentBehindDueNeighbourAsync();
+        var stall = new StallFirstOwnCompleteLogService(scene.Logs, scene.Owned.AgentRunId);
+        var log = new RecordedRecoveryLog();
+        var recovery = Recovery(stall, logger: log);
+        var wave = await ReconcileUntilPausedAsync(recovery, stall.Entered, scene.Owned);
+
+        if (reclaimedByAnotherWorker)
+            await ReconcileUntilAsync(Recovery(scene.Logs), scene.Owned, value => value.State == AgentRunLogCaptureIntentState.Completed, "re-claimed and completed by another worker once the stalled claim's lease expired", LeaseWait);
+        else
+            await WaitForLeaseToExpireAsync(scene.Owned);
+
+        stall.Release();
+        var summary = await wave;
+
+        summary.LostLease.ShouldBeGreaterThanOrEqualTo(1, "the late settlement is discarded and counted as a lost lease");
+        log.Summaries.Last().ShouldBe(summary, "the wave must log the tally it returns; nothing else reads its lost leases");
+        await ShouldHaveLeftTheNeighbourAloneAsync(scene, log);
+
+        var entry = log.About(scene.IntentId).ShouldHaveSingleItem("the lost claim must be logged once, naming its intent");
+        entry.Level.ShouldBe(LogLevel.Warning);
+        entry.Properties["RunId"].ShouldBe(scene.Owned.AgentRunId);
+        entry.Properties["Cause"].ShouldBe(cause);
+        entry.Properties["Outcome"].ShouldBe(AgentRunLogCaptureIntentState.SourceFinalized);
+        entry.Properties["OutcomeCode"].ShouldBe("complete-backend-unavailable");
+        entry.Exception.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(8, AgentRunLogCaptureIntentState.SourceFinalized, "complete-backend-unavailable")] // the observed retry is the write discarded
+    [InlineData(1, AgentRunLogCaptureIntentState.ExternalStateIndeterminate, "recovery-exhausted")] // the settlement exhausts the observed retry, and that write is discarded
+    public async Task A_settlement_whose_row_changed_under_its_lock_is_logged_with_the_write_it_discarded_and_still_waits_out_its_lease(int maxAttempts, AgentRunLogCaptureIntentState discardedState, string discardedCode)
+    {
+        // The settlement locks the intent before it reads it, so its write matches no row only if the row changed under
+        // that lock — a contract the service relies on and nothing else checks. The write is counted as a lost lease, and
+        // its claim stays leased until the lease expires, with no log line. A settlement can replace the outcome it
+        // observed before it writes, so the line must name the write it discarded, not the outcome it observed.
+        var scene = await SeedOwnedIntentBehindDueNeighbourAsync();
+        var stale = new RefusedCaptureSettlementInterceptor(scene.IntentId, "xmin");
+        var log = new RecordedRecoveryLog();
+        var recovery = Recovery(new AlwaysRetryableCompleteLogService(scene.Logs), new RecoveryTestOptions { MaxAttempts = maxAttempts }, stale, log);
+
+        var summary = await ReconcileUntilFaultedAsync(recovery, () => stale.Refused, scene.Owned);
+
+        summary.LostLease.ShouldBeGreaterThanOrEqualTo(1, "a write that matches no row is counted as a lost lease");
+        log.Summaries.Last().ShouldBe(summary, "the wave must log the tally it returns; nothing else reads its lost leases");
+        await ShouldBeLeftLeasedAndUnwrittenAsync(scene.Owned);
+        await ShouldHaveLeftTheNeighbourAloneAsync(scene, log);
+
+        var entry = log.About(scene.IntentId).ShouldHaveSingleItem("the lost claim must be logged once, naming its intent");
+        entry.Level.ShouldBe(LogLevel.Warning);
+        entry.Properties["RunId"].ShouldBe(scene.Owned.AgentRunId);
+        entry.Properties["Cause"].ShouldBe("row-version-changed");
+        entry.Properties["Outcome"].ShouldBe(discardedState);
+        entry.Properties["OutcomeCode"].ShouldBe(discardedCode);
+        entry.Exception.ShouldBeOfType<DbUpdateConcurrencyException>();
+    }
+
+    [Fact]
+    public async Task A_wave_logs_one_summary_when_it_claimed_work_and_none_when_it_claimed_nothing()
+    {
+        // The recurring job discards the summary, so the wave's own log line is the only place its tally is read. A wave
+        // that claimed nothing has nothing to report, and one line a minute from every idle worker would bury the rest.
+        var owned = await SeedWorldAsync();
+        var logs = LogService();
+        var sessionId = Guid.NewGuid();
+        await Recovery(logs).DeclareAsync(Declaration(owned, sessionId, 7, AgentRunLogKinds.StandardOutput), CancellationToken.None);
+        await SeedFinalizedTerminalStreamAsync(owned, logs, sessionId);
+        var log = new RecordedRecoveryLog();
+        var recovery = Recovery(logs, logger: log);
+
+        var claimingWaves = await ReconcileUntilIdleAsync(recovery, owned);
+
+        claimingWaves.ShouldBeGreaterThanOrEqualTo(1, "this test's own due intent was never claimed, so no wave had work to report");
+        log.Summaries.Count.ShouldBe(claimingWaves, "every wave that claimed work logs its summary once, and the idle wave logs none");
+    }
+
+    /// <summary>
+    /// Reconciles until a wave claims nothing, after THIS test's intent has been claimed, and returns how many waves claimed
+    /// work first. Waves are deployment-wide, so earlier tests' due intents are claimed too, and each settles terminal or
+    /// schedules its retry past the next wave's cutoff, so a wave with nothing due follows.
+    /// </summary>
+    private async Task<int> ReconcileUntilIdleAsync(AgentRunLogCaptureRecoveryService recovery, World world)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
+        var claimingWaves = 0;
+        (await IntentAsync(world)).RecoveryAttemptCount.ShouldBe(0, "the intent was claimed before any wave was started to claim it");
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var summary = await recovery.ReconcileAsync(CancellationToken.None);
+
+            if (summary.Claimed == 0 && (await IntentAsync(world)).RecoveryAttemptCount > 0) return claimingWaves;
+
+            if (summary.Claimed > 0) claimingWaves++;
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"No reconcile wave claimed nothing after agent run {world.AgentRunId}'s capture intent was claimed, across {claimingWaves} claiming wave(s). "
+            + "Reconcile waves are deployment-wide, so check whether an earlier test left intents that fall due again before every next wave's cutoff.");
+    }
+
+    /// <summary>How long a test waits on a 6 s recovery lease to expire, with room for a loaded database.</summary>
+    private static readonly TimeSpan LeaseWait = TimeSpan.FromSeconds(20);
+
+    /// <summary>Polls the database clock until THIS test's claimed intent's recovery lease has expired.</summary>
+    private async Task WaitForLeaseToExpireAsync(World world)
+    {
+        var deadline = DateTimeOffset.UtcNow + LeaseWait;
+        (await LeaseExpiredAsync(world)).ShouldBeFalse("waiting for the lease to expire is meaningless when it had expired before the wait began");
+
+        while (!await LeaseExpiredAsync(world))
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+                throw new Xunit.Sdk.XunitException($"The recovery lease on agent run {world.AgentRunId}'s capture intent never expired by the database clock; check its recovery_lease_expires_at against clock_timestamp().");
+
+            await Task.Delay(50);
+        }
+    }
+
+    private async Task<bool> LeaseExpiredAsync(World world)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().Database
+            .SqlQuery<bool>($"SELECT COALESCE(recovery_lease_expires_at <= clock_timestamp(), FALSE) AS \"Value\" FROM agent_run_log_capture_intent WHERE agent_run_id = {world.AgentRunId}").SingleAsync();
     }
 
     [Fact]
@@ -1073,10 +1285,20 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
     /// </summary>
     private sealed class RecordedRecoveryLog : ILogger<AgentRunLogCaptureRecoveryService>
     {
-        private readonly ConcurrentBag<RecordedEntry> _entries = [];
+        private readonly ConcurrentQueue<RecordedEntry> _entries = [];
 
         /// <summary>The entries naming one intent. The sweep is deployment-wide, so whatever else it met in this shared database is not this test's business.</summary>
         public IReadOnlyList<RecordedEntry> About(Guid intentId) => _entries.Where(entry => Equals(entry.Properties.GetValueOrDefault("IntentId"), intentId)).ToList();
+
+        /// <summary>The wave summaries, in the order the waves logged them, rebuilt from their structured properties.</summary>
+        public IReadOnlyList<AgentRunLogCaptureRecoverySummary> Summaries => _entries.Where(entry => entry.Properties.ContainsKey("Claimed")).Select(Summary).ToList();
+
+        private static AgentRunLogCaptureRecoverySummary Summary(RecordedEntry entry) => new(Count(entry, "Claimed"), Count(entry, "Completed"), Count(entry, "CaptureFailed"), Count(entry, "Superseded"), Count(entry, "Retried"), Count(entry, "LostLease"))
+        {
+            ExternalStateIndeterminate = Count(entry, "ExternalStateIndeterminate"),
+        };
+
+        private static int Count(RecordedEntry entry, string name) => entry.Properties[name].ShouldBeOfType<int>();
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
@@ -1085,7 +1307,7 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         {
             if (state is not IReadOnlyList<KeyValuePair<string, object?>> properties) return;
 
-            _entries.Add(new RecordedEntry(logLevel, properties.ToDictionary(property => property.Key, property => property.Value, StringComparer.Ordinal), exception));
+            _entries.Enqueue(new RecordedEntry(logLevel, properties.ToDictionary(property => property.Key, property => property.Value, StringComparer.Ordinal), exception));
         }
     }
 
@@ -1127,6 +1349,59 @@ public sealed class AgentRunLogCaptureRecoveryFlowTests
         public Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken) => inner.FinalizeSourceAsync(request, cancellationToken);
         public Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken) =>
             Task.FromResult<AgentRunLogCompleteResult>(new AgentRunLogCompleteResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable, true)));
+        public Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken) => inner.FailCaptureAsync(request, cancellationToken);
+        public Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken) => inner.RecordOwnerLossAsync(request, cancellationToken);
+        public Task<AgentRunLogMetadataResult> GetMetadataAsync(Guid teamId, Guid streamId, CancellationToken cancellationToken) => inner.GetMetadataAsync(teamId, streamId, cancellationToken);
+        public Task<IReadOnlyList<AgentRunLogMetadata>> ListMetadataAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => inner.ListMetadataAsync(teamId, agentRunId, cancellationToken);
+        public Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => inner.ListCaptureHeadsAsync(teamId, agentRunId, cancellationToken);
+        public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => inner.ReadRangeAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// Fails the owning run's every CompleteAsync outside the database, the way a provider or CAS fault would. Only that
+    /// run's call fails: a wave is deployment-wide, so a neighbour's call runs through this same instance and completes.
+    /// </summary>
+    private sealed class ThrowingCompleteLogService(IAgentRunLogService inner, Guid agentRunId) : IAgentRunLogService
+    {
+        public Task<AgentRunLogOpenResult> OpenAsync(AgentRunLogOpenRequest request, CancellationToken cancellationToken) => inner.OpenAsync(request, cancellationToken);
+        public Task<AgentRunLogAppendResult> AppendAsync(AgentRunLogAppendRequest request, CancellationToken cancellationToken) => inner.AppendAsync(request, cancellationToken);
+        public Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken) => inner.FinalizeSourceAsync(request, cancellationToken);
+        public Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken) => request.AgentRunId == agentRunId
+            ? Task.FromException<AgentRunLogCompleteResult>(new InvalidOperationException($"The completion provider failed for agent run {agentRunId}."))
+            : inner.CompleteAsync(request, cancellationToken);
+        public Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken) => inner.FailCaptureAsync(request, cancellationToken);
+        public Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken) => inner.RecordOwnerLossAsync(request, cancellationToken);
+        public Task<AgentRunLogMetadataResult> GetMetadataAsync(Guid teamId, Guid streamId, CancellationToken cancellationToken) => inner.GetMetadataAsync(teamId, streamId, cancellationToken);
+        public Task<IReadOnlyList<AgentRunLogMetadata>> ListMetadataAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => inner.ListMetadataAsync(teamId, agentRunId, cancellationToken);
+        public Task<IReadOnlyList<AgentRunLogCaptureHead>> ListCaptureHeadsAsync(Guid teamId, Guid agentRunId, CancellationToken cancellationToken) => inner.ListCaptureHeadsAsync(teamId, agentRunId, cancellationToken);
+        public Task<AgentRunLogRangeResult> ReadRangeAsync(AgentRunLogRangeRequest request, CancellationToken cancellationToken) => inner.ReadRangeAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// Holds the owning run's first CompleteAsync until released and IGNORES its cancellation, as a provider call that does
+    /// not honour its bound would, then answers it as retryable. That is how a live worker overruns its lease. Only the
+    /// owning run's first call is held: a wave is deployment-wide, so a neighbour's call runs through this same instance,
+    /// and holding a stranger's would stall the wave before this test's intent is claimed. Every later call passes through.
+    /// </summary>
+    private sealed class StallFirstOwnCompleteLogService(IAgentRunLogService inner, Guid agentRunId) : IAgentRunLogService
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _stalled;
+
+        public Task Entered => _entered.Task;
+        public void Release() => _release.TrySetResult();
+        public Task<AgentRunLogOpenResult> OpenAsync(AgentRunLogOpenRequest request, CancellationToken cancellationToken) => inner.OpenAsync(request, cancellationToken);
+        public Task<AgentRunLogAppendResult> AppendAsync(AgentRunLogAppendRequest request, CancellationToken cancellationToken) => inner.AppendAsync(request, cancellationToken);
+        public Task<AgentRunLogFinalizeSourceResult> FinalizeSourceAsync(AgentRunLogFinalizeSourceRequest request, CancellationToken cancellationToken) => inner.FinalizeSourceAsync(request, cancellationToken);
+        public async Task<AgentRunLogCompleteResult> CompleteAsync(AgentRunLogCompleteRequest request, CancellationToken cancellationToken)
+        {
+            if (request.AgentRunId != agentRunId || Interlocked.Exchange(ref _stalled, 1) == 1) return await inner.CompleteAsync(request, cancellationToken);
+
+            _entered.TrySetResult();
+            await _release.Task;
+            return new AgentRunLogCompleteResult.Rejected(new AgentRunLogProblem(AgentRunLogProblemCode.BackendUnavailable, true));
+        }
         public Task<AgentRunLogFailCaptureResult> FailCaptureAsync(AgentRunLogFailCaptureRequest request, CancellationToken cancellationToken) => inner.FailCaptureAsync(request, cancellationToken);
         public Task<int> RecordOwnerLossAsync(AgentRunLogOwnerLossRequest request, CancellationToken cancellationToken) => inner.RecordOwnerLossAsync(request, cancellationToken);
         public Task<AgentRunLogMetadataResult> GetMetadataAsync(Guid teamId, Guid streamId, CancellationToken cancellationToken) => inner.GetMetadataAsync(teamId, streamId, cancellationToken);
