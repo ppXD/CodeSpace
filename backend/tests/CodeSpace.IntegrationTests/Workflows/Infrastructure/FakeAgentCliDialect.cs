@@ -38,6 +38,62 @@ public static class FakeAgentCliDialect
         kind == ClaudeCodeHarness.HarnessKind ? ClaudeCodeHarness.CommandEnvVar : CodexHarness.CommandEnvVar;
 
     /// <summary>
+    /// A POSIX shell function, <c>claude_goal</c>, that prints the goal a Claude invocation carries on stdin, byte for
+    /// byte. Claude's stdin is not the goal: it is one stream-json user message whose FIRST text block is the goal
+    /// (<c>ClaudeCodeHarness.PromptMessage</c>), so a fake that read it as text would act on the JSON. Codex's stdin is
+    /// the goal itself.
+    ///
+    /// <para>Plain <c>awk</c>, because a fake runs on /bin/sh with nothing else assumed (no jq, no python). It decodes the
+    /// one JSON string the harness writes — every escape System.Text.Json emits, <c>\uXXXX</c> and surrogate pairs
+    /// included, re-encoded as UTF-8 — under <c>LC_ALL=C</c> so every awk treats the text as bytes. A stdin that is not
+    /// such a message yields nothing, so a harness that stopped sending one fails a fake loudly instead of feeding it
+    /// JSON. Pinned against the real encoder by <c>SubtaskAwareFakeCliDriftTests</c>.</para>
+    /// </summary>
+    public const string ClaudeGoalFunction = """
+        claude_goal() {
+        LC_ALL=C awk '
+        function hex(h,  n, k) { n = 0; for (k = 1; k <= 4; k++) n = n * 16 + index("0123456789abcdef", tolower(substr(h, k, 1))) - 1; return n }
+        function utf8(c) {
+          if (c < 128) printf "%c", c; else if (c < 2048) printf "%c%c", 192 + int(c / 64), 128 + c % 64; else if (c < 65536) printf "%c%c%c", 224 + int(c / 4096), 128 + int(c / 64) % 64, 128 + c % 64; else printf "%c%c%c%c", 240 + int(c / 262144), 128 + int(c / 4096) % 64, 128 + int(c / 64) % 64, 128 + c % 64
+        }
+        {
+          head = "\"content\":[{\"type\":\"text\",\"text\":\""
+          p = index($0, head)
+          if (p == 0) next
+          s = substr($0, p + length(head)); n = length(s)
+          for (i = 1; i <= n; i++) {
+            ch = substr(s, i, 1)
+            if (ch == "\"") exit
+            if (ch != "\\") { printf "%s", ch; continue }
+            e = substr(s, ++i, 1)
+            if (e == "n") printf "\n"; else if (e == "r") printf "\r"; else if (e == "t") printf "\t"; else if (e == "b") printf "\b"; else if (e == "f") printf "\f"; else if (e != "u") printf "%s", e
+            else {
+              c = hex(substr(s, i + 1, 4)); i += 4
+              if (c >= 55296 && c < 56320 && substr(s, i + 1, 2) == "\\u") { c = 65536 + (c - 55296) * 1024 + hex(substr(s, i + 3, 4)) - 56320; i += 6 }
+              utf8(c)
+            }
+          }
+        }'
+        }
+
+        """;
+
+    /// <summary>
+    /// Sets <c>$goal</c> to the goal the invoking harness handed over on stdin — read as text for Codex (argv starts with
+    /// <c>exec</c>), decoded out of its stream-json message for Claude (<see cref="ClaudeGoalFunction"/>). A fake that
+    /// arms <c>ClaudeCodeHarness.CommandEnvVar</c> reads its goal through this, never <c>$(cat)</c>.
+    /// </summary>
+    public const string ReadGoal = ClaudeGoalFunction + "if [ \"$1\" = 'exec' ]; then goal=\"$(cat)\"; else goal=\"$(claude_goal)\"; fi\n";
+
+    /// <summary>The goal a Claude spec carries: the first text block of the one stream-json user message on its stdin — what the CLI hands the model, for a test that asserts on the goal a launch was given.</summary>
+    public static string ClaudeGoal(string? standardInput)
+    {
+        using var message = System.Text.Json.JsonDocument.Parse(standardInput ?? throw new ArgumentNullException(nameof(standardInput)));
+
+        return message.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString()!;
+    }
+
+    /// <summary>
     /// Wrap a fake's event tail so ONE script serves both harnesses, branching on the single discriminator that is a
     /// property of the invocation: Codex's argv always starts with <c>exec</c>, Claude's with <c>--print</c>. The
     /// <paramref name="codexLines"/> stay BYTE-IDENTICAL to the fake's pre-existing tail, so every codex consumer and

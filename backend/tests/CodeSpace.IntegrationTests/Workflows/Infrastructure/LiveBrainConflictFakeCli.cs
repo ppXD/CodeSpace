@@ -68,7 +68,7 @@ public sealed class LiveBrainConflictFakeCli : IDisposable
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"$(cat)\"\n" +
+        FakeAgentCliDialect.ReadGoal +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "case \"$goal\" in\n" +
         "  *\"" + ResolverMarker + "\"*)\n" +

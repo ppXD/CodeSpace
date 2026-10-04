@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -74,6 +75,24 @@ public sealed partial class NativeLaunchRegistryTests
         ((IFailure)refusal).Code.ShouldBe(FailureCodes.SandboxArgumentTooLong);
         refusal.Message.ShouldContain("standard input", Case.Insensitive);
         refusal.Message.ShouldNotContain("xxxx", Case.Sensitive, "a refusal is host metadata — never the prompt itself");
+        Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse("refused before anything is created on disk or any commitment is consumed");
+    }
+
+    [Fact]
+    public async Task A_claude_goal_is_measured_as_the_message_that_crosses_the_pipe_not_as_the_goal_alone()
+    {
+        // Claude's stdin is the goal wrapped in one stream-json message, so the bytes that cross the pipe are the
+        // message's. A goal that fits the budget on its own and whose message does not must be refused here, as a goal
+        // past it is — never sent into a frame write that fails after transmission is marked started.
+        var key = "stdin-message-limit-" + Guid.NewGuid().ToString("N");
+        var goal = new string('x', NativeLaunchProtocol.LargeCarrierBudgetBytes - 16);
+        var spec = new ClaudeCodeHarness().BuildInvocation(new AgentTask { Goal = goal, Harness = ClaudeCodeHarness.HarnessKind });
+
+        NativeLaunchProtocol.EncodedBytes(goal).ShouldBeLessThanOrEqualTo(NativeLaunchProtocol.LargeCarrierBudgetBytes, "fixture check: the goal alone fits the budget");
+
+        var refusal = await Should.ThrowAsync<SandboxArgumentTooLongException>(() => new LocalProcessRunner().LaunchOrDiscoverAsync(new SandboxLaunchRequest(spec, key), CancellationToken.None));
+
+        refusal.Message.ShouldContain(NativeLaunchProtocol.EncodedBytes(spec.StandardInput!).ToString(), customMessage: "the size named is the message's, the bytes the pipe would actually carry");
         Directory.Exists(LocalProcessRunner.SpoolDirectoryFor(key)).ShouldBeFalse("refused before anything is created on disk or any commitment is consumed");
     }
 

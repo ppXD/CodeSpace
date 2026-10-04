@@ -191,7 +191,7 @@ public sealed class AgentRunExecutorReviseTests
         var warm = harness.BuildInvocation(task);
 
         warm.ConfigHomeFiles.ShouldContain(file => file.Content == half, "fixture check: the spec must carry the transcript");
-        warm.StandardInput.ShouldBe(half, "fixture check: and the goal");
+        ClaudeCodeHarnessTests.GoalOf(warm.StandardInput).ShouldBe(half, "fixture check: and the goal");
         AgentRunExecutor.ContinuationOverflowsTheFrame(task, warm).ShouldBeTrue();
         AgentRunExecutor.ContinuationOverflowsTheFrame(AgentRunExecutor.RunCold(task), harness.BuildInvocation(AgentRunExecutor.RunCold(task))).ShouldBeFalse(customMessage: "a cold attempt carries no transcript, so only the goal is left to fit");
         NativeLaunchProtocol.FitsTheFrame(harness.BuildInvocation(AgentRunExecutor.RunCold(task))).ShouldBeTrue();

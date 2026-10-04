@@ -1,4 +1,6 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Skills;
@@ -117,6 +119,26 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
 
     private const string DefaultCommand = "claude";
 
+    /// <summary>
+    /// The text block that follows the goal in the one user message a run's stdin carries (<see cref="PromptMessage"/>).
+    /// The pinned CLI reads @-mentions and a leading /command out of a message's LAST text block only, so this constant
+    /// is the block it parses and the goal never is. It must give the CLI nothing to act on: no '@', no leading '/',
+    /// '!' or '#', no keyword it reacts to. Pinned by a unit test and by GoalChannelE2ETests against the real binary.
+    /// </summary>
+    internal const string GoalTrailer = "Begin with the task above.";
+
+    /// <summary>
+    /// How the message is serialized. Relaxed, because the launch pipe measures and carries stdin through its own JSON
+    /// encoder, which already escapes every non-ASCII character (and HTML-sensitive ASCII such as '+', '&lt;', '&gt;'): the
+    /// default encoder here would escape them first and the pipe would then escape the escapes. So a goal of characters
+    /// this encoder writes as they are (ASCII and most of the BMP) costs the pipe what the bare goal would, plus a constant
+    /// envelope. What it does escape — a quote, a backslash, every control character (a newline included, which keeps
+    /// the message exactly one line), a few format and separator characters such as U+FEFF and U+2028, and any character
+    /// outside the BMP, which every System.Text.Json encoder writes as an escaped surrogate pair — has its backslash
+    /// escaped again on the pipe, so it costs up to twice the goal's own pipe size. Nothing here is ever rendered as HTML.
+    /// </summary>
+    private static readonly JsonSerializerOptions PromptMessageJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     public string Kind => HarnessKind;
 
     public string Version => System.Environment.GetEnvironmentVariable(VersionEnvVar) is { Length: > 0 } v ? v : DefaultVersion;
@@ -173,12 +195,14 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
 
     public SandboxSpec BuildInvocation(AgentTask task)
     {
-        // --output-format stream-json REQUIRES --verbose in --print mode (the CLI rejects it otherwise).
-        var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose" };
+        // --output-format stream-json REQUIRES --verbose in --print mode (the CLI rejects it otherwise). The prompt is
+        // read as stream-json too (see PromptMessage): on a text stdin the CLI acts on the goal's own text before the
+        // model sees it.
+        var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json" };
 
         // P3.2: a CONTINUE re-stage threads the prior session id as `--resume <id>` to pick up the conversation.
         // Placed right after the seed — before the variadic --allowed-tools / --permission-mode — so the variadic can
-        // never swallow it. The continuation prompt rides stdin like any other. Null (a fresh run) → omitted.
+        // never swallow it. The continuation prompt rides stdin like any other, in the same message. Null (a fresh run) → omitted.
         if (task.ResumeFromSessionId is { Length: > 0 } resumeSessionId)
         {
             args.Add("--resume");
@@ -227,7 +251,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         {
             Command = ResolveCommand(),
             Args = args,
-            StandardInput = task.Goal,
+            StandardInput = PromptMessage(task.Goal),
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = BuildEnvironment(task),
             TimeoutSeconds = task.TimeoutSeconds,
@@ -244,6 +268,60 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
     }
+
+    /// <summary>
+    /// The goal as the ONE stream-json user message the CLI reads from stdin under <c>--input-format stream-json</c>: the
+    /// goal as its first text block, <see cref="GoalTrailer"/> as its last, on one line. Every Claude prompt is built
+    /// here — a fresh run, a CONTINUE on <c>--resume</c>, a revise round, a reviewer — because every one is a
+    /// <see cref="BuildInvocation"/>.
+    ///
+    /// <para>Why not the goal as text: on a text stdin the pinned 2.1.263 CLI, before the model acts and in plan mode
+    /// too, reads every <c>@path</c> the goal names after start of text, whitespace (JavaScript's <c>\s</c>, so a BOM,
+    /// NBSP, U+3000 and U+2028 count) or 。、？！ into the request and the session transcript — an absolute path, a
+    /// <c>~</c> path (HOME is the run's config home under bubblewrap, beside its MCP declaration and transcripts), a
+    /// directory listing, a symlink out of the workspace. A goal that starts with <c>/word</c> runs as a command:
+    /// <c>/security-review</c> runs git, <c>/config</c> rewrites settings, and an unknown word ends the run as a success
+    /// with no turn. Text reaches a goal from pull requests, repositories and other models, so none of it may act before
+    /// the model reads it.</para>
+    ///
+    /// <para>The CLI parses mentions and commands out of a message's LAST text block only, so the goal sits first and
+    /// reaches the model byte for byte — never escaped or rewritten, the same text Codex gets. Escaping the sigils instead
+    /// would change what the model reads and would have to copy the CLI's JavaScript <c>\s</c> exactly: a .NET <c>\s</c>
+    /// misses the BOM, and the CLI then reads the file. The block order is undocumented CLI behaviour, which is why
+    /// GoalChannelE2ETests pins it against the real binary, with the text channel as its positive control.</para>
+    ///
+    /// <para>A blank goal is refused: the CLI drops a block its JavaScript <c>trim()</c> empties and runs the model on the
+    /// trailer alone, reporting success for a run that had no task. On a text stdin it refused a blank prompt itself.</para>
+    /// </summary>
+    internal static string PromptMessage(string goal)
+    {
+        EnsureGoal(goal);
+
+        var message = new JsonObject
+        {
+            ["type"] = "user",
+            ["message"] = new JsonObject { ["role"] = "user", ["content"] = new JsonArray(TextBlock(goal), TextBlock(GoalTrailer)) },
+            ["parent_tool_use_id"] = null,
+            ["session_id"] = "",
+        };
+
+        return message.ToJsonString(PromptMessageJson) + "\n";
+    }
+
+    private static JsonObject TextBlock(string text) => new() { ["type"] = "text", ["text"] = text };
+
+    private static void EnsureGoal(string goal)
+    {
+        if (IsBlankToTheCli(goal))
+            throw new ArgumentException("A Claude Code run cannot take a blank goal: the CLI drops a blank prompt block and would run the model with no task.", nameof(goal));
+    }
+
+    /// <summary>
+    /// Whether the CLI would drop <paramref name="goal"/> as a blank block. It tests a block with JavaScript's
+    /// <c>trim()</c>, whose whitespace is .NET's plus U+FEFF: <c>string.IsNullOrWhiteSpace</c> alone passes a BOM-only
+    /// goal the CLI then drops. (.NET also counts U+0085, which only refuses a goal the CLI would have kept.)
+    /// </summary>
+    private static bool IsBlankToTheCli(string goal) => goal.All(c => char.IsWhiteSpace(c) || c == '\uFEFF');
 
     /// <summary>
     /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
