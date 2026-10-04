@@ -145,6 +145,20 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// </summary>
     public const int MaxInputCharacters = 1_048_576;
 
+    /// <summary>
+    /// Lets Codex start in a directory that is not inside a git repository. Two kinds of run have such a cwd: a
+    /// multi-repo run whose cwd mode is <c>Auto</c> or <c>WorkspaceRoot</c>, which works at the workspace root holding
+    /// each repository in a folder of its own, and a repo-less run, which works in a scratch directory with no git
+    /// anywhere above it. (A single-repo workspace is cloned into its root, so its cwd is a repository in every mode.)
+    /// Without this flag the pinned 0.142.2 refuses both before any model request: exit 1, "Not inside a trusted
+    /// directory and --skip-git-repo-check was not specified". It does so for <c>exec</c> and <c>exec resume &lt;id&gt;</c>
+    /// alike, and no <c>projects</c> trust entry lifts the refusal. Every run passes it, because CodeSpace decides which
+    /// directory a run works in, not Codex's git heuristic. Inside a repository it changes nothing the model is sent: the
+    /// repository's <c>AGENTS.md</c> and skills still load, and <see cref="AppendWorkspaceDistrust"/> still keeps its
+    /// project config out. Verified against 0.142.2, which accepts the flag after <c>resume &lt;id&gt;</c> too.
+    /// </summary>
+    private const string SkipGitRepoCheck = "--skip-git-repo-check";
+
     public SandboxSpec BuildInvocation(AgentTask task)
     {
         EnsureWithinInputCap(task.Goal);
@@ -153,8 +167,8 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         // prior thread. The subcommand must follow `exec` directly; --model, the `-c` overrides (incl. the sandbox on
         // the resume path — see AppendSandbox), and the stdin `-` positional follow. Null (a fresh run) → the plain seed.
         var args = task.ResumeFromSessionId is { Length: > 0 } resumeThreadId
-            ? new List<string> { "exec", "resume", resumeThreadId, "--json" }
-            : new List<string> { "exec", "--json" };
+            ? new List<string> { "exec", "resume", resumeThreadId, "--json", SkipGitRepoCheck }
+            : new List<string> { "exec", "--json", SkipGitRepoCheck };
 
         // task.Tools is intentionally NOT projected here: Codex has no global tool allow-list (it restricts via
         // --sandbox + per-MCP-server enabled_tools), so a Claude-Code-style tool list has no faithful Codex flag.
@@ -170,6 +184,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         }
 
         AppendSandbox(args, task);
+        AppendRepositoryWritableRoots(args, task);
 
         // Point Codex at a custom gateway (when one was projected) BEFORE the `-` positional — Codex parses `-c`
         // overrides as flags, so they must precede it.
@@ -645,6 +660,32 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// <summary>The argv that gives Codex's sandbox <paramref name="mode"/>, spelled the way this invocation's subcommand accepts it (see <see cref="AppendSandbox"/>).</summary>
     private static string[] SandboxFragment(AgentTask task, string mode) =>
         task.ResumeFromSessionId is { Length: > 0 } ? new[] { "-c", $"sandbox_mode={mode}" } : new[] { "--sandbox", mode };
+
+    /// <summary>
+    /// Name every repository below the cwd to Codex's workspace-write sandbox as a writable root of its own. That sandbox
+    /// keeps <c>.git</c>, <c>.codex</c> and <c>.agents</c> read-only only at the top of each writable root, so at a
+    /// multi-repo root, whose repositories sit below the cwd rather than at the top of a root, each repository's
+    /// <c>.git/hooks</c> and <c>.git/config</c> were writable to the agent. The platform's own commit and push then run
+    /// git in each repository with the run's credential. Named as roots, the pinned 0.142.2 refuses those writes, on
+    /// <c>exec</c> and <c>exec resume</c> alike, and the agent can still change each repository's files (observed under
+    /// macOS's sandbox; the unconfined sandbox lane runs the same check on Linux). No write access is added, since each
+    /// directory is already inside the cwd; a repository outside it is left out, because naming it would widen the
+    /// sandbox. A single-repo run's repository is its cwd, so its argv is unchanged. A read-only run has no writable root
+    /// to add to. Under our confinement Codex's sandbox is stood down (<see cref="SandboxStandDown"/>) and ignores this
+    /// table.
+    /// </summary>
+    private static void AppendRepositoryWritableRoots(List<string> args, AgentTask task)
+    {
+        if (task.Permissions.WriteScope == AgentWriteScope.ReadOnly || string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return;
+
+        var inside = Path.TrimEndingDirectorySeparator(task.WorkspaceDirectory) + Path.DirectorySeparatorChar;
+        var repositories = (task.WorkspaceRepositoryDirectories ?? []).Where(directory => directory.StartsWith(inside, StringComparison.Ordinal)).Distinct(StringComparer.Ordinal).ToList();
+
+        if (repositories.Count == 0) return;
+
+        args.Add("-c");
+        args.Add($"sandbox_workspace_write.writable_roots=[{string.Join(',', repositories.Select(McpDeclarationWriter.TomlString))}]");
+    }
 
     /// <summary>What the runner swaps the sandbox fragment for where it confines the run: the same spelling, carrying <see cref="ConfinedSandboxMode"/>.</summary>
     private static ArgsSubstitution SandboxStandDown(AgentTask task) =>

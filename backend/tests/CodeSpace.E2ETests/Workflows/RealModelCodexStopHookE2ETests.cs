@@ -145,7 +145,7 @@ public sealed class RealModelCodexStopHookE2ETests : IDisposable
         return credId;
     }
 
-    /// <summary>A fresh git-initialised temp workspace — <c>codex exec</c> refuses to run outside a trusted git repo (mirrors <see cref="RealModelCodexInjectionE2ETests"/>'s own helper). Tracked for teardown.</summary>
+    /// <summary>A fresh git-initialised temp workspace the test supplies (mirrors <see cref="RealModelCodexInjectionE2ETests"/>'s own helper). Tracked for teardown. The repository is this test's choice, not the CLI's: every Codex run passes <c>--skip-git-repo-check</c>.</summary>
     private string NewGitWorkspace()
     {
         var ws = Path.Combine(Path.GetTempPath(), "cs-codex-stophook-" + Guid.NewGuid().ToString("N"), "ws");
