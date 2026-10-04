@@ -112,7 +112,7 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
 
         var identity = await _actorIdentity.ResolveAsync(responderUserId, provider.Value.InstanceId, cancellationToken).ConfigureAwait(false);
 
-        if (identity == null) throw new ActorIdentityRequiredException(provider.Value.Provider, provider.Value.InstanceId);
+        if (identity == null) throw new ActorIdentityRequiredException(provider.Value.Provider, provider.Value.InstanceId, responderUserId);
 
         // Identity + Active credential confirmed — but that's "who you are", not "can you act on THIS
         // repo". Membership/role is only knowable from the provider, so for a repo-scoped requirement we
