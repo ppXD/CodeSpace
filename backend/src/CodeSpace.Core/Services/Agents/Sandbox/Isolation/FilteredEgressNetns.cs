@@ -29,7 +29,7 @@ public static class FilteredEgressNetns
 
     private static readonly CapabilityProbe Filter = new(() => FilterProbe(IpForwardPath), () => System.Diagnostics.Stopwatch.GetElapsedTime(ProcessStart), ProbeRetryInterval);
 
-    /// <summary>True when <c>ip</c> + <c>nft</c> are present (the binaries the plan drives). Whether this process may USE them to filter a run is <see cref="CanFilter"/>, which a confining host's launch keys on; this alone gates what needs only the binaries — tearing a namespace down by name, the legacy re-bind's wide bind — and the allowlist plan of a host where bubblewrap does not confine, whose setup filters the run or aborts its launch (<c>LocalProcessRunner.FiltersAllowlist</c>). A failed probe is retried like the filter probe (<see cref="CapabilityProbe"/>): a fork that failed once at boot must not disable any of them for the process lifetime.</summary>
+    /// <summary>True when <c>ip</c> + <c>nft</c> are present (the binaries the plan drives). Whether this process may USE them to filter a run is <see cref="CanFilter"/>, which a confining host's launch keys on; this alone gates what needs only the binaries — tearing a namespace down by name — and the allowlist plan of a host where bubblewrap does not confine, whose setup filters the run or aborts its launch (<c>LocalProcessRunner.FiltersAllowlist</c>). A failed probe is retried like the filter probe (<see cref="CapabilityProbe"/>): a fork that failed once at boot must not disable any of them for the process lifetime.</summary>
     public static bool IsSupported => Tools.Holds;
 
     /// <summary>
@@ -118,16 +118,6 @@ public static class FilteredEgressNetns
         /// <summary>The <c>ip netns exec &lt;ns&gt;</c> prefix a caller prepends to run its command inside the filtered netns. Empty when setup failed.</summary>
         public IReadOnlyList<string> ExecPrefix { get; init; } = Array.Empty<string>();
 
-        /// <summary>
-        /// The HOST-side veth address of this run's /30 (<c>FilteredEgressPlan.HostIp</c>) — the namespace's default
-        /// gateway. Null when setup failed. It is not knowable before the /30 is reserved HERE, so it is returned. A
-        /// packet to the host's own address is delivered locally, so the plan's forward-hook filter never sees it; the
-        /// plan's guard on the veth does, and admits nothing there but replies and DNS to a resolver the run's resolv.conf
-        /// names (<c>FilteredEgressPlan.BuildVethGuardRuleset</c>). A child launched before that guard still reaches this
-        /// worker at this address, which is how a run launched before the relay reached its broker.
-        /// </summary>
-        public string? HostIp { get; init; }
-
         public string? SetupError { get; init; }
     }
 
@@ -208,7 +198,7 @@ public static class FilteredEgressNetns
                 return new SetupResult { SetupOk = false, SetupError = $"nft -f - → exit {nftExit}: {Trim(nftOut)}" };
             }
 
-            return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix, HostIp = plan.HostIp };
+            return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix };
         }
         catch (Exception ex)
         {

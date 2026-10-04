@@ -28,8 +28,9 @@ namespace CodeSpace.SandboxTests;
 /// address or the veth's IPv6 link-local) while DNS on the worker and the allowlist still answer; a peer the worker
 /// reaches at an address the run's /30 shadows is refused and the sandbox receives nothing, a flow the worker opened to
 /// that peer before the run included; an upload across a narrower uplink still completes; and a guard an earlier round
-/// left behind is replaced, not added to. So does the one about forwarding a root worker may not turn on, and the four
-/// about DNS: port 53 is open only at the resolver the run's resolv.conf names; the namespace the production setup
+/// left behind is replaced, not added to. So do the one about forwarding a root worker may not turn on, the durable
+/// teardown by name, after which the kernel lists nothing of the run (no namespace, no forward table, no guard), and the
+/// four about DNS: port 53 is open only at the resolver the run's resolv.conf names; the namespace the production setup
 /// builds reads the worker's own resolv.conf, whose resolvers alone its tables admit; and a resolver address the
 /// worker's own NAT rewrites — DNATed before the forward table, REDIRECTed to the worker before the guard — still
 /// answers the run.</para>
@@ -73,6 +74,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         if (!FilteredEgressNetns.IsSupported) return;
 
         var runId = Guid.NewGuid().ToString("N");
+        var names = NamesOf(runId);
         var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, timeoutSeconds: 20, CancellationToken.None);
 
         try
@@ -83,11 +85,20 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             // Run curl INSIDE the netns via the ExecPrefix — exactly how the durable launch will prefix its command chain.
             (await RunViaPrefixAsync(setup.ExecPrefix, Allowed)).ShouldBe(0, "the ALLOWED host is reachable through the set-up netns");
             (await RunViaPrefixAsync(setup.ExecPrefix, Denied)).ShouldNotBe(0, "the DENIED host is dropped — SetupAsync's netns enforces the filter");
+            (await RunHostExitAsync(["nft", "list", "table", "inet", names.Namespace])).ShouldBe(0, "control: the guard on the run's veth is there before its run ends");
         }
         finally
         {
             await FilteredEgressNetns.TeardownAsync(runId, CancellationToken.None);   // reconstructed from runId alone — the reap/crash-resume contract
         }
+
+        // The kernel's own listing is the evidence the guard went, not the re-setup below: the plan's ruleset replaces a
+        // guard table of the same name, so a re-setup succeeds over one a teardown left behind.
+        (await RunHostExitAsync(["nft", "list", "table", "inet", names.Namespace])).ShouldNotBe(0, $"the guard on the run's veth must go with its run, or every allowlist run leaks an nft table on the worker — check `nft list tables | grep {names.Namespace}`");
+        (await RunHostExitAsync(["nft", "list", "table", "ip", names.Namespace])).ShouldNotBe(0, "and so must its forward table");
+        (await RunHostExitAsync(["ip", "netns", "pids", names.Namespace])).ShouldNotBe(0, $"and its namespace — check `ip netns list | grep {names.Namespace}`");
+
+        output.WriteLine($"{RanMarker} teardown-by-name table={names.Namespace}");
 
         // Teardown actually freed the runId-derived names: a second SetupAsync with the SAME runId succeeds (it would
         // collide on the still-present ns/table otherwise). This is the leak-free guarantee.
@@ -119,9 +130,13 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             try
             {
                 second.SetupOk.ShouldBeTrue($"the next run's allowlist namespace must set up: {second.SetupError}");
-                second.HostIp.ShouldNotBe(first.HostIp, "the survivor's /30 is still on its veth; handing it out again routes one run's replies into the other's namespace");
 
-                output.WriteLine($"{RanMarker} restart-reissue survivor={first.HostIp} next={second.HostIp}");
+                var survivorGateway = await GatewayOfAsync(survivor);
+                var nextGateway = await GatewayOfAsync(next);
+
+                nextGateway.ShouldNotBe(survivorGateway, "the survivor's /30 is still on its veth; handing it out again routes one run's replies into the other's namespace");
+
+                output.WriteLine($"{RanMarker} restart-reissue survivor={survivorGateway} next={nextGateway}");
             }
             finally { await FilteredEgressNetns.TeardownAsync(next, CancellationToken.None); }
         }
@@ -197,18 +212,19 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         {
             setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
 
-            using var unlisted = new WorkerResolver(setup.HostIp!);
-            var guarded = await ProbeTheWorkerAsync(setup, workerIp, listener);
+            var gateway = await GatewayOfAsync(runId);
+            using var unlisted = new WorkerResolver(gateway);
+            var guarded = await ProbeTheWorkerAsync(setup, gateway, workerIp, listener);
 
-            guarded["gateway"].ShouldNotBe("open", $"a listener on the worker must not be reachable at the run's gateway {setup.HostIp} (its API, every other run's lease); probe: {Describe(guarded)}");
+            guarded["gateway"].ShouldNotBe("open", $"a listener on the worker must not be reachable at the run's gateway {gateway} (its API, every other run's lease); probe: {Describe(guarded)}");
             guarded["worker"].ShouldNotBe("open", $"nor at the worker's own address {workerIp}; probe: {Describe(guarded)}");
             guarded["dns_udp"].ShouldBe("answered", $"the resolver the run's resolv.conf names, which the worker serves on its own address, still answers over UDP; probe: {Describe(guarded)}");
             guarded["dns_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(guarded)}");
-            guarded["gateway_53"].ShouldNotBe("open", $"but port 53 at the gateway {setup.HostIp}, which the resolv.conf does not name, is shut — check `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` names {workerIp} on each port-53 accept; probe: {Describe(guarded)}");
+            guarded["gateway_53"].ShouldNotBe("open", $"but port 53 at the gateway {gateway}, which the resolv.conf does not name, is shut — check `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` names {workerIp} on each port-53 accept; probe: {Describe(guarded)}");
             guarded["allowed"].ShouldBe("open", $"the allowlisted {Allowed} is still reachable through the namespace's NAT; probe: {Describe(guarded)}");
 
             (await RunHostExitAsync(["nft", "delete", "table", "inet", FilteredEgressPlan.NamespaceFor(runId)])).ShouldBe(0, "control setup: the guard must be there to delete");
-            var unguarded = await ProbeTheWorkerAsync(setup, workerIp, listener);
+            var unguarded = await ProbeTheWorkerAsync(setup, gateway, workerIp, listener);
 
             unguarded["gateway"].ShouldBe("open", $"control: with the guard gone the listener answers at the gateway, or the refusal above proved nothing about the guard; probe: {Describe(unguarded)}");
             unguarded["worker"].ShouldBe("open", $"control: and at the worker's own address; probe: {Describe(unguarded)}");
@@ -417,7 +433,7 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
             var setup = await FilteredEgressNetns.SetupAsync(runId, new[] { Allowed }, view.Path, timeoutSeconds: 20, CancellationToken.None);
             setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up over the stale table: {setup.SetupError}");
 
-            var probe = await ProbeTheWorkerAsync(setup, workerIp, listener);
+            var probe = await ProbeTheWorkerAsync(setup, await GatewayOfAsync(runId), workerIp, listener);
 
             probe["dns_udp"].ShouldBe("answered", $"this setup's DNS rule must not sit behind the earlier guard's drop — check `nft list table inet {names.Namespace}` holds one input chain of four rules; probe: {Describe(probe)}");
             probe["gateway"].ShouldNotBe("open", $"and its guard still stands; probe: {Describe(probe)}");
@@ -572,20 +588,21 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
         {
             setup.SetupOk.ShouldBeTrue($"the allowlist namespace must set up on this host: {setup.SetupError}");
 
-            using var proxy = new WorkerResolver(setup.HostIp!);
-            var rewritten = await ProbePort53Async(setup.ExecPrefix, service, setup.HostIp!);
+            var gateway = await GatewayOfAsync(runId);
+            using var proxy = new WorkerResolver(gateway);
+            var rewritten = await ProbePort53Async(setup.ExecPrefix, service, gateway);
 
             rewritten["view"].ShouldBe(File.ReadAllText(view.Path), $"fixture: the namespace must read the resolv.conf the rules were built from; probe: {Describe(rewritten)}");
-            rewritten["lookup"].ShouldBe(PinnedAnswer, $"a lookup through the resolv.conf, which names {service}, must be answered by the proxy the worker redirects it to at {setup.HostIp} — check each port-53 accept in `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` matches `ct original ip daddr`; probe: {Describe(rewritten)}");
+            rewritten["lookup"].ShouldBe(PinnedAnswer, $"a lookup through the resolv.conf, which names {service}, must be answered by the proxy the worker redirects it to at {gateway} — check each port-53 accept in `nft list table inet {FilteredEgressPlan.NamespaceFor(runId)}` matches `ct original ip daddr`; probe: {Describe(rewritten)}");
             rewritten["resolver_udp"].ShouldBe("answered", $"and DNS to {service} directly over UDP; probe: {Describe(rewritten)}");
             rewritten["resolver_tcp"].ShouldBe("answered", $"and over TCP; probe: {Describe(rewritten)}");
-            rewritten["unlisted_tcp"].ShouldNotBe("open", $"but port 53 at the gateway {setup.HostIp}, which the file does not name, stays shut though the proxy listens there; probe: {Describe(rewritten)}");
+            rewritten["unlisted_tcp"].ShouldNotBe("open", $"but port 53 at the gateway {gateway}, which the file does not name, stays shut though the proxy listens there; probe: {Describe(rewritten)}");
             rewritten["unlisted_udp"].ShouldNotBe("answered", $"and a datagram to it unanswered; probe: {Describe(rewritten)}");
 
             (await redirect.DeleteAsync()).ShouldBe(0, "control setup: the worker's REDIRECT must be there to delete");
             var direct = await LookupAsync(setup.ExecPrefix);
 
-            direct.ShouldNotBe(PinnedAnswer, $"control: with the REDIRECT gone the lookup must not reach the proxy at {setup.HostIp}, or the answer above did not come through the worker's rewrite");
+            direct.ShouldNotBe(PinnedAnswer, $"control: with the REDIRECT gone the lookup must not reach the proxy at {gateway}, or the answer above did not come through the worker's rewrite");
 
             output.WriteLine($"{RanMarker} dns-redirect {Describe(rewritten)} control: lookup={direct}".Replace('\n', ' '));
         }
@@ -716,9 +733,9 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
     }
 
     /// <summary>From inside the namespace: the worker's listener at the gateway and at its own address, DNS to the worker over UDP and TCP, port 53 at the gateway, and the allowlisted IP.</summary>
-    private static async Task<Dictionary<string, string>> ProbeTheWorkerAsync(FilteredEgressNetns.SetupResult setup, string workerIp, TcpListener listener)
+    private static async Task<Dictionary<string, string>> ProbeTheWorkerAsync(FilteredEgressNetns.SetupResult setup, string gateway, string workerIp, TcpListener listener)
     {
-        var stdout = await RunHostAsync(setup.ExecPrefix.Concat(["python3", "-c", WorkerProbeScript, setup.HostIp!, workerIp, PortOf(listener), Allowed]).ToList());
+        var stdout = await RunHostAsync(setup.ExecPrefix.Concat(["python3", "-c", WorkerProbeScript, gateway, workerIp, PortOf(listener), Allowed]).ToList());
         var line = stdout.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.StartsWith('{'));
 
         return line is null ? new Dictionary<string, string> { ["gateway"] = $"no probe output: {stdout}", ["worker"] = "?", ["dns_udp"] = "?", ["dns_tcp"] = "?", ["gateway_53"] = "?", ["allowed"] = "?" } : JsonSerializer.Deserialize<Dictionary<string, string>>(line)!;
@@ -742,6 +759,18 @@ public sealed class FilteredEgressNetnsE2ETests(ITestOutputHelper output)
 
     /// <summary>The run's namespace, table and veth names: the run key's alone, so a plan on any lease names them as the setup did.</summary>
     private static FilteredEgressPlan NamesOf(string runId) => FilteredEgressPlan.Build(runId, Array.Empty<string>(), new EgressSubnetAllocator.Lease { Cidr = "0.0.0.0/30", HostIp = "0.0.0.1", NsIp = "0.0.0.2" }, []);
+
+    /// <summary>The run's gateway: the IPv4 address on the host end of its veth (<see cref="NamesOf"/>), as the kernel holds it — the /30 the setup reserved, read where it took effect.</summary>
+    private static async Task<string> GatewayOfAsync(string runId)
+    {
+        var veth = NamesOf(runId).VethHost;
+        var listed = await RunHostAsync(["ip", "-4", "-o", "addr", "show", "dev", veth]);
+        var words = listed.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var inet = Array.IndexOf(words, "inet");
+
+        (inet >= 0 && inet + 1 < words.Length).ShouldBeTrue($"fixture: the run's host veth {veth} must carry an IPv4 address; `ip -4 -o addr show dev {veth}` printed: {listed}");
+        return words[inet + 1].Split('/')[0];
+    }
 
     /// <summary>Connect from the worker, send <paramref name="bytes"/> bytes and half-close, and return the peer's one-line answer — or the socket error that stopped it, or <c>timeout</c>.</summary>
     private static async Task<string> AskAsync(string host, int port, int bytes)
