@@ -70,7 +70,7 @@ public sealed class SubtaskAwareFakeCli : IDisposable
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"$(cat)\"\n" +
+        FakeAgentCliDialect.ReadGoal +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         FakeAgentCliDialect.Dialects(
             "printf '{\"type\":\"agent_reasoning\",\"message\":\"Planning work for: %s\"}\\n' \"$esc\"\n" +

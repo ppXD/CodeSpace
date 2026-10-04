@@ -120,4 +120,35 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
         using var arms = new RepositoryConfigE2ETests(output);
         await arms.ClaudeIgnoresRepositorySettingsAsync(AgentAutonomyLevel.Standard, repositories: 1, Lane);
     }
+
+    [Fact]
+    public async Task A_standard_claude_goal_naming_secrets_reaches_the_model_verbatim_and_reads_none_of_them()
+    {
+        // The goal channel in the posture the worker ships Claude in — Standard, so bypassPermissions, which the pinned
+        // CLI refuses to the root lane's uid 0. The CLI read a text goal's mentions in bypass exactly as in plan mode.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new GoalChannelE2ETests(output);
+        await arms.MentionsReadNothingAsync(AgentAutonomyLevel.Standard, Lane);
+    }
+
+    [Fact]
+    public async Task A_continued_standard_claude_session_takes_its_prompt_the_same_way()
+    {
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new GoalChannelE2ETests(output);
+        await arms.ResumedPromptReadsNothingAsync(AgentAutonomyLevel.Standard, Lane);
+    }
+
+    [Theory]
+    [InlineData("/fix")]
+    [InlineData("/security-review")]
+    public async Task A_standard_claude_goal_that_opens_with_a_slash_word_reaches_the_model_as_text(string word)
+    {
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new GoalChannelE2ETests(output);
+        await arms.SlashWordReachesTheModelAsync(word, AgentAutonomyLevel.Standard, Lane);
+    }
 }

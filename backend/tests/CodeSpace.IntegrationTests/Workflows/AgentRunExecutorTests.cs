@@ -211,7 +211,7 @@ public partial class AgentRunExecutorTests
         warm.Args.ShouldContain("--resume", customMessage: "fixture check: and would have resumed it");
         launched.ConfigHomeFiles.ShouldNotContain(file => file.Content.Length == transcript.Length, "the launched spec restores nothing");
         launched.Args.ShouldNotContain("--resume");
-        launched.StandardInput.ShouldNotBeNull().ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
+        FakeAgentCliDialect.ClaudeGoal(launched.StandardInput).ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the goal said the conversation was restored; it must be told that it is not");
 
         var persisted = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options).ShouldNotBeNull();
         persisted.ResumeFromSessionId.ShouldBeNull("the Room's 'resumed' mark reads the persisted envelope, and this attempt resumed nothing");
@@ -260,7 +260,7 @@ public partial class AgentRunExecutorTests
 
             run.Status.ShouldBe(AgentRunStatus.Succeeded, $"a cold continuation must launch and be graded on its contract — it ended {result.ExitReason}: {result.AcceptanceDetail ?? run.Error}");
             result.AcceptancePassed.ShouldBe(true);
-            harness.Specs[^1].StandardInput.ShouldNotBeNull().ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the agent is still told");
+            FakeAgentCliDialect.ClaudeGoal(harness.Specs[^1].StandardInput).ShouldEndWith(AgentRetryContinuity.OversizedTranscriptHint, customMessage: "the agent is still told");
         }
         finally
         {

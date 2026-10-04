@@ -62,7 +62,7 @@ public sealed class MultiRepoFeatureFakeCli : IDisposable
     /// </summary>
     internal static string ScriptBody =>
         "#!/bin/sh\n" +
-        "goal=\"$(cat)\"\n" +
+        FakeAgentCliDialect.ReadGoal +
         "esc=$(printf '%s' \"$goal\" | sed 's/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g')\n" +
         "fname=$(printf '%s' \"$goal\" | tr -c 'A-Za-z0-9' '_' | cut -c1-100)\n" +
         "printf 'primary work for: %s\\n' \"$goal\" > \"" + PrimaryAlias + "/" + FilePrefix + "${fname}.txt\" || exit 90\n" +

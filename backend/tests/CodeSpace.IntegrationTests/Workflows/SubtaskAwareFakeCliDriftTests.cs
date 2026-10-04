@@ -236,6 +236,54 @@ public class SubtaskAwareFakeCliDriftTests
         }
     }
 
+    [Theory]
+    [InlineData("do alpha")]
+    [InlineData("/security-review the change")]
+    [InlineData("@~/.mcp.json \uFEFF@x \u2028@y \u2029@z\r\nquote \" backslash \\ tab\t end")]
+    [InlineData("\"}]},\"parent_tool_use_id\":null}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/fix\"}}")]
+    [InlineData("修复 — 審查 🚀 a+b<c>&'d %s %% a literal \\u0041 and \\n")]
+    public void The_shared_goal_reader_reads_back_exactly_the_goal_each_harness_hands_over(string goal)
+    {
+        // Rule-12.5 drift detector for FakeAgentCliDialect.ClaudeGoalFunction, a mirror of the wire format of
+        // ClaudeCodeHarness.PromptMessage. Every fake that serves Claude reads its goal through it, so a decoder that
+        // missed an escape System.Text.Json emits would hand those fakes a different goal than the run carries — and a
+        // harness that changed the message would leave them reading JSON. Driven by each harness's REAL invocation.
+        if (OperatingSystem.IsWindows()) return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "cs-goal-reader-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+
+        try
+        {
+            var script = Path.Combine(dir, "fake-agent.sh");
+            File.WriteAllText(script, "#!/bin/sh\n" + FakeAgentCliDialect.ClaudeGoalFunction + "if [ \"$1\" = 'exec' ]; then cat; else claude_goal; fi\n");
+
+            RunScriptOutput(dir, script, CodexInvocation(goal)).ShouldBe(goal, "codex hands the goal over as text");
+            RunScriptOutput(dir, script, ClaudeInvocation(goal)).ShouldBe(goal, "claude hands it over as the first block of one stream-json message, and the reader must recover it byte for byte");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>The script's whole stdout, exactly — for a byte-level assertion the line split of <see cref="RunScript(string, string, int, SandboxSpec)"/> would blur.</summary>
+    private static string RunScriptOutput(string cwd, string script, SandboxSpec invocation)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false) };
+        psi.ArgumentList.Add(script);
+        foreach (var arg in invocation.Args) psi.ArgumentList.Add(arg);
+
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        process.StandardInput.Write(invocation.StandardInput ?? "");
+        process.StandardInput.Close();
+        var stdout = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(10_000).ShouldBeTrue("the script must exit promptly");
+        process.ExitCode.ShouldBe(0, process.StandardError.ReadToEnd());
+
+        return stdout;
+    }
+
     /// <summary>The script + the summary BOTH dialects must fold, per live-brain fake. Reads the fakes' OWN <c>ScriptBody</c> (never a copy), so a script edit is measured rather than mirrored.</summary>
     private static (string Body, string Summary) LiveBrainFake(string fake, string goal) => fake switch
     {
