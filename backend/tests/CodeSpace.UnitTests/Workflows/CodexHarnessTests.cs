@@ -243,6 +243,61 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void A_multi_repo_run_gets_each_repositorys_agents_md_after_the_persona_and_the_operating_contract()
+    {
+        // Codex reads a project doc from its cwd and above only, so at a workspace root none of the repositories' reached
+        // it (observed against 0.142.2). They ride the run's own AGENTS.md, after everything the platform says.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+        tree.File("ws/api/AGENTS.md", "Keep the API stable.\n");
+        tree.File("ws/web/AGENTS.md", "Keep the UI accessible.\n");
+
+        var spec = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer.", WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = [Path.Combine(workspace, "api"), Path.Combine(workspace, "web")] });
+
+        spec.ConfigHomeFiles.Single(f => f.RelativePath == CodexHarness.AgentsFile).Content.ShouldBe(AgentOperatingContract.Compose("You are a meticulous reviewer.") + "\n\n--- project-doc (api/AGENTS.md) ---\n\nKeep the API stable.\n\n\n--- project-doc (web/AGENTS.md) ---\n\nKeep the UI accessible.\n");
+        spec.LaunchNotices.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void A_single_repo_run_writes_the_same_agents_md_as_before_whatever_its_repository_holds()
+    {
+        // The cwd is the repository, whose AGENTS.md Codex loads itself: appending it would hand the model the doc twice.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+        tree.File("ws/AGENTS.md", "Keep the change small.\n");
+        tree.File("ws/pkg/AGENTS.md", "Keep the package pure.\n");
+
+        var spec = Harness.BuildInvocation(Task() with { SystemPrompt = "You are a meticulous reviewer.", WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = [workspace] });
+
+        spec.ConfigHomeFiles.Single(f => f.RelativePath == CodexHarness.AgentsFile).Content.ShouldBe(AgentOperatingContract.Compose("You are a meticulous reviewer."));
+        spec.LaunchNotices.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void What_a_multi_repo_run_leaves_out_of_its_agents_md_is_on_its_launch_notices()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+        tree.File("ws/api/AGENTS.md", new string('x', CodexRepositoryGuides.MaxProjectDocBytes + 1));
+        tree.Link("ws/web/AGENTS.md", tree.File("outside/secret.md", "OUTSIDE"));
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = [Path.Combine(workspace, "api"), Path.Combine(workspace, "web")] });
+
+        spec.LaunchNotices.ShouldBe(new[]
+        {
+            $"Left all but the first {CodexRepositoryGuides.MaxProjectDocBytes} bytes of the AGENTS.md of 'api' out of this run: Codex reads no more of a project doc.",
+            "Left the AGENTS.md of 'web' out of this run: it resolves outside the workspace.",
+        });
+        spec.ConfigHomeFiles.Single(f => f.RelativePath == CodexHarness.AgentsFile).Content.ShouldNotContain("OUTSIDE");
+    }
+
+    [Fact]
     public void SkillsRoot_is_pinned_to_the_codex_home_relative_skills_dir()
     {
         // Rule 8: pin the projection-root constant so an ACCIDENTAL edit is a deliberate, visible change. ($CODEX_HOME/skills

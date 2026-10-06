@@ -22,11 +22,11 @@ namespace CodeSpace.SandboxTests;
 /// Codex's <c>.codex/config.toml</c> and <c>.codex/hooks.json</c> — and the target repository is untrusted input. A file
 /// committed there must not take the run's model call off its broker, and must not run a command the model never
 /// chose. The repository's own instructions (<c>CLAUDE.md</c>, <c>AGENTS.md</c>) are context, not config, and must
-/// still reach the model. For Claude that holds for every repository of a multi-repo workspace. The multi-repo Codex
-/// arm asserts less: the run starts at the workspace root, reaches its broker and loads no config from that root. It
-/// does not assert that the <c>AGENTS.md</c> of a repository below that root reaches the model. A repo-less Codex run
-/// must likewise start in its scratch directory, and where nothing of ours confines a multi-repo run, Codex's own
-/// sandbox must keep every repository's <c>.git</c> and <c>.codex</c> read-only
+/// still reach the model. For Claude that holds for every repository of a multi-repo workspace, and for Codex too
+/// (<see cref="A_multi_repo_codex_run_reads_every_repositorys_agents_md"/>); a multi-repo Codex run must also start at
+/// the workspace root, reach its broker and load no config from that root. A repo-less Codex run must likewise start in
+/// its scratch directory, and where nothing of ours confines a multi-repo run, Codex's own sandbox must keep every
+/// repository's <c>.git</c> and <c>.codex</c> read-only
 /// (<see cref="CodexKeepsEveryRepositorysMetadataReadOnlyAsync"/>, run by the unconfined lane). The platform's own
 /// Claude Stop hook must still run beside the settings an Allowlist run carries on its argv
 /// (<see cref="ClaudeRunsItsOwnStopHookUnderTheSealedEgressSettingsAsync"/>, run by the non-root lane).
@@ -74,9 +74,11 @@ namespace CodeSpace.SandboxTests;
 /// directory it resolves as its cwd, so an entry keyed only by a workspace path under a symlink matched nothing. Codex
 /// also refused to start at a multi-repo workspace's root, or in a repo-less run's scratch directory, neither of which
 /// is a git repository: without <c>--skip-git-repo-check</c> it exits 1 before any model request. A single-repo arm
-/// cannot see that. Once it started at a multi-repo root, its own sandbox kept <c>.git</c> and <c>.codex</c> read-only
-/// only at that root, so where nothing of ours confined the run, each repository's <c>.git/hooks</c> and
-/// <c>.git/config</c> were writable to the agent. Unpinned, the same Claude also named the repository's skill, command and
+/// cannot see that. Started there, it read no repository's <c>AGENTS.md</c>: it reads a project doc from its cwd and
+/// the directories above it, never from one below. Once it started at a multi-repo root, its own sandbox kept
+/// <c>.git</c> and <c>.codex</c> read-only only at that root, so where nothing of ours confined the run, each
+/// repository's <c>.git/hooks</c> and <c>.git/config</c> were writable to the agent. Unpinned, the same Claude also
+/// named the repository's skill, command and
 /// agent in its first request and on its <c>init</c> line, put <c>CLAUDE.local.md</c> and the selected output style in
 /// front of the model, attached the scoped rule and <c>sub/CLAUDE.md</c> once the run read <c>sub/notes.txt</c>, and, at
 /// Standard, ran the skill's hook and the skill's and the command's shell once invoked. Codex started a repository
@@ -186,6 +188,7 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         violations.ShouldBeEmpty(Diagnosis(harnessKind, spec, run, upstream));
         File.Exists(ownHook).ShouldBeTrue($"the platform's own Stop hook must still run with the repository's hooks shut out — a distrust that also silenced it would disable in-loop acceptance. {Diagnosis(harnessKind, spec, run, upstream)}");
         upstream.Requests.ShouldContain(r => r.Body.Contains($"PROJECT-DOC-{repo.Nonce}", StringComparison.Ordinal), $"the repository's AGENTS.md is context, not config — it must still reach the model. {Diagnosis(harnessKind, spec, run, upstream)}");
+        Occurrences(upstream.Requests.First(r => r.Path.EndsWith("/responses", StringComparison.Ordinal)).Body, $"PROJECT-DOC-{repo.Nonce}").ShouldBe(1, $"the CLI loads the doc of the repository it runs in itself, so the harness must not hand it over a second time. {Diagnosis(harnessKind, spec, run, upstream)}");
 
         output.WriteLine($"{RanMarker} codex-cli single-repo confined={BubblewrapSandbox.Available is not null} hostileConnections={hostile.Connections}");
     }
@@ -199,7 +202,8 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
     /// config too. Codex never reads it from there, so those markers only catch a future CLI that reads config below its
     /// cwd; the distrust of a repository's own committed config is pinned by
     /// <see cref="A_codex_run_ignores_the_config_and_hooks_its_repository_commits_and_still_reads_its_agents_md"/>. Which
-    /// instructions reach the run from the repositories below its cwd is not asserted here.
+    /// instructions reach the run from the repositories below its cwd is pinned by
+    /// <see cref="A_multi_repo_codex_run_reads_every_repositorys_agents_md"/>.
     /// </summary>
     [Fact]
     public async Task A_multi_repo_codex_run_starts_at_a_workspace_root_that_is_no_repository_and_loads_no_config_from_it()
