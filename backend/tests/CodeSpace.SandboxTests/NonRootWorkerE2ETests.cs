@@ -17,7 +17,8 @@ namespace CodeSpace.SandboxTests;
 /// (<see cref="NonRootWorker.Require"/>), then runs the SAME arm the root lane runs, so both lanes pin one behaviour —
 /// but for two arms: this worker cannot filter, so its allowlist run is severed where the root lane's is filtered, and
 /// it still reaches its broker; and its repository-config arm runs Claude at Standard, the tier the root lane's uid 0
-/// cannot give it.
+/// cannot give it. The publish-isolation Claude arm runs here alone for the same reason: a Confined Claude could not
+/// write the <c>.git</c> it plants into, so the root lane runs only that class's Codex arm.
 ///
 /// <para>Selected by its trait alone (<c>--filter Category=SandboxNonRoot</c>), never by the root lane's
 /// <c>Category=Sandbox</c>. Every arm that ran prints its class's marker with <c>non-root</c> and its uid, which the
@@ -150,5 +151,16 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
 
         using var arms = new GoalChannelE2ETests(output);
         await arms.SlashWordReachesTheModelAsync(word, AgentAutonomyLevel.Standard, Lane);
+    }
+
+    [Fact]
+    public async Task A_standard_claude_agent_that_plants_push_vectors_in_its_git_cannot_reach_the_sink_when_the_platform_publishes()
+    {
+        // The publish-isolation arm with Claude at Standard, the posture the worker ships it in: bypassPermissions, which the
+        // pinned CLI refuses to the root lane's uid 0, and a workspace it may write, so it can plant into its own .git.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new AgentPublishIsolationE2ETests(output);
+        await arms.PlantedPushVectorsReachNoSinkAsync(ClaudeCodeHarness.HarnessKind, Lane);
     }
 }

@@ -4,10 +4,13 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 
 /// <summary>
 /// Builds every <c>git</c> spec the platform runs over an agent's clone after the agent's turn: the capture
-/// (<c>add -A</c> and the <c>diff --cached</c> trio), the re-attach capture, and the branch steps (<c>checkout -B</c>,
-/// <c>add -A</c>, <c>commit</c>, <c>diff --quiet</c>, <c>rev-parse HEAD</c>). The agent can write its own <c>.git</c>
-/// during the run, so by then its config, hooks and attributes are the agent's. Each spec built here makes sure a
-/// tampered <c>.git</c> cannot run code with anything the agent does not already have:
+/// (<c>add -A</c> and the <c>diff --cached</c> trio), the re-attach capture, the branch steps (<c>checkout -B</c>,
+/// <c>add -A</c>, <c>commit</c>, <c>diff --quiet</c>), and the publish's steps there: the <c>update-ref</c> that names the
+/// cloned base, the <c>merge-base --is-ancestor</c> that asks whether the branch adds anything to it, and the
+/// <c>bundle create</c>s that carry the base and the branch out to the platform-owned publish repo (the clone bound
+/// read-only, the bundles written outside it). The agent can write its own <c>.git</c> during the run, so by then its
+/// config, hooks and attributes are the agent's. Each spec built here makes sure a tampered <c>.git</c> cannot run code
+/// with anything the agent does not already have:
 /// <list type="bullet">
 ///   <item><c>-c core.hooksPath=/dev/null</c> — a command-line value beats the repo's own, so neither a planted
 ///   <c>.git/hooks/*</c> nor an agent-set hooks directory runs, and a vetoing pre-commit can no longer lose the
