@@ -596,31 +596,10 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     {
         if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return;
 
-        var entries = new[] { task.WorkspaceDirectory, PhysicalDirectory(task.WorkspaceDirectory) }.Distinct(StringComparer.Ordinal).Select(path => $"{McpDeclarationWriter.TomlString(path)}={{trust_level=\"untrusted\"}}");
+        var entries = new[] { task.WorkspaceDirectory, PhysicalPath.Directory(task.WorkspaceDirectory) }.Distinct(StringComparer.Ordinal).Select(path => $"{McpDeclarationWriter.TomlString(path)}={{trust_level=\"untrusted\"}}");
 
         args.Add("-c");
         args.Add($"projects={{{string.Join(',', entries)}}}");
-    }
-
-    /// <summary>
-    /// The directory a process resolves <paramref name="path"/> to as its cwd: every component's symlink followed, a
-    /// link whose own target runs through another link included. A path that does not exist resolves to no cwd, so it
-    /// is returned as given.
-    /// </summary>
-    private static string PhysicalDirectory(string path)
-    {
-        if (!Directory.Exists(path)) return path;
-
-        var full = Path.GetFullPath(path);
-        var physical = Path.GetPathRoot(full)!;
-
-        foreach (var segment in full[physical.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var next = Path.Combine(physical, segment);
-            physical = new DirectoryInfo(next).ResolveLinkTarget(returnFinalTarget: true) is { } target ? PhysicalDirectory(target.FullName) : next;
-        }
-
-        return physical;
     }
 
     /// <summary>Codex hosts an MCP server from an <c>[mcp_servers.&lt;name&gt;]</c> table in its config home's <c>config.toml</c>. The harness owns the format — it renders the TOML content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>

@@ -202,6 +202,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         // model sees it.
         var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json" };
 
+        // The directories added back for their memory, less any whose memory reaches outside the workspace (see AppendSettingsPin).
+        var memory = ClaudeWorkspaceMemory.For(task);
+
         // P3.2: a CONTINUE re-stage threads the prior session id as `--resume <id>` to pick up the conversation.
         // Placed right after the seed — before the variadic --allowed-tools / --permission-mode — so the variadic can
         // never swallow it. The continuation prompt rides stdin like any other, in the same message. Null (a fresh run) → omitted.
@@ -223,7 +226,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         // and the requirement is that we NEVER pass --bare / --safe-mode (guarded by a unit test). What every run does
         // get is the settings pin — one mechanism, no per-run condition: the target repository's own .claude settings
         // are untrusted input whether or not this run writes settings of its own (see AppendSettingsPin).
-        AppendSettingsPin(args, task);
+        AppendSettingsPin(args, memory.Directories);
 
         AppendSealedEgressSettings(args, task);
 
@@ -255,7 +258,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             Args = args,
             StandardInput = PromptMessage(task.Goal),
             WorkingDirectory = task.WorkspaceDirectory,
-            Environment = BuildEnvironment(task),
+            Environment = BuildEnvironment(task, memory.Directories),
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
@@ -268,6 +271,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             ConfigHomeFiles = BuildConfigHomeFiles(task),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
+            // A repository's memory left out because it links outside the workspace — the run's timeline says so.
+            LaunchNotices = memory.Notices,
         };
     }
 
@@ -583,19 +588,19 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// <summary>
     /// The child env: the task's env, plus harness-injected entries — the <see cref="DisableNonEssentialTrafficEnvVar"/>
     /// for an Allowlist (deny-by-default) egress run (so the CLI doesn't stall reaching telemetry hosts the allowlist
-    /// doesn't pin, B3.3c), the <see cref="AdditionalDirectoriesMemoryEnvVar"/> that makes the workspace's
-    /// <c>--add-dir</c> load its memory (<see cref="AppendSettingsPin"/>), and the gateway model-tier pins
+    /// doesn't pin, B3.3c), the <see cref="AdditionalDirectoriesMemoryEnvVar"/> that makes each <c>--add-dir</c>
+    /// directory load its memory (<see cref="AppendSettingsPin"/>) when there is one, and the gateway model-tier pins
     /// (<see cref="AddGatewayModelTiers"/>). An explicit <see cref="AgentTask.Environment"/> entry WINS (operator intent —
     /// layered last), matching the runner's NonInteractiveEnv "operator value wins" convention. When nothing is injected
     /// the task env is returned unchanged → byte-identical.
     /// </summary>
-    private static IReadOnlyDictionary<string, string> BuildEnvironment(AgentTask task)
+    private static IReadOnlyDictionary<string, string> BuildEnvironment(AgentTask task, IReadOnlyList<string> memoryDirectories)
     {
         var injected = new Dictionary<string, string>(StringComparer.Ordinal);
 
         if (task.Permissions.Egress == AgentEgressPolicy.Allowlist) injected[DisableNonEssentialTrafficEnvVar] = "1";
 
-        if (HasWorkspace(task)) injected[AdditionalDirectoriesMemoryEnvVar] = "1";
+        if (memoryDirectories.Count > 0) injected[AdditionalDirectoriesMemoryEnvVar] = "1";
 
         AddGatewayModelTiers(injected, task);
 
@@ -650,33 +655,23 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// terminates the list.</para>
     ///
     /// <para>A multi-repo workspace runs at its root, which holds no <c>CLAUDE.md</c>, so every repository directory
-    /// inside the workspace is added too (<see cref="MemoryDirectories"/>), and each repository's memory loads.</para>
+    /// inside the workspace is added too, and each repository's memory loads.</para>
+    ///
+    /// <para>The CLI opens an added directory's <c>CLAUDE.md</c> and <c>.claude/CLAUDE.md</c> by path and follows a
+    /// symlink at either, or at <c>.claude</c> itself, wherever it leads, so a directory whose memory resolves outside the
+    /// workspace is not added at all (<see cref="ClaudeWorkspaceMemory"/>), and when none is left there is no
+    /// <c>--add-dir</c>. The settings pin stays either way.</para>
     /// </summary>
-    private static void AppendSettingsPin(List<string> args, AgentTask task)
+    private static void AppendSettingsPin(List<string> args, IReadOnlyList<string> memoryDirectories)
     {
         args.Add("--setting-sources");
         args.Add("user");
 
-        if (!HasWorkspace(task)) return;
+        if (memoryDirectories.Count == 0) return;
 
         args.Add("--add-dir");
-        args.AddRange(MemoryDirectories(task));
+        args.AddRange(memoryDirectories);
     }
-
-    /// <summary>
-    /// The workspace, then every repository directory inside it. A repository outside it — a sibling of a cwd at the
-    /// primary repository — is left out: the unpinned CLI never loaded its memory either, and an added directory also
-    /// widens what the CLI's tools may touch.
-    /// </summary>
-    private static IEnumerable<string> MemoryDirectories(AgentTask task)
-    {
-        var workspace = task.WorkspaceDirectory!;
-        var inside = Path.TrimEndingDirectorySeparator(workspace) + Path.DirectorySeparatorChar;
-
-        return new[] { workspace }.Concat((task.WorkspaceRepositoryDirectories ?? []).Where(directory => directory.StartsWith(inside, StringComparison.Ordinal))).Distinct(StringComparer.Ordinal);
-    }
-
-    private static bool HasWorkspace(AgentTask task) => !string.IsNullOrWhiteSpace(task.WorkspaceDirectory);
 
     /// <summary>
     /// On a deny-by-default (Allowlist) egress run, deliver <c>--settings {"<see cref="SkipWebFetchPreflightSetting"/>":true}</c>

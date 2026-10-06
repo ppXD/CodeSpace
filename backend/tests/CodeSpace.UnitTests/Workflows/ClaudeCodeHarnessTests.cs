@@ -23,13 +23,23 @@ public class ClaudeCodeHarnessTests
 {
     private static readonly ClaudeCodeHarness Harness = new();
 
+    /// <summary>
+    /// The workspace every task here names: a path no host holds. The harness reads the memory under its workspace
+    /// before adding it (<see cref="ClaudeWorkspaceMemory"/>), so a literal such as <c>/tmp/ws</c> would make these
+    /// pins depend on whatever a developer's machine happens to keep there.
+    /// </summary>
+    private static readonly string Ws = $"/tmp/cs-claude-ws-{Guid.NewGuid():N}";
+
+    /// <summary><see cref="Ws"/> as Claude names its sessions' directory: every character but a letter or digit becomes '-'.</summary>
+    private static readonly string WsProjects = Ws.Replace('/', '-');
+
     private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "claude-opus-4-8", AgentWriteScope scope = AgentWriteScope.Workspace, IReadOnlyList<string>? tools = null) => new()
     {
         Goal = goal,
         Harness = ClaudeCodeHarness.HarnessKind,
         Model = model,
         Tools = tools,
-        WorkspaceDirectory = "/tmp/ws",
+        WorkspaceDirectory = Ws,
         Permissions = new AgentPermissions { WriteScope = scope },
         TimeoutSeconds = 900,
     };
@@ -102,19 +112,23 @@ public class ClaudeCodeHarnessTests
 
         var at = args.IndexOf("--add-dir");
         at.ShouldBeGreaterThanOrEqualTo(0, "the workspace must be added back for its memory to load");
-        args[at + 1].ShouldBe("/tmp/ws", "the directory added is the run's own workspace");
+        args[at + 1].ShouldBe(Ws, "the directory added is the run's own workspace");
         args[at + 2].ShouldStartWith("--", customMessage: "--add-dir is variadic: the next token must be a flag that terminates it, never a value it would swallow");
         spec.Environment[ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar].ShouldBe("1", "without the switch the added directory contributes no memory");
     }
 
     public static TheoryData<string, string, string[]?, string[]> WorkspaceShapes() => new()
     {
-        // shape, the workspace (the cwd), the repository directories the executor stamps, the directories added
-        { "single-repo", "/tmp/ws", new[] { "/tmp/ws" }, new[] { "/tmp/ws" } },
-        { "multi-repo at its root", "/tmp/ws", new[] { "/tmp/ws/web", "/tmp/ws/api" }, new[] { "/tmp/ws", "/tmp/ws/web", "/tmp/ws/api" } },
-        { "multi-repo at its primary repository", "/tmp/ws/web", new[] { "/tmp/ws/web", "/tmp/ws/api" }, new[] { "/tmp/ws/web" } },
-        { "named by its producer, no repositories stamped", "/tmp/ws", null, new[] { "/tmp/ws" } },
+        // shape, the workspace (the cwd), the repository directories the executor stamps, the directories added — each
+        // relative to Ws, "" being Ws itself
+        { "single-repo", "", new[] { "" }, new[] { "" } },
+        { "multi-repo at its root", "", new[] { "web", "api" }, new[] { "", "web", "api" } },
+        { "multi-repo at its primary repository", "web", new[] { "web", "api" }, new[] { "web" } },
+        { "named by its producer, no repositories stamped", "", null, new[] { "" } },
     };
+
+    /// <summary>A path relative to <see cref="Ws"/>; "" is Ws itself.</summary>
+    private static string At(string relative) => relative.Length == 0 ? Ws : $"{Ws}/{relative}";
 
     [Theory]
     [MemberData(nameof(WorkspaceShapes))]
@@ -124,9 +138,9 @@ public class ClaudeCodeHarnessTests
         // sits in its own directory below it. The pinned CLI loads every added directory's memory and none of its
         // settings (RepositoryConfigE2ETests). A repository outside the cwd — a primary-repository cwd's siblings — is
         // left out: the unpinned CLI never loaded its memory, and an added directory also widens what the CLI's tools may touch.
-        var args = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = repositories }).Args.ToList();
+        var args = Harness.BuildInvocation(Task() with { WorkspaceDirectory = At(workspace), WorkspaceRepositoryDirectories = repositories?.Select(At).ToList() }).Args.ToList();
 
-        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(added, $"a {shape} workspace");
+        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(added.Select(At), $"a {shape} workspace");
         args.Count(arg => arg == "--add-dir").ShouldBe(1, "one variadic --add-dir carries every directory");
     }
 
@@ -141,6 +155,59 @@ public class ClaudeCodeHarnessTests
         spec.Args.ShouldNotContain("--add-dir", "there is no workspace to add back");
         spec.Environment.ContainsKey(ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar).ShouldBeFalse("the switch rides only with the directory it applies to");
         spec.Args[spec.Args.ToList().IndexOf("--setting-sources") + 1].ShouldBe("user", "but the settings pin stays");
+    }
+
+    [Fact]
+    public void A_repository_whose_memory_links_outside_the_workspace_is_not_added_and_the_launch_says_so()
+    {
+        // The CLI opens an added directory's CLAUDE.md by path and follows a symlink there wherever it leads. web's
+        // leads out of the workspace, so web is not added; api's CLAUDE.md links to its own AGENTS.md and still is.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+        var web = tree.Directory("ws/web");
+        var api = tree.Directory("ws/api");
+
+        tree.Link("ws/web/CLAUDE.md", tree.File("outside/secret.md", "OUTSIDE"));
+        tree.File("ws/api/AGENTS.md", "API MEMORY");
+        tree.Link("ws/api/CLAUDE.md", "AGENTS.md");
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = new[] { web, api } });
+        var args = spec.Args.ToList();
+
+        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(new[] { workspace, api }, "the workspace and api are added as before; web is not");
+        spec.Environment[ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar].ShouldBe("1", "the directories still added still load their memory");
+        spec.LaunchNotices.ShouldBe(new[] { "Left the memory in 'web' out of this run: CLAUDE.md resolves outside the workspace." });
+    }
+
+    [Fact]
+    public void A_run_left_with_no_memory_directory_adds_none_and_still_pins_its_settings()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+
+        tree.Link("ws/CLAUDE.md", tree.File("outside/secret.md", "OUTSIDE"));
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = new[] { workspace } });
+
+        spec.Args.ShouldNotContain("--add-dir", "an empty variadic --add-dir would swallow the next flag as its value");
+        spec.Environment.ContainsKey(ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar).ShouldBeFalse("the switch rides only with a directory it applies to");
+        spec.Args.Count(arg => arg == "--setting-sources").ShouldBe(1);
+        spec.Args[spec.Args.ToList().IndexOf("--setting-sources") + 1].ShouldBe("user", "the settings pin never depends on what memory is left");
+        spec.LaunchNotices.ShouldBe(new[] { "Left the memory in the workspace out of this run: CLAUDE.md resolves outside the workspace." });
+    }
+
+    [Fact]
+    public void LaunchNotices_never_reach_the_serialized_spec()
+    {
+        // The launch frame and the invocation's binding identity are the serialized spec: a notice is for the timeline only.
+        var spec = Harness.BuildInvocation(Task()) with { LaunchNotices = new[] { "Left the memory in the workspace out of this run: CLAUDE.md resolves outside the workspace." } };
+
+        JsonSerializer.Serialize(spec).ShouldNotContain("LaunchNotices");
+        JsonSerializer.Serialize(spec).ShouldBe(JsonSerializer.Serialize(spec with { LaunchNotices = Array.Empty<string>() }));
     }
 
     [Fact]
@@ -260,7 +327,7 @@ public class ClaudeCodeHarnessTests
         var transcript = Harness.BuildInvocation(task).ConfigHomeFiles.SingleOrDefault(f => f.RelativePath.StartsWith("projects/", StringComparison.Ordinal));
 
         transcript.ShouldNotBeNull("a CONTINUE restores the prior session JSONL where --resume looks");
-        transcript!.RelativePath.ShouldBe("projects/-tmp-ws/sess-r1.jsonl", "projects/<sanitized-cwd>/<session-id>.jsonl (cwd /tmp/ws → -tmp-ws)");
+        transcript!.RelativePath.ShouldBe($"projects/{WsProjects}/sess-r1.jsonl", "projects/<sanitized-cwd>/<session-id>.jsonl (every character of the cwd but a letter or digit → '-')");
         transcript.Content.ShouldBe("{\"type\":\"summary\"}\n{\"type\":\"user\"}\n", "the transcript bytes are restored verbatim");
     }
 
@@ -277,7 +344,7 @@ public class ClaudeCodeHarnessTests
         var paths = Harness.BuildInvocation(task).ConfigHomeFiles.Select(f => f.RelativePath).ToList();
 
         paths.ShouldContain("skills/tdd/SKILL.md");
-        paths.ShouldContain("projects/-tmp-ws/sess-r2.jsonl");
+        paths.ShouldContain($"projects/{WsProjects}/sess-r2.jsonl");
     }
 
     [Fact]
@@ -302,7 +369,7 @@ public class ClaudeCodeHarnessTests
         {
             LocalProcessRunner.WriteConfigHomeFiles(spec.ConfigHomeFiles, configHome);
 
-            File.ReadAllText(Path.Combine(configHome, "projects", "-tmp-ws", "sess-rt.jsonl"))
+            File.ReadAllText(Path.Combine(configHome, "projects", WsProjects, "sess-rt.jsonl"))
                 .ShouldBe("{\"line\":1}\n{\"line\":2}\n", "the runner materialized the transcript exactly where --resume reads it");
         }
         finally
@@ -319,12 +386,12 @@ public class ClaudeCodeHarnessTests
         // continue cold-starts. This pins that symmetry: SessionTranscriptRelativePath == the restore ConfigHomeFile's
         // RelativePath, both projects/<sanitized-cwd>/<id>.jsonl.
         // Claude's path is COMPUTED from cwd+id, so the configHome arg is ignored (no search).
-        var capturePath = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath("/tmp/cfg", "/tmp/ws", "sess-x");
+        var capturePath = ((IAgentSessionTranscript)Harness).SessionTranscriptRelativePath("/tmp/cfg", Ws, "sess-x");
 
         var restorePath = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-x", RestoredTranscript = "x\n" })
             .ConfigHomeFiles.Single(f => f.RelativePath.StartsWith("projects/", StringComparison.Ordinal)).RelativePath;
 
-        capturePath.ShouldBe("projects/-tmp-ws/sess-x.jsonl");
+        capturePath.ShouldBe($"projects/{WsProjects}/sess-x.jsonl");
         capturePath.ShouldBe(restorePath, "the executor must read the session file from exactly where the harness restores it");
     }
 
@@ -334,7 +401,7 @@ public class ClaudeCodeHarnessTests
         var h = (IAgentSessionTranscript)Harness;
 
         h.SessionTranscriptRelativePath("/tmp/cfg", null, "sess").ShouldBeNull("no cwd → nothing to encode the projects dir on");
-        h.SessionTranscriptRelativePath("/tmp/cfg", "/tmp/ws", null).ShouldBeNull("no session id → nothing to name the file");
+        h.SessionTranscriptRelativePath("/tmp/cfg", Ws, null).ShouldBeNull("no session id → nothing to name the file");
         h.SessionTranscriptRelativePath("/tmp/cfg", "   ", "sess").ShouldBeNull("a blank cwd is not addressable");
     }
 
@@ -625,9 +692,9 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("claude");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", Ws, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
         GoalOf(spec.StandardInput).ShouldBe("Fix the failing billing tests");
-        spec.WorkingDirectory.ShouldBe("/tmp/ws");
+        spec.WorkingDirectory.ShouldBe(Ws);
         spec.TimeoutSeconds.ShouldBe(900);
     }
 
@@ -646,7 +713,7 @@ public class ClaudeCodeHarnessTests
         // trailing positional and the prompt is never swallowed.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "sess-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--resume", "sess-resume-1", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", Ws, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]
@@ -656,7 +723,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("--resume");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", Ws, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
     }
 
     [Theory]
@@ -668,7 +735,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task(model: model));
 
         spec.Args.ShouldNotContain("--model", customMessage: "a blank model must omit --model so the CLI uses its own default (the Model=empty rule)");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", "/tmp/ws", "--permission-mode", "bypassPermissions" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", Ws, "--permission-mode", "bypassPermissions" });
     }
 
     [Fact]

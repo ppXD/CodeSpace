@@ -559,6 +559,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (ranCold)
                 await RecordRunColdAsync(owner, task with { Model = dispatchedModel }, LaunchRanColdNote, cancellationToken).ConfigureAwait(false);
 
+            // The same rule for what the harness left out of the launch. Said again only when a revise round's build
+            // leaves out something else: the agent changes the workspace those notices describe.
+            var launchNotices = await AppendLaunchNoticesAsync(owner, spec, said: null, cancellationToken).ConfigureAwait(false);
+
             var result = await RunHarnessAsync(runContext, cancellationToken).ConfigureAwait(false);
             result = AgentRunBudget.Apply(effectiveTask, result, modelPrices);
 
@@ -677,6 +681,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 if (roundRanCold)
                     await RecordRunColdAsync(owner, null, ReviseRanColdNote, cancellationToken).ConfigureAwait(false);
+
+                launchNotices = await AppendLaunchNoticesAsync(owner, reviseSpec, launchNotices, cancellationToken).ConfigureAwait(false);
 
                 var roundResult = await RunHarnessAsync(runContext with { Spec = reviseSpec, Task = reviseTask, SpoolKey = ReviseSpoolKey(agentRunId, round) }, cancellationToken).ConfigureAwait(false);
                 result = AgentRunBudget.Apply(reviseTask with { BudgetSpentUsd = result.CumulativeCostUsd }, roundResult, modelPrices) with { TokenUsage = SumTokenUsage(priorUsage, roundResult.TokenUsage), ReviseRounds = round };
@@ -2700,6 +2706,53 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogWarning(ex, "Agent run {RunId}: could not record the gateway-format-fault mitigation event", runId);
         }
+    }
+
+    /// <summary>The most launch notices one timeline event repeats; the rest are counted. Pinned by a unit test.</summary>
+    internal const int MaxLaunchNotices = 10;
+
+    /// <summary>The launch notices as one event's text — the first <see cref="MaxLaunchNotices"/> in order, then how many more there were; null when there are none.</summary>
+    internal static string? DescribeLaunchNotices(IReadOnlyList<string> notices)
+    {
+        if (notices.Count == 0) return null;
+
+        var shown = string.Join(" ", notices.Take(MaxLaunchNotices));
+
+        return notices.Count > MaxLaunchNotices ? $"{shown} ({notices.Count - MaxLaunchNotices} more)" : shown;
+    }
+
+    /// <summary>The timeline's account of a revise round that leaves out none of what an earlier launch of the run left out.</summary>
+    internal const string LaunchNoticesClearedNote = "Left no memory out of this round: what an earlier round of this run left out loads again.";
+
+    /// <summary>
+    /// What a launch's notices add to a timeline that last said <paramref name="said"/> (<see cref="DescribeLaunchNotices"/>,
+    /// null for nothing): null when they say the same, so an unchanged workspace is announced once per run; their text
+    /// when they differ; and <see cref="LaunchNoticesClearedNote"/> when a launch leaves nothing out that the last one did.
+    /// </summary>
+    internal static string? DescribeLaunchNoticeChange(IReadOnlyList<string> notices, string? said)
+    {
+        var text = DescribeLaunchNotices(notices);
+
+        if (text == said) return null;
+
+        return text ?? LaunchNoticesClearedNote;
+    }
+
+    /// <summary>Say on the timeline what the harness left out of this launch (<see cref="SandboxSpec.LaunchNotices"/>) — a repository's memory that links outside the workspace, for one — so a run missing its instructions says why, and say it again only when a revise round's launch leaves out something else (<see cref="DescribeLaunchNoticeChange"/>). Returns what the timeline now says. One bounded event per change; best-effort like the other launch notes.</summary>
+    private async Task<string?> AppendLaunchNoticesAsync(AgentRunOwnerToken owner, SandboxSpec spec, string? said, CancellationToken cancellationToken)
+    {
+        if (DescribeLaunchNoticeChange(spec.LaunchNotices, said) is not { } text) return said;
+
+        try
+        {
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = text }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the launch notices", owner.RunId);
+        }
+
+        return DescribeLaunchNotices(spec.LaunchNotices);
     }
 
     /// <summary>Announce the escalation on the timeline — the operator sees the run reached for a stronger model and WHY, or that it wanted to and the team had nothing stronger. Best-effort like the other completion-tail events.</summary>
