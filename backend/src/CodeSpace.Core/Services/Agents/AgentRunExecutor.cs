@@ -3042,14 +3042,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
             var fullSpec = spec with { Command = command };
             var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+            var posture = AcceptanceGradingPosturePolicy.For(task);
 
             // C3: the run's own recorded base is the oracle anchor — the grader restores the acceptance command's
             // program file from it, so an agent cannot buy its own pass by rewriting the check script it is graded
             // with. The patch lane always had this anchor; the BRANCH lane discarded it and graded the candidate's
             // bytes as the judge.
             grade = hasBranch
-                ? await grader.GradeAsync(repositoryId, run.TeamId, result.ProducedBranch!, fullSpec, timeoutSeconds, new OracleAnchor(result.BaseSha, OracleFloorPrograms(fullSpec)), cancellationToken).ConfigureAwait(false)
-                : await grader.GradePatchAsync(repositoryId, run.TeamId, result.BaseSha!, result.Patch, result.PatchArtifactId, fullSpec, timeoutSeconds, OracleFloorPrograms(fullSpec), cancellationToken).ConfigureAwait(false);
+                ? await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, Branch = result.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(result.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture }, cancellationToken).ConfigureAwait(false)
+                : await grader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, BaseSha = result.BaseSha!, InlinePatch = result.Patch, PatchArtifactId = result.PatchArtifactId, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = OracleFloorPrograms(fullSpec), Posture = posture }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -3118,6 +3119,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var command = spec.Command.ToArray();
         var fullSpec = spec with { Command = command };
         var timeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds;
+        var posture = AcceptanceGradingPosturePolicy.For(task);
 
         var targets = result.RepositoryResults.Where(r => !string.IsNullOrEmpty(r.ProducedBranch) && r.RepositoryId is not null).ToList();
 
@@ -3142,7 +3144,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             try
             {
                 // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
-                grade = await grader.GradeAsync(target.RepositoryId!.Value, run.TeamId, target.ProducedBranch!, fullSpec, timeoutSeconds, new OracleAnchor(target.BaseSha, OracleFloorPrograms(fullSpec)), cancellationToken).ConfigureAwait(false);
+                grade = await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = run.TeamId, Branch = target.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(target.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
             {

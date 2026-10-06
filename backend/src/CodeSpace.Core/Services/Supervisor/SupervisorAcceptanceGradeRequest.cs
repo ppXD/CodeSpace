@@ -13,6 +13,9 @@ public sealed record RepositoryAcceptanceGradeRequest
     public required int TimeoutSeconds { get; init; }
     public OracleAnchor Anchor { get; init; } = OracleAnchor.None;
     public ReviewModelIdentity? ProducerModel { get; init; }
+
+    /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
+    public required AcceptanceGradingPosture? Posture { get; init; }
 }
 
 /// <summary>A delayed captured-deliverable acceptance grade with the producer identity that authored the files.</summary>
@@ -23,6 +26,9 @@ public sealed record CapturedAcceptanceGradeRequest
     public required SupervisorAcceptanceSpec Spec { get; init; }
     public required int TimeoutSeconds { get; init; }
     public ReviewModelIdentity? ProducerModel { get; init; }
+
+    /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
+    public required AcceptanceGradingPosture? Posture { get; init; }
 }
 
 /// <summary>A delayed patch acceptance grade with the producer identity that authored the patch.</summary>
@@ -37,4 +43,32 @@ public sealed record PatchAcceptanceGradeRequest
     public required int TimeoutSeconds { get; init; }
     public IReadOnlyList<string>? OracleFloorPrograms { get; init; }
     public ReviewModelIdentity? ProducerModel { get; init; }
+
+    /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
+    public required AcceptanceGradingPosture? Posture { get; init; }
+}
+
+/// <summary>A baseline grade of a unit's base tree, under the SAME posture as the candidate it is compared against, so the differential measures the work and not two different sandboxes.</summary>
+public sealed record BaseAcceptanceGradeRequest
+{
+    public required Guid RepositoryId { get; init; }
+    public required Guid TeamId { get; init; }
+    public required string BaseSha { get; init; }
+    public required SupervisorAcceptanceSpec Spec { get; init; }
+    public required int TimeoutSeconds { get; init; }
+
+    /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
+    public required AcceptanceGradingPosture? Posture { get; init; }
+}
+
+/// <summary>A grade of a repo-less run's live workspace directory, under the posture of the run that wrote it.</summary>
+public sealed record DirectoryAcceptanceGradeRequest
+{
+    public required string Directory { get; init; }
+    public required Guid TeamId { get; init; }
+    public required SupervisorAcceptanceSpec Spec { get; init; }
+    public required int TimeoutSeconds { get; init; }
+
+    /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
+    public required AcceptanceGradingPosture? Posture { get; init; }
 }

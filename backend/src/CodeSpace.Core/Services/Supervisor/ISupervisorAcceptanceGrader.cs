@@ -15,6 +15,11 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// cloned, OR a check that cannot be RUN (a binary not on PATH, a judge with no model) — returns a FAILED grade (not
 /// an exception), because acceptance that cannot be verified is "not accepted", never a silent pass and never a
 /// crash that strands the caller. Only a genuine cancellation propagates.</para>
+///
+/// <para>Every production lane grades through a REQUEST overload, because only a request carries the producing run's
+/// <see cref="AcceptanceGradingPosture"/>: the network, egress allowlist and resource ceilings the grade's setup and
+/// check run under. The positional overloads carry none, so the real grader runs them with network off under the
+/// Confined tier's ceilings. They remain the members a test double implements.</para>
 /// </summary>
 public interface ISupervisorAcceptanceGrader
 {
@@ -29,6 +34,14 @@ public interface ISupervisorAcceptanceGrader
     /// <summary>Grade a patch request while preserving the producer identity across the delayed fold.</summary>
     Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
         GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, request.OracleFloorPrograms, cancellationToken);
+
+    /// <summary>Grade a unit's base tree under the posture of the candidate it is compared against.</summary>
+    Task<BenchmarkGrade> GradeBaseAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        GradeBaseAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.Spec, request.TimeoutSeconds, cancellationToken);
+
+    /// <summary>Grade a repo-less run's live workspace under the posture of the run that wrote it.</summary>
+    Task<BenchmarkGrade> GradeDirectoryAsync(DirectoryAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        GradeDirectoryAsync(request.Directory, request.Spec, request.TeamId, request.TimeoutSeconds, cancellationToken);
 
     /// <summary>
     /// Clone <paramref name="repositoryId"/> at <paramref name="branch"/> (team-scoped) and grade it with the oracle

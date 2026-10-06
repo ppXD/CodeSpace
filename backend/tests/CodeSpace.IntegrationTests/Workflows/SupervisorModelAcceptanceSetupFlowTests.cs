@@ -101,7 +101,7 @@ public sealed class SupervisorModelAcceptanceSetupFlowTests
         using var scope = _fixture.BeginScope(builder => builder.RegisterInstance(new SandboxRunnerRegistry([runner])).As<ISandboxRunnerRegistry>());
 
         var operatorSpec = new SupervisorAcceptanceSpec { Command = new[] { "report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent, SetupCommand = probe.SetupArgv, TimeoutSeconds = 0 };
-        var grade = await scope.Resolve<ISupervisorAcceptanceGrader>().GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = operatorSpec, TimeoutSeconds = 0 }, CancellationToken.None);
+        var grade = await scope.Resolve<ISupervisorAcceptanceGrader>().GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = operatorSpec, TimeoutSeconds = 0, Posture = null }, CancellationToken.None);
 
         grade.Passed.ShouldBeTrue(grade.Detail);
 

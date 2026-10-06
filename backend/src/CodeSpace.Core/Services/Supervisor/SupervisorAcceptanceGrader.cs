@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -29,7 +30,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v8";   // v8: every grade step (setup, check, oracle-restore git) runs under a bounded window — a non-positive authored timeout grades at the default instead of arming no wall clock, a longer one is capped at SupervisorLane.MaxAcceptanceGradeTimeoutSeconds
+    public const string EvaluatorVersion = "supervisor-acceptance/v9";   // v9: the setup and the check run under the PRODUCING run's posture (network, egress allowlist, memory/cpu ceilings), narrow-only; a request with none grades network-off under the Confined ceilings; a check killed at that ceiling grades tests-resource-exhausted (Environment) and a setup the sandbox severed grades setup-failed-network-severed. v8: every grade step runs under a bounded window
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -62,7 +63,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         GradeAsync(repositoryId, teamId, branch, spec, timeoutSeconds, OracleAnchor.None, cancellationToken);
 
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken) =>
-        GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, Branch = branch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor }, cancellationToken);
+        GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, Branch = branch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, Posture = null }, cancellationToken);
 
     public async Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
@@ -88,7 +89,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(workspace.Directory, spec, teamId, timeoutSeconds, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(workspace.Directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -106,16 +107,19 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
-    public async Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
+        GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = directory, Spec = spec, TeamId = teamId, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradeDirectoryAsync(DirectoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(directory))
+        if (!Directory.Exists(request.Directory))
             return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
 
-        return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds), cancellationToken).ConfigureAwait(false);
+        return await GradeWorkspaceAsync(new WorkspaceGradeRequest(request.Directory, request.Spec, request.TeamId, request.TimeoutSeconds, request.Posture), cancellationToken).ConfigureAwait(false);
     }
 
     public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
-        GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds }, cancellationToken);
+        GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
 
     public async Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
@@ -131,7 +135,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
                 return Failed(ISupervisorAcceptanceGrader.NoDeliverablesCaptured, GradeFailureClass.Genuine);
             }
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.ProducerModel), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -233,7 +237,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         GradePatchAsync(repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, oracleFloorPrograms: null, cancellationToken);
 
     public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
-        GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, InlinePatch = inlinePatch, PatchArtifactId = patchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms }, cancellationToken);
+        GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, InlinePatch = inlinePatch, PatchArtifactId = patchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, Posture = null }, cancellationToken);
 
     public async Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
@@ -277,7 +281,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -295,8 +299,12 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
-    public async Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
+        GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, Spec = spec, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
+
+    public async Task<BenchmarkGrade> GradeBaseAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
+        var (repositoryId, teamId, baseSha, spec, timeoutSeconds) = (request.RepositoryId, request.TeamId, request.BaseSha, request.Spec, request.TimeoutSeconds);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-base-" + Guid.NewGuid().ToString("N"));
 
         try
@@ -306,7 +314,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -654,23 +662,35 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     private static int BoundedGradeWindow(int timeoutSeconds) =>
         timeoutSeconds <= 0 ? SupervisorLane.AcceptanceGradeTimeoutSeconds : Math.Min(timeoutSeconds, SupervisorLane.MaxAcceptanceGradeTimeoutSeconds);
 
+    /// <summary>
+    /// The ONE place every lane's grade runs the candidate's bytes: the optional setup step, then the oracle. Both run
+    /// through a runner bound to the producing run's <see cref="AcceptanceGradingPosture"/> (a request without one
+    /// grades <see cref="AcceptanceGradingPosturePolicy.FailClosed"/>), so no lane can hand a grade more network or
+    /// resources than the run whose work it executes had.
+    /// </summary>
     private async Task<BenchmarkGrade> GradeWorkspaceAsync(WorkspaceGradeRequest request, CancellationToken cancellationToken)
     {
-        var (directory, spec, teamId, authoredTimeoutSeconds, producerModel, protection) = request;
+        var (directory, spec, teamId, authoredTimeoutSeconds, posture, producerModel, protection) = request;
         var timeoutSeconds = BoundedGradeWindow(authoredTimeoutSeconds);
+        var runner = AcceptanceGradingPosturePolicy.Bind(_runners.Resolve(GradingRunnerKind), posture ?? AcceptanceGradingPosturePolicy.FailClosed);
+        var setupSpec = spec.SetupCommand is { Count: > 0 } setupCommand ? SetupSpec(setupCommand, directory, timeoutSeconds) : null;
+        var setupEgress = setupSpec is null ? null : runner.EnforcedEgress(setupSpec);
+        var setupNotice = SetupNotice(setupSpec, runner.Posture, setupEgress, directory);
 
-        if (spec.SetupCommand is { Count: > 0 } setupCommand)
+        if (setupSpec is not null)
         {
-            var setupFailure = await RunSetupCommandAsync(setupCommand, directory, timeoutSeconds, cancellationToken).ConfigureAwait(false);
-            if (setupFailure is not null) return setupFailure;
+            var setupFailure = await RunSetupCommandAsync(runner, setupSpec, severed: setupEgress == SandboxEgressMode.None, cancellationToken).ConfigureAwait(false);
+            if (setupFailure is not null) return await CaptureEvidenceAsync(WithSetupNotice(setupFailure, setupNotice), teamId, cancellationToken).ConfigureAwait(false);
         }
 
-        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, _runners.Resolve(GradingRunnerKind)) with { ProducerModel = producerModel };
+        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, runner) with { ProducerModel = producerModel };
 
         var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
 
         if (protection.EvidenceNote is not null)
             grade = grade with { EvidenceText = $"{protection.EvidenceNote}\n{grade.EvidenceText}" };
+
+        grade = WithSetupNotice(grade, setupNotice);
 
         // A PASS keeps nothing else: both folds drop the evidence tail on green (nothing to repair) and the
         // decider's pass branch renders no evidence at all, so a grade that ran the candidate's own copy of the
@@ -688,7 +708,30 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         return await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default);
+    private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, AcceptanceGradingPosture? Posture, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default);
+
+    /// <summary>The narrowed-setup notice this grade owes, logged once, or null when the contract has no setup step or the sandbox left it the network it asks for.</summary>
+    private string? SetupNotice(SandboxSpec? setupSpec, AcceptanceGradingPosture posture, SandboxEgressMode? enforced, string directory)
+    {
+        if (setupSpec is null || AcceptanceGradingPosturePolicy.SetupNetworkNotice(posture, enforced) is not { } notice) return null;
+
+        _logger.LogInformation("Acceptance setup in {Directory} runs under the producing run's posture ({Autonomy}): {Notice}", directory, posture.Autonomy, notice);
+
+        return notice;
+    }
+
+    /// <summary>
+    /// Put the narrowed-setup notice at the head of the grade's evidence, which is where an operator reads why a
+    /// setup failed. A FAILURE may gain evidence for it, because evidence never loosens how a failure is classified.
+    /// A PASS with no evidence of its own does not: admission caps an unevidenced pass, and a notice must never be
+    /// what lifts that cap. The log line still records it.
+    /// </summary>
+    private static BenchmarkGrade WithSetupNotice(BenchmarkGrade grade, string? notice)
+    {
+        if (notice is null || grade.Passed && string.IsNullOrEmpty(grade.EvidenceText)) return grade;
+
+        return grade with { EvidenceText = string.IsNullOrEmpty(grade.EvidenceText) ? notice : $"{notice}\n{grade.EvidenceText}" };
+    }
 
     /// <summary>
     /// P3a-1: the oracle run's output becomes a durable CAS artifact — the id a receipt's <c>EvidenceRef</c> binds
@@ -727,34 +770,46 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             : grade with { EvidenceTail = Agents.AcceptanceEvidenceRenderer.ClipTail(grade.EvidenceText) };
 
     /// <summary>
+    /// The contract's setup step as a spec. A setup INSTALLS what the check needs (a package restore, a toolchain
+    /// fetch), so it ASKS for the network. How much of it the step gets is the producing run's posture's call — it runs
+    /// the manifests the agent wrote, so it never reaches further than that agent could.
+    /// </summary>
+    private static SandboxSpec SetupSpec(IReadOnlyList<string> setupCommand, string directory, int timeoutSeconds) => new()
+    {
+        Command = setupCommand[0],
+        Args = setupCommand.Skip(1).ToList(),
+        WorkingDirectory = directory,
+        TimeoutSeconds = timeoutSeconds,
+        AllowNetwork = true,
+    };
+
+    /// <summary>
     /// P3.1 part 2: run the contract's OPTIONAL setup step in the SAME workspace before the check — a failure here
     /// means the check itself never got a chance to run, so it is classified alongside <c>grade-error:</c>/
     /// <c>clone-failed:</c> (infra, not a code verdict) rather than as a genuine failing check. Returns null on
     /// success (proceed to grading); a non-null grade short-circuits <see cref="GradeWorkspaceAsync"/>.
+    ///
+    /// <para>A setup the sandbox <paramref name="severed"/> (the producing run's posture took its network, and this
+    /// host enforced it) fails the same way on every attempt, because the posture comes from the same stored task each
+    /// time. Its detail says so (<see cref="Agents.AgentAcceptanceContract.SetupSeveredDetailPrefix"/>): still infra, but
+    /// decided by the grade's posture rather than a transient fault, so an authored retry does not re-buy an agent run
+    /// to sever it again.</para>
     /// </summary>
-    private async Task<BenchmarkGrade?> RunSetupCommandAsync(IReadOnlyList<string> setupCommand, string directory, int timeoutSeconds, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade?> RunSetupCommandAsync(PostureBoundSandboxRunner runner, SandboxSpec setupSpec, bool severed, CancellationToken cancellationToken)
     {
-        var spec = new SandboxSpec
-        {
-            Command = setupCommand[0],
-            Args = setupCommand.Skip(1).ToList(),
-            WorkingDirectory = directory,
-            TimeoutSeconds = timeoutSeconds,
-            // A contract's setup step is what INSTALLS what the check needs (a package restore, a toolchain fetch),
-            // so it keeps the egress it has always had — stated here rather than inherited, now that a spec that
-            // says nothing is severed.
-            AllowNetwork = true,
-        };
-
-        var result = await _runners.Resolve(GradingRunnerKind).RunAsync(spec, cancellationToken).ConfigureAwait(false);
+        var result = await runner.RunAsync(setupSpec, cancellationToken).ConfigureAwait(false);
 
         if (result.Status == SandboxStatus.Success) return null;
 
-        _logger.LogWarning("Acceptance grading's setup command failed in {Directory}: {Status} (exit {ExitCode}) {Stderr}", directory, result.Status, result.ExitCode, Summarize(result.Stderr));
+        _logger.LogWarning("Acceptance grading's setup command failed in {Directory}: {Status} (exit {ExitCode}) {Stderr}", setupSpec.WorkingDirectory, result.Status, result.ExitCode, Summarize(result.Stderr));
 
-        return result.Status == SandboxStatus.TimedOut
-            ? Failed("setup-timed-out", GradeFailureClass.Environment)
-            : Failed($"setup-failed: {Summarize(result.Stderr)}", GradeFailureClass.Environment);
+        return (severed, result.Status) switch
+        {
+            (true, SandboxStatus.TimedOut) => Failed($"{Agents.AgentAcceptanceContract.SetupSeveredDetailPrefix} timed out", GradeFailureClass.Environment),
+            (true, _) => Failed($"{Agents.AgentAcceptanceContract.SetupSeveredDetailPrefix} {Summarize(result.Stderr)}", GradeFailureClass.Environment),
+            (false, SandboxStatus.TimedOut) => Failed("setup-timed-out", GradeFailureClass.Environment),
+            _ => Failed($"setup-failed: {Summarize(result.Stderr)}", GradeFailureClass.Environment),
+        };
     }
 
     private static BenchmarkGrade Failed(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };

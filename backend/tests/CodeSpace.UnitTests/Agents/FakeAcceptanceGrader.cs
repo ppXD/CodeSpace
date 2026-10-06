@@ -23,6 +23,15 @@ internal sealed class FakeAcceptanceGrader : ISupervisorAcceptanceGrader
     public int PatchCallCount { get; private set; }
     public (Guid RepositoryId, Guid TeamId, string BaseSha, Guid? PatchArtifactId)? LastPatchCall { get; private set; }
 
+    /// <summary>The producing-run posture every request-form repository grade carried, in call order.</summary>
+    public List<AcceptanceGradingPosture?> Postures { get; } = new();
+
+    public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    {
+        Postures.Add(request.Posture);
+        return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, cancellationToken);
+    }
+
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
     {
         CallCount++;

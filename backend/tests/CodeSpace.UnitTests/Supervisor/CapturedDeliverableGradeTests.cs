@@ -55,7 +55,7 @@ public class CapturedDeliverableGradeTests
         var producer = new ReviewModelIdentity { ModelCredentialModelId = modelRowId, ConfiguredModel = "configured", ObservedModel = "observed" };
         var (grader, oracle, _) = New(new BenchmarkGrade { Passed = true, Detail = "artifact-present" }, Row(runId, teamId, "report.md", "# findings\n"));
 
-        await grader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = runId, TeamId = teamId, Spec = Spec("report.md"), TimeoutSeconds = 60, ProducerModel = producer }, CancellationToken.None);
+        await grader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = runId, TeamId = teamId, Spec = Spec("report.md"), TimeoutSeconds = 60, ProducerModel = producer, Posture = null }, CancellationToken.None);
 
         oracle.LastProducerModel.ShouldBe(producer, "the evaluator must see the producer identity even when grading happens after the worker and workspace are gone");
     }

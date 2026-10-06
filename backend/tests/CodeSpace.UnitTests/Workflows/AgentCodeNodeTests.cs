@@ -677,8 +677,27 @@ public class AgentCodeNodeTests
     }
 
     [Theory]
+    [InlineData("setup-failed-network-severed: npm ERR! network request failed")]
+    [InlineData("setup-failed-network-severed: timed out")]
+    [InlineData("repo 'web': setup-failed-network-severed: npm ERR! network request failed")]   // through the multi-repo display tag
+    public async Task A_setup_the_grades_posture_severed_is_not_retried(string acceptanceDetail)
+    {
+        // The posture comes from the same stored task on every attempt, so a respawn re-buys a whole billed agent run
+        // only to have its setup severed again. Still infra — never a code verdict — but no longer worth a respawn.
+        var resume = JsonDocument.Parse($$"""
+            {"status":"Failed","error":"x","exitReason":"acceptance-failed","acceptanceDetail":"{{acceptanceDetail}}","changedFiles":["src/a.ts"]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse("a setup the grade's own posture severed fails identically on every respawn");
+    }
+
+    [Theory]
     [InlineData("setup-failed: npm ERR! missing script")]
     [InlineData("setup-timed-out")]
+    [InlineData("tests-resource-exhausted")]   // the check was killed at the grade's own ceiling: an environment fact, like tests-timed-out
     public async Task P3_1_part_2_a_setup_command_infra_fault_is_retryable_despite_the_fail_closed_acceptance_exit_reason(string acceptanceDetail)
     {
         // The contract's OWN setup step (installing deps, a build) failing/timing out means the CHECK never ran at

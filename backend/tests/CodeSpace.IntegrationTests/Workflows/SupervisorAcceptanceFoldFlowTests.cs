@@ -73,6 +73,46 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             .ShouldBe(true, "the grade is PERSISTED onto the durable ledger row (so replay reads it, not re-grades)");
     }
 
+    [Theory]
+    [InlineData(true, AgentAutonomyLevel.Standard, null)]                     // branch arm, a network-off resolver
+    [InlineData(false, AgentAutonomyLevel.Standard, null)]                    // patch arm (a guard-blocked push), the same resolver
+    [InlineData(true, AgentAutonomyLevel.Trusted, "registry.npmjs.org")]      // branch arm, an allowlisted resolver
+    [InlineData(false, AgentAutonomyLevel.Trusted, "registry.npmjs.org")]     // patch arm, the same resolver
+    public async Task A_resolve_is_graded_under_the_resolvers_own_stored_posture(bool pushed, AgentAutonomyLevel tier, string? allowHost)
+    {
+        // The resolve grade runs the resolver's reconciled bytes, so its setup and check get the resolver's own tier
+        // and network — read off its stored task, never the run profile and never the old hard-coded host network —
+        // on BOTH arms: the pushed branch, and the recorded patch a policy-blocked push leaves behind.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var resolverId = Guid.NewGuid();
+        var branch = pushed ? "codespace/resolve/x" : null;
+        var permissions = AgentAutonomyPolicy.Derive(tier) with { Egress = allowHost is null ? AgentEgressPolicy.Full : AgentEgressPolicy.Allowlist, EgressAllowHosts = allowHost is null ? null : new[] { allowHost } };
+        var task = new AgentTask { Goal = "reconcile", Harness = "codex-cli", Autonomy = tier, Permissions = permissions };
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = $"reconciled {Marker}", ProducedBranch = branch };
+
+        await SeedAgentRunRawAsync(resolverId, teamId, runId, AgentRunStatus.Succeeded, JsonSerializer.Serialize(result, AgentJson.Options), JsonSerializer.Serialize(task, AgentJson.Options));
+        await SeedResolveDecisionAsync(runId, teamId, ResolveOutcomeWithAgentId(resolverId, branch, markerPresent: true));
+        if (!pushed) await SeedManifestAsync(teamId, resolverId, repoId, branch: null, baseSha: "deadbeef", patchArtifactId: Guid.NewGuid());
+
+        var expected = AcceptanceGradingPosturePolicy.For(task);
+        var unleashed = AcceptanceGradingPosturePolicy.For(AgentAutonomyLevel.Unleashed, AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Unleashed));
+        JsonSerializer.Serialize(expected, AgentJson.Options).ShouldNotBe(JsonSerializer.Serialize(AcceptanceGradingPosturePolicy.FailClosed, AgentJson.Options), "fixture check: a lane that dropped the posture (fail-closed) must not pass");
+        JsonSerializer.Serialize(expected, AgentJson.Options).ShouldNotBe(JsonSerializer.Serialize(unleashed, AgentJson.Options), "fixture check: a lane that widened the posture must not pass");
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId, Command), grader);
+
+        (pushed ? grader.CallCount : grader.PatchCallCount).ShouldBe(1, $"fixture check: the resolve was graded on its {(pushed ? "branch" : "patch")} arm");
+        var posture = grader.LastPosture.ShouldNotBeNull("the resolve lane passed the resolver's posture");
+        posture.Autonomy.ShouldBe(expected.Autonomy);
+        posture.AllowNetwork.ShouldBe(expected.AllowNetwork);
+        posture.EgressAllowlist.ShouldBe(expected.EgressAllowlist);
+        posture.MaxMemoryMb.ShouldBe(expected.MaxMemoryMb);
+        posture.MaxCpuPercent.ShouldBe(expected.MaxCpuPercent);
+    }
+
     [Fact]
     public async Task A_resolver_that_never_pushed_grades_via_its_own_recorded_patch_not_fail_closed()
     {
@@ -1473,14 +1513,14 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         await db.SaveChangesAsync();
     }
 
-    private async Task SeedAgentRunRawAsync(Guid agentRunId, Guid teamId, Guid runId, AgentRunStatus status, string? resultJson)
+    private async Task SeedAgentRunRawAsync(Guid agentRunId, Guid teamId, Guid runId, AgentRunStatus status, string? resultJson, string taskJson = "{}")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.AgentRun.Add(new AgentRun
         {
             Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, Harness = "codex-cli",
-            Status = status, TaskJson = "{}", ResultJson = resultJson,
+            Status = status, TaskJson = taskJson, ResultJson = resultJson,
         });
         await db.SaveChangesAsync();
     }
@@ -1561,6 +1601,15 @@ public sealed class SupervisorAcceptanceFoldFlowTests
 
         public int PatchCallCount { get; private set; }
 
+        /// <summary>V-B: the producing-run posture the last request-form grade carried.</summary>
+        public AcceptanceGradingPosture? LastPosture { get; private set; }
+
+        public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            LastPosture = request.Posture;
+            return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor, cancellationToken);
+        }
+
         /// <summary>The C3 anchor the branch grade was handed. Recorded because it is otherwise unobservable: the floor-less overload compiles and greens while silently reducing the grade to authored-only protection — which on this lane is none — so nothing but this would red if the inventory were dropped.</summary>
         public OracleAnchor? LastAnchor { get; private set; }
 
@@ -1576,6 +1625,12 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             LastCall = (repositoryId, teamId, branch, spec.Command, timeoutSeconds, spec.Kind ?? BenchmarkGradingKind.TestsPass);
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            LastPosture = request.Posture;
+            return GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 
         public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
