@@ -42,15 +42,18 @@ public sealed class PackHostAllowlist : IPackHostAllowlist, ISingletonDependency
     /// <summary>True when <paramref name="url"/> is a well-formed absolute https URL whose host is on <paramref name="hosts"/>; else false with an actionable <paramref name="reason"/>. Pure + internal so it's unit-pinned.</summary>
     internal static bool TryValidate(string url, IReadOnlySet<string> hosts, out string reason)
     {
+        // Neither reason below names the input: a pasted token would otherwise ride into the API error body, the UI and the
+        // mediator's error log. An unparseable URL has no userinfo to strip, and a URL pasted without "https://" parses the
+        // token before its colon as the scheme.
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
-            reason = $"'{url}' is not a valid absolute URL.";
+            reason = "The pack source is not a valid absolute URL.";
             return false;
         }
 
         if (uri.Scheme != Uri.UriSchemeHttps)
         {
-            reason = $"Only https pack sources are allowed (got scheme '{uri.Scheme}'). Paste an https git URL.";
+            reason = "Only https pack sources are allowed. Paste an https git URL.";
             return false;
         }
 

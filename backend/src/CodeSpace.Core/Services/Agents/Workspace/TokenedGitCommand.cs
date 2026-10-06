@@ -50,11 +50,16 @@ internal static class TokenedGitCommand
         return new[] { "-c", $"credential.{uri.Scheme}://{uri.Authority}.helper=" };
     }
 
-    /// <summary><paramref name="spec"/> as a tokened command when the remote it can reach is tokened — <see cref="CredentialHelperReset"/> ahead of its arguments, <see cref="TraceOff"/> over its environment — otherwise unchanged.</summary>
-    internal static SandboxSpec Spec(string remoteUrl, SandboxSpec spec)
-    {
-        if (!IsTokened(remoteUrl)) return spec;
+    /// <summary><paramref name="spec"/> as a tokened command (<see cref="AsTokened"/>) when the remote it can reach is tokened, otherwise unchanged.</summary>
+    internal static SandboxSpec Spec(string remoteUrl, SandboxSpec spec) => IsTokened(remoteUrl) ? AsTokened(remoteUrl, spec) : spec;
 
+    /// <summary>
+    /// <paramref name="spec"/> as a tokened command for <paramref name="remoteUrl"/> — <see cref="CredentialHelperReset"/> ahead of
+    /// its arguments, <see cref="TraceOff"/> over its environment — whatever <see cref="IsTokened"/> says: for a caller that knows
+    /// the URL's userinfo is a credential without a password, as a token pasted as the user alone is.
+    /// </summary>
+    internal static SandboxSpec AsTokened(string remoteUrl, SandboxSpec spec)
+    {
         var environment = new Dictionary<string, string>(spec.Environment);
         foreach (var (name, value) in TraceOff) environment[name] = value;
 

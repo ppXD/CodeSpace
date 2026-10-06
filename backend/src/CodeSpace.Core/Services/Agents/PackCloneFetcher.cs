@@ -1,6 +1,8 @@
+using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -16,8 +18,14 @@ namespace CodeSpace.Core.Services.Agents;
 /// FAILURE (or any throw mid-clone) reclaims the partial dir immediately; (3) <see cref="IWorkspaceJanitor"/> — the
 /// crash-safety backstop: the recurring sweep (which fans out over every janitor) ages out a clone orphaned by a
 /// worker that died between clone and dispose.</para>
+///
+/// <para>A pasted URL can carry a credential in its userinfo (<see cref="PastedSecret"/>). The clone runs as a tokened command,
+/// so the operator's credential helpers and trace2 targets never see it, in a directory only this worker's uid can read;
+/// once cloned, origin is rewritten to the URL without it, so the checkout the import walks holds none; a clone failure names
+/// the URL without it and redacts it from git's stderr, since that message reaches the API error body, the UI and the
+/// mediator's error log.</para>
 /// </summary>
-public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, ISingletonDependency
+public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, ISingletonDependency
 {
     /// <summary>Operators tune how long an orphaned pack clone lingers before the janitor reclaims it (a TimeSpan, e.g. "00:30:00"); default 1h. Pinned by a test (Rule 8). MUST exceed the maximum possible import duration so the age-based sweep never deletes a live clone.</summary>
     public const string StaleThresholdEnvVar = "CODESPACE_PACK_CLONE_STALE_THRESHOLD";
@@ -50,25 +58,54 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
         Directory.CreateDirectory(PackClonesRoot);
         var dir = Path.Combine(PackClonesRoot, Guid.NewGuid().ToString("N"));
 
-        SandboxResult result;
         try
         {
-            Directory.CreateDirectory(dir);
-            result = await _runners.Resolve(SandboxKinds.Local).RunAsync(BuildCloneSpec(url, reference, dir), cancellationToken).ConfigureAwait(false);
+            CreateOwnerOnlyDirectory(dir);
+            await CloneAsync(url, reference, dir, cancellationToken).ConfigureAwait(false);
+            await StripPastedCredentialAsync(url, dir, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            TryDeleteDirectory(dir);   // never leak a partial clone, even on an unexpected throw / cancellation
+            TryDeleteDirectory(dir);   // never leak a partial clone, or one still holding a pasted credential, even on an unexpected throw / cancellation
             throw;
         }
 
-        if (result.Status != SandboxStatus.Success)
-        {
-            TryDeleteDirectory(dir);   // clone failed → reclaim the partial dir immediately
-            throw new PackImportException($"git clone of '{url}' failed ({result.Status}, exit {result.ExitCode}): {Summarize(result.Stderr)}");
-        }
-
         return new PackCheckout(dir);
+    }
+
+    /// <summary>
+    /// The clone's directory, readable by this worker's uid alone. git writes the pasted URL, credential included, into
+    /// <c>.git/config</c> before the transfer starts, and origin is stripped only once it ends — up to the clone timeout later,
+    /// or never when the worker dies mid-clone and leaves it to the janitor — so it is owner-only before git runs.
+    /// </summary>
+    private static void CreateOwnerOnlyDirectory(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    /// <summary>Run the clone; a failure throws a <see cref="PackImportException"/> that names no pasted credential.</summary>
+    private async Task CloneAsync(string url, string? reference, string dir, CancellationToken cancellationToken)
+    {
+        var result = await _runners.Resolve(SandboxKinds.Local).RunAsync(BuildCloneSpec(url, reference, dir), cancellationToken).ConfigureAwait(false);
+
+        if (result.Status != SandboxStatus.Success)
+            throw new PackImportException(CloneFailedMessage(url, result));
+    }
+
+    /// <summary>
+    /// git writes the pasted URL, credential included, into the clone's origin, and the import then walks that checkout (a
+    /// worker that dies mid-import leaves it on disk for the janitor). Rewrite origin to the URL without the credential through
+    /// the workspace provider's own strip: set-url, else remove origin, else a <see cref="WorkspaceException"/> — and the
+    /// caller deletes the clone on the way out.
+    /// </summary>
+    private async Task StripPastedCredentialAsync(string url, string dir, CancellationToken cancellationToken)
+    {
+        var cleanUrl = WithoutPastedCredential(url);
+
+        if (cleanUrl == url) return;
+
+        await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(SandboxKinds.Local), CloneTimeoutSeconds, _logger, cleanUrl, dir, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -93,9 +130,18 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
         return args;
     }
 
-    /// <summary>The clone as the runner gets it: <see cref="BuildCloneArgs"/> in <paramref name="dir"/>, with the network. A pasted URL carrying a token clones as a <see cref="TokenedGitCommand"/>, so no credential helper stores it and no trace2 target records it.</summary>
-    internal static SandboxSpec BuildCloneSpec(string url, string? reference, string dir) =>
-        TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = BuildCloneArgs(url, reference, dir), WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true });
+    /// <summary>
+    /// The clone as the runner gets it: <see cref="BuildCloneArgs"/> in <paramref name="dir"/>, with the network. A pasted URL
+    /// carrying a credential (<see cref="PastedSecret"/>) clones as a <see cref="TokenedGitCommand"/>, so no credential helper sees
+    /// it and no trace2 target records it — a token pasted as the user alone too, which carries no password for
+    /// <see cref="TokenedGitCommand.IsTokened"/> to find, yet git hands it to every helper it asks for the missing one.
+    /// </summary>
+    internal static SandboxSpec BuildCloneSpec(string url, string? reference, string dir)
+    {
+        var spec = new SandboxSpec { Command = "git", Args = BuildCloneArgs(url, reference, dir), WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true };
+
+        return PastedSecret(url) is null ? spec : TokenedGitCommand.AsTokened(url, spec);
+    }
 
     // ── IWorkspaceJanitor: reclaim pack clones orphaned by a crashed worker ──────────────────────────
 
@@ -144,6 +190,52 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
             // Best-effort: a leaked temp dir on the worker's ephemeral disk is reclaimed by the next janitor sweep.
         }
     }
+
+    /// <summary>
+    /// The clone failure as the operator reads it — in the API error body, the UI and the mediator's error log: the URL
+    /// without its pasted credential, and git's stderr with that credential redacted. git hides a password, but when a token
+    /// is pasted as the user alone it asks for a password and names that user. Pure + internal so it is unit-pinned.
+    /// </summary>
+    internal static string CloneFailedMessage(string url, SandboxResult result) =>
+        $"git clone of '{WithoutPastedCredential(url)}' failed ({result.Status}, exit {result.ExitCode}): {RedactPastedCredential(url, Summarize(result.Stderr))}";
+
+    /// <summary>
+    /// The part of a pasted http(s) URL's userinfo that carries its credential: the password when one is given
+    /// (<c>x-access-token:&lt;token&gt;@</c>, <c>oauth2:&lt;token&gt;@</c>), else the user — a token pasted as the user alone
+    /// (<c>&lt;token&gt;@</c>). Null for a URL without userinfo and for any other scheme: git never sends an ssh URL's user as a
+    /// credential, and its <c>git@</c> names an account.
+    /// </summary>
+    private static string? PastedSecret(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp)) return null;
+
+        var (user, password) = uri.UserInfo.Split(':', 2) is [var u, var p] ? (u, p) : (uri.UserInfo, "");
+        var secret = password.Length > 0 ? password : user;
+
+        return secret.Length > 0 ? secret : null;
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> without the pasted credential. First the userinfo of every http(s) URL in it (<see cref="UrlUserInfo"/>),
+    /// whichever part carries the token — <c>&lt;token&gt;:x-oauth-basic@</c> puts it in the user — and in whatever spelling. Then
+    /// <see cref="PastedSecret"/> as bare text in each spelling git or a remote may echo it: a decoded user can hold the '/' or
+    /// '@' that ends a URL's userinfo, and a remote can echo the token it was handed. A user beside a password is not bare
+    /// text to redact: it names an account, and git names it only inside a URL, since it asks for a password only when none
+    /// was given — masking it would mask every 'a' in git's reason, or the owner in the repository's path.
+    /// </summary>
+    private static string RedactPastedCredential(string url, string text) =>
+        new SecretRedactor(Spellings(PastedSecret(url))).Redact(UrlUserInfo().Replace(text, "${scheme}" + SecretRedactor.Placeholder + "@"));
+
+    /// <summary><paramref name="secret"/> in each spelling git may echo it: as written, decoded (git 2.33 names a user decoded) and re-encoded (later git re-encodes it).</summary>
+    private static IEnumerable<string> Spellings(string? secret) =>
+        secret is null ? Array.Empty<string>() : new[] { secret, Uri.UnescapeDataString(secret), Uri.EscapeDataString(Uri.UnescapeDataString(secret)) };
+
+    /// <summary>An http(s) URL's userinfo in free text: what follows the scheme up to an '@', with no '/', '?', '#', whitespace or quote between.</summary>
+    [GeneratedRegex(@"(?<scheme>https?://)[^/?#@\s'""]+@", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UrlUserInfo();
+
+    /// <summary>The URL origin keeps and an error names: without its userinfo (<see cref="RemoteTipResolver.SanitizeUrl"/>) when that carries a <see cref="PastedSecret"/>, otherwise as written.</summary>
+    private static string WithoutPastedCredential(string url) => PastedSecret(url) is null ? url : RemoteTipResolver.SanitizeUrl(url);
 
     private static string Summarize(string stderr) =>
         string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
