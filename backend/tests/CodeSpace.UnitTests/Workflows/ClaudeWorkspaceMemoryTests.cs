@@ -350,9 +350,10 @@ public sealed class ClaudeWorkspaceMemoryTests : IDisposable
                 _tree.Link("ws/CLAUDE.md", "AGENTS.md");
                 break;
             case "a .claude directory linked to another inside the workspace":
-                _tree.File("ws/shared/CLAUDE.md", "Shared.\n");
-                _tree.File("ws/shared/rules/r.md", "Rule.\n");
-                _tree.Link("ws/.claude", Path.Combine(_workspace, "shared"));
+                // A dot-directory, which the nested walk never enters: a shared/CLAUDE.md would be nested memory of its own.
+                _tree.File("ws/.shared/CLAUDE.md", "Shared.\n");
+                _tree.File("ws/.shared/rules/r.md", "Rule.\n");
+                _tree.Link("ws/.claude", Path.Combine(_workspace, ".shared"));
                 break;
             case "a CLAUDE.md linked to nothing":
                 _tree.Link("ws/CLAUDE.md", Outside("missing.md"));

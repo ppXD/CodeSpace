@@ -36,13 +36,14 @@ internal static class PhysicalPath
     /// search. The path is first normalised the way a caller's own path library does (a <c>..</c> in it is lexical),
     /// then walked one component at a time as the kernel walks it. A <c>..</c> inside a link's target is taken from
     /// where that link really is, never textually: <c>deep/../x</c> with <c>deep</c> linked to <c>/o/p/q</c> is
-    /// <c>/o/p/x</c>, which a lexical reading would place beside <c>deep</c>.
+    /// <c>/o/p/x</c>, which a lexical reading would place beside <c>deep</c>. Each component walked is spent from
+    /// <paramref name="allowance"/> when one is given, and the walk reaches nothing once it runs out.
     /// </summary>
-    public static string? File(string path)
+    public static string? File(string path, Allowance? allowance = null)
     {
         try
         {
-            return Walk(Path.GetFullPath(path));
+            return Walk(Path.GetFullPath(path), allowance);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -59,7 +60,7 @@ internal static class PhysicalPath
         return physicalPath == root || physicalPath.StartsWith(below, StringComparison.Ordinal);
     }
 
-    private static string? Walk(string full)
+    private static string? Walk(string full, Allowance? allowance)
     {
         var current = Path.GetPathRoot(full)!;
         var pending = Components(full[current.Length..]);
@@ -67,6 +68,8 @@ internal static class PhysicalPath
 
         while (pending.Count > 0)
         {
+            if (allowance?.Spend() == false) return null;
+
             var name = Pop(pending);
 
             if (name == "..")
@@ -109,4 +112,19 @@ internal static class PhysicalPath
 
     /// <summary>A link's target goes in front of whatever was left below the link.</summary>
     private static void Push(List<string> pending, string target) => pending.AddRange(Components(Path.IsPathRooted(target) ? target[Path.GetPathRoot(target)!.Length..] : target));
+
+    /// <summary>
+    /// What a caller that resolves many paths for one decision may spend walking them, in components: every one a walk
+    /// takes — a link target's own and each <c>..</c> included — costs one. The link-hop limit bounds how many targets a
+    /// walk follows but not how long each is, so a target that repeats <c>d/../</c> thousands of times costs what it walks.
+    /// </summary>
+    internal sealed class Allowance(long components)
+    {
+        private long _remaining = components;
+
+        /// <summary>Whether a walk has wanted more than the allowance held — the one way to tell a path that reaches nothing from a walk cut short.</summary>
+        public bool Spent => _remaining < 0;
+
+        internal bool Spend() => --_remaining >= 0;
+    }
 }

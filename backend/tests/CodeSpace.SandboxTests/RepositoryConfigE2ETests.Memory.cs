@@ -106,10 +106,14 @@ public sealed partial class RepositoryConfigE2ETests
     private static IEnumerable<string> Missing(ScriptedModelUpstream upstream, IReadOnlyList<Repository> repositories, string surface) =>
         repositories.Select(repo => repo.Directory).Except(Reached(upstream, repositories, surface));
 
+    /// <summary>The directory under a bound system root that the non-root lane creates for uid 1654 (sandbox-isolation.yml).</summary>
+    private const string NonRootOutsideRoot = "/etc/cs-sandbox-outside";
+
     /// <summary>
     /// A directory outside the workspace that the run can still read. Where the host confines, only the system roots are
     /// bound beside the workspace and the config home, and <c>/tmp</c> is the sandbox's own, so it goes under one of those
-    /// roots (this lane runs as root); anywhere else the temp path serves.
+    /// roots: directly as root, and under <see cref="NonRootOutsideRoot"/> as uid 1654, which cannot write <c>/etc</c> and is
+    /// handed that directory by the non-root lane. Anywhere else the temp path serves.
     /// </summary>
     private string NewOutsideDirectory()
     {
@@ -117,7 +121,11 @@ public sealed partial class RepositoryConfigE2ETests
 
         if (BubblewrapSandbox.Available is not null) BubblewrapSandbox.ReadOnlyRootDirs.ShouldContain(boundRoot, "fixture check: the outside file must sit where the sandbox can see it, or the control finds nothing to follow");
 
-        var directory = Path.Combine(BubblewrapSandbox.Available is null ? Path.GetTempPath() : boundRoot, $"cs-repo-config-outside-{Guid.NewGuid():N}");
+        var parent = BubblewrapSandbox.Available is null ? Path.GetTempPath() : Environment.IsPrivilegedProcess ? boundRoot : NonRootOutsideRoot;
+
+        if (parent == NonRootOutsideRoot) Directory.Exists(parent).ShouldBeTrue($"fixture check: the non-root lane must create {NonRootOutsideRoot} for uid 1654 (sandbox-isolation.yml) before it drops root");
+
+        var directory = Path.Combine(parent, $"cs-repo-config-outside-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         _directories.Add(directory);
         return directory;

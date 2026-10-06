@@ -90,10 +90,11 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// <summary>
     /// Claude Code's switch that loads every <c>--add-dir</c> directory's memory: its <c>CLAUDE.md</c>, its
     /// <c>.claude/CLAUDE.md</c>, each <c>.claude/rules</c> file WITHOUT a <c>paths:</c> frontmatter, and the in-repository
-    /// files those @-import. A rule scoped by <c>paths:</c> never loads from an added directory, not even once the run
-    /// opens a file it covers. This is the one project-memory route the pinned CLI's loader does not gate on the
-    /// <c>project</c> setting source, which is how a run pinned to <c>--setting-sources user</c> keeps the repository's
-    /// memory (see <see cref="AppendSettingsPin"/>). Pinned by a test (Rule 8).
+    /// files any of those or of its scoped rules @-import. A rule scoped by <c>paths:</c> never loads from an added
+    /// directory itself, not even once the run opens a file it covers. This is the one project-memory route the pinned
+    /// CLI's loader does not gate on the <c>project</c> setting source, which is how a run pinned to
+    /// <c>--setting-sources user</c> keeps the repository's memory (see <see cref="AppendSettingsPin"/>). Pinned by a
+    /// test (Rule 8).
     /// </summary>
     public const string AdditionalDirectoriesMemoryEnvVar = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
 
@@ -202,7 +203,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
         // model sees it.
         var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json" };
 
-        // The directories added back for their memory, less any whose memory reaches outside the workspace (see AppendSettingsPin).
+        // The directories added back for their memory — the workspace, its repositories and the nested directories that fit
+        // in place — less any whose memory reaches outside the workspace (see AppendSettingsPin).
         var memory = ClaudeWorkspaceMemory.For(task);
 
         // P3.2: a CONTINUE re-stage threads the prior session id as `--resume <id>` to pick up the conversation.
@@ -271,7 +273,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             ConfigHomeFiles = BuildConfigHomeFiles(task),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
-            // A repository's memory left out because it links outside the workspace — the run's timeline says so.
+            // Memory left out — linked outside the workspace, or nested past the in-place budget — the run's timeline says so.
             LaunchNotices = memory.Notices,
         };
     }
@@ -647,12 +649,15 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// <c>CLAUDE.local.md</c> and the output style its settings select stay out for good: a skill's or command's body
     /// runs shell once invoked and a skill's frontmatter runs hooks, an agent's frontmatter can set its own permission
     /// mode, hooks and MCP servers, <c>CLAUDE.local.md</c> is a developer's untracked file by convention, and an output
-    /// style replaces the CLI's own instructions in the system prompt. A rule scoped by <c>paths:</c> and a subdirectory's own
-    /// <c>CLAUDE.md</c>, which the unpinned CLI attached once the run opened a file they cover, are lost as well. The
-    /// subdirectory's memory is not unreachable: an <c>--add-dir</c> naming that subdirectory loads it in place, before
-    /// the first request. This pin adds only the workspace and its repositories. RepositoryConfigE2ETests pins what
-    /// loads and what does not against the real binary. <c>--add-dir</c> is variadic; every flag that follows it
-    /// terminates the list.</para>
+    /// style replaces the CLI's own instructions in the system prompt. A rule scoped by <c>paths:</c>, which the unpinned CLI
+    /// attached once the run opened a file it covers, is lost as well. A subdirectory's own memory, which it attached the
+    /// same way, comes back in place instead: an <c>--add-dir</c> naming the subdirectory loads its <c>CLAUDE.md</c>, its
+    /// <c>.claude/CLAUDE.md</c>, its rules without <c>paths:</c> and what its rules import before the first request, and
+    /// reads no settings from it either. Every nested directory that holds such memory is added after the workspace and
+    /// its repositories, shallowest first, when all of it together, imports included, fits the in-place budget; past it
+    /// none is (<see cref="ClaudeWorkspaceMemory"/>).
+    /// RepositoryConfigE2ETests pins what loads and what does not against the real binary. <c>--add-dir</c> is variadic;
+    /// every flag that follows it terminates the list.</para>
     ///
     /// <para>A multi-repo workspace runs at its root, which holds no <c>CLAUDE.md</c>, so every repository directory
     /// inside the workspace is added too, and each repository's memory loads.</para>

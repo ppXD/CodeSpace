@@ -6,24 +6,26 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 
 /// <summary>
 /// The directories a Claude run adds back with <c>--add-dir</c> so their memory loads (see
-/// <c>ClaudeCodeHarness.AppendSettingsPin</c>), less every one whose memory would bring in bytes from outside the
-/// workspace.
+/// <c>ClaudeCodeHarness.AppendSettingsPin</c>): the workspace and its repositories, then each nested directory that holds
+/// memory while all of them fit in place (ClaudeWorkspaceMemory.Nested.cs), less every one whose memory would bring in
+/// bytes from outside the workspace.
 ///
 /// <para>The pinned 2.1.263 opens an added directory's <c>CLAUDE.md</c> and <c>.claude/CLAUDE.md</c> by path and
 /// follows a symlink at either wherever it leads, and a <c>.claude</c> directory that is itself a link brings in what
 /// the directory it leads to holds, its rules included. What it reaches is handed to the model as the repository's
 /// instructions; RepositoryConfigE2ETests pins all three against the real binary. One such target is
 /// <c>/proc/self/environ</c>, which on Linux holds the CLI's own environment and with it the run's broker token. The
-/// same CLI does not follow a <c>.claude/rules</c> entry, file or folder, that links outside the added directory, and
-/// refuses an import that resolves outside its cwd unless external includes are approved, which a fresh per-run config
-/// home never is (both observed against 2.1.263). The guard counts those as escapes too, so a later CLI that follows
+/// same CLI does not follow a <c>.claude/rules</c> entry, file or folder, that links outside its cwd, and refuses an
+/// import that resolves outside its cwd unless external includes are approved, which a fresh per-run config home never
+/// is (both observed against 2.1.263). The guard counts those as escapes too, so a later CLI that follows
 /// them reaches nothing: before a directory is added, everything its memory can reach is resolved the way the kernel
 /// resolves it (<see cref="PhysicalPath.File"/>) — those memory files, the <c>.claude</c> directory itself, every
 /// markdown file and folder under <c>.claude/rules</c>, and every file they @-import, to <see cref="MaxImportHops"/>
 /// hops. If any of it resolves outside the workspace, the directory is left out whole and the run's timeline says so
 /// (<see cref="Plan.Notices"/>). A link that stays inside the workspace — <c>CLAUDE.md</c> to <c>AGENTS.md</c>, or one
-/// repository's rule to a sibling repository the same workspace holds — keeps loading, and so does one that dangles,
-/// which gives the CLI nothing to read.</para>
+/// repository's <c>CLAUDE.md</c> to a sibling repository the same workspace holds — keeps loading, and so does one that
+/// dangles, which gives the CLI nothing to read; a rules entry linked to a sibling the cwd does not hold is the CLI's own
+/// to skip.</para>
 ///
 /// <para>Any <c>@</c> followed by a run of non-space is taken for an import, inside code blocks too and with no space
 /// before it, wherever its target resolves: a superset of the CLI's own grammar. One exception, documented rather than
@@ -31,11 +33,11 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// yet when the invocation is built, so there is nothing to resolve; the CLI's refusal is its only guard.</para>
 ///
 /// <para>Every file is opened no-follow, non-blocking and only if regular (<see cref="LocalAcceptanceFileIdentity.Open"/>),
-/// so a FIFO in a repository cannot hang the build; the CLI reads no FIFO either. The bounds below only cap what one
-/// build may spend; what cannot be checked within them, or at all, leaves the directory out too, and the build never
-/// throws for it. The check runs on every build, a revise round's included, and nothing writes the workspace while it
-/// does: no agent process is running before a round starts. On a host that is neither Linux nor macOS the directories
-/// are added unchecked.</para>
+/// so a FIFO in a repository cannot hang the build; the CLI reads no FIFO either. The bounds below, and the build's
+/// <see cref="Budget"/> over every directory together, only cap what one build may spend; what cannot be checked within
+/// them, or at all, leaves the directory out too, and the build never throws for it. The check runs on every build, a
+/// revise round's included, and nothing writes the workspace while it does: no agent process is running before a round
+/// starts. On a host that is neither Linux nor macOS the directories are added unchecked.</para>
 /// </summary>
 internal static partial class ClaudeWorkspaceMemory
 {
@@ -49,15 +51,20 @@ internal static partial class ClaudeWorkspaceMemory
     /// </summary>
     internal const int MaxLookups = 16384;
 
-    /// <summary>The most bytes the guard reads from one directory's memory, every file it scans together; more leaves the directory out. Pinned by a test.</summary>
+    /// <summary>The most bytes the guard reads from one directory's memory, every file it scans together, more leaving the directory out; and the most the walk reads of one rule to find where its frontmatter closes. Pinned by a test.</summary>
     internal const int MaxScannedBytes = 4 * 1024 * 1024;
 
     /// <summary>The longest file or directory name a notice repeats; a longer one is cut. Pinned by a test.</summary>
     internal const int MaxNoticeNameLength = 120;
 
-    /// <summary>The directories to add, in order, and one sentence for each directory left out.</summary>
+    /// <summary>The directories to add, in order, and one sentence for each directory or walk bound that left memory out.</summary>
     internal sealed record Plan(IReadOnlyList<string> Directories, IReadOnlyList<string> Notices);
 
+    /// <summary>
+    /// The plan for one build. The workspace and its repositories are checked first, so no tree below them can spend the
+    /// build's <see cref="Budget"/> before their own memory is checked; the walk below then checks each nested directory
+    /// it would add as it finds it.
+    /// </summary>
     public static Plan For(AgentTask task)
     {
         if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return new Plan([], []);
@@ -66,10 +73,14 @@ internal static partial class ClaudeWorkspaceMemory
 
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return new Plan(roots, []);
 
-        var leftOut = LeftOut(ProvisionedRoot(task), roots);
-        var notices = leftOut.Select(item => Notice(task.WorkspaceDirectory, item.Root, item.Why)).ToList();
+        var workspace = PhysicalPath.File(ProvisionedRoot(task)) ?? ProvisionedRoot(task);
+        var guard = new Guard(workspace, new Budget());
+        var rootsLeftOut = LeftOut(guard, roots);
+        var nested = new NestedWalk(task.WorkspaceDirectory, roots, workspace, guard).Plan();
+        var leftOut = rootsLeftOut.Concat(LeftOut(guard, nested.Directories)).ToList();
+        var notices = LeftOutNotices(task.WorkspaceDirectory, guard, leftOut).Concat(nested.Notices).ToList();
 
-        return new Plan(roots.Except(leftOut.Select(item => item.Root), StringComparer.Ordinal).ToList(), notices);
+        return new Plan(roots.Concat(nested.Directories).Except(leftOut.Select(item => item.Root), StringComparer.Ordinal).ToList(), notices);
     }
 
     /// <summary>
@@ -100,26 +111,13 @@ internal static partial class ClaudeWorkspaceMemory
         return parent is not null && repositories.Count > 1 && repositories.Contains(cwd, StringComparer.Ordinal) && repositories.All(directory => Path.GetDirectoryName(directory) == parent) ? parent : cwd;
     }
 
-    /// <summary>Every root whose memory reaches outside the workspace or cannot be checked, in order, with why. The workspace is resolved by the same walker as everything its memory reaches, so the two sides of the comparison cannot disagree on a link.</summary>
-    private static List<(string Root, string Why)> LeftOut(string workspace, IEnumerable<string> roots)
-    {
-        var physical = PhysicalPath.File(workspace) ?? workspace;
+    /// <summary>Every directory whose memory reaches outside the workspace or cannot be checked, in order, with why.</summary>
+    private static List<(string Root, string Why)> LeftOut(Guard guard, IEnumerable<string> roots) =>
+        roots.Select(root => (Root: root, Why: guard.Of(root).Escape)).Where(item => item.Why is not null).Select(item => (item.Root, item.Why!)).ToList();
 
-        return roots.Select(root => (Root: root, Why: FirstEscape(physical, root))).Where(item => item.Why is not null).Select(item => (item.Root, item.Why!)).ToList();
-    }
-
-    /// <summary>Why one root must be left out, or null when all of its memory stays inside the workspace. A directory the guard cannot finish reading is left out rather than failing the launch.</summary>
-    private static string? FirstEscape(string workspace, string root)
-    {
-        try
-        {
-            return new Closure(workspace, root).FirstEscape();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            return "its memory could not be checked";
-        }
-    }
+    /// <summary>A notice for each directory left out by name, and one for all of them the budget left unchecked — which says too that the walk may have found less.</summary>
+    private static IEnumerable<string> LeftOutNotices(string workspace, Guard guard, IEnumerable<(string Root, string Why)> leftOut) =>
+        leftOut.Where(item => item.Why != Unchecked).Select(item => Notice(workspace, item.Root, item.Why)).Concat(guard.Budget.Spent ? [BudgetNotice] : []);
 
     private static string Notice(string workspace, string root, string why) => $"Left the memory in {Place(workspace, root)} out of this run: {why}.";
 

@@ -50,6 +50,7 @@ public class FailureTaxonomyTests
         "MaterializationHaltException",
         "LegacyProviderRejectedException",
         "LegacyProviderLeasePoisonedException",
+        "MemoryBudgetSpentException",
     };
 
     [Fact]

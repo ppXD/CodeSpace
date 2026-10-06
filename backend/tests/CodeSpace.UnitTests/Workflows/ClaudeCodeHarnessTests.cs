@@ -201,6 +201,57 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void A_tree_with_no_nested_memory_builds_the_argv_a_bare_workspace_builds()
+    {
+        // Directories, docs, memory under a dot-directory or node_modules, and settings or a scoped rule with nothing the
+        // CLI loads in place beside them: none of it is nested memory, so the argv is the one every run had before.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+
+        tree.File("ws/CLAUDE.md", "Root memory.\n");
+        tree.File("ws/src/app.ts", "export {};\n");
+        tree.File("ws/docs/notes.md", "Notes.\n");
+        tree.File("ws/.github/CLAUDE.md", "Under a dot-directory.\n");
+        tree.File("ws/node_modules/x/CLAUDE.md", "A dependency's own.\n");
+        tree.File("ws/pkg/.claude/settings.json", "{}");
+        tree.File("ws/pkg/.claude/rules/ts.md", "---\npaths: \"**/*.ts\"\n---\nTypes.\n");
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = new[] { workspace } });
+
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--setting-sources", "user", "--add-dir", workspace, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions" });
+        spec.LaunchNotices.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Nested_memory_rides_the_one_variadic_add_dir_after_the_workspace_and_the_pin_stays()
+    {
+        // An --add-dir naming a nested directory loads its memory in place and none of its settings
+        // (RepositoryConfigE2ETests); a second --add-dir flag, or anything the pin drops, would be a different route.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+
+        tree.File("ws/pkg/CLAUDE.md", "Package memory.\n");
+        tree.File("ws/pkg/.claude/settings.json", "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:9\"}}");
+        tree.File("ws/lib/.claude/rules/style.md", "Tabs.\n");
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = new[] { workspace } });
+        var args = spec.Args.ToList();
+
+        args.Skip(args.IndexOf("--add-dir") + 1).TakeWhile(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ShouldBe(new[] { workspace, Path.Combine(workspace, "lib"), Path.Combine(workspace, "pkg") });
+        args.Count(arg => arg == "--add-dir").ShouldBe(1, "one variadic --add-dir carries every directory");
+        args.Count(arg => arg == "--setting-sources").ShouldBe(1);
+        args[args.IndexOf("--setting-sources") + 1].ShouldBe("user");
+        args.ShouldNotContain("--plugin-dir");
+        args.ShouldNotContain("--agents");
+        spec.Environment[ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar].ShouldBe("1");
+        spec.ConfigHomeFiles.ShouldBeEmpty("nested memory loads where it is: no repository byte is copied into the config home");
+    }
+
+    [Fact]
     public void LaunchNotices_never_reach_the_serialized_spec()
     {
         // The launch frame and the invocation's binding identity are the serialized spec: a notice is for the timeline only.
