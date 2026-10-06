@@ -50,14 +50,11 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
         Directory.CreateDirectory(PackClonesRoot);
         var dir = Path.Combine(PackClonesRoot, Guid.NewGuid().ToString("N"));
 
-        var args = BuildCloneArgs(url, reference, dir);
-
         SandboxResult result;
         try
         {
             Directory.CreateDirectory(dir);
-            result = await _runners.Resolve(SandboxKinds.Local)
-                .RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+            result = await _runners.Resolve(SandboxKinds.Local).RunAsync(BuildCloneSpec(url, reference, dir), cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -95,6 +92,10 @@ public sealed class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, IS
 
         return args;
     }
+
+    /// <summary>The clone as the runner gets it: <see cref="BuildCloneArgs"/> in <paramref name="dir"/>, with the network. A pasted URL carrying a token clones as a <see cref="TokenedGitCommand"/>, so no credential helper stores it and no trace2 target records it.</summary>
+    internal static SandboxSpec BuildCloneSpec(string url, string? reference, string dir) =>
+        TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = BuildCloneArgs(url, reference, dir), WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true });
 
     // ── IWorkspaceJanitor: reclaim pack clones orphaned by a crashed worker ──────────────────────────
 

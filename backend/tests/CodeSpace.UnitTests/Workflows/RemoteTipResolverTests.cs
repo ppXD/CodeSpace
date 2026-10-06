@@ -176,7 +176,36 @@ public sealed class RemoteTipResolverTests
         RemoteTipResolver.SanitizeUrl("https://host/repo.git").ShouldBe("https://host/repo.git");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_launch_probe_runs_as_a_tokened_command_only_when_it_carries_a_token(bool tokened)
+    {
+        // The probe names the authed URL, so a tokened probe must leave nothing for an operator's store helper or trace2
+        // target to keep; an untokened one keeps both, and the helpers may be how it authenticates.
+        var tip = new string('c', 40);
+        var runner = new LsRemoteRunner($"{tip}\trefs/heads/main\n");
+        var request = new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = tokened ? "test-token" : null, Ref = "main" };
+
+        var sha = await new RemoteTipResolver(new SandboxRunnerRegistry(new ISandboxRunner[] { runner })).ResolveTipShaAsync(request, refRequired: true, CancellationToken.None);
+
+        sha.ShouldBe(tip);
+        var probe = runner.Specs.ShouldHaveSingleItem();
+        TokenedGitSpecs.RunsTokened(probe, "https://example.test").ShouldBe(tokened, string.Join(' ', probe.Args));
+    }
+
     // ─── harness (the LocalGitWorkspaceProviderTests pattern) ───────────────────────
+
+    private sealed class LsRemoteRunner(string stdout) : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<SandboxSpec> Specs { get; } = new();
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Add(spec);
+            return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = stdout, Stderr = "" });
+        }
+    }
 
     private static RemoteTipResolver NewResolver() =>
         new(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }));

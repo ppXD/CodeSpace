@@ -332,7 +332,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
 
         var cloneResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+            TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
 
         if (cloneResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");

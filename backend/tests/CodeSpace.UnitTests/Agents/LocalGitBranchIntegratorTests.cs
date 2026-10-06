@@ -1,4 +1,8 @@
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace.Integrators;
+using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -92,5 +96,71 @@ public class LocalGitBranchIntegratorTests
         var detail = LocalGitBranchIntegrator.RedactedConflictDetail(stderr, "/nonexistent", null);
 
         detail.ShouldBe(filler + "…", "the cap drops the WHOLE surrogate pair rather than emit its unpaired high half");
+    }
+
+    // ── Tokened commands: the ones whose git transport reaches the tokened origin ──────────
+
+    [Theory]
+    [InlineData(true, false)]    // clean: the clone and the push
+    [InlineData(true, true)]     // conflicted: the clone only — nothing is pushed
+    [InlineData(false, false)]   // untokened: an anonymous clone keeps the operator's helpers and trace2
+    [InlineData(false, true)]
+    public async Task Only_the_clone_and_the_push_run_as_tokened_commands(bool tokened, bool conflicted)
+    {
+        // The integration clone keeps its tokened origin to the end, but only the commands whose git transport talks to it
+        // hand the URL's password to credential helpers or write the URL to trace2: the clone names the authed URL, and the
+        // push goes through origin. The base checkout, the apply and the reset back to base download LFS objects through origin too, but
+        // git-lfs authenticates those from the URL and neither asks nor tells a helper (TokenedGitCredentialHelperFlowTests
+        // proves it), so they run as written, like the commit, the diffs and the rev-parses.
+        var runner = new IntegrationRunner(conflicted);
+        var integrator = new LocalGitBranchIntegrator(new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), new InlineOffloader(), NullLogger<LocalGitBranchIntegrator>.Instance);
+
+        await integrator.IntegrateAsync(new IntegrationRequest
+        {
+            TeamId = Guid.NewGuid(), RepositoryUrl = "https://example.test/repo.git", BaseSha = "base", Token = tokened ? "test-token" : null, IntegrationBranch = "codespace/integration/run",
+            Contributions = new[] { new BranchContribution { Label = "agent", BaseSha = "base", Patch = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n" } },
+        }, CancellationToken.None);
+
+        var transport = new[] { "clone", "push" };
+        var subcommands = runner.Specs.Select(Subcommand).ToList();
+        subcommands.ShouldContain(conflicted ? "reset" : "commit", "fixture check: the run took the intended path");
+        subcommands.ShouldContain("checkout", "fixture check: the base was checked out");
+        subcommands.ShouldContain("apply", "fixture check: the patch was applied");
+        if (tokened && !conflicted) subcommands.ShouldContain("push", "fixture check: a clean tokened integration pushes");
+
+        foreach (var spec in runner.Specs)
+            TokenedGitSpecs.RunsTokened(spec, "https://example.test").ShouldBe(tokened && transport.Contains(Subcommand(spec)), string.Join(' ', spec.Args));
+    }
+
+    /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>
+    private static string Subcommand(SandboxSpec spec)
+    {
+        var i = 0;
+        while (spec.Args[i] is "-c" or "-C") i += 2;
+        return spec.Args[i];
+    }
+
+    /// <summary>Answers an integration the way git would for one contribution: the apply succeeds or conflicts, the index then has staged changes, and the integration branch does not exist yet.</summary>
+    private sealed class IntegrationRunner(bool conflicted) : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<SandboxSpec> Specs { get; } = new();
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Add(spec);
+
+            var fails = (spec.Args.Contains("apply") && conflicted) || spec.Args.Contains("--quiet") || spec.Args.Contains("--verify");
+
+            return Task.FromResult(fails
+                ? new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "" }
+                : new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
+        }
+    }
+
+    private sealed class InlineOffloader : IArtifactOffloader
+    {
+        public Task<string> ResolveAsync(Guid teamId, string? inline, Guid? artifactId, CancellationToken cancellationToken) => Task.FromResult(inline ?? "");
+        public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 }

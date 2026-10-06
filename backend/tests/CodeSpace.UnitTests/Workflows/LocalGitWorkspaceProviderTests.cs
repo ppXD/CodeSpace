@@ -628,6 +628,87 @@ public sealed class LocalGitWorkspaceProviderTests
         }
     }
 
+    // ─── Tokened commands: every command that runs while the token is in reach ──────────
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Every_command_before_the_token_strip_runs_as_a_tokened_command_when_the_clone_is_tokened(bool tokened)
+    {
+        // Until the strip, the token is in reach: the probe and the clone name the authed URL, and the pin's fetch rungs go
+        // through the still-tokened origin. Every command before the strip shares one runner path, so each runs as a
+        // tokened command — the local ones (the ancestry checks, the pin's checkout) at no cost. The strip and the base
+        // read after it reach no tokened remote, and an untokened clone keeps the operator's helpers and trace2 on every
+        // command — they may be how it authenticates.
+        var runner = new PinFetchRunner();
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = "https://example.test/repo.git", Token = tokened ? "test-token" : null, Ref = "session", DefaultRef = "main", PinnedSha = new string('b', 40), Depth = 1,
+        }), CancellationToken.None);
+
+        var subcommands = runner.Specs.Select(Subcommand).ToList();
+        subcommands.ShouldContain("ls-remote", "fixture check: the soft-ref probe ran");
+        subcommands.Count(s => s == "fetch").ShouldBe(3, "fixture check: every fetch rung of the pin ran");
+        subcommands.ShouldContain("checkout", "fixture check: the pin was checked out");
+
+        var strip = runner.Specs.FindIndex(s => s.Args.Contains("set-url"));
+        (strip > 0).ShouldBe(tokened, "fixture check: only a tokened clone strips its origin");
+
+        for (var i = 0; i < runner.Specs.Count; i++)
+            TokenedGitSpecs.RunsTokened(runner.Specs[i], "https://example.test").ShouldBe(tokened && i < strip, string.Join(' ', runner.Specs[i].Args));
+    }
+
+    [Fact]
+    public async Task Only_the_publish_commands_that_name_the_authed_url_run_as_tokened_commands()
+    {
+        // The LFS upload, the push and its readback carry the token in their argv. Every other post-turn command — over the
+        // agent clone or in the publish repo — reaches no tokened remote and is left as written.
+        var runner = new PostTurnRunner(agentCommittedItself: false);
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        const string token = "fixture-token";
+
+        await using var handle = await provider.PrepareAsync(PostTurnProvision(token, multiRepo: false), CancellationToken.None);
+        var oid = "abcd" + new string('0', 60);
+        var lfsObject = Path.Combine(handle.Directory, ".git", "lfs", "objects", "ab", "cd", oid);
+        Directory.CreateDirectory(Path.GetDirectoryName(lfsObject)!);
+        await File.WriteAllTextAsync(lfsObject, "an lfs object the branch points at\n");
+        var prepared = runner.Specs.Count;
+
+        (await ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None)).ShouldBe("codespace/run");
+
+        var postTurn = runner.Specs.Skip(prepared).ToList();
+        var tokened = postTurn.Where(s => s.Args.Any(a => a.Contains(token))).ToList();
+
+        tokened.Select(Subcommand).ShouldBe(new[] { "lfs", "push", "ls-remote" }, "fixture check: the LFS upload, the push and the readback all ran");
+        tokened.ShouldAllBe(s => TokenedGitSpecs.RunsTokened(s, "https://example.test"));
+        postTurn.Where(s => !tokened.Contains(s)).ShouldAllBe(s => !TokenedGitSpecs.RunsTokened(s, "https://example.test"));
+    }
+
+    /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>
+    private static string Subcommand(SandboxSpec spec)
+    {
+        var i = 0;
+        while (spec.Args[i] is "-c" or "-C") i += 2;
+        return spec.Args[i];
+    }
+
+    /// <summary>Records every spec and answers success with a fixed 40-char sha, except that no commit is ever local (<c>rev-parse --verify</c> fails), so a pin walks every fetch rung before its checkout.</summary>
+    private sealed class PinFetchRunner : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<SandboxSpec> Specs { get; } = new();
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Add(spec);
+
+            return Task.FromResult(spec.Args.Contains("--verify")
+                ? new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "" }
+                : new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
+        }
+    }
+
     // ─── Change capture ──────────────────────────────────────────────────────
 
     // ── S1: PinnedSha — the immutable-base substrate ─────────────────────────────────
