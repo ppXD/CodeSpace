@@ -80,8 +80,8 @@ internal static partial class ClaudeWorkspaceMemory
     /// <summary>
     /// The outside-link guard of one build: whether a directory's memory reaches outside the physical
     /// <paramref name="workspace"/> or cannot be checked, and why — each directory checked once against the build's
-    /// <paramref name="budget"/>. The workspace is resolved by the same walker as everything its memory reaches, so the
-    /// two sides of the comparison cannot disagree on a link.
+    /// <paramref name="budget"/>, whichever route asks, an <c>--add-dir</c> or a pointer. The workspace is resolved by the
+    /// same walker as everything its memory reaches, so the two sides of the comparison cannot disagree on a link.
     /// </summary>
     private sealed class Guard(string workspace, Budget budget)
     {

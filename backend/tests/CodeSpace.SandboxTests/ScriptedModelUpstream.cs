@@ -22,8 +22,11 @@ namespace CodeSpace.SandboxTests;
 /// </summary>
 internal sealed class ScriptedModelUpstream(IReadOnlyList<string> commands, string finalText) : HttpMessageHandler
 {
-    /// <summary>The prefix every scripted tool call's id carries, so a later turn can count how many it has already answered.</summary>
-    private const string ToolIdPrefix = "toolu_review_";
+    /// <summary>The prefix every scripted tool call's id carries, followed by its step, so a later turn can count how many it has already answered and a test can find each call's result.</summary>
+    internal const string ToolIdPrefix = "toolu_review_";
+
+    /// <summary>The same for the calls of <see cref="Subagent"/>'s script, which runs in a conversation of its own.</summary>
+    internal const string SubagentToolIdPrefix = "toolu_subagent_";
 
     private readonly ConcurrentQueue<RecordedRequest> _requests = new();
 
@@ -38,6 +41,20 @@ internal sealed class ScriptedModelUpstream(IReadOnlyList<string> commands, stri
     /// fails the run at once, naming the tool, instead of quietly answering a call it no longer has.
     /// </summary>
     public IReadOnlyList<ScriptedToolCall>? ClaudeCalls { get; init; }
+
+    /// <summary>
+    /// The script of a subagent the main loop starts (with an <c>Agent</c> call in <see cref="ClaudeCalls"/>): a turn whose
+    /// system prompt holds its marker is one of that subagent's, and calls the next of its calls, then answers. Its
+    /// conversation holds none of the main loop's calls, nor the main loop's its, so each counts its own.
+    /// </summary>
+    public ScriptedSubagent? Subagent { get; init; }
+
+    /// <summary>
+    /// Whether the permission classifier's side query — the one that carries the run's <c>&lt;transcript&gt;</c> — gets the
+    /// verdict that lets the call through (<c>&lt;block&gt;no&lt;/block&gt;</c>), so a plan-mode run may start a read-only
+    /// subagent. Off, the classifier gets no verdict it can parse and the CLI refuses the call, which other arms rely on.
+    /// </summary>
+    public bool ClassifierAllows { get; init; }
 
     /// <summary>Every request the broker relayed, in arrival order — the model-side ground truth of what the CLI sent.</summary>
     public IReadOnlyList<RecordedRequest> Requests => _requests.ToArray();
@@ -55,22 +72,22 @@ internal sealed class ScriptedModelUpstream(IReadOnlyList<string> commands, stri
 
         if (path.EndsWith("/responses", StringComparison.Ordinal)) return ResponsesTurn(json);
 
-        if (path.EndsWith("/messages", StringComparison.Ordinal)) return MessagesTurn(json);
+        if (path.EndsWith("/messages", StringComparison.Ordinal)) return MessagesTurn(json, body);
 
         return Json("""{"input_tokens":11}""");
     }
 
-    private HttpResponseMessage MessagesTurn(JsonObject? request)
+    private HttpResponseMessage MessagesTurn(JsonObject? request, string body)
     {
         var model = Text(request?["model"]) ?? "scripted-model";
         var hasTools = request?["tools"] is JsonArray { Count: > 0 };
         var streaming = request?["stream"] is JsonValue stream && stream.TryGetValue<bool>(out var on) && on;
 
-        // A side query (no tools: a title, a summary) answers plainly; only the main loop runs the script.
-        if (!hasTools) return streaming ? Sse(AnthropicText(model, "ok")) : Json(AnthropicMessage(model, new JsonArray(new JsonObject { ["type"] = "text", ["text"] = "ok" }), "end_turn"));
+        // A side query (no tools: a title, a summary, a classifier's verdict) answers plainly; only the main loop runs the script.
+        if (!hasTools) return SideAnswer(model, streaming, ClassifierAllows && body.Contains("<transcript>", StringComparison.Ordinal) ? "<block>no</block>" : "ok");
 
-        var step = AnsweredToolCalls(request!["messages"] as JsonArray);
-        var script = ClaudeCalls ?? commands.Select(BashCall).ToList();
+        var (script, prefix) = Subagent is { } subagent && (request!["system"]?.ToJsonString() ?? "").Contains(subagent.SystemMarker, StringComparison.Ordinal) ? (subagent.Calls, SubagentToolIdPrefix) : (ClaudeCalls ?? commands.Select(BashCall).ToList(), ToolIdPrefix);
+        var step = AnsweredToolCalls(request!["messages"] as JsonArray, prefix);
 
         if (step < script.Count)
         {
@@ -79,11 +96,14 @@ internal sealed class ScriptedModelUpstream(IReadOnlyList<string> commands, stri
 
             if (!offered.Contains(call.Name)) return Unscriptable($"The CLI offered no {call.Name} tool for this script to call; it offered: {string.Join(", ", offered)}");
 
-            return streaming ? Sse(AnthropicToolUse(model, step, call)) : Json(AnthropicMessage(model, new JsonArray(new JsonObject { ["type"] = "tool_use", ["id"] = ToolIdPrefix + step, ["name"] = call.Name, ["input"] = call.Input.DeepClone() }), "tool_use"));
+            return streaming ? Sse(AnthropicToolUse(model, prefix + step, call)) : Json(AnthropicMessage(model, new JsonArray(new JsonObject { ["type"] = "tool_use", ["id"] = prefix + step, ["name"] = call.Name, ["input"] = call.Input.DeepClone() }), "tool_use"));
         }
 
         return streaming ? Sse(AnthropicText(model, FinalText)) : Json(AnthropicMessage(model, new JsonArray(new JsonObject { ["type"] = "text", ["text"] = FinalText }), "end_turn"));
     }
+
+    private static HttpResponseMessage SideAnswer(string model, bool streaming, string text) =>
+        streaming ? Sse(AnthropicText(model, text)) : Json(AnthropicMessage(model, new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }), "end_turn"));
 
     private HttpResponseMessage ResponsesTurn(JsonObject? request)
     {
@@ -113,13 +133,13 @@ internal sealed class ScriptedModelUpstream(IReadOnlyList<string> commands, stri
 
     private static ScriptedToolCall BashCall(string command) => new("Bash", new JsonObject { ["command"] = command, ["description"] = "Read the change under review" });
 
-    private static int AnsweredToolCalls(JsonArray? messages) =>
-        messages?.Count(message => Text(message?["role"]) == "assistant" && message!["content"] is JsonArray blocks && blocks.Any(block => Text(block?["type"]) == "tool_use" && Text(block!["id"])?.StartsWith(ToolIdPrefix, StringComparison.Ordinal) == true)) ?? 0;
+    private static int AnsweredToolCalls(JsonArray? messages, string prefix) =>
+        messages?.Count(message => Text(message?["role"]) == "assistant" && message!["content"] is JsonArray blocks && blocks.Any(block => Text(block?["type"]) == "tool_use" && Text(block!["id"])?.StartsWith(prefix, StringComparison.Ordinal) == true)) ?? 0;
 
-    private static IEnumerable<(string Event, JsonObject Data)> AnthropicToolUse(string model, int step, ScriptedToolCall call)
+    private static IEnumerable<(string Event, JsonObject Data)> AnthropicToolUse(string model, string id, ScriptedToolCall call)
     {
         yield return AnthropicStart(model);
-        yield return ("content_block_start", new JsonObject { ["type"] = "content_block_start", ["index"] = 0, ["content_block"] = new JsonObject { ["type"] = "tool_use", ["id"] = ToolIdPrefix + step, ["name"] = call.Name, ["input"] = new JsonObject() } });
+        yield return ("content_block_start", new JsonObject { ["type"] = "content_block_start", ["index"] = 0, ["content_block"] = new JsonObject { ["type"] = "tool_use", ["id"] = id, ["name"] = call.Name, ["input"] = new JsonObject() } });
         yield return ("content_block_delta", new JsonObject { ["type"] = "content_block_delta", ["index"] = 0, ["delta"] = new JsonObject { ["type"] = "input_json_delta", ["partial_json"] = call.Input.ToJsonString() } });
         yield return ("content_block_stop", new JsonObject { ["type"] = "content_block_stop", ["index"] = 0 });
         yield return ("message_delta", new JsonObject { ["type"] = "message_delta", ["delta"] = new JsonObject { ["stop_reason"] = "tool_use", ["stop_sequence"] = null }, ["usage"] = new JsonObject { ["output_tokens"] = 7 } });
@@ -200,3 +220,6 @@ internal sealed record RecordedRequest(string Method, string Path, string Body);
 
 /// <summary>One call a scripted Claude turn makes: the CLI tool's name as the request offers it, and the tool's input.</summary>
 internal sealed record ScriptedToolCall(string Name, JsonObject Input);
+
+/// <summary>A subagent's script: the text its system prompt carries, which tells its turns from the main loop's, and the calls it makes.</summary>
+internal sealed record ScriptedSubagent(string SystemMarker, IReadOnlyList<ScriptedToolCall> Calls);

@@ -32,6 +32,9 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// closed: a <c>~</c> import names the run's own home, which under confinement is its config home and does not exist
 /// yet when the invocation is built, so there is nothing to resolve; the CLI's refusal is its only guard.</para>
 ///
+/// <para>A pointer rule (ClaudeWorkspaceMemory.Pointers.cs) names files the model may read, so the directory it points
+/// into is checked the same way first, and one that reaches outside gets no pointer.</para>
+///
 /// <para>Every file is opened no-follow, non-blocking and only if regular (<see cref="LocalAcceptanceFileIdentity.Open"/>),
 /// so a FIFO in a repository cannot hang the build; the CLI reads no FIFO either. The bounds below, and the build's
 /// <see cref="Budget"/> over every directory together, only cap what one build may spend; what cannot be checked within
@@ -57,8 +60,8 @@ internal static partial class ClaudeWorkspaceMemory
     /// <summary>The longest file or directory name a notice repeats; a longer one is cut. Pinned by a test.</summary>
     internal const int MaxNoticeNameLength = 120;
 
-    /// <summary>The directories to add, in order, and one sentence for each directory or walk bound that left memory out.</summary>
-    internal sealed record Plan(IReadOnlyList<string> Directories, IReadOnlyList<string> Notices);
+    /// <summary>The directories to add, in order; the pointer rules the run's config home carries (ClaudeWorkspaceMemory.Pointers.cs); and one sentence for each directory, rule or bound that left memory out.</summary>
+    internal sealed record Plan(IReadOnlyList<string> Directories, IReadOnlyList<ConfigHomeFile> Pointers, IReadOnlyList<string> Notices);
 
     /// <summary>
     /// The plan for one build. The workspace and its repositories are checked first, so no tree below them can spend the
@@ -67,20 +70,21 @@ internal static partial class ClaudeWorkspaceMemory
     /// </summary>
     public static Plan For(AgentTask task)
     {
-        if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return new Plan([], []);
+        if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return new Plan([], [], []);
 
         var roots = RootDirectories(task).ToList();
 
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return new Plan(roots, []);
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return new Plan(roots, [], []);
 
         var workspace = PhysicalPath.File(ProvisionedRoot(task)) ?? ProvisionedRoot(task);
         var guard = new Guard(workspace, new Budget());
         var rootsLeftOut = LeftOut(guard, roots);
         var nested = new NestedWalk(task.WorkspaceDirectory, roots, workspace, guard).Plan();
-        var leftOut = rootsLeftOut.Concat(LeftOut(guard, nested.Directories)).ToList();
-        var notices = LeftOutNotices(task.WorkspaceDirectory, guard, leftOut).Concat(nested.Notices).ToList();
+        var leftOut = rootsLeftOut.Concat(LeftOut(guard, nested.InPlace)).ToList();
+        var pointers = new PointerRules(task.WorkspaceDirectory, guard, roots.Concat(nested.InPlace)).For(nested);
+        var notices = LeftOutNotices(task.WorkspaceDirectory, leftOut).Concat(nested.Notices).Concat(pointers.Notices).Concat(guard.Budget.Spent ? [BudgetNotice] : []).ToList();
 
-        return new Plan(roots.Concat(nested.Directories).Except(leftOut.Select(item => item.Root), StringComparer.Ordinal).ToList(), notices);
+        return new Plan(roots.Concat(nested.InPlace).Except(leftOut.Select(item => item.Root), StringComparer.Ordinal).ToList(), pointers.Files, notices);
     }
 
     /// <summary>
@@ -115,9 +119,9 @@ internal static partial class ClaudeWorkspaceMemory
     private static List<(string Root, string Why)> LeftOut(Guard guard, IEnumerable<string> roots) =>
         roots.Select(root => (Root: root, Why: guard.Of(root).Escape)).Where(item => item.Why is not null).Select(item => (item.Root, item.Why!)).ToList();
 
-    /// <summary>A notice for each directory left out by name, and one for all of them the budget left unchecked — which says too that the walk may have found less.</summary>
-    private static IEnumerable<string> LeftOutNotices(string workspace, Guard guard, IEnumerable<(string Root, string Why)> leftOut) =>
-        leftOut.Where(item => item.Why != Unchecked).Select(item => Notice(workspace, item.Root, item.Why)).Concat(guard.Budget.Spent ? [BudgetNotice] : []);
+    /// <summary>A notice for each directory left out by name; those the budget left unchecked share <see cref="BudgetNotice"/>, which says too that the walk may have found less.</summary>
+    private static IEnumerable<string> LeftOutNotices(string workspace, IEnumerable<(string Root, string Why)> leftOut) =>
+        leftOut.Where(item => item.Why != Unchecked).Select(item => Notice(workspace, item.Root, item.Why));
 
     private static string Notice(string workspace, string root, string why) => $"Left the memory in {Place(workspace, root)} out of this run: {why}.";
 

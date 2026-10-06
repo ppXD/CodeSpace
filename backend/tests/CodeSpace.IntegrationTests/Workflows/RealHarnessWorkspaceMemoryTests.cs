@@ -17,8 +17,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
 /// A repository's memory run through the production pipeline: does the CLI get its workspace added back for memory, and
-/// does the run's timeline say why not when it doesn't — for a <c>CLAUDE.md</c> committed as a symlink — and does a
-/// nested directory holding memory ride the same <c>--add-dir</c>, committed or written by an earlier round?
+/// does the run's timeline say why not when it doesn't — for a <c>CLAUDE.md</c> committed as a symlink — does a
+/// nested directory holding memory ride the same <c>--add-dir</c>, committed or written by an earlier round, and does
+/// each round's config home point at the scoped rules and the over-budget directories its workspace holds?
 ///
 /// <para>🟡 Medium-mock (Rule 12): the real DI-wired <see cref="IAgentRunExecutor"/>, the real
 /// <see cref="ClaudeCodeHarness"/>, <c>LocalGitWorkspaceProvider</c> cloning a <c>file://</c> bare remote (the symlink
@@ -104,6 +105,41 @@ public sealed class RealHarnessWorkspaceMemoryTests
         cli.Launches().ShouldBe(new[] { draft, revision }, "each round is launched with the nested memory its workspace holds when the round starts");
         result.ReviseRounds.ShouldBe(1, "fixture check: the drafted round failed its check, so the executor built a second spec for the revision");
         notices.ShouldBeEmpty("nothing was left out");
+    }
+
+    [Fact]
+    public async Task A_large_tree_and_its_scoped_rules_reach_each_round_as_pointer_rules_its_own_config_home_carries()
+    {
+        // Past the in-place budget no nested directory is added; each is pointed at from the round's config home, beside
+        // a pointer for the committed scoped rule, whose glob the fake reads back rebased onto the cwd — but not pkg-out,
+        // whose CLAUDE.md links outside the workspace: the guard leaves it without one, and says so once. The draft
+        // round's agent writes a scoped rule of its own: the revision's fresh config home points at it, the draft's did not.
+        if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script
+
+        var packages = Enumerable.Range(0, ClaudeWorkspaceMemory.MaxInPlaceDirectories + 1).Select(i => $"pkg-{i:00}").ToList();
+        var files = packages.ToDictionary(package => $"{package}/CLAUDE.md", _ => "Keep the package's API stable.\n");
+        var directories = string.Join(' ', packages.Select(package => package == "pkg-00" ? "/pkg-00 /pkg-00/**/*.ts" : $"/{package}"));
+
+        files["pkg-00/.claude/rules/ts.md"] = "---\npaths: \"*.ts\"\n---\nType every export.\n";
+
+        using var outside = new OutsideFile();
+        using var remote = new BareRemote();
+        await remote.SeedAsync(CheckScript, claudeMdTarget: "AGENTS.md", files: files, links: new Dictionary<string, string> { ["pkg-out/CLAUDE.md"] = outside.Path });
+        using var cli = new MemoryCheckingFakeCli($". ; {directories}", $". ; /lib/py/*.py {directories}", draftAction: "mkdir -p lib/.claude/rules && printf -- '---\\npaths: py/*.py\\n---\\nPython.\\n' > lib/.claude/rules/py.md", pointers: true);
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, userId, repoId, cli.Env());
+
+        await ExecuteRealAsync(runId);
+
+        var (run, result) = await LoadAsync(runId);
+        var notices = (await LoadEventsAsync(runId)).Where(e => e.Text.StartsWith(NoticePrefix, StringComparison.Ordinal)).ToList();
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the fake CLI fails a round whose argv or config-home pointers are not what its workspace holds when it starts; error: {run.Error}; launches: {string.Join(", ", cli.Launches())}");
+        cli.Launches().ShouldBe(new[] { $". ; {directories}", $". ; /lib/py/*.py {directories}" }, "each round's own config home points at what its workspace holds when the round starts");
+        result.ReviseRounds.ShouldBe(1, "fixture check: the drafted round failed its check, so the executor built a second spec for the revision");
+        notices.Select(e => e.Text).ShouldBe(new[] { $"Left the memory of every nested directory out of the run's first request: together it spans more than {ClaudeWorkspaceMemory.MaxInPlaceDirectories} directories or {ClaudeWorkspaceMemory.MaxInPlaceBytes} bytes. A read below one of them points the run at that directory's memory instead. Left the memory in 'pkg-out' out of this run: CLAUDE.md resolves outside the workspace." }, "said once, in one event: the revision leaves out what the draft did");
     }
 
     /// <summary>What <c>CLAUDE.md</c> links to for <paramref name="where"/>.</summary>
@@ -220,7 +256,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
         }
     }
 
-    /// <summary>A bare local remote whose one commit holds the contract's check, an <c>AGENTS.md</c>, a <c>CLAUDE.md</c> committed as a symlink, and any other files given. GUID-suffixed; best-effort cleanup.</summary>
+    /// <summary>A bare local remote whose one commit holds the contract's check, an <c>AGENTS.md</c>, a <c>CLAUDE.md</c> committed as a symlink, and any other files and symlinks given. GUID-suffixed; best-effort cleanup.</summary>
     private sealed class BareRemote : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-memory-remote-" + Guid.NewGuid().ToString("N"));
@@ -234,7 +270,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
 
         public string Url => new Uri(_bare).AbsoluteUri;
 
-        public async Task SeedAsync(string checkScript, string claudeMdTarget, IReadOnlyDictionary<string, string>? files = null)
+        public async Task SeedAsync(string checkScript, string claudeMdTarget, IReadOnlyDictionary<string, string>? files = null, IReadOnlyDictionary<string, string>? links = null)
         {
             await Git(_root, "init", "--bare", "-b", "main", _bare);
 
@@ -252,6 +288,12 @@ public sealed class RealHarnessWorkspaceMemoryTests
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(seed, relative))!);
                 await File.WriteAllTextAsync(Path.Combine(seed, relative), content);
+            }
+
+            foreach (var (relative, target) in links ?? new Dictionary<string, string>())
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(seed, relative))!);
+                File.CreateSymbolicLink(Path.Combine(seed, relative), target);
             }
 
             await Git(seed, "add", "-A");
@@ -275,7 +317,8 @@ public sealed class RealHarnessWorkspaceMemoryTests
 
     /// <summary>
     /// The fake <c>claude</c>: records the directories the argv it was spawned with names after <c>--add-dir</c> —
-    /// <c>absent</c> for none, else <c>.</c> for the first, the workspace, and each other one relative to it — exits 9
+    /// <c>absent</c> for none, else <c>.</c> for the first, the workspace, and each other one relative to it — and, when
+    /// armed to, after <c> ; </c> every glob the pointer rules in its <c>$CLAUDE_CONFIG_DIR</c> carry, file by file; exits 9
     /// when that is not what the test expects of its round, and otherwise drafts <c>feature.txt</c> — running the draft
     /// action as it does, when given one — or writes the revision, when its goal is the executor's revise instruction,
     /// and prints a successful stream-json result. Named and staged with the <see cref="FakeAgentCliMarker"/> markers, so a real-CLI
@@ -290,13 +333,15 @@ public sealed class RealHarnessWorkspaceMemoryTests
         private readonly string _draft;
         private readonly string _revision;
         private readonly string _draftAction;
+        private readonly string _pointers;
 
         /// <param name="draft">The directories the draft round's argv must add, as the fake records them: <c>absent</c>, <c>.</c> or <c>. pkg</c>.</param>
         /// <param name="revision">The same, for the revision.</param>
         /// <param name="draftAction">A shell command the draft round runs in its workspace, or null for none.</param>
-        public MemoryCheckingFakeCli(string draft, string revision, string? draftAction)
+        /// <param name="pointers">Whether each launch's record also carries the globs of the pointer rules in its config home.</param>
+        public MemoryCheckingFakeCli(string draft, string revision, string? draftAction, bool pointers = false)
         {
-            (_draft, _revision, _draftAction) = (draft, revision, draftAction ?? "");
+            (_draft, _revision, _draftAction, _pointers) = (draft, revision, draftAction ?? "", pointers ? "1" : "");
             Directory.CreateDirectory(_directory);
             _launches = Path.Combine(_directory, "launches.txt");
 
@@ -309,6 +354,10 @@ public sealed class RealHarnessWorkspaceMemoryTests
                   [ "$listing" = 1 ] || continue
                   if [ -z "$first" ]; then first=$arg; memory=.; else memory="$memory ${arg#"$first"/}"; fi
                 done
+                if [ -n "$FAKE_POINTERS" ]; then
+                  globs=$(cat "$CLAUDE_CONFIG_DIR"/{{ClaudeWorkspaceMemory.PointerRulePrefix}}*.md 2>/dev/null | sed -n 's/^  - "\(.*\)"$/\1/p' | tr '\n' ' ')
+                  memory="$memory ; ${globs% }"
+                fi
                 printf '%s\n' "$memory" >> "$FAKE_LAUNCHES"
                 case "$goal" in {{AgentRunExecutor.ReviseInstructionPrefix}}*) expected=$FAKE_EXPECT_REVISION ;; *) expected=$FAKE_EXPECT_DRAFT ;; esac
                 [ "$memory" = "$expected" ] || { echo "expected the memory directories '$expected', argv: $*" >&2; exit 9; }
@@ -325,7 +374,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
             Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
         }
 
-        public IReadOnlyDictionary<string, string> Env() => new Dictionary<string, string> { ["FAKE_LAUNCHES"] = _launches, ["FAKE_EXPECT_DRAFT"] = _draft, ["FAKE_EXPECT_REVISION"] = _revision, ["FAKE_DRAFT_ACTION"] = _draftAction };
+        public IReadOnlyDictionary<string, string> Env() => new Dictionary<string, string> { ["FAKE_LAUNCHES"] = _launches, ["FAKE_EXPECT_DRAFT"] = _draft, ["FAKE_EXPECT_REVISION"] = _revision, ["FAKE_DRAFT_ACTION"] = _draftAction, ["FAKE_POINTERS"] = _pointers };
 
         /// <summary>What each launch's argv said, in order.</summary>
         public IReadOnlyList<string> Launches() => File.Exists(_launches) ? File.ReadAllLines(_launches) : Array.Empty<string>();

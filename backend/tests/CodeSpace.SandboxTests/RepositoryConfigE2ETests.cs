@@ -36,15 +36,21 @@ namespace CodeSpace.SandboxTests;
 /// <c>.claude/rules</c> file without <c>paths:</c>, and <c>sub/CLAUDE.md</c>, whose directory the harness adds in place.
 /// What it drops must not reach any request, run its commands or be named on the CLI's <c>init</c> line: a skill
 /// (frontmatter hooks, <c>!</c> shell), a command (<c>!</c> shell), an agent (<c>permissionMode</c>, hooks,
-/// <c>mcpServers</c>), <c>CLAUDE.local.md</c>, a rule scoped by <c>paths:</c>, and the output style the repository's
-/// settings select. The unpinned CLI attached the scoped rule only once the run opened a file below <c>sub/</c>, and ran
+/// <c>mcpServers</c>), <c>CLAUDE.local.md</c>, the text of a rule scoped by <c>paths:</c> — which a pointer names
+/// instead, so its own text never reaches the model — and the output style the repository's settings select. The
+/// unpinned CLI attached the scoped rule only once the run opened a file below <c>sub/</c>, and ran
 /// a skill's or command's commands only once invoked, so the scripted model opens <c>sub/notes.txt</c> with the CLI's own
 /// Read tool, invokes the skill and the command, and delegates to the agent (<see cref="ClaudeSurfaceCalls"/>). The single-repo Codex arm also names
 /// a repository skill whose <c>agents/openai.yaml</c> depends on an MCP server, which must not start. A repository whose
 /// memory links outside the workspace is left out of the run whole, against a positive control that adds it back
 /// (<see cref="A_claude_run_leaves_out_repository_memory_that_links_outside_the_workspace"/>), and nested memory is
 /// loaded in place within its budget and not past it, with nothing it must not load
-/// (<see cref="A_claude_run_reads_nested_memory_in_place_and_nothing_it_must_not"/>).</para>
+/// (<see cref="A_claude_run_reads_nested_memory_in_place_and_nothing_it_must_not"/>). A scoped rule, and nested memory
+/// past the budget, is pointed at: the pointer attaches on the reads that attached the repository's own, and on no other
+/// (<see cref="A_scoped_rule_reaches_the_model_only_after_a_read_it_matches"/>,
+/// <see cref="Pointer_rules_attach_where_the_unpinned_cli_attached_project_rules"/>), and so is nested memory loaded in
+/// place, for the Explore subagent the CLI starts without it
+/// (<see cref="An_explore_subagent_is_pointed_at_nested_memory_loaded_in_place"/>).</para>
 ///
 /// <para>Fidelity: 🟢 HIGH for everything but the model. The pinned CLI binaries, the production harness argv
 /// (<see cref="IAgentHarness.BuildInvocation"/>), the production <see cref="LocalProcessRunner"/> (bubblewrap where the
@@ -130,7 +136,7 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         ["COMMAND"] = "a command",
         ["AGENT"] = "an agent",
         ["LOCAL-MEMORY"] = "CLAUDE.local.md",
-        ["SCOPED-RULE"] = "a rule scoped by paths:",
+        ["SCOPED-RULE"] = "the text of a rule scoped by paths:, which only a pointer names",
         ["OUTPUT-STYLE"] = "the output style its settings select",
     };
 
