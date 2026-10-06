@@ -68,6 +68,17 @@ public static class SupervisorLane
     public const int AcceptanceGradeTimeoutSeconds = 300;
 
     /// <summary>
+    /// The LONGEST wall-clock window (seconds) any one step of an acceptance grade may run — the contract's setup, its
+    /// check, the oracle restore's git commands — whatever the contract authored. A contract's
+    /// <see cref="SupervisorAcceptanceSpec.TimeoutSeconds"/> only tunes the window inside (0, this]: a non-positive
+    /// value grades at <see cref="AcceptanceGradeTimeoutSeconds"/> (it used to arm no wall clock at all, so a grade
+    /// could run agent-written bytes for as long as they liked) and a longer one is capped here — an agent run's own
+    /// default budget. That rewrite is for lanes that never validate the contract; an operator contract authoring a
+    /// window outside the range is refused where it is authored (<c>AgentAcceptanceContract.ValidateAuthored</c>). Pinned (Rule 8).
+    /// </summary>
+    public const int MaxAcceptanceGradeTimeoutSeconds = 3600;
+
+    /// <summary>
     /// P1.3 — the heartbeat interval a long SEQUENTIAL multi-target/multi-gate grade emits a ledger record at, so
     /// the reconciler's staleness check (<see cref="StuckRunReconcilerService.LedgerLivenessWindow"/>, 5 min) never
     /// mistakes an actively-grading run for an abandoned one. Comfortably under the liveness window (30% of it) so

@@ -38,7 +38,16 @@ public interface ISupervisorAcceptanceGrader
     /// </summary>
     Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken);
 
-    /// <summary>DC-4 slice 2 (the repo-less lane): grade the oracle DIRECTLY against an existing directory — the scratch workspace a repo-less run produced its declared deliverables in. The agent process has already exited, so grading its left-behind directory is equivalent to grading a clone of it; there is no git world to anchor an independent checkout on. Same per-kind oracles, same fail-closed posture.</summary>
+    /// <summary>
+    /// DC-4 slice 2 (the repo-less lane): grade the oracle DIRECTLY against an existing directory — the scratch
+    /// workspace a repo-less run produced its declared deliverables in. There is no git world to anchor an independent
+    /// checkout on, so this is NOT equivalent to grading a clone: the check runs in the agent's own live workspace, and
+    /// every byte the contract does not pin is the agent's. A declared <c>OraclePaths</c> digest pins only the literal
+    /// files it names; anything else the check executes or reads can decide its exit code — a module beside a pinned
+    /// script (a planted <c>json.py</c> flips a pinned <c>check.py</c>), test-runner config and plugins, manifest
+    /// scripts. The verdict is only as independent as an oracle that neither executes nor imports candidate-controlled
+    /// files. Same per-kind oracles, same fail-closed posture.
+    /// </summary>
     Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
         Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: directory grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });
 

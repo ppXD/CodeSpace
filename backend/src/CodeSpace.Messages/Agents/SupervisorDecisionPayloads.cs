@@ -82,8 +82,10 @@ public sealed record SupervisorPlannedSubtask
     /// noun as a stop / phase (<see cref="SupervisorAcceptanceSpec"/>). Null-omitted (<c>[JsonIgnore(WhenWritingNull)]</c>)
     /// so a subtask without a contract serializes byte-identical to before. PURE DATA here: recorded + projected; the
     /// per-unit acceptance GATE (grade each settled unit against this at the spawn fold) is a follow-up (slice 3).
+    /// Model-authored, so it never carries a setup command or timeout (<see cref="ModelAuthoredAcceptanceConverter"/>).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(ModelAuthoredAcceptanceConverter))]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 
     /// <summary>
@@ -266,8 +268,9 @@ public sealed record SupervisorAmendAcceptancePayload
     /// <summary>True = forgo verification for this unit entirely; false = replace its oracle with <see cref="Acceptance"/>.</summary>
     public bool Waive { get; init; }
 
-    /// <summary>The replacement oracle (full spec — kind, rubric/schema payloads, timeout). Null when <see cref="Waive"/> is true.</summary>
+    /// <summary>The replacement oracle (full spec — kind, rubric/schema payloads; never a setup command or timeout, see <see cref="ModelAuthoredAcceptanceConverter"/>). Null when <see cref="Waive"/> is true.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(ModelAuthoredAcceptanceConverter))]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 
     /// <summary>Why the current oracle should not bind — quoted onto the human card, so the co-signer rules on evidence.</summary>
@@ -357,8 +360,10 @@ public sealed record SupervisorStopPayload
     /// Optional model-authored OBJECTIVE acceptance for the terminal result — the L3→L4 "definition of done": a
     /// server-run check the supervisor declares so "done" is a verified fact, not a self-report. Null-omitted
     /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so a stop WITHOUT acceptance serializes byte-identical to before —
-    /// the idempotency-key bytes are unchanged and exactly-once replay is unaffected. See <see cref="SupervisorAcceptanceSpec"/>.
+    /// the idempotency-key bytes are unchanged and exactly-once replay is unaffected. See <see cref="SupervisorAcceptanceSpec"/>;
+    /// model-authored, so it never carries a setup command or timeout (<see cref="ModelAuthoredAcceptanceConverter"/>).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(ModelAuthoredAcceptanceConverter))]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 }

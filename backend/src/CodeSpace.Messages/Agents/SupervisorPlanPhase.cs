@@ -22,7 +22,8 @@ public sealed record SupervisorPlanPhase
     /// <summary>The plan-local subtask ids this phase groups (a subset of the plan's <see cref="SupervisorPlanPayload.Subtasks"/>). Empty for a descriptive-only phase.</summary>
     public IReadOnlyList<string> SubtaskIds { get; init; } = Array.Empty<string>();
 
-    /// <summary>Optional per-phase OBJECTIVE acceptance (reuses the same noun as a stop's acceptance) — the server-runnable check this phase is "done" by. Recorded + projected in v1; the enforcing gate is a follow-up. Null-omitted so a phase without acceptance is byte-stable.</summary>
+    /// <summary>Optional per-phase OBJECTIVE acceptance (reuses the same noun as a stop's acceptance) — the server-runnable check this phase is "done" by. Recorded + projected in v1; the enforcing gate is a follow-up. Null-omitted so a phase without acceptance is byte-stable. Model-authored, so it never carries a setup command or timeout (<see cref="ModelAuthoredAcceptanceConverter"/>).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(ModelAuthoredAcceptanceConverter))]
     public SupervisorAcceptanceSpec? Acceptance { get; init; }
 }

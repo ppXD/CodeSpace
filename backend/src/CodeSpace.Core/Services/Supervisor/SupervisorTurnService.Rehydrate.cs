@@ -1696,8 +1696,8 @@ public sealed partial class SupervisorTurnService
     /// <summary>The verdict detail plus the oracle's integrity note, when there is one — the ONLY route a voided tamper or an unprotected judge has onto the durable stop outcome, which carries pass + detail and nothing else. No note ⇒ the detail verbatim (the dominant case stays byte-identical).</summary>
     internal static string Annotated(string detail, string? oracleNote) => string.IsNullOrEmpty(oracleNote) ? detail : $"{detail} [{oracleNote}]";
 
-    /// <summary>The model-authored acceptance spec off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/> — its command + oracle Kind), best-effort (null when absent / malformed).</summary>
-    private static SupervisorAcceptanceSpec? ReadStopAcceptance(string payloadJson)
+    /// <summary>The model-authored acceptance spec off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/> — its command + oracle Kind), best-effort (null when absent / malformed). It reads through the payload's own acceptance slot, so a stored row never hands the stop gate a setup command or timeout (<see cref="ModelAuthoredAcceptanceConverter"/>). Internal so that rule is pinned on this reader rather than on a copy of it.</summary>
+    internal static SupervisorAcceptanceSpec? ReadStopAcceptance(string payloadJson)
     {
         try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Acceptance; }
         catch (JsonException) { return null; }

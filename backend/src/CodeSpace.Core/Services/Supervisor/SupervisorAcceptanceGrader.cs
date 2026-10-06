@@ -29,7 +29,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v7";   // v7: delayed repository, patch, and captured-deliverable grades carry the producer's durable row/configured/observed identity into model-backed oracles; missing legacy evidence stays Unknown and is never inferred from the compatibility price label
+    public const string EvaluatorVersion = "supervisor-acceptance/v8";   // v8: every grade step (setup, check, oracle-restore git) runs under a bounded window — a non-positive authored timeout grades at the default instead of arming no wall clock, a longer one is capped at SupervisorLane.MaxAcceptanceGradeTimeoutSeconds
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -641,12 +641,23 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         Command = "git",
         Args = args.ToList(),
         WorkingDirectory = directory,
-        TimeoutSeconds = timeoutSeconds,
+        TimeoutSeconds = BoundedGradeWindow(timeoutSeconds),
     };
+
+    /// <summary>
+    /// The window a grade step actually runs under, whatever the contract authored: a non-positive value grades at
+    /// <see cref="SupervisorLane.AcceptanceGradeTimeoutSeconds"/> — the runner reads it as "no wall clock at all", and
+    /// the batch run path has no stall watchdog behind it — and a longer one is capped at
+    /// <see cref="SupervisorLane.MaxAcceptanceGradeTimeoutSeconds"/>. Applied HERE, at the steps, because not every lane
+    /// validates the contract before grading: the supervisor's fold never calls <c>LocalAcceptanceVerifier.ValidateContract</c>.
+    /// </summary>
+    private static int BoundedGradeWindow(int timeoutSeconds) =>
+        timeoutSeconds <= 0 ? SupervisorLane.AcceptanceGradeTimeoutSeconds : Math.Min(timeoutSeconds, SupervisorLane.MaxAcceptanceGradeTimeoutSeconds);
 
     private async Task<BenchmarkGrade> GradeWorkspaceAsync(WorkspaceGradeRequest request, CancellationToken cancellationToken)
     {
-        var (directory, spec, teamId, timeoutSeconds, producerModel, protection) = request;
+        var (directory, spec, teamId, authoredTimeoutSeconds, producerModel, protection) = request;
+        var timeoutSeconds = BoundedGradeWindow(authoredTimeoutSeconds);
 
         if (spec.SetupCommand is { Count: > 0 } setupCommand)
         {

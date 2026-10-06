@@ -103,6 +103,14 @@ public class SupervisorAcceptanceVerdictTests
         SupervisorLane.AcceptanceGradeTimeoutSeconds.ShouldBe(300);
     }
 
+    [Fact]
+    public void The_acceptance_grade_ceiling_is_pinned()
+    {
+        // The longest window any one grade step may run, whatever a contract authors — an agent run's own default
+        // budget. Raising it lengthens how long agent-written bytes can run during grading on every lane.
+        SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.ShouldBe(3600);
+    }
+
     // ── AppendAcceptanceGrade: the GENERIC additive fold for a terminal STOP (preserves the stop shape) ──
 
     [Fact]
