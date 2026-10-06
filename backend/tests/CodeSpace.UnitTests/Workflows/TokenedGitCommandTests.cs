@@ -80,4 +80,16 @@ public sealed class TokenedGitCommandTests
 
         TokenedGitCommand.Spec("https://host/r.git", spec).ShouldBeSameAs(spec, "the operator's helpers may be how an untokened remote authenticates");
     }
+
+    [Fact]
+    public void A_caller_that_knows_a_bare_user_is_a_token_marks_the_command_tokened()
+    {
+        // A stored https://user@mirror URL may authenticate through the operator's helper, so Spec leaves it alone; a pasted
+        // pack URL's bare user is a token, and its caller marks the command itself.
+        const string url = "https://ghp_pasted@host/r.git";
+        var spec = new SandboxSpec { Command = "git", Args = new[] { "clone", url, "/tmp/x" } };
+
+        TokenedGitCommand.Spec(url, spec).ShouldBeSameAs(spec);
+        TokenedGitSpecs.RunsTokened(TokenedGitCommand.AsTokened(url, spec), "https://host").ShouldBeTrue();
+    }
 }

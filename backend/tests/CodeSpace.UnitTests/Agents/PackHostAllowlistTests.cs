@@ -25,9 +25,9 @@ public class PackHostAllowlistTests
     }
 
     [Theory]
-    [InlineData("http://github.com/owner/repo", "scheme")]              // not https
-    [InlineData("file:///etc/passwd", "scheme")]                        // not https
-    [InlineData("ssh://git@github.com/owner/repo", "scheme")]           // not https
+    [InlineData("http://github.com/owner/repo", "Only https")]          // not https
+    [InlineData("file:///etc/passwd", "Only https")]                    // not https
+    [InlineData("ssh://git@github.com/owner/repo", "Only https")]       // not https
     [InlineData("https://internal.corp/secret", "allowlist")]           // not an allowlisted host (SSRF / internal)
     [InlineData("https://169.254.169.254/latest/meta-data", "allowlist")]   // cloud metadata host
     [InlineData("not-a-url", "valid absolute URL")]
@@ -38,6 +38,33 @@ public class PackHostAllowlistTests
         allowlist.IsAllowed(url).ShouldBeFalse();
         var ex = Should.Throw<PackImportException>(() => allowlist.EnsureAllowed(url));
         ex.Message.ShouldContain(reasonFragment);
+    }
+
+    [Fact]
+    public void A_malformed_url_is_refused_without_echoing_the_credential_it_carries()
+    {
+        // An unparseable URL has no userinfo to strip, so the refusal names none of it: the message reaches the API error
+        // body, the UI and the mediator's error log, and the operator still has what they pasted.
+        const string url = "https://x-access-token:fake-pasted-token-0123456789@github.com:notaport/owner/repo";
+
+        var ex = Should.Throw<PackImportException>(() => new PackHostAllowlist(rawAllowedHostsOverride: null).EnsureAllowed(url));
+
+        ex.Message.ShouldContain("valid absolute URL");
+        ex.Message.ShouldNotContain("fake-pasted-token-0123456789");
+    }
+
+    [Theory]
+    [InlineData("fake-pasted-token-0123456789:x-oauth-basic@github.com/owner/repo.git")]
+    [InlineData("Fake-Pasted-Token-0123456789:x@gitlab.com/group/repo.git")]   // the scheme comes back lowercased
+    public void A_url_pasted_without_https_is_refused_without_echoing_the_token_read_as_its_scheme(string url)
+    {
+        // Without "https://" the token before the colon parses as the URL's scheme, so naming the scheme names the token.
+        Uri.TryCreate(url, UriKind.Absolute, out _).ShouldBeTrue("fixture check: the token parses as the scheme");
+
+        var ex = Should.Throw<PackImportException>(() => new PackHostAllowlist(rawAllowedHostsOverride: null).EnsureAllowed(url));
+
+        ex.Message.ShouldContain("Only https");
+        ex.Message.ShouldNotContain("pasted-token-0123456789", Case.Insensitive);
     }
 
     [Fact]

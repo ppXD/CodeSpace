@@ -49,6 +49,7 @@ public class PackCloneFetcherArgsTests
 
     [Theory]
     [InlineData("https://someone:ghp_pasted_token@github.com/owner/repo", true)]   // a pasted URL with a personal token in it
+    [InlineData("https://ghp_pasted_token@github.com/owner/repo", true)]           // the token alone as the user: git hands it to the helpers it asks for a password
     [InlineData("https://github.com/owner/repo", false)]
     public void Only_a_clone_url_carrying_a_token_runs_as_a_tokened_command(string url, bool tokened)
     {
