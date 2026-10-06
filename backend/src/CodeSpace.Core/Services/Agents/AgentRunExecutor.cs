@@ -3672,7 +3672,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId, catalogMode);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId, catalogMode, task.Permissions);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a

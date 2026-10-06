@@ -24,6 +24,14 @@ public sealed record AgentToolCall
     /// may read. Null → no run context (a retrieval tool then has no session to read → fail-closed / empty).
     /// </summary>
     public Guid? RunId { get; init; }
+
+    /// <summary>
+    /// The sandbox posture of the agent run this call is serving — stamped from the per-run MCP endpoint (same
+    /// provenance as <see cref="TeamId"/>), never from the model's input. A tool that starts a sandbox of its own runs
+    /// it no wider than this. Null → no calling run (a test, a future non-agent caller): such a tool keeps its own
+    /// posture.
+    /// </summary>
+    public AgentRunPosture? CallerPosture { get; init; }
 }
 
 /// <summary>Result of the pure, I/O-free input-validation stage — the first gate before any permission check or side effect.</summary>

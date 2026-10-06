@@ -49,4 +49,12 @@ public sealed record RunCommandRequest
 
     /// <summary>Sandbox runner + workspace backend to use — "local" (v0), later "docker" / "k8s". <c>null</c> → the deployment default (the <c>Agents:DefaultRunnerKind</c> configuration key, itself defaulting to "local").</summary>
     public string? RunnerKind { get; init; }
+
+    /// <summary>
+    /// The posture of the agent run that asked for this command through its tool fabric. Set → the command runs no
+    /// wider than that run: no network unless the run has network, only the run's operator-named hosts when the run is
+    /// allowlisted, and under the resource ceilings of the run's tier — all narrowed further by the deployment ceiling.
+    /// <c>null</c> → a workflow node's own command: its authored posture, narrowed by the deployment ceiling alone.
+    /// </summary>
+    public AgentRunPosture? CallerPosture { get; init; }
 }

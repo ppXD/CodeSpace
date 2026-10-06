@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes;
@@ -126,4 +127,11 @@ public sealed record NodeRunContext
     /// to hand a restored conversation to, so checkpointing one is pure waste.</para>
     /// </summary>
     public bool RetriesOnFailure { get; init; }
+
+    /// <summary>
+    /// The sandbox posture of the agent run this node is serving as a tool — set only by <c>NodeAgentTool</c>, from the
+    /// run's MCP endpoint. A node that starts a sandbox of its own (<c>agent.run_command</c>) runs it no wider than
+    /// this. Null on the workflow engine path, where the node keeps its own authored posture.
+    /// </summary>
+    public AgentRunPosture? CallerPosture { get; init; }
 }

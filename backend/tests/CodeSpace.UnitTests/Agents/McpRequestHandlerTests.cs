@@ -521,6 +521,41 @@ public class McpRequestHandlerTests
         seen.ShouldBe(runId, "the run id must travel handler → AgentToolCall so a retrieval tool can scope to the run's session");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ToolsCall_stamps_the_runs_posture_onto_the_tool_call_on_the_ungoverned_and_the_governed_path(bool governed)
+    {
+        // The posture travels handler → AgentToolCall like TeamId and RunId, from the run's endpoint and never from the
+        // model's arguments, so agent.run_command's sandbox can be no wider than the run's. Both paths that invoke a
+        // tool (the ledger-governed write and the ungoverned call) must carry it.
+        var permissions = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist, EgressAllowHosts = ["registry.npmjs.org"] };
+        AgentRunPosture? seen = null;
+        var tool = new FakeTool { Kind = "agent.run_command", IsDestructiveOverride = true, OnCall = (c, _) => { seen = c.CallerPosture; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+        var runId = Guid.NewGuid();
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, runId, new SpyLedger(), fenceEpoch: 1, governanceEnabled: governed, permissions: permissions);
+
+        await Respond(handler, Call("agent.run_command", """{"network":true}"""));
+
+        var posture = seen.ShouldNotBeNull("the tool must see the run's posture");
+        posture.RunId.ShouldBe(runId, "the run the posture belongs to — the unit a run's commands queue by");
+        posture.Autonomy.ShouldBe(AgentAutonomyLevel.Unleashed);
+        posture.Permissions.ShouldBeSameAs(permissions, "the run's own permissions, not a re-derivation from its tier");
+    }
+
+    [Fact]
+    public async Task ToolsCall_on_a_handler_built_without_permissions_stamps_its_tiers_derived_posture()
+    {
+        AgentRunPosture? seen = null;
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.CallerPosture; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(Handler(AgentAutonomyLevel.Standard, tool), Call("echo", "{}"));
+
+        var posture = seen.ShouldNotBeNull();
+        posture.Autonomy.ShouldBe(AgentAutonomyLevel.Standard);
+        posture.Permissions.ShouldBe(AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard), "with no run permissions the tier's own derivation stands in — never an open network");
+    }
+
     [Fact]
     public async Task ToolsCall_with_no_run_on_the_handler_stamps_the_empty_run_id()
     {

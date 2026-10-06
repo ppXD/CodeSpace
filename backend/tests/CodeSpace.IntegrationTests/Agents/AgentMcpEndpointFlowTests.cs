@@ -429,6 +429,36 @@ public class AgentMcpEndpointFlowTests
     }
 
     [Fact]
+    public async Task A_run_whose_own_network_is_off_cannot_open_one_through_run_command_over_its_endpoint()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+
+        // Unleashed, so the destructive tool is gate-Allowed; the run's OWN permissions pin the network off. The posture
+        // must travel executor → endpoint → handler → tool → node → service from the PERSISTED task, not the tier.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, permissions: new AgentPermissions { Network = AgentNetworkAccess.Off });
+        var commands = new RecordingCommandRunner();
+
+        using var connects = ConnectRegistryFromFixture();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 6"), commandRunner: commands));
+
+        var connect = await WaitForConnectAsync(connects, runId, run);
+        await using var client = await McpClient.ConnectAsync(connect);
+
+        var call = await client.CallToolAsync(1, "agent.run_command", new { command = "true", network = true });
+        call.GetProperty("isError").GetBoolean().ShouldBeFalse(customMessage: $"the command must still run — narrowed, not refused: {call.GetRawText()}");
+
+        var spec = commands.Specs.ShouldHaveSingleItem("the tool call must reach the command runner exactly once");
+        spec.AllowNetwork.ShouldBeFalse("a run whose own network is off cannot open one by asking agent.run_command for it");
+        spec.MaxMemoryMb.ShouldBe(6144, "the command is held to the run's Unleashed memory row");
+        spec.MaxCpuPercent.ShouldBe(400);
+
+        await run;
+    }
+
+    [Fact]
     public async Task A_team_A_endpoint_naming_team_Bs_repo_fails_closed_without_leaking_existence()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -1119,7 +1149,7 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, string? proxyPath = null, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, string? proxyPath = null, CancellationToken cancellationToken = default, ISandboxRunner? commandRunner = null)
     {
         // The catalog choice rides the RUN now (CreateRunAsync's enableMcp) and governance is a committed constant, so
         // the only environment this still drives is the proxy path — a genuine filesystem seam, not a feature flag.
@@ -1132,7 +1162,11 @@ public class AgentMcpEndpointFlowTests
             // useGovernanceContainer routes the run through the SECOND, governance-on container so the endpoint's DI
             // IAgentToolRegistry actually contains decision.request (registry composition is fixed at container build).
             using var scope = useGovernanceContainer ? _fixture.BeginGovernanceOnScope() : _fixture.BeginScope();
-            await NewExecutor(scope, harness).ExecuteAsync(runId, cancellationToken);
+
+            // A command runner, when given, is what the scopes the executor makes for itself — the MCP endpoint's among
+            // them, and so every tool call's — run commands on. The harness keeps the real runner the executor is handed.
+            using var toolScope = commandRunner is null ? null : scope.BeginLifetimeScope(b => b.RegisterInstance(new SandboxRunnerRegistry([commandRunner])).As<ISandboxRunnerRegistry>());
+            await NewExecutor(scope, harness, toolScope).ExecuteAsync(runId, cancellationToken);
         }
         finally
         {
@@ -1157,7 +1191,7 @@ public class AgentMcpEndpointFlowTests
         }
     }
 
-    private static AgentRunExecutor NewExecutor(ILifetimeScope scope, IAgentHarness harness) => new(
+    private static AgentRunExecutor NewExecutor(ILifetimeScope scope, IAgentHarness harness, ILifetimeScope? toolScope = null) => new(
         scope.Resolve<IAgentRunService>(),
         new AgentHarnessRegistry(new[] { harness }),
         new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
@@ -1166,7 +1200,7 @@ public class AgentMcpEndpointFlowTests
         scope.Resolve<IModelCredentialResolver>(),
         scope.Resolve<IWorkspaceProviderRegistry>(),
         scope.Resolve<IAgentRunCompletionNotifier>(),
-        scope.Resolve<IServiceScopeFactory>(),
+        toolScope is null ? scope.Resolve<IServiceScopeFactory>() : new ScopedServiceScopeFactory(toolScope),
         scope.Resolve<CodeSpaceDbContext>(),
         scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
         scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
@@ -1471,11 +1505,11 @@ public class AgentMcpEndpointFlowTests
     // ── Seeding (mirrors McpToolTeamScopeFlowTests + AgentRunExecutorTests) ──
 
     /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set.</summary>
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model")
+    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model", AgentPermissions? permissions = null)
     {
         using var scope = _fixture.BeginScopeAs(_operators[teamId], teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools, EnableMcpEndpoint = enableMcp },
+            new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Permissions = permissions ?? new(), Tools = tools, EnableMcpEndpoint = enableMcp },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
@@ -1549,6 +1583,40 @@ public class AgentMcpEndpointFlowTests
     }
 
     /// <summary>Holds the fixture scope open while a test reads the connect-registry singleton it resolved from it.</summary>
+    /// <summary>
+    /// An <see cref="IServiceScopeFactory"/> rooted at THIS scope, so a per-test registration override is visible to the
+    /// scopes the executor creates for itself. The container's own factory is a singleton holding the ROOT lifetime
+    /// scope, so every scope it makes would see nothing a test registered.
+    /// </summary>
+    private sealed class ScopedServiceScopeFactory(ILifetimeScope scope) : IServiceScopeFactory
+    {
+        public IServiceScope CreateScope() => new Scope(scope.BeginLifetimeScope());
+
+        private sealed class Scope(ILifetimeScope child) : IServiceScope
+        {
+            public IServiceProvider ServiceProvider { get; } = new Autofac.Extensions.DependencyInjection.AutofacServiceProvider(child);
+
+            public void Dispose() => child.Dispose();
+        }
+    }
+
+    /// <summary>Records every command spec it is handed, then runs it on the real local runner.</summary>
+    private sealed class RecordingCommandRunner : ISandboxRunner
+    {
+        private readonly LocalProcessRunner _real = new();
+
+        public System.Collections.Concurrent.ConcurrentQueue<SandboxSpec> Specs { get; } = new();
+
+        public string Kind => LocalProcessRunner.LocalKind;
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Enqueue(spec);
+
+            return _real.RunAsync(spec, cancellationToken);
+        }
+    }
+
     private sealed class FlagScope : IDisposable
     {
         private readonly IDisposable _scope;
