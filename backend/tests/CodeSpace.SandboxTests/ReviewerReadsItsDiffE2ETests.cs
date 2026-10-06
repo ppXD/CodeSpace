@@ -340,9 +340,9 @@ public sealed class ReviewerReadsItsDiffE2ETests(ITestOutputHelper output) : IDi
         Environment = new Dictionary<string, string>(brokeredEnvironment) { ["HOME"] = NewDirectory("review-home") },
     };
 
-    /// <summary>The spec the executor would hand the runner: the harness invocation with its broker channel stamped when its network is off, and with its write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
-    internal static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered) =>
-        AgentRunExecutor.ApplyWriteScope(AgentRunExecutor.ApplyModelBrokerChannel(harness.BuildInvocation(task), brokered), task.Permissions);
+    /// <summary>The spec the executor would hand the runner: the harness invocation with its egress allowlist built when its egress is one (from the run's model credential, <paramref name="modelBaseUrl"/> and <paramref name="modelProvider"/>, as the executor builds it), its broker channel stamped when its network is off or allowlisted, and its write scope applied, so a read-only run's workspace is mounted read-only wherever the host confines.</summary>
+    internal static SandboxSpec ProductionSpec(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered, string? modelBaseUrl = null, string? modelProvider = null) =>
+        AgentRunExecutor.ApplyWriteScope(AgentRunExecutor.ApplyModelBrokerChannel(AgentRunExecutor.ApplyEgressPolicy(harness.BuildInvocation(task), task.Permissions, modelBaseUrl, modelProvider, workspace: null), brokered), task.Permissions);
 
     private static async Task<ReviewRun> RunAsync(IAgentHarness harness, AgentTask task, BrokeredModelCredential brokered)
     {

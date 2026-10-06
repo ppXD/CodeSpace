@@ -18,7 +18,8 @@ namespace CodeSpace.SandboxTests;
 /// but for two arms: this worker cannot filter, so its allowlist run is severed where the root lane's is filtered, and
 /// it still reaches its broker; and its repository-config arm runs Claude at Standard, the tier the root lane's uid 0
 /// cannot give it. The publish-isolation Claude arm runs here alone for the same reason: a Confined Claude could not
-/// write the <c>.git</c> it plants into, so the root lane runs only that class's Codex arm.
+/// write the <c>.git</c> it plants into, so the root lane runs only that class's Codex arm. So does the Claude arm whose
+/// own Stop hook must run beside an Allowlist run's sealed-egress settings: a Confined run gets no in-loop check.
 ///
 /// <para>Selected by its trait alone (<c>--filter Category=SandboxNonRoot</c>), never by the root lane's
 /// <c>Category=Sandbox</c>. Every arm that ran prints its class's marker with <c>non-root</c> and its uid, which the
@@ -120,6 +121,17 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
 
         using var arms = new RepositoryConfigE2ETests(output);
         await arms.ClaudeIgnoresRepositorySettingsAsync(AgentAutonomyLevel.Standard, repositories: 1, Lane);
+    }
+
+    [Fact]
+    public async Task A_standard_allowlist_claude_run_still_runs_its_own_stop_hook_beside_the_sealed_egress_settings()
+    {
+        // An acceptance-bearing Allowlist run: its in-loop check rides the config home's settings.json, its egress
+        // settings ride --settings, and Standard — which uid 0 cannot get — lets the check leave its marker.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new RepositoryConfigE2ETests(output);
+        await arms.ClaudeRunsItsOwnStopHookUnderTheSealedEgressSettingsAsync(Lane);
     }
 
     [Fact]

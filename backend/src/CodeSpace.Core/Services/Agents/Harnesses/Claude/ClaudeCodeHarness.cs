@@ -88,8 +88,10 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     public const string DisableNonEssentialTrafficEnvVar = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
     /// <summary>
-    /// Claude Code's switch that loads <c>CLAUDE.md</c>, <c>.claude/CLAUDE.md</c> and <c>.claude/rules</c> from every
-    /// <c>--add-dir</c> directory — the one project-memory route the pinned CLI's loader does not gate on the
+    /// Claude Code's switch that loads every <c>--add-dir</c> directory's memory: its <c>CLAUDE.md</c>, its
+    /// <c>.claude/CLAUDE.md</c>, each <c>.claude/rules</c> file WITHOUT a <c>paths:</c> frontmatter, and the in-repository
+    /// files those @-import. A rule scoped by <c>paths:</c> never loads from an added directory, not even once the run
+    /// opens a file it covers. This is the one project-memory route the pinned CLI's loader does not gate on the
     /// <c>project</c> setting source, which is how a run pinned to <c>--setting-sources user</c> keeps the repository's
     /// memory (see <see cref="AppendSettingsPin"/>). Pinned by a test (Rule 8).
     /// </summary>
@@ -631,11 +633,21 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// project <c>.mcp.json</c> server was spawned whenever no declaration of ours made the MCP config strict.
     ///
     /// <para>The same source also gates project memory, so the pin alone drops the repository's <c>CLAUDE.md</c>. The
-    /// workspace comes back as an <c>--add-dir</c> with <see cref="AdditionalDirectoriesMemoryEnvVar"/> set: the loader
-    /// reads <c>CLAUDE.md</c>, <c>.claude/CLAUDE.md</c> and <c>.claude/rules</c> from an added directory whatever the
-    /// setting sources, and reads no settings from it. Project commands, agents and skills, and a subdirectory's own
-    /// <c>CLAUDE.md</c>, have no such route in 2.1.263 and stay unloaded. <c>--add-dir</c> is variadic; every flag that
-    /// follows it terminates the list.</para>
+    /// workspace comes back as an <c>--add-dir</c> with <see cref="AdditionalDirectoriesMemoryEnvVar"/> set: whatever the
+    /// setting sources, the CLI then reads an added directory's <c>CLAUDE.md</c>, its <c>.claude/CLAUDE.md</c>, its
+    /// <c>.claude/rules</c> files without a <c>paths:</c> frontmatter and the in-repository files those @-import, all
+    /// before the first request, and reads no settings from it.</para>
+    ///
+    /// <para>Everything else the unpinned 2.1.263 took from the project stays unloaded. Its skills, commands and agents,
+    /// <c>CLAUDE.local.md</c> and the output style its settings select stay out for good: a skill's or command's body
+    /// runs shell once invoked and a skill's frontmatter runs hooks, an agent's frontmatter can set its own permission
+    /// mode, hooks and MCP servers, <c>CLAUDE.local.md</c> is a developer's untracked file by convention, and an output
+    /// style replaces the CLI's own instructions in the system prompt. A rule scoped by <c>paths:</c> and a subdirectory's own
+    /// <c>CLAUDE.md</c>, which the unpinned CLI attached once the run opened a file they cover, are lost as well. The
+    /// subdirectory's memory is not unreachable: an <c>--add-dir</c> naming that subdirectory loads it in place, before
+    /// the first request. This pin adds only the workspace and its repositories. RepositoryConfigE2ETests pins what
+    /// loads and what does not against the real binary. <c>--add-dir</c> is variadic; every flag that follows it
+    /// terminates the list.</para>
     ///
     /// <para>A multi-repo workspace runs at its root, which holds no <c>CLAUDE.md</c>, so every repository directory
     /// inside the workspace is added too (<see cref="MemoryDirectories"/>), and each repository's memory loads.</para>
@@ -670,9 +682,10 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// On a deny-by-default (Allowlist) egress run, deliver <c>--settings {"<see cref="SkipWebFetchPreflightSetting"/>":true}</c>
     /// so a WebFetch tool call doesn't preflight the hostname against <c>api.anthropic.com</c> — a host the egress allowlist
     /// (model + git only) doesn't pin, which would stall the run (it's NOT covered by <see cref="DisableNonEssentialTrafficEnvVar"/>,
-    /// the only other escape our env closes). Safe to add unconditionally: the runner writes NO <c>settings.json</c> into the
-    /// per-run config dir (only <c>.mcp.json</c>, loaded independently), so <c>--settings</c> cannot clobber any run settings.
-    /// A Full-egress run is unchanged.
+    /// the only other escape our env closes). Safe to add unconditionally: the one <c>settings.json</c> the runner writes into
+    /// the per-run config dir is the in-loop Stop hook's (<see cref="BuildConfigHomeFiles"/>, on an acceptance-bearing run),
+    /// and the CLI layers <c>--settings</c> over that file rather than reading it instead — with both, the Stop hook still
+    /// runs (observed against 2.1.263 under <c>--setting-sources user</c>). A Full-egress run is unchanged.
     /// </summary>
     private static void AppendSealedEgressSettings(List<string> args, AgentTask task)
     {

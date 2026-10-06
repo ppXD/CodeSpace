@@ -94,8 +94,9 @@ public class ClaudeCodeHarnessTests
     public void The_workspace_comes_back_as_an_added_directory_so_its_memory_still_loads()
     {
         // `--setting-sources user` also switches off the project CLAUDE.md walk. The pinned CLI loads CLAUDE.md,
-        // .claude/CLAUDE.md and .claude/rules from an --add-dir directory whatever the setting sources — but only with
-        // the memory switch on (both halves observed against 2.1.263: either alone loads no project memory).
+        // .claude/CLAUDE.md and the .claude/rules without a paths: frontmatter from an --add-dir directory whatever the
+        // setting sources — but only with the memory switch on (both halves observed against 2.1.263: either alone loads
+        // no project memory).
         var spec = Harness.BuildInvocation(Task());
         var args = spec.Args.ToList();
 
