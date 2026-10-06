@@ -9,7 +9,8 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 /// <summary>
 /// <see cref="IRemoteTipResolver"/> over <c>git ls-remote</c>, run through the local <see cref="ISandboxRunner"/>
 /// exactly like <see cref="Providers.LocalGitWorkspaceProvider"/>'s own git calls (same auth-URL embedding, same
-/// token redaction on surfaced errors, same process/timeout handling). Branch first, tag second (preferring the
+/// token redaction on surfaced errors, same process/timeout handling, and a tokened probe runs as a
+/// <see cref="TokenedGitCommand"/>). Branch first, tag second (preferring the
 /// peeled <c>^{}</c> commit over the annotated tag object — the pin is a COMMIT), HEAD when no ref is named.
 /// Returned lines are matched by EXACT full ref name (ls-remote patterns are tail-matched globs — a pattern hit is
 /// necessary but not sufficient), so a glob-shaped or shadowing ref can never pin the wrong commit.
@@ -82,7 +83,7 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
         try
         {
             result = await _runners.Resolve(SandboxKinds.Local)
-                .RunAsync(new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+                .RunAsync(TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
         }
         catch (Win32Exception ex)
         {

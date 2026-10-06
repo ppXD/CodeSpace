@@ -16,7 +16,9 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
 ///
 /// <para><b>Secret hygiene:</b> the access token is embedded in the clone URL for the clone command
 /// only, then the origin remote is rewritten to the tokenless URL so the persisted <c>.git/config</c>
-/// never retains it, and any token text is redacted from surfaced error output. (The transient argv
+/// never retains it, and any token text is redacted from surfaced error output. Every command that can
+/// reach the tokened remote runs as a <see cref="TokenedGitCommand"/>, so an operator's <c>store</c> or
+/// <c>cache</c> helper never keeps the token and no trace2 target records it. (The transient argv
 /// exposure is acceptable on a single-tenant local worker; the K8s runner injects via an in-pod
 /// credential helper instead.)</para>
 /// </summary>
@@ -154,7 +156,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// <summary>Clone one repo, strip its token from the persisted remote, and read its base revision — the per-repo unit of the workspace.</summary>
     private async Task<MaterializedRepo> MaterializeAsync(WorkspaceRepositoryProvision repo, string directory, CancellationToken cancellationToken)
     {
-        var context = new RepositoryCommandContext(directory, ResolveLocalSourcePaths(repo.CloneRequest));
+        var context = new RepositoryCommandContext(directory, ResolveLocalSourcePaths(repo.CloneRequest), BuildAuthenticatedUrl(repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token));
         Directory.CreateDirectory(directory);
         await CloneAsync(repo.CloneRequest, context, cancellationToken).ConfigureAwait(false);
 
@@ -325,7 +327,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private async Task CloneAsync(WorkspaceRequest request, RepositoryCommandContext context, CancellationToken cancellationToken)
     {
         var directory = context.Directory;
-        var url = BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
+        var url = context.RemoteUrl;
 
         var (checkoutRef, softRefFellBack, remoteTip) = await ResolveCheckoutRefAsync(request, url, context, cancellationToken).ConfigureAwait(false);
 
@@ -575,11 +577,14 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     /// commands that DO reach the remote (clone, fetch, push) as well as the local ones, so a single severed helper
     /// would break materialization on any runner that enforces it. The value is the egress they have always had —
     /// each command still uses the runner's filesystem isolation with its explicit workspace and source mounts.
+    /// Every command here runs before the token strip, while <see cref="RepositoryCommandContext.RemoteUrl"/> is in
+    /// reach, so a tokened clone runs each of them as a <see cref="TokenedGitCommand"/>.
     /// </summary>
     private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, RepositoryCommandContext context, CancellationToken cancellationToken) =>
-        _runners.Resolve(Kind).RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = context.Directory, ReadOnlyPaths = context.ReadOnlyPaths, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken);
+        _runners.Resolve(Kind).RunAsync(TokenedGitCommand.Spec(context.RemoteUrl, new SandboxSpec { Command = "git", Args = args, WorkingDirectory = context.Directory, ReadOnlyPaths = context.ReadOnlyPaths, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken);
 
-    private sealed record RepositoryCommandContext(string Directory, IReadOnlyList<string> ReadOnlyPaths);
+    /// <summary>One clone's commands: its directory, its read-only source mounts, and the remote they can reach — the authed URL the probe and clone name, and origin holds until the strip.</summary>
+    private sealed record RepositoryCommandContext(string Directory, IReadOnlyList<string> ReadOnlyPaths, string RemoteUrl);
 
     private static IReadOnlyList<string> ResolveLocalSourcePaths(WorkspaceRequest request)
     {
@@ -784,9 +789,9 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
                 // is off: against a remote without the locks API git-lfs would otherwise record lfs.<url>.locksverify in the
                 // publish repo's .git/config, keyed by the authed URL, which would put the token on disk.
                 if (hasLfs)
-                    await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "-c", "lfs.locksverify=false", "lfs", "push", authedUrl, branchName }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
+                    await RunTokenedPublishGitOrThrowAsync(repo, publishDir, authedUrl, new[] { "-c", "lfs.locksverify=false", "lfs", "push", authedUrl, branchName }, cancellationToken).ConfigureAwait(false);
 
-                await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
+                await RunTokenedPublishGitOrThrowAsync(repo, publishDir, authedUrl, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken).ConfigureAwait(false);
 
                 repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, publishDir, authedUrl, branchName, cancellationToken).ConfigureAwait(false);
 
@@ -857,7 +862,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             {
                 var localTip = (await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "rev-parse", $"refs/heads/{branchName}" }, cancellationToken, network: false).ConfigureAwait(false)).Trim();
 
-                var readback = await RunPublishGitAsync(repo, publishDir, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
+                var readback = await RunTokenedPublishGitAsync(repo, publishDir, authedUrl, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken).ConfigureAwait(false);
 
                 if (readback.Status != SandboxStatus.Success || readback.ExitCode != 0)
                 {
@@ -929,14 +934,25 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         // ── Commands over the platform-owned publish repo (init, fetch, lfs push, push, rev-parse, ls-remote) ──
         // A fresh repo outside the workspace, never touched by the agent. Only the commands that reach the remote carry the
-        // credential (in the argv) and the network; the credential never meets the agent-writable .git.
+        // credential (in the argv) and the network, and they run as tokened commands (TokenedGitCommand), so no helper keeps
+        // it and no trace2 target records it; the credential never meets the agent-writable .git.
 
         private Task<string> RunPublishGitOrThrowAsync(MaterializedRepo repo, string publishDir, IReadOnlyList<string> args, CancellationToken cancellationToken, bool network, int timeoutSeconds = CaptureTimeoutSeconds) =>
             EnsureSuccessAsync(repo, args, RunPublishGitAsync(repo, publishDir, args, cancellationToken, network, timeoutSeconds));
 
         /// <summary>Run a git command in the publish repo (its directory as cwd). Returns the raw result so a caller can classify it (e.g. an unreadable remote on the readback) rather than always throw.</summary>
         private Task<SandboxResult> RunPublishGitAsync(MaterializedRepo repo, string publishDir, IReadOnlyList<string> args, CancellationToken cancellationToken, bool network, int timeoutSeconds) =>
-            ExecuteGitAsync(repo, args, new SandboxSpec { Command = "git", Args = args, WorkingDirectory = publishDir, TimeoutSeconds = timeoutSeconds, AllowNetwork = network }, cancellationToken);
+            ExecuteGitAsync(repo, args, PublishGitSpec(publishDir, args, network, timeoutSeconds), cancellationToken);
+
+        private Task<string> RunTokenedPublishGitOrThrowAsync(MaterializedRepo repo, string publishDir, string authedUrl, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
+            EnsureSuccessAsync(repo, args, RunTokenedPublishGitAsync(repo, publishDir, authedUrl, args, cancellationToken));
+
+        /// <summary>Run a publish-repo command that names <paramref name="authedUrl"/> — the LFS upload, the push, the readback — as a <see cref="TokenedGitCommand"/>, with the network and the push budget.</summary>
+        private Task<SandboxResult> RunTokenedPublishGitAsync(MaterializedRepo repo, string publishDir, string authedUrl, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
+            ExecuteGitAsync(repo, args, TokenedGitCommand.Spec(authedUrl, PublishGitSpec(publishDir, args, network: true, PushTimeoutSeconds)), cancellationToken);
+
+        private static SandboxSpec PublishGitSpec(string publishDir, IReadOnlyList<string> args, bool network, int timeoutSeconds) =>
+            new() { Command = "git", Args = args, WorkingDirectory = publishDir, TimeoutSeconds = timeoutSeconds, AllowNetwork = network };
 
         /// <summary>
         /// Host-side IO the publish does itself rather than through the runner (staging its directory, copying the clone's

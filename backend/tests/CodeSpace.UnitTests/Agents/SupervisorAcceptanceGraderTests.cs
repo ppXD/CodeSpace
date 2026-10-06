@@ -192,6 +192,24 @@ public class SupervisorAcceptanceGraderTests
         grade.Detail.ShouldStartWith("clone-failed:", customMessage: "the prefix is the interim infra-vs-genuine discriminator a differential consumer keys on (until F0's typed dispositions)");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Only_a_tokened_base_clone_runs_as_a_tokened_command(bool tokened)
+    {
+        // The clone is the one command that names the authed URL; the token strip follows it at once, so the detached
+        // checkout and everything after it reach no tokened remote. An untokened clone keeps the operator's helpers.
+        var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "https://example.test/r.git", Token = tokened ? "test-token" : null }), new FakeGrader(Pass), runners: runners);
+
+        await grader.GradeBaseAsync(Guid.NewGuid(), Guid.NewGuid(), "deadbeef", Spec(), 30, CancellationToken.None);
+
+        var clone = runners.Invocations.Single(i => i.Args.Contains("clone"));
+        TokenedGitSpecs.RunsTokened(clone, "https://example.test").ShouldBe(tokened, string.Join(' ', clone.Args));
+        runners.Invocations.ShouldContain(i => i.Args.Contains("checkout"), "fixture check: the base checkout ran after the clone");
+        runners.Invocations.Where(i => !i.Args.Contains("clone")).ShouldAllBe(i => !TokenedGitSpecs.RunsTokened(i, "https://example.test"));
+    }
+
     // ── S2: GradePatchAsync — the branch-less twin (a fresh clone at the BASE SHA + apply, no push) ────
 
     [Fact]

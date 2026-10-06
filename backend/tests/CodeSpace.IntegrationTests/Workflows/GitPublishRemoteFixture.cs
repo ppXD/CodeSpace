@@ -10,8 +10,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// A loopback smart-HTTP git remote (the real <c>git http-backend</c>) that ALSO speaks the Git-LFS batch API, with a
 /// FAKE token required for every write — the legitimate destination an agent's produced branch must reach. Fetch/clone
-/// is anonymous (<c>GIT_HTTP_EXPORT_ALL</c>); <c>git-receive-pack</c> and every LFS endpoint demand
-/// <c>x-access-token:&lt;FakeToken&gt;</c> basic auth, so a push that arrives proves the real credential was presented.
+/// is anonymous (<c>GIT_HTTP_EXPORT_ALL</c>) unless <see cref="AuthenticateReads"/> is set; <c>git-receive-pack</c> and
+/// every LFS endpoint demand <c>x-access-token:&lt;FakeToken&gt;</c> basic auth, so a push that arrives proves the real
+/// credential was presented.
 /// It records every request so a test can assert what the remote saw — the authenticated push, the LFS objects uploaded,
 /// and that no agent-injected header (<see cref="HostileHeader"/>) was ever sent to it. Fixture setup runs real git out
 /// of band; only the production provider's commands run through the sandbox runner under test.
@@ -24,7 +25,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     /// <summary>A request header an agent's <c>http.extraHeader</c> would inject; the clean publish repo must never send it to the remote.</summary>
     public const string HostileHeader = "X-Codespace-Exfil";
 
-    private readonly HttpListener _listener = new();
+    private HttpListener _listener = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<Task> _requests = new();
     private readonly object _gate = new();
@@ -37,11 +38,17 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     public string Url { get; private set; } = "";
     public string BaseSha { get; private set; } = "";
 
+    /// <summary>When set, every git request — a clone, a fetch, an <c>ls-remote</c> — demands the token too, so a read that succeeds proves it authenticated. Off by default: reads are anonymous.</summary>
+    public bool AuthenticateReads { get; init; }
+
     /// <summary>Count of authenticated <c>git-receive-pack</c> requests — a push that validated the real credential.</summary>
     public int AuthenticatedPushRequests { get; private set; }
 
     /// <summary>OIDs the remote received over the LFS upload endpoint.</summary>
     public List<string> UploadedLfsOids { get; } = new();
+
+    /// <summary>OIDs the remote served over the LFS download endpoint, to an authenticated request.</summary>
+    public List<string> DownloadedLfsOids { get; } = new();
 
     /// <summary>True if any request to the remote carried the agent-injected <see cref="HostileHeader"/>.</summary>
     public bool SawHostileHeader { get; private set; }
@@ -76,7 +83,10 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
             var port = ((IPEndPoint)probe.LocalEndpoint).Port;
             probe.Stop();
             Url = $"http://127.0.0.1:{port}/remote.git";
-            _listener.Prefixes.Clear();
+
+            // A failed Start closes the listener for good (Prefixes then throws ObjectDisposedException), so each attempt
+            // at a fresh port needs a fresh listener.
+            if (attempt > 0) _listener = new HttpListener();
             _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
             try { _listener.Start(); break; }
             catch (HttpListenerException) when (attempt < 4) { }
@@ -104,6 +114,42 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
         await GitAsync(Seed, new[] { "update-ref", "refs/heads/main", commit });
         await PublishSeedAsync();
+    }
+
+    /// <summary>
+    /// Give main LFS history: <c>big.bin</c> at a new commit (<see cref="LfsHistory.BaseSha"/>), a different version of it
+    /// at main's tip after that, and one more object in the LFS store that no commit names yet, for a patch to point at.
+    /// The seed has no LFS filters, so the pointers are committed as plain text; every object lives only in the remote's
+    /// LFS store. Call before the clone.
+    /// </summary>
+    public async Task<LfsHistory> AddLfsHistoryAsync()
+    {
+        await File.WriteAllTextAsync(Path.Combine(Seed, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
+        var atBase = await CommitLfsFileAsync("lfs payload v1\n");
+        var baseSha = (await GitAsync(Seed, new[] { "rev-parse", "HEAD" })).Trim();
+
+        await CommitLfsFileAsync("lfs payload v2\n");
+        var unreferenced = await StoreLfsObjectAsync("lfs payload v3\n");
+
+        await PublishSeedAsync();
+        return new LfsHistory(baseSha, atBase, unreferenced);
+    }
+
+    private async Task<LfsObject> CommitLfsFileAsync(string payload)
+    {
+        var lfs = await StoreLfsObjectAsync(payload);
+        await File.WriteAllTextAsync(Path.Combine(Seed, "big.bin"), lfs.Pointer);
+        await GitAsync(Seed, new[] { "add", "." });
+        await GitAsync(Seed, new[] { "commit", "-m", payload.Trim() });
+        return lfs;
+    }
+
+    private async Task<LfsObject> StoreLfsObjectAsync(string payload)
+    {
+        var bytes = Encoding.UTF8.GetBytes(payload);
+        var oid = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+        await File.WriteAllBytesAsync(Path.Combine(LfsStore, oid), bytes);
+        return new LfsObject(oid, bytes.Length);
     }
 
     /// <summary>One raw tree entry: <c>&lt;mode&gt; &lt;name&gt;\0&lt;20-byte sha&gt;</c>, written exactly as given (no mode normalisation).</summary>
@@ -211,6 +257,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
         var stored = Path.Combine(LfsStore, oid);
         if (!File.Exists(stored)) { context.Response.StatusCode = 404; return; }
+        lock (_gate) DownloadedLfsOids.Add(oid);
         var bytes = await File.ReadAllBytesAsync(stored);
         context.Response.ContentLength64 = bytes.Length;
         await context.Response.OutputStream.WriteAsync(bytes);
@@ -220,10 +267,10 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     {
         var isPush = path.EndsWith("/git-receive-pack", StringComparison.Ordinal) || context.Request.QueryString["service"] == "git-receive-pack";
 
-        if (isPush)
+        if (isPush || AuthenticateReads)
         {
             if (!AuthOk(context)) { Unauthorized(context); return; }
-            lock (_gate) AuthenticatedPushRequests++;
+            if (isPush) lock (_gate) AuthenticatedPushRequests++;
         }
 
         using var input = new MemoryStream();
@@ -310,6 +357,15 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     }
 }
 
+/// <summary>An LFS object the fixture's remote stores, and the pointer a commit names it by.</summary>
+internal sealed record LfsObject(string Oid, long Size)
+{
+    public string Pointer => $"version https://git-lfs.github.com/spec/v1\noid sha256:{Oid}\nsize {Size}\n";
+}
+
+/// <summary>What <see cref="GitPublishRemoteFixture.AddLfsHistoryAsync"/> made: the commit holding <see cref="AtBase"/>, and an object no commit names.</summary>
+internal sealed record LfsHistory(string BaseSha, LfsObject AtBase, LfsObject Unreferenced);
+
 /// <summary>A loopback endpoint that accepts and records every connection, answering nothing useful — the attacker a redirect (insteadOf / proxy / a hostile .lfsconfig) would reach. The publish must send it NOTHING.</summary>
 internal sealed class LoopbackSink : IDisposable
 {
@@ -339,4 +395,142 @@ internal sealed class LoopbackSink : IDisposable
     }
 
     public void Dispose() => _listener.Stop();
+}
+
+/// <summary>
+/// A loopback forward proxy that answers 407 to every request without <see cref="User"/>'s Basic proxy credential and
+/// relays the rest to the origin, one request per connection — an operator's proxy whose password lives in their
+/// credential helper. Counts the requests it relayed, so a test can tell git went through it rather than around it.
+/// </summary>
+internal sealed class AuthenticatingProxy : IAsyncDisposable
+{
+    public const string User = "proxyuser";
+    public const string Password = "fake-proxy-password";
+
+    private static readonly string Credential = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{User}:{Password}"));
+    private static readonly byte[] Challenge = Encoding.ASCII.GetBytes("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"fixture-proxy\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+
+    private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly List<Task> _connections = new();
+    private readonly Task _accept;
+    private int _relayed;
+
+    public AuthenticatingProxy()
+    {
+        _listener.Start();
+        _accept = AcceptAsync();
+    }
+
+    public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+    public int RelayedRequests => Volatile.Read(ref _relayed);
+
+    private async Task AcceptAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                var client = await _listener.AcceptTcpClientAsync(_stopping.Token);
+                lock (_connections) _connections.Add(ServeAsync(client));
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException) { }
+    }
+
+    private async Task ServeAsync(TcpClient client)
+    {
+        using var _ = client;
+
+        try
+        {
+            var stream = client.GetStream();
+            var (head, body) = await ReadHeadAsync(stream);
+            var lines = head.Split("\r\n");
+            var request = lines[0].Split(' ');
+            var headers = lines.Skip(1).Select(l => l.Split(':', 2)).Where(h => h.Length == 2).ToList();
+
+            if (Header(headers, "Proxy-Authorization") != Credential)
+            {
+                await DrainBodyAsync(stream, body.Length, headers);
+                await stream.WriteAsync(Challenge);
+                return;
+            }
+
+            Interlocked.Increment(ref _relayed);
+            await RelayAsync(stream, request, headers, body);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException) { }
+    }
+
+    /// <summary>Forward one request in origin form, without the proxy headers and asking the origin to close after it, then copy the origin's response back until it does.</summary>
+    private static async Task RelayAsync(NetworkStream client, string[] request, List<string[]> headers, byte[] body)
+    {
+        var target = new Uri(request[1]);
+        using var upstream = new TcpClient();
+        await upstream.ConnectAsync(target.Host, target.Port);
+        var origin = upstream.GetStream();
+
+        var forwarded = new StringBuilder($"{request[0]} {target.PathAndQuery} {request[2]}\r\n");
+        foreach (var h in headers.Where(h => !h[0].Trim().StartsWith("Proxy-", StringComparison.OrdinalIgnoreCase) && !h[0].Trim().Equals("Connection", StringComparison.OrdinalIgnoreCase))) forwarded.Append($"{h[0]}:{h[1]}\r\n");
+        forwarded.Append("Connection: close\r\n\r\n");
+
+        await origin.WriteAsync(Encoding.ASCII.GetBytes(forwarded.ToString()));
+        await origin.WriteAsync(body);
+
+        var restOfRequest = client.CopyToAsync(origin);
+        await origin.CopyToAsync(client);
+
+        upstream.Close();
+        try { await restOfRequest; } catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException) { }
+    }
+
+    /// <summary>Read past the request's head; returns it and whatever body bytes arrived with it.</summary>
+    private static async Task<(string Head, byte[] Body)> ReadHeadAsync(NetworkStream stream)
+    {
+        var received = new MemoryStream();
+        var chunk = new byte[4096];
+
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk);
+            if (read == 0) throw new IOException("the client closed before its request head ended");
+            received.Write(chunk, 0, read);
+
+            var bytes = received.ToArray();
+            var end = bytes.AsSpan().IndexOf("\r\n\r\n"u8);
+            if (end >= 0) return (Encoding.ASCII.GetString(bytes, 0, end), bytes[(end + 4)..]);
+        }
+    }
+
+    /// <summary>Consume a refused request's body so the challenge is read, not reset — unless the client is waiting for a 100 before it sends one.</summary>
+    private static async Task DrainBodyAsync(NetworkStream stream, int alreadyRead, List<string[]> headers)
+    {
+        if (Header(headers, "Expect") is not null) return;
+
+        var remaining = long.TryParse(Header(headers, "Content-Length"), out var length) ? length - alreadyRead : 0;
+        var buffer = new byte[8192];
+
+        while (remaining > 0)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)));
+            if (read == 0) return;
+            remaining -= read;
+        }
+    }
+
+    private static string? Header(IEnumerable<string[]> headers, string name) => headers.FirstOrDefault(h => h[0].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))?[1].Trim();
+
+    public async ValueTask DisposeAsync()
+    {
+        _stopping.Cancel();
+        _listener.Stop();
+        await _accept;
+
+        Task[] open;
+        lock (_connections) open = _connections.ToArray();
+        try { await Task.WhenAll(open).WaitAsync(TimeSpan.FromSeconds(10)); } catch (TimeoutException) { /* best-effort: a client still holding a connection */ }
+
+        _stopping.Dispose();
+    }
 }
