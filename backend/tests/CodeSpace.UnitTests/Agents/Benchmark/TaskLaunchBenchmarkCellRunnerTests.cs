@@ -1,6 +1,7 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.TaskLaunch;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
@@ -60,6 +61,27 @@ public class TaskLaunchBenchmarkCellRunnerTests
 
         TaskLaunchBenchmarkCellRunner.ProducerModelOf(selection, [Attempt("wire-a"), Attempt("WIRE-A")]).ShouldBe(new ReviewModelIdentity { ModelCredentialModelId = rowId, ConfiguredModel = "configured-alias", ObservedModel = "wire-a" });
         TaskLaunchBenchmarkCellRunner.ProducerModelOf(selection, [Attempt("wire-a"), Attempt("wire-b")]).ObservedModel.ShouldBeNull("a union of work from different backing models has no single producer identity and cannot establish judge independence");
+    }
+
+    [Fact]
+    public void The_graded_workspace_is_checked_under_its_producers_posture_only_when_every_attempt_agrees_on_it()
+    {
+        var standard = Task(AgentAutonomyLevel.Standard);
+        var trusted = Task(AgentAutonomyLevel.Trusted);
+
+        TaskLaunchBenchmarkCellRunner.GradedPosture([WithTask(standard), WithTask(standard)]).ShouldBe(AcceptanceGradingPosturePolicy.For(standard), "one producer posture — the check runs under it");
+        TaskLaunchBenchmarkCellRunner.GradedPosture([WithTask(standard), WithTask(trusted)]).ShouldBeNull("a union of work from different postures has no single one to run it under — the grade fails closed");
+        TaskLaunchBenchmarkCellRunner.GradedPosture([WithTask(standard), WithTaskJson("not json")]).ShouldBeNull("an attempt whose task cannot be read says nothing about what it was allowed — fail closed");
+
+        static AgentTask Task(AgentAutonomyLevel tier) => new() { Goal = "g", Harness = "test", Autonomy = tier, Permissions = AgentAutonomyPolicy.Derive(tier) };
+        static AgentRun WithTask(AgentTask task) => WithTaskJson(System.Text.Json.JsonSerializer.Serialize(task, AgentJson.Options));
+
+        static AgentRun WithTaskJson(string taskJson)
+        {
+            var attempt = Attempt(null);
+            attempt.TaskJson = taskJson;
+            return attempt;
+        }
     }
 
     private static AgentRun Attempt(string? model) => new()

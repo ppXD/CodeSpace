@@ -148,7 +148,12 @@ public static class AgentAcceptanceContract
                    || effective.StartsWith("clone-failed:", StringComparison.Ordinal)
                    || effective.StartsWith("setup-failed:", StringComparison.Ordinal)
                    || effective.StartsWith("oracle-restore-failed:", StringComparison.Ordinal)
+                   || effective.StartsWith(SetupSeveredDetailPrefix, StringComparison.Ordinal)
                    || effective is "no-rubric" or "no-schema" or "tests-timed-out" or "setup-timed-out"
+                   // The check was killed at the grade's OWN memory ceiling (the producing run's posture): an
+                   // environment fact like the grader's own wall clock, and what the agent's own run already reports
+                   // for the same kill. Never a verdict on the code, so no revise round is spent on it.
+                   or Eval.Benchmark.Graders.TestsPassGrader.ResourceExhaustedDetail
                    // POSIX "cannot run the command" codes (B6): 127 = command not found, 126 = found but not
                    // executable — the CHECK ITSELF could not run, exactly like a grader start-throw. The two must
                    // classify identically across runners or the same broken oracle reads infra locally (direct exec
@@ -168,6 +173,24 @@ public static class AgentAcceptanceContract
                    || effective.StartsWith(Messages.Agents.SupervisorAgentResult.InfraExitDetailPrefix, StringComparison.Ordinal)
                    || (effective == "no-branch-or-repo" && workPresent));
     }
+
+    /// <summary>
+    /// The detail prefix of a contract setup step that failed with the network the producing run's posture took from
+    /// it, on a host that enforced that (<c>SupervisorAcceptanceGrader</c> writes it only when the runner reports the
+    /// step severed). Infra-classed like any setup failure — the check never ran — but, unlike <c>setup-failed:</c>,
+    /// not transient: the posture comes from the same stored task on every attempt. Pinned by a unit test (Rule 8):
+    /// the grader writes it and <see cref="IsDecidedByGradePosture"/> reads it across a durable resume payload.
+    /// </summary>
+    public const string SetupSeveredDetailPrefix = "setup-failed-network-severed:";
+
+    /// <summary>
+    /// Whether an acceptance-failure DETAIL was decided by the grade's own posture rather than by the work or a
+    /// transient fault: a respawn of the same task grades under the same posture and reaches the same failure, so it
+    /// is infra (<see cref="IsInfraFailure(string?, bool)"/>) and still not worth a retry. Sees through the same display
+    /// tags the infra classification does.
+    /// </summary>
+    public static bool IsDecidedByGradePosture(string? detail) =>
+        StripGateLabel(StripRepoTag(detail))?.StartsWith(SetupSeveredDetailPrefix, StringComparison.Ordinal) == true;
 
     /// <summary>
     /// The multi-repo grade paths wrap a classifiable detail in a uniform machine-authored display tag

@@ -1,7 +1,10 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -307,7 +310,60 @@ public sealed class BenchmarkRunnerFlowTests
         await Should.ThrowAsync<ArgumentException>(() => RunAsync(task, BenchmarkMode.HarnessCli, workspace.Directory, teamId));
     }
 
+    [Fact]
+    public async Task The_benchmark_check_runs_under_the_benchmark_agents_own_posture()
+    {
+        // The check runs the fixture's test command in the workspace the agent just wrote, so a module the tests
+        // import is the agent's code. It runs under the posture the agent itself ran with: the same ceilings, and the
+        // check's own network cut. Before, the grade handed TestsPassGrader the raw local runner, with no ceiling.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli();
+        using var workspace = BenchmarkFixture.StageSolved();
+
+        var teamId = await SeedTeamAsync();
+        var task = TestsPassTask();
+        var graders = new RunnerRecordingGraders();
+
+        BenchmarkResult result;
+        using (var scope = _fixture.BeginScope(b =>
+        {
+            b.RegisterInstance(new TestCurrentUser(_operators[teamId], "test", Array.Empty<string>())).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
+            b.RegisterInstance(new TestCurrentTeam(teamId)).As<CodeSpace.Core.Services.Identity.ICurrentTeam>().SingleInstance();
+            b.RegisterInstance(graders).As<IBenchmarkGraderRegistry>();
+        }))
+        {
+            result = await scope.Resolve<IBenchmarkRunner>().RunAsync(task, BenchmarkMode.HarnessCli, new BenchmarkExecutionContext { WorkspaceDirectory = workspace.Directory, TeamId = teamId }, CancellationToken.None);
+        }
+
+        var expected = AcceptanceGradingPosturePolicy.For(BenchmarkRunner.BuildAgentTask(task, BenchmarkMode.HarnessCli, workspace.Directory, selection: null));
+        var runner = graders.Runners.ShouldHaveSingleItem("fixture check: the real TestsPass oracle graded the cell once").ShouldBeOfType<PostureBoundSandboxRunner>("the oracle is handed a runner bound to a posture, never the raw local runner");
+
+        result.Grade.Passed.ShouldBeTrue("fixture check: the solved fixture still grades pass under the posture");
+        JsonSerializer.Serialize(runner.Posture, AgentJson.Options).ShouldBe(JsonSerializer.Serialize(expected, AgentJson.Options), "the posture the benchmark agent itself ran with — not the fail-closed default");
+        expected.MaxMemoryMb.ShouldBeGreaterThan(0, "fixture check: a zero ceiling would mean unlimited and pass vacuously");
+    }
+
     // ─── Helpers ───
+
+    /// <summary>The real TestsPass oracle, recording the runner each grade hands it before it runs the check for real.</summary>
+    private sealed class RunnerRecordingGraders : IBenchmarkGraderRegistry
+    {
+        public List<CodeSpace.Core.Services.Agents.Sandbox.ISandboxRunner> Runners { get; } = new();
+
+        public IBenchmarkGrader Resolve(BenchmarkGradingKind kind) => new Recording(this);
+
+        private sealed class Recording(RunnerRecordingGraders owner) : IBenchmarkGrader
+        {
+            public BenchmarkGradingKind Kind => BenchmarkGradingKind.TestsPass;
+
+            public Task<BenchmarkGrade> GradeAsync(BenchmarkGradingContext context, CancellationToken cancellationToken)
+            {
+                owner.Runners.Add(context.Runner);
+                return new TestsPassGrader().GradeAsync(context, cancellationToken);
+            }
+        }
+    }
 
     /// <summary>The cell's M1a four-state verdict, through the REAL classifier over a one-cell manifest — what the evaluator-health floor actually counts, never a re-derivation of it here.</summary>
     private static CorpusCellState CellStateOf(BenchmarkTask task, BenchmarkResult result) =>

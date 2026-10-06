@@ -728,6 +728,29 @@ public class SupervisorTurnServiceTests
         SupervisorOutcome.ReadAcceptanceGradePassed(StopRowOutcome(ledger)).ShouldBe(false, "the verdict is folded durably onto the stop row");
     }
 
+    [Theory]
+    [InlineData(null, AgentAutonomyLevel.Standard)]         // no profile tier → the spawn default every unit got
+    [InlineData("Trusted", AgentAutonomyLevel.Trusted)]
+    [InlineData("confined", AgentAutonomyLevel.Confined)]
+    public async Task A_stop_grades_its_integrated_head_under_the_runs_own_autonomy_grant(string? profileTier, AgentAutonomyLevel expectedTier)
+    {
+        // The head mixes every unit's work, so its grade runs the tier every unit was clamped to — never the host
+        // network a hard-coded setup step used to get, and never less than the run's most capable unit had.
+        var ledger = SeedRunWithCleanMerge();
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
+        var config = GoalConfigWithRepo() with { AgentProfile = GoalConfigWithRepo().AgentProfile! with { AutonomyLevel = profileTier } };
+
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, config, CancellationToken.None);
+
+        var tier = AgentAutonomyPolicy.Clamp(expectedTier, AgentAutonomyPolicy.DeploymentCeiling);
+        var expected = AcceptanceGradingPosturePolicy.For(tier, AgentAutonomyPolicy.Derive(tier));
+        var posture = grader.Postures.ShouldHaveSingleItem("the stop's model gate graded once, through the posture-carrying request").ShouldNotBeNull();
+        posture.Autonomy.ShouldBe(expected.Autonomy);
+        posture.AllowNetwork.ShouldBe(expected.AllowNetwork);
+        posture.MaxMemoryMb.ShouldBe(expected.MaxMemoryMb);
+    }
+
     [Fact]
     public async Task A_full_turn_stop_with_a_model_acceptance_that_PASSES_reports_completed_and_surfaces_the_branch()
     {

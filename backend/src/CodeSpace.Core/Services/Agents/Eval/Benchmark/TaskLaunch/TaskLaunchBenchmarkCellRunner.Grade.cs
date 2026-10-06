@@ -37,6 +37,21 @@ public sealed partial class TaskLaunchBenchmarkCellRunner
     internal static string? ObservedModelOf(IReadOnlyList<AgentRun> attempts) =>
         ParseResult(attempts[^1])?.Model ?? attempts.Select(ParseResult).Select(r => r?.Model).FirstOrDefault(model => model is not null);
 
+    /// <summary>
+    /// The posture the reconstructed workspace's check runs under: the one every attempt that wrote it ran with, read off
+    /// each attempt's stored task. Like <see cref="ProducerModelOf"/>, it claims one only when every attempt agrees; a
+    /// union of work from different postures, or an attempt whose task cannot be read, has none — null, so the grade
+    /// fails closed (<c>AcceptanceGradingPosturePolicy.FailClosed</c>). Internal so the rule is pinned directly.
+    /// </summary>
+    internal static AcceptanceGradingPosture? GradedPosture(IReadOnlyList<AgentRun> attempts)
+    {
+        var postures = attempts.Select(attempt => Supervisor.AcceptanceGradingPosturePolicy.ForStoredTask(attempt.TaskJson)).ToList();
+
+        if (postures.Count == 0 || postures.Any(posture => posture is null)) return null;
+
+        return postures.Select(posture => JsonSerializer.Serialize(posture, AgentJson.Options)).Distinct(StringComparer.Ordinal).Count() == 1 ? postures[0] : null;
+    }
+
     internal static ReviewModelIdentity ProducerModelOf(BenchmarkAgentSelection? selection, IReadOnlyList<AgentRun> attempts)
     {
         var observed = attempts.Select(ParseResult).Select(result => result?.Model).Where(model => !string.IsNullOrWhiteSpace(model)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();

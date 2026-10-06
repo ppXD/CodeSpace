@@ -13,6 +13,15 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 /// </summary>
 public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
 {
+    /// <summary>
+    /// The detail of a check the runner killed at its own memory ceiling (<see cref="SandboxStatus.ResourceExhausted"/>,
+    /// read from the cgroup's oom_kill counter, never guessed from the exit code). A grade now runs under the producing
+    /// run's ceilings, so a ceiling can end a check, and that says nothing about whether the code is right: it is an
+    /// <see cref="GradeFailureClass.Environment"/> fact like <c>tests-timed-out</c>. Pinned by a unit test (Rule 8): the
+    /// infra classifier and the agent.code retry verdict read this literal across a durable resume payload.
+    /// </summary>
+    public const string ResourceExhaustedDetail = "tests-resource-exhausted";
+
     public BenchmarkGradingKind Kind => BenchmarkGradingKind.TestsPass;
 
     public async Task<BenchmarkGrade> GradeAsync(BenchmarkGradingContext context, CancellationToken cancellationToken)
@@ -31,7 +40,7 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
 
         return result.Status == SandboxStatus.Success
             ? new BenchmarkGrade { Passed = true, Detail = "tests-passed", EvidenceText = evidence }
-            : Fail(DetailFor(result), result.Status == SandboxStatus.TimedOut ? GradeFailureClass.Environment : GradeFailureClass.Genuine) with { EvidenceText = evidence };
+            : Fail(DetailFor(result), result.Status is SandboxStatus.TimedOut or SandboxStatus.ResourceExhausted ? GradeFailureClass.Environment : GradeFailureClass.Genuine) with { EvidenceText = evidence };
     }
 
     /// <summary>The grading command runs in the post-run workspace with a fresh, short wall-clock cap — the tests are tiny, and a hung test is a fail, not a hang. The env is the runner's scrubbed default (no agent secret injected — the grader is independent of the agent's credential).</summary>
@@ -49,8 +58,12 @@ public sealed class TestsPassGrader : IBenchmarkGrader, ISingletonDependency
 
     private static string Tail(string text) => text.Length <= 8_192 ? text : text[^8_192..];
 
-    private static string DetailFor(SandboxResult result) =>
-        result.Status == SandboxStatus.TimedOut ? "tests-timed-out" : $"tests-failed-exit-{result.ExitCode}";
+    private static string DetailFor(SandboxResult result) => result.Status switch
+    {
+        SandboxStatus.TimedOut => "tests-timed-out",
+        SandboxStatus.ResourceExhausted => ResourceExhaustedDetail,
+        _ => $"tests-failed-exit-{result.ExitCode}",
+    };
 
     private static BenchmarkGrade Fail(string detail, GradeFailureClass? failureClass = null) => new() { Passed = false, Detail = detail, Class = failureClass };
 }

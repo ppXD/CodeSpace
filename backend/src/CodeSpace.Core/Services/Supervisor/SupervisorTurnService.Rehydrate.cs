@@ -694,6 +694,7 @@ public sealed partial class SupervisorTurnService
             // gate IS the floor — so its own program file(s) are the run's oracle inventory (C3 narrowing).
             var spec = new SupervisorAcceptanceSpec { Command = command };
             var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(command);
+            var posture = resolver is null ? null : await ProducerPostureAsync(resolver.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
 
             // The branch arm carries the SAME inventory the patch arm below does. The floor-less overload compiles
             // and greens, but it silently reduces the grade to authored-only protection — which on this lane means
@@ -701,12 +702,12 @@ public sealed partial class SupervisorTurnService
             // saying it went unanchored. There is no base sha to pair it with here (this lane resolves none), and
             // the anchor is what keeps that from reading as an oversight.
             if (!string.IsNullOrEmpty(resolver?.ProducedBranch))
-                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = resolver.ProducedBranch, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(null, oracleFloorPrograms), ProducerModel = ProducerModelOf(resolver!) }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = resolver.ProducedBranch, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(null, oracleFloorPrograms), ProducerModel = ProducerModelOf(resolver!), Posture = posture }, cancellationToken).ConfigureAwait(false);
 
             var manifest = resolver is not null ? await ResolveUnitManifestAsync(resolver.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false) : null;
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(resolver!) }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(resolver!), Posture = posture }, cancellationToken).ConfigureAwait(false);
 
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
         }
@@ -962,17 +963,19 @@ public sealed partial class SupervisorTurnService
 
             if (repositoryId is null) return await GradeCapturedUnitAsync(result, spec, timeoutSeconds, teamId, cancellationToken).ConfigureAwait(false);
 
+            var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
             if (!string.IsNullOrEmpty(result.ProducedBranch))
             {
                 var anchor = await OracleAnchorAsync(result.AgentRunId, repositoryId.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = result.ProducedBranch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result) }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = result.ProducedBranch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
             }
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(result) }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
 
             return NotApplicableOrFailed(expectsChanges);
         }
@@ -1010,7 +1013,9 @@ public sealed partial class SupervisorTurnService
         if (!Agents.AgentAcceptanceContract.GradesFromDeliverables(spec))
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
-        var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = result.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(result) }, cancellationToken).ConfigureAwait(false);
+        var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = result.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
 
         return grade.Detail == ISupervisorAcceptanceGrader.NoDeliverablesCaptured ? DisambiguateEmptyWorld(result, grade) : grade;
     }
@@ -1070,14 +1075,18 @@ public sealed partial class SupervisorTurnService
             // no-branch-no-patch verdict leaves nothing to differentiate.
             if (string.IsNullOrEmpty(result.ProducedBranch) && manifest.PatchArtifactId is null) return null;
 
+            // The baseline runs under the CANDIDATE's posture: a differential between a base graded with network and
+            // a candidate graded without it would measure the two sandboxes, not the work.
+            var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
             // The memo key is the FULL spec identity, not just the argv: Kind routes a different oracle, and
             // SetupCommand/Rubric/Schema change what the same argv means — two subtasks may share a Command yet
-            // measure different contracts (adversarial-scan M1).
-            var key = $"{repositoryId}@{manifest.BaseSha}#{System.Text.Json.JsonSerializer.Serialize(spec, Agents.AgentJson.Options)}";
+            // measure different contracts (adversarial-scan M1). The posture is part of it for the reason above.
+            var key = $"{repositoryId}@{manifest.BaseSha}#{System.Text.Json.JsonSerializer.Serialize(spec, Agents.AgentJson.Options)}#{System.Text.Json.JsonSerializer.Serialize(posture, Agents.AgentJson.Options)}";
 
             if (baselines.TryGetValue(key, out var memoized)) return memoized;
 
-            var grade = await _acceptanceGrader.GradeBaseAsync(repositoryId.Value, teamId, manifest.BaseSha!, spec, spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            var grade = await _acceptanceGrader.GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = posture }, cancellationToken).ConfigureAwait(false);
 
             // A MEASURED baseline is shareable; an infra-classed one (a transient clone fault) is not — stamping it
             // onto every sibling off the same base would spread one blip across the whole fan-out.
@@ -1109,6 +1118,8 @@ public sealed partial class SupervisorTurnService
 
         if (targets.Count == 0) return NotApplicableOrFailed(expectsChanges);
 
+        var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
         foreach (var target in targets)
         {
             BenchmarkGrade grade;
@@ -1116,7 +1127,7 @@ public sealed partial class SupervisorTurnService
             {
                 var anchor = await OracleAnchorAsync(result.AgentRunId, target.RepositoryId!.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = teamId, Branch = target.ProducedBranch!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result) }, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = teamId, Branch = target.ProducedBranch!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
             }
             catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1414,7 +1425,7 @@ public sealed partial class SupervisorTurnService
         // "grader.acceptance" so its spend is recorded + counts toward the cost cap.
         BenchmarkGrade grade;
         using (Workflows.Llm.LlmCallContext.Push(new Workflows.Llm.LlmCallScope(context.SupervisorRunId, teamId, context.NodeId, "", GraderAcceptanceCallKind, _recordLogger, _offloader, _budget, context.MaxCostUsd, context.ModelPrices)))
-            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, AcceptanceOracleProtection.ProgramCandidates(floorCommand), cancellationToken).ConfigureAwait(false);
+            grade = await GradeStopTargetsWithHeartbeatAsync(context.SupervisorRunId, context.NodeId, teamId, targets, gates, oracleBaseShas, AcceptanceOracleProtection.ProgramCandidates(floorCommand), RunProfilePosture(context.AgentProfile), cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
@@ -1472,7 +1483,9 @@ public sealed partial class SupervisorTurnService
         {
             foreach (var unit in units)
             {
-                var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = unit.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(unit) }, cancellationToken).ConfigureAwait(false);
+                var posture = await ProducerPostureAsync(unit.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+                var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = unit.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(unit), Posture = posture }, cancellationToken).ConfigureAwait(false);
 
                 if (grade.Passed) return (grade, false);
 
@@ -1561,14 +1574,14 @@ public sealed partial class SupervisorTurnService
     /// migration) at <see cref="SupervisorLane.AcceptanceGradeHeartbeatInterval"/>; it stops the instant grading
     /// finishes (success, failure, or exception) via the linked token — never outlives the grade it protects.
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsWithHeartbeatAsync(Guid supervisorRunId, string nodeId, Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, AcceptanceGradingPosture posture, CancellationToken cancellationToken)
     {
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var heartbeat = RunGradingHeartbeatLoopAsync(supervisorRunId, nodeId, SupervisorLane.AcceptanceGradeHeartbeatInterval, heartbeatCts.Token, TimeProvider.System);
 
         try
         {
-            return await GradeStopTargetsAsync(teamId, targets, gates, oracleBaseShas, oracleFloorPrograms, cancellationToken).ConfigureAwait(false);
+            return await GradeStopTargetsAsync(teamId, targets, gates, oracleBaseShas, oracleFloorPrograms, posture, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -1641,7 +1654,7 @@ public sealed partial class SupervisorTurnService
     /// operator's own workspace, not the model). The first-failure short-circuit keeps the common rejected case cheap;
     /// a future perf slice could grade with a bounded degree-of-parallelism if a large workspace makes wall-clock bite.</para>
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, SupervisorAcceptanceSpec? Spec)> gates, IReadOnlyDictionary<Guid, string> oracleBaseShas, IReadOnlyList<string> oracleFloorPrograms, AcceptanceGradingPosture posture, CancellationToken cancellationToken)
     {
         var oracleNotes = new List<string>();
 
@@ -1663,7 +1676,7 @@ public sealed partial class SupervisorTurnService
                     // by rewriting the check script the operator's floor runs. The floor's inventory gates BOTH
                     // gates: the model's own tightening command can name a file the goal required editing, and
                     // restoring that would void the very work the stop is shipping.
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, spec, spec?.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, new OracleAnchor(oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms), cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId, TeamId = teamId, Branch = target.Branch, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms), Posture = posture }, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1754,6 +1767,32 @@ public sealed partial class SupervisorTurnService
             .ConfigureAwait(false);
 
         return rows.ToDictionary(r => r.Id, r => new ResolveContributorRow(r.Id, r.TeamId, r.Status, r.Error, r.ResultJson, r.TaskJson));
+    }
+
+    /// <summary>
+    /// The posture a grade of <paramref name="agentRunId"/>'s work runs under, read off the unit's own stored task: the
+    /// tier and permissions it ran with, as admitted. Null when the row is not this team's or its task cannot be read,
+    /// and the grader then grades fail-closed. Every per-unit lane reads it for the unit whose bytes it runs.
+    /// </summary>
+    private async Task<AcceptanceGradingPosture?> ProducerPostureAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var taskJson = await _db.AgentRun.AsNoTracking().Where(r => r.Id == agentRunId && r.TeamId == teamId).Select(r => r.TaskJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return AcceptanceGradingPosturePolicy.ForStoredTask(taskJson);
+    }
+
+    /// <summary>
+    /// The posture of the run-level STOP grade, whose head mixes every unit's work: the run's own autonomy grant, which
+    /// is the tier each unit it spawns is clamped to (<c>RealSupervisorActionExecutor.AutonomyOf</c>), with the
+    /// permissions that tier derives. A unit may lower its own tier, but none can exceed this one. So the head is never
+    /// graded with more than the operator granted the run, and never with less than its most capable unit could have
+    /// run against the same bytes.
+    /// </summary>
+    private static AcceptanceGradingPosture RunProfilePosture(SupervisorAgentProfile? profile)
+    {
+        var tier = Executors.RealSupervisorActionExecutor.AutonomyOf(profile);
+
+        return AcceptanceGradingPosturePolicy.For(tier, AgentAutonomyPolicy.Derive(tier));
     }
 
     /// <summary>The producer's durable routing identity from its task envelope, best-effort. It never invents provider observation.</summary>

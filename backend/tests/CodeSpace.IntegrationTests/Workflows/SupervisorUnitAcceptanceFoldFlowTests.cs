@@ -833,6 +833,123 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         unit.AcceptanceDetail.ShouldStartWith("not-applicable");
     }
 
+    // ─── V-B: every per-unit lane grades under the posture of the unit whose bytes it runs ─────────────────
+
+    [Theory]
+    [InlineData("branch")]
+    [InlineData("patch")]
+    [InlineData("multi-repo")]
+    [InlineData("captured")]
+    public async Task Every_per_unit_lane_grades_under_the_units_own_stored_posture(string lane)
+    {
+        // The unit's task_json is what its sandbox ran under (tier + permissions as admitted). A lane that graded
+        // under anything else — the old hard-coded host network, or the run's profile — would let a network-off
+        // unit's planted manifest install with egress, or cut a Trusted unit's legitimate download.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+        var task = UnitTask(AgentAutonomyLevel.Trusted, allowHost: "registry.npmjs.org");
+        await SeedUnitAgentRunAsync(teamId, agentId, task);
+
+        if (lane == "captured")
+        {
+            await SeedPlanAsync(runId, teamId, sequence: 1, ArtifactPlanPayload("s1", new[] { "report.md" }));
+            await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, producedBranch: null)));
+        }
+        else
+        {
+            await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+            var unit = lane switch
+            {
+                "branch" => Unit(agentId, "codespace/agent/s1"),
+                "patch" => Unit(agentId, producedBranch: null),
+                _ => Unit(agentId, "web/x") with { RepositoryResults = new[] { new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), ProducedBranch = "web/x", BaseBranch = "main", Access = WorkspaceAccess.Write }, new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), ProducedBranch = "api/x", BaseBranch = "main", Access = WorkspaceAccess.Write } } },
+            };
+            await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(unit));
+            if (lane != "multi-repo") await SeedManifestAsync(teamId, agentId, repoId, lane == "branch" ? "codespace/agent/s1" : null, baseSha: "deadbeef", patchArtifactId: lane == "patch" ? Guid.NewGuid() : null);
+        }
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        await RehydrateAsync(runId, teamId, lane == "captured" ? RepoLessGoalConfig() : GoalConfig(repoId), grader);
+
+        var expectedLanes = lane switch { "branch" => new[] { "branch", "base" }, "patch" => new[] { "patch", "base" }, "multi-repo" => new[] { "branch", "branch" }, _ => new[] { "captured" } };
+        grader.Postures.Select(p => p.Lane).ShouldBe(expectedLanes, "fixture check: the lane under test (and its baseline) actually graded");
+        grader.Postures.ShouldAllBe(p => p.Posture != null, "no per-unit lane may drop the producing unit's posture");
+        foreach (var (_, posture) in grader.Postures) ShouldBeThePostureOf(posture!, task);
+    }
+
+    [Fact]
+    public async Task A_unit_whose_task_cannot_be_read_hands_the_grader_no_posture_so_it_grades_fail_closed()
+    {
+        // No agent_run row for this unit in this team: there is no producer to take a posture from, and the grader
+        // reads a null posture as network off under the Confined ceilings (pinned in AcceptanceGradingPostureTests).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.Postures.ShouldHaveSingleItem().Posture.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Units_of_different_tiers_off_the_same_base_do_not_share_a_baseline_measurement()
+    {
+        // The baseline runs under its candidate's posture, so a base measured with the network cannot stand in for a
+        // network-off sibling's differential: that would compare two sandboxes, not two trees.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+        var agentA = Guid.NewGuid();
+        var agentB = Guid.NewGuid();
+        await SeedUnitAgentRunAsync(teamId, agentA, UnitTask(AgentAutonomyLevel.Standard, allowHost: null));
+        await SeedUnitAgentRunAsync(teamId, agentB, UnitTask(AgentAutonomyLevel.Trusted, allowHost: null));
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", Check), ("s2", Check)));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1","s2"]}""", SpawnOutcome(Unit(agentA, producedBranch: "codespace/agent/a"), Unit(agentB, producedBranch: "codespace/agent/b")));
+        await SeedManifestAsync(teamId, agentA, repoId, branch: "codespace/agent/a", baseSha: "deadbeef", patchArtifactId: null);
+        await SeedManifestAsync(teamId, agentB, repoId, branch: "codespace/agent/b", baseSha: "deadbeef", patchArtifactId: null);
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.BaseCalls.Count.ShouldBe(2, "same base and same oracle, but two postures ⇒ two measurements");
+        grader.Postures.Where(p => p.Lane == "base").Select(p => p.Posture!.AllowNetwork).ShouldBe(new[] { false, true }, "each baseline ran under its own candidate's posture");
+    }
+
+    private static AgentTask UnitTask(AgentAutonomyLevel tier, string? allowHost) => new()
+    {
+        Goal = "do s1",
+        Harness = "codex-cli",
+        Autonomy = tier,
+        Permissions = AgentAutonomyPolicy.Derive(tier) with { Egress = allowHost is null ? AgentEgressPolicy.Full : AgentEgressPolicy.Allowlist, EgressAllowHosts = allowHost is null ? null : new[] { allowHost } },
+    };
+
+    private async Task SeedUnitAgentRunAsync(Guid teamId, Guid agentRunId, AgentTask task)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.AgentRun.Add(new AgentRun { Id = agentRunId, TeamId = teamId, Harness = task.Harness, Status = CodeSpace.Messages.Enums.AgentRunStatus.Succeeded, TaskJson = JsonSerializer.Serialize(task, AgentJson.Options) });
+        await db.SaveChangesAsync();
+    }
+
+    private static void ShouldBeThePostureOf(AcceptanceGradingPosture actual, AgentTask producer)
+    {
+        var expected = AcceptanceGradingPosturePolicy.For(producer);
+
+        actual.Autonomy.ShouldBe(expected.Autonomy);
+        actual.AllowNetwork.ShouldBe(expected.AllowNetwork);
+        (actual.EgressAllowlist ?? Array.Empty<string>()).ShouldBe(expected.EgressAllowlist ?? Array.Empty<string>());
+        actual.MaxMemoryMb.ShouldBe(expected.MaxMemoryMb);
+        actual.MaxCpuPercent.ShouldBe(expected.MaxCpuPercent);
+    }
+
     // ─── C2: a REPO-LESS unit is graded against what it captured, not failed closed on "no repo" ──────────
 
     /// <summary>
@@ -1633,9 +1750,13 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         public List<(Guid RepositoryId, Guid TeamId, string BaseSha, Guid? PatchArtifactId, IReadOnlyList<string> Command)> PatchCalls { get; } = new();
         public List<ReviewModelIdentity?> PatchProducerModels { get; } = new();
 
+        /// <summary>V-B: the producing-run posture every request-form grade carried, tagged by lane, in call order.</summary>
+        public List<(string Lane, AcceptanceGradingPosture? Posture)> Postures { get; } = new();
+
         public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             RepositoryProducerModels.Add(request.ProducerModel);
+            Postures.Add(("branch", request.Posture));
             return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 
@@ -1656,6 +1777,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         public Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             PatchProducerModels.Add(request.ProducerModel);
+            Postures.Add(("patch", request.Posture));
             return GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 
@@ -1666,6 +1788,12 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         /// <summary>When set, GradeBaseAsync throws — proves the candidate grade survives its own baseline's crash.</summary>
         public Exception? ThrowOnBase { get; set; }
+
+        public Task<BenchmarkGrade> GradeBaseAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            Postures.Add(("base", request.Posture));
+            return GradeBaseAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.Spec, request.TimeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {
@@ -1679,6 +1807,12 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         /// <summary>The verdict the rebuilt-world grade returns. Its default is the passing ArtifactPresent verdict a captured, correct report earns.</summary>
         public BenchmarkGrade CapturedGrade { get; set; } = new() { Passed = true, Detail = "artifact-present" };
+
+        public Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            Postures.Add(("captured", request.Posture));
+            return GradeCapturedAsync(request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken)
         {

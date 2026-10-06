@@ -609,6 +609,38 @@ public class AgentRunExecutorAcceptanceTests
         grader.DirectoryCalls.ShouldBe(0);
     }
 
+    // ─── V-B: every repository lane grades under the run's OWN posture ──────────
+
+    [Theory]
+    [InlineData("branch", AgentAutonomyLevel.Standard)]
+    [InlineData("branch", AgentAutonomyLevel.Trusted)]
+    [InlineData("patch", AgentAutonomyLevel.Standard)]
+    [InlineData("patch", AgentAutonomyLevel.Trusted)]
+    [InlineData("multi-repo", AgentAutonomyLevel.Standard)]
+    [InlineData("multi-repo", AgentAutonomyLevel.Trusted)]
+    public async Task Every_repository_lane_grades_under_the_producing_runs_posture(string lane, AgentAutonomyLevel tier)
+    {
+        // The grade runs the candidate's bytes after the agent's sandbox is gone; the posture is what keeps its setup
+        // from reaching a network this run never had. A lane that dropped it would grade fail-closed — safe, but no
+        // longer this run's posture, so a Trusted run's setup could not download.
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var task = TaskWith(Spec("sh", "check.sh")) with { Autonomy = tier, Permissions = AgentAutonomyPolicy.Derive(tier) with { Egress = AgentEgressPolicy.Allowlist, EgressAllowHosts = new[] { "registry.npmjs.org" } } };
+        var result = lane switch
+        {
+            "branch" => Succeeded(),
+            "patch" => SucceededPatchOnly(),
+            _ => Succeeded() with { RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web" }, new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" } } },
+        };
+
+        await executor.GradeAcceptanceIfPresentAsync(Run(), task, result, workspace: null, CancellationToken.None);
+
+        var expected = AcceptanceGradingPosturePolicy.For(task);
+        grader.Postures.Count.ShouldBe(lane == "multi-repo" ? 2 : 1, "fixture check: the lane under test actually graded");
+        grader.Postures.ShouldAllBe(p => p != null && p.Autonomy == expected.Autonomy && p.AllowNetwork == expected.AllowNetwork && p.MaxMemoryMb == expected.MaxMemoryMb && p.MaxCpuPercent == expected.MaxCpuPercent);
+        grader.Postures.ShouldAllBe(p => (p!.EgressAllowlist ?? Array.Empty<string>()).SequenceEqual(expected.EgressAllowlist ?? Array.Empty<string>()));
+        expected.AllowNetwork.ShouldBe(tier == AgentAutonomyLevel.Trusted, "fixture check: the two tiers really differ on the network");
+    }
+
     // ─── fixtures ────────────────────────────────────────────────────────────────
 
     private static AgentRun Run() => new() { Id = Guid.NewGuid(), TeamId = Guid.NewGuid() };
@@ -715,6 +747,21 @@ public class AgentRunExecutorAcceptanceTests
 
         /// <summary>C3 narrowing — the run's own ORACLE INVENTORY each branch grade was handed. This lane's contract IS the run's one gate, so its own program file(s) are the judge.</summary>
         public Dictionary<string, IReadOnlyList<string>?> OracleFloorProgramsByBranch { get; } = new();
+
+        /// <summary>The producing-run posture every request-form grade carried, in call order — a lane that dropped it records null.</summary>
+        public List<AcceptanceGradingPosture?> Postures { get; } = new();
+
+        public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            Postures.Add(request.Posture);
+            return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor, cancellationToken);
+        }
+
+        public Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
+        {
+            Postures.Add(request.Posture);
+            return GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, cancellationToken);
+        }
 
         public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken)
         {

@@ -1351,7 +1351,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// clamped to the value returned here (<see cref="ClampAutonomy"/>), so tightening this tightens every
     /// spawn.</para>
     /// </summary>
-    private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
+    internal static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
         AgentAutonomyPolicy.Clamp(AgentAutonomyPolicy.Parse(profile?.AutonomyLevel, AgentAutonomyLevel.Standard), AgentAutonomyPolicy.DeploymentCeiling);
 
     /// <summary>Clamp a model-authored autonomy REQUEST to the run profile's <paramref name="ceiling"/> (L4 arc B): the request wins only when it is MORE restrictive than the ceiling (the enum is ordered Confined &lt; Standard &lt; Trusted &lt; Unleashed); an absent / unparseable / equal-or-higher request keeps the ceiling — so the model can lower its own autonomy but NEVER raise it past the operator's grant. No request → the ceiling (byte-identical).</summary>

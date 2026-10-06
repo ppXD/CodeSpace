@@ -73,7 +73,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, context, cancellationToken).ConfigureAwait(false);
 
-        var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, new BenchmarkTaskGradingRequest { Task = task, WorkspaceDirectory = workspaceDirectory, TeamId = teamId, ProducerModel = ProducerModelOf(selection, attempts) }, cancellationToken).ConfigureAwait(false);
+        var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, new BenchmarkTaskGradingRequest { Task = task, WorkspaceDirectory = workspaceDirectory, TeamId = teamId, ProducerModel = ProducerModelOf(selection, attempts), Posture = Supervisor.AcceptanceGradingPosturePolicy.For(agentTask) }, cancellationToken).ConfigureAwait(false);
 
         grade = ApplyMcpFabricRule(grade, mode, attempts[^1]);
 

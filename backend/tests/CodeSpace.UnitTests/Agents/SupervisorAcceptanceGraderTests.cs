@@ -1029,9 +1029,12 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
+        // v9: the setup and the check run under the PRODUCING run's posture (network, egress allowlist, memory/cpu
+        // ceilings), narrow-only — a request with none grades network-off under the Confined ceilings; a check killed at
+        // that ceiling is an Environment fact, and a setup the sandbox severed is decided by the posture.
         // v8: every grade step runs under a bounded window — a non-positive authored timeout grades at the default
         // instead of arming no wall clock, and a longer one is capped at SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v8");
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v9");
     }
 
     [Fact]

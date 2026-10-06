@@ -340,9 +340,15 @@ public sealed class AgentCodeNode : INodeRuntime
             // slow suite) is an environment/workload fact, not a code defect, so it gets the SAME fresh-respawn
             // chance a crash/timeout does (mirrors AgentAcceptanceContract.IsInfraFailure, the same classification
             // the executor's revise loop / supervisor decider / recitation already apply elsewhere).
+            //
+            // ...EXCEPT an infra fault the grade's own posture decided (a setup step the sandbox severed because the
+            // producing run had no network): the posture is read off the same stored task on every attempt, so a
+            // respawn re-buys a whole agent run only to fail the same way. Still infra — never a code verdict — but
+            // deterministic, so it falls back into the non-retryable arm below.
             var exitReason = ReadString(payload, "exitReason");
             var acceptanceFailed = exitReason == AgentAcceptanceContract.FailClosedExitReason;
-            var acceptanceInfraFault = acceptanceFailed && AgentAcceptanceContract.IsInfraFailure(ReadOptionalString(payload, "acceptanceDetail"), WorkPresent(payload));
+            var acceptanceDetail = ReadOptionalString(payload, "acceptanceDetail");
+            var acceptanceInfraFault = acceptanceFailed && AgentAcceptanceContract.IsInfraFailure(acceptanceDetail, WorkPresent(payload)) && !AgentAcceptanceContract.IsDecidedByGradePosture(acceptanceDetail);
 
             // The SAME carve-out, one status over: NeedsReview is not one fact. The critic flagging an output is a
             // verdict a respawn cannot change, but the IDLE watchdog killing a silent process is an environment

@@ -49,6 +49,24 @@ public sealed class SupervisorBranchlessStopGradeTests
         grader.ProducerModels.ShouldBe(new[] { producer });
     }
 
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    public async Task A_branchless_gate_grades_each_units_world_under_that_units_stored_posture(AgentAutonomyLevel tier)
+    {
+        var db = Infrastructure.EmptyTestDb.New();
+        var task = new AgentTask { Goal = "write the report", Harness = "codex-cli", Autonomy = tier, Permissions = AgentAutonomyPolicy.Derive(tier) };
+        db.AgentRun.Add(new CodeSpace.Core.Persistence.Entities.AgentRun { Id = UnitId, TeamId = TeamId, Harness = task.Harness, Status = AgentRunStatus.Succeeded, TaskJson = JsonSerializer.Serialize(task, AgentJson.Options) });
+        await db.SaveChangesAsync();
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent), db: db);
+
+        var posture = grader.Postures.ShouldHaveSingleItem().ShouldNotBeNull("the captured world is the unit's bytes, graded under the unit's own posture");
+        posture.Autonomy.ShouldBe(AcceptanceGradingPosturePolicy.For(task).Autonomy);
+        posture.AllowNetwork.ShouldBe(AcceptanceGradingPosturePolicy.For(task).AllowNetwork);
+    }
+
     [Fact]
     public async Task A_failing_deliverable_kind_stop_records_the_failure_named_by_its_gate()
     {
@@ -225,12 +243,12 @@ public sealed class SupervisorBranchlessStopGradeTests
     private static readonly AcceptanceRubric WithRubric = new() { Criteria = new[] { new AcceptanceRubricCriterion { Id = "sources", Requirement = "names at least one source" } } };
 
     /// <summary>Drive the stop grade directly with a branchless context (the fake resolver finds no published branch when the tape carries none).</summary>
-    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null, ProducerFixture? producers = null)
+    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null, ProducerFixture? producers = null, CodeSpace.Core.Persistence.Db.CodeSpaceDbContext? db = null)
     {
         // Only the stop-grade path's own collaborators are real here: the grader under test, the branch resolver (the
         // source of the branchless world), the manifest store the oracle anchor reads, and the budget ledger the call
         // scope carries. Every other seam is untouched by ApplyStopAcceptanceGradeAsync.
-        var service = new SupervisorTurnService(null!, null!, null!, db: Infrastructure.EmptyTestDb.New(), grader, null!, null!, null!, null!,
+        var service = new SupervisorTurnService(null!, null!, null!, db: db ?? Infrastructure.EmptyTestDb.New(), grader, null!, null!, null!, null!,
             null!, null!, new NoManifests(), new FakeSupervisorPublishedBranchResolver(), null!, new AdmitAllBudgetLedger(),
             null!, null!, NullLogger<SupervisorTurnService>.Instance, rubricJudge);
 
@@ -303,9 +321,12 @@ public sealed class SupervisorBranchlessStopGradeTests
         public List<Guid> CapturedCalls { get; } = new();
         public List<ReviewModelIdentity?> ProducerModels { get; } = new();
 
+        public List<AcceptanceGradingPosture?> Postures { get; } = new();
+
         public Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             ProducerModels.Add(request.ProducerModel);
+            Postures.Add(request.Posture);
             return GradeCapturedAsync(request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 

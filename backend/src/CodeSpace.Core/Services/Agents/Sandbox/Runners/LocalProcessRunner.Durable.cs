@@ -383,6 +383,27 @@ public sealed partial class LocalProcessRunner
             throw new SealedEgressUnavailableException(cause);
     }
 
+    /// <inheritdoc />
+    public SandboxEgressMode EnforcedEgress(SandboxSpec spec)
+    {
+        var confines = BubblewrapSandbox.Available is not null;
+
+        return EnforcedEgress(spec, confines, HostFiltersAllowlist(confines));
+    }
+
+    /// <summary>
+    /// <see cref="EnforcedEgress(SandboxSpec)"/> over whether this host <paramref name="confines"/> and whether it plans
+    /// an allowlist into a filtered namespace (<paramref name="filtersAllowlist"/>), so the table is pinned on any host.
+    /// The same <see cref="EgressPolicyFor"/> derivation the launch reads, with the one thing it leaves implicit made
+    /// explicit: a severed policy is enforced only by bubblewrap's fresh namespace, so where nothing confines the child
+    /// keeps the worker's network. A filtered namespace is built with or without bubblewrap.
+    /// </summary>
+    internal static SandboxEgressMode EnforcedEgress(SandboxSpec spec, bool confines, bool filtersAllowlist) => EgressPolicyFor(spec, filtersAllowlist).Mode switch
+    {
+        SandboxEgressMode.None when !confines => SandboxEgressMode.Full,
+        var mode => mode,
+    };
+
     /// <summary>
     /// Why a brokered child with a network of its own could not reach its broker from this host, or null when it can
     /// or needs nothing: no broker port, a network it shares with the worker, or both halves of the relay in place.

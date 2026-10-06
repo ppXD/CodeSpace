@@ -57,7 +57,7 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
         if (observation.Failure != null) return observation.Failure;
         var context = (Context)request.Context!;
         BenchmarkGrade grade;
-        try { grade = await grader.GradeDirectoryAsync(observation.Directory!, context.Spec!, request.TeamId, context.Spec!.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false); }
+        try { grade = await grader.GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = observation.Directory!, Spec = context.Spec!, TeamId = request.TeamId, TimeoutSeconds = context.Spec!.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = AcceptanceGradingPosturePolicy.For(request.Task) }, cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) when (ex is not OperationCanceledException and not Exceptions.AgentRunOwnershipLostException and not AgentAuthorityDeniedException)
         {
             return Failed($"local-oracle-unavailable: {ex.GetType().Name}", GradeFailureClass.GraderFault);
