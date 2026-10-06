@@ -30,7 +30,9 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// tool the tier does not permit comes back as a tool result with <c>isError:true</c> + a reason — never silently
 /// run. Per-call TENANCY is enforced: the handler stamps the run's <c>teamId</c> onto every <c>AgentToolCall</c>,
 /// which <c>NodeAgentTool</c> writes to the synthetic scope's <c>sys.team_id</c> so a repo-touching tool resolves
-/// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). EVERY
+/// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). The run's sandbox
+/// posture rides every call the same way (<see cref="AgentToolCall.CallerPosture"/>), so a tool that starts a sandbox of
+/// its own (<c>agent.run_command</c>) runs it no wider than the run. EVERY
 /// tool-result text the model receives — success output, tool error, AND the caught-exception message — is run
 /// through the run's <see cref="SecretRedactor"/> at the single <see cref="ToolResult"/> choke point, so an echoed
 /// model key can never reach the model through a tool call.</para>
@@ -105,12 +107,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     // run that did NOT opt into the side-effecting fabric) serves only read-only tools — they are the only ones listed,
     // allow-listed, and callable. Full (the existing opt-in) serves the whole registry, byte-identical to before.
     private readonly McpCatalogMode _catalogMode;
+    // The posture of the run this connection serves, stamped onto every tool call so a tool that starts a sandbox of
+    // its own runs it no wider than the run. The run's own permissions when the endpoint passed them; a handler built
+    // without them (tests) serves its tier's derived permissions.
+    private readonly AgentRunPosture _posture;
     private readonly ILogger _logger;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null, ILogger? logger = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null, ILogger? logger = null, AgentPermissions? permissions = null)
     {
         _registry = registry;
         _autonomy = autonomy;
+        _posture = new AgentRunPosture { RunId = runId, Autonomy = autonomy, Permissions = permissions ?? AgentAutonomyPolicy.Derive(autonomy) };
         _counters = counters;
         _teamId = teamId;
         _redactor = redactor ?? SecretRedactor.None;
@@ -877,7 +884,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     {
         try
         {
-            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId, RunId = _runId }, cancellationToken).ConfigureAwait(false);
+            var result = await tool.CallAsync(CallFor(arguments), cancellationToken).ConfigureAwait(false);
 
             if (result.IsError)
             {
@@ -981,7 +988,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     {
         try
         {
-            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId, RunId = _runId }, cancellationToken).ConfigureAwait(false);
+            var result = await tool.CallAsync(CallFor(arguments), cancellationToken).ConfigureAwait(false);
 
             if (result.IsError) return ToolResult(isError: true, result.Error ?? "Tool failed.");
 
@@ -999,6 +1006,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             return ToolResult(isError: true, ex.Message);
         }
     }
+
+    /// <summary>The call a tool receives on either path: the model's arguments, plus the run's team, id and sandbox posture — server-stamped, never read from the arguments.</summary>
+    private AgentToolCall CallFor(JsonElement arguments) => new() { Input = arguments, TeamId = _teamId, RunId = _runId, CallerPosture = _posture };
 
     private static bool IsSupportedVersion(JsonElement request) =>
         !request.TryGetProperty("jsonrpc", out var v) || (v.ValueKind == JsonValueKind.String && v.GetString() == "2.0");

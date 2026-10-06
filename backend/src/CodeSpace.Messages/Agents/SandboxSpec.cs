@@ -156,8 +156,11 @@ public sealed record SandboxSpec
     /// <see cref="AgentTask.Autonomy"/> tier via <c>AgentAutonomyPolicy.Ceilings</c> — a committed per-tier value,
     /// narrowable per deployment by the operator's host budget (<c>RuntimeSettings.AgentMemoryCeilingMb</c>) and by
     /// nothing else. It is applied at the executor's one spec choke point, so every harness's invocation and every
-    /// revise round carries it. <c>0</c> = unlimited, which is what a spec built OUTSIDE that path still means —
-    /// <c>RunCommandService</c>'s repo-scoped command runs on the NON-durable runner, which has no cgroup path at all.</para>
+    /// revise round carries it. <c>0</c> = unlimited, which is what a spec built OUTSIDE that path still means — a
+    /// workflow node's <c>agent.run_command</c>. The same command asked for by an AGENT carries its calling run's tier
+    /// row instead (<c>RunCommandService</c>), on a cgroup leaf of its own beside the agent's — it bounds the command, it
+    /// does not share the agent's. A run's commands queue, one at a time (<c>CallerCommandLanes</c>), so they never hold
+    /// more than one row between them; the agent and its one running command can together hold up to two.</para>
     ///
     /// <para>ENFORCED only by a runner with cgroup-v2 delegation (the durable local runner on Linux under an
     /// operator-delegated <c>Sandbox:CgroupRoot</c>); carried and ignored otherwise, including on macOS development.

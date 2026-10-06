@@ -88,6 +88,36 @@ public class AgentRunCommandNodeTests
     }
 
     [Fact]
+    public async Task Carries_the_calling_runs_posture_into_the_request_and_a_workflow_context_carries_none()
+    {
+        var posture = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Standard, Permissions = new AgentPermissions { Network = AgentNetworkAccess.Off } };
+        var asTool = new StubRunCommandService();
+        var asNode = new StubRunCommandService();
+
+        await new AgentRunCommandNode(asTool, new FakeArtifactStore()).RunAsync(Context() with { CallerPosture = posture }, CancellationToken.None);
+        await new AgentRunCommandNode(asNode, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
+
+        asTool.Request!.CallerPosture.ShouldBeSameAs(posture, "a command an agent asks for carries that agent's run posture to the service that builds its sandbox");
+        asNode.Request!.CallerPosture.ShouldBeNull("a workflow node's command has no calling run — its authored posture stands");
+    }
+
+    [Fact]
+    public async Task Tells_the_agent_when_its_runs_posture_took_the_network_its_command_asked_for()
+    {
+        // The agent (and whoever approved the call) asked for "network": true; a network-off run's command runs
+        // severed. Without saying so, the only trace is the command's own connection error.
+        var posture = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Standard, Permissions = new AgentPermissions { Network = AgentNetworkAccess.Off } };
+        var inputs = new Dictionary<string, JsonElement> { ["command"] = JsonSerializer.SerializeToElement("npm"), ["network"] = JsonSerializer.SerializeToElement(true) };
+
+        var asTool = await new AgentRunCommandNode(new StubRunCommandService(), new FakeArtifactStore()).RunAsync(ContextFrom(inputs) with { CallerPosture = posture }, CancellationToken.None);
+        var asNode = await new AgentRunCommandNode(new StubRunCommandService(), new FakeArtifactStore()).RunAsync(ContextFrom(inputs), CancellationToken.None);
+
+        asTool.Outputs["networkNarrowed"].GetString().ShouldBe(RunCommandService.CallerNetworkNarrowing(new RunCommandRequest { Command = "npm", AllowNetwork = true, CallerPosture = posture }));
+        asTool.Outputs["networkNarrowed"].GetString().ShouldNotBeNull().ShouldStartWith("off");
+        asNode.Outputs.ContainsKey("networkNarrowed").ShouldBeFalse("a workflow node's command is never narrowed by a caller — its outputs are unchanged");
+    }
+
+    [Fact]
     public async Task Runs_ephemerally_when_no_repository_is_given()
     {
         var stub = new StubRunCommandService();

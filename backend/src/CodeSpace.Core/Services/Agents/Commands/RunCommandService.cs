@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Auth;
@@ -18,20 +19,24 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IWorkspaceProviderRegistry _workspaces;
     private readonly AgentDefaultRunnerSetting _defaultRunner;
+    private readonly CallerCommandLanes _lanes;
 
-    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces, AgentDefaultRunnerSetting defaultRunner)
+    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces, AgentDefaultRunnerSetting defaultRunner, CallerCommandLanes lanes)
     {
         _db = db;
         _auth = auth;
         _runners = runners;
         _workspaces = workspaces;
         _defaultRunner = defaultRunner;
+        _lanes = lanes;
     }
 
     public async Task<SandboxResult> RunAsync(RunCommandRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.Command))
             throw new InvalidOperationException("A command is required.");
+
+        await using var lane = await EnterCallerLaneAsync(request.CallerPosture, cancellationToken).ConfigureAwait(false);
 
         var runnerKind = string.IsNullOrWhiteSpace(request.RunnerKind) ? _defaultRunner.Value : request.RunnerKind;
         var runner = _runners.Resolve(runnerKind);
@@ -53,6 +58,38 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     }
 
     /// <summary>
+    /// A command an agent asked for waits its turn among its run's commands (<see cref="CallerCommandLanes"/>), so the
+    /// commands one run has running never hold more than one tier row of cgroup ceilings between them. A workflow
+    /// node's command has no calling run and never waits.
+    /// </summary>
+    private async Task<IAsyncDisposable?> EnterCallerLaneAsync(AgentRunPosture? caller, CancellationToken cancellationToken) =>
+        caller is null ? null : await _lanes.EnterAsync(caller.RunId, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// What a command an agent asked network for lost to its calling run's posture, as one line the agent and whoever
+    /// approved the call can read on the tool result — or null when nothing was lost: no calling run (a workflow node),
+    /// no network asked for (or none the deployment ceiling allows anyway), or granted as asked. Derived from the same
+    /// projection <see cref="BuildSpec"/> runs, so it can never disagree with the sandbox the command got. "Off" carries
+    /// the confinement caveat: it is severed only where the sandbox confines.
+    /// </summary>
+    public static string? CallerNetworkNarrowing(RunCommandRequest request)
+    {
+        if (request.CallerPosture is not { } caller) return null;
+
+        var authored = AuthoredSpec(request, workingDirectory: null);
+
+        if (!authored.AllowNetwork) return null;
+
+        return WithinCallerPosture(authored, caller) switch
+        {
+            { AllowNetwork: false } when caller.Permissions.Network != AgentNetworkAccess.On => $"off: the calling run ({caller.Autonomy}) has no network{AgentAutonomyPolicy.ConfinementCaveat}",
+            { AllowNetwork: false } => $"off: the calling run's egress allowlist names no host a command may reach{AgentAutonomyPolicy.ConfinementCaveat}",
+            { EgressAllowlist: { Count: > 0 } hosts } => $"narrowed to the calling run's egress allowlist ({string.Join(", ", hosts)})",
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// The request → <see cref="SandboxSpec"/> projection, with the deployment autonomy ceiling
     /// (<c>Sandbox:MaxAutonomy</c>) narrowing the requested egress. This lane has NO autonomy tier anywhere in its
     /// vocabulary — <c>agent.run_command</c>'s raw <c>"network": true</c> lands straight on
@@ -61,10 +98,16 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     /// sandbox enforces) has the last word instead. NARROW-ONLY: a ceiling that grants network leaves the request
     /// exactly as asked, so the committed default clamps nothing.
     ///
+    /// <para>A command an AGENT asked for (<see cref="RunCommandRequest.CallerPosture"/> set) is then narrowed to that
+    /// agent's own run by <see cref="WithinCallerPosture"/>; a workflow node's command is exactly as above.</para>
+    ///
     /// <para>Internal (not private) so the narrowing is unit-pinned directly (InternalsVisibleTo) rather than only
     /// through a runner that would have to be confining to show it.</para>
     /// </summary>
-    internal static SandboxSpec BuildSpec(RunCommandRequest request, string? workingDirectory) => new()
+    internal static SandboxSpec BuildSpec(RunCommandRequest request, string? workingDirectory) => WithinCallerPosture(AuthoredSpec(request, workingDirectory), request.CallerPosture);
+
+    /// <summary>The command as authored, under the deployment ceiling alone — what a workflow node's command runs as, and what an agent's is narrowed from.</summary>
+    private static SandboxSpec AuthoredSpec(RunCommandRequest request, string? workingDirectory) => new()
     {
         Command = request.Command,
         Args = request.Args,
@@ -76,6 +119,42 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         MaxProcesses = request.MaxProcesses,
         MaxFileSizeMb = request.MaxFileSizeMb,
     };
+
+    /// <summary>
+    /// Narrow a command an agent asked for through its tool fabric to the posture of the agent's OWN run. The command's
+    /// sandbox is a sandbox of its own, so without this a network-off agent could hand itself the internet by asking
+    /// for <c>"network": true</c>, and every command it ran was uncapped. NARROW-ONLY: the network stays only when the
+    /// command asked for it, the deployment ceiling allows it (above) AND the run has it; the ceilings are those of the
+    /// run's tier clamped by the deployment ceiling, narrowed by the operator's host memory budget — the same table and
+    /// budget <c>AgentRunExecutor.ApplyResourceCeilings</c> holds the run itself to. Those ceilings land on a cgroup leaf
+    /// of the command's own, beside the agent's: they bound the command, not the run as a whole, which is why a run's
+    /// commands also queue (<see cref="CallerCommandLanes"/>). No caller (a workflow node) ⇒ the spec is returned untouched.
+    /// </summary>
+    private static SandboxSpec WithinCallerPosture(SandboxSpec spec, AgentRunPosture? caller)
+    {
+        if (caller is null) return spec;
+
+        var ceilings = AgentAutonomyPolicy.Ceilings(AgentAutonomyPolicy.Clamp(caller.Autonomy, AgentAutonomyPolicy.DeploymentCeiling), RuntimeSettings.Current.AgentMemoryCeilingMb);
+        var narrowed = spec with { AllowNetwork = spec.AllowNetwork && caller.Permissions.Network == AgentNetworkAccess.On, MaxMemoryMb = ceilings.MemoryMb, MaxCpuPercent = ceilings.CpuPercent };
+
+        return WithinCallerEgress(narrowed, caller.Permissions);
+    }
+
+    /// <summary>
+    /// An allowlisted caller's command reaches ONLY the operator's extra hosts (<see cref="AgentPermissions.EgressAllowHosts"/>).
+    /// The run's own allowlist adds its model host and its repositories' git hosts; a command needs neither, and a
+    /// repository the command names may sit on a host the run never had, so the extra hosts are the one part that is a
+    /// strict subset of the run's reach. None ⇒ severed, never full egress — the same fail-closed rule
+    /// <c>AgentRunExecutor.ApplyEgressPolicy</c> applies to the run itself.
+    /// </summary>
+    private static SandboxSpec WithinCallerEgress(SandboxSpec spec, AgentPermissions permissions)
+    {
+        if (!spec.AllowNetwork || permissions.Egress != AgentEgressPolicy.Allowlist) return spec;
+
+        var hosts = EgressAllowlistBuilder.Build(modelBaseUrl: null, modelProvider: null, Array.Empty<string>(), permissions.EgressAllowHosts);
+
+        return hosts.Count == 0 ? spec with { AllowNetwork = false } : spec with { EgressAllowlist = hosts };
+    }
 
     /// <summary>
     /// Repo → clone request: load the repository (by id, like the git.* node services), resolve a short-lived

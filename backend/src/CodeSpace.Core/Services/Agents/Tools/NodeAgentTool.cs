@@ -17,7 +17,8 @@ namespace CodeSpace.Core.Services.Agents.Tools;
 /// <para>Only synchronous nodes are tool-callable: a node that SUSPENDS for an async wait (e.g. agent.run)
 /// returns a typed error rather than silently parking — a tool call must produce a concrete result. The node
 /// runs against a minimal synthetic context (the tool input as its inputs, no upstream scope, no-op
-/// observability); the agent loop / MCP layer owns its own auditing around the call.</para>
+/// observability, the calling run's <see cref="AgentToolCall.CallerPosture"/>); the agent loop / MCP layer owns its own
+/// auditing around the call.</para>
 /// </summary>
 public sealed class NodeAgentTool : IAgentTool
 {
@@ -85,6 +86,7 @@ public sealed class NodeAgentTool : IAgentTool
             Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
             Logger = _logger,
             Observability = NodeObservability.NoOp,
+            CallerPosture = call.CallerPosture,
         };
 
         var result = await _invocations.ExecuteAsync(new NodeInvocation(_node.TypeKey, context), cancellationToken).ConfigureAwait(false);

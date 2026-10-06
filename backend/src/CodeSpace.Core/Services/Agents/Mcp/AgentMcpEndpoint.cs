@@ -17,7 +17,7 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// One run's live MCP endpoint over a PER-RUN Unix-domain socket: it binds + listens on the run's socket path, accepts
 /// connections in a loop, and for each connection validates the per-run <c>CODESPACE_RUN_TOKEN</c> on the FIRST line
 /// before serving — then pumps one <see cref="McpFramingLoop"/> (a fresh <see cref="McpRequestHandler"/> bound to the
-/// run's tool registry + autonomy + team + secret redactor) over the socket's <see cref="NetworkStream"/>. Every
+/// run's tool registry + autonomy + permissions + team + secret redactor) over the socket's <see cref="NetworkStream"/>. Every
 /// tool-result text the handler returns is run through the run's <see cref="SecretRedactor"/>, so an echoed model key
 /// never reaches the model. The connect descriptor
 /// (socket path + token) is registered with the <see cref="IAgentMcpConnectRegistry"/> under the run id so a consumer
@@ -48,6 +48,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly bool _governanceEnabled;
     private readonly Guid? _approvalConversationId;
     private readonly McpCatalogMode _catalogMode;
+    private readonly AgentPermissions? _permissions;
     private readonly ILogger _logger;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
@@ -56,7 +57,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, McpCatalogMode catalogMode = McpCatalogMode.Full)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, McpCatalogMode catalogMode = McpCatalogMode.Full, AgentPermissions? permissions = null)
     {
         _runId = runId;
         _registry = registry;
@@ -71,6 +72,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _governanceEnabled = governanceEnabled;
         _approvalConversationId = approvalConversationId;
         _catalogMode = catalogMode;
+        _permissions = permissions;
         _logger = logger;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _counters = new McpFabricCounters();
@@ -187,7 +189,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         var authorityContext = new McpAuthorityContext(_runId, _teamId, connectionScope.ServiceProvider.GetRequiredService<IAgentAuthorityCallGuard>(), _counters);
         var authorizedRegistry = new AuthorityCheckedToolRegistry(_registry, authorityContext);
-        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters, _logger);
+        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters, _logger, _permissions);
 
         var handler = new AuthorizedMcpRequestHandler(protocol, authorityContext);
 

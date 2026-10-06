@@ -15,7 +15,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// need a full AI agent. With a <c>repositoryId</c> the command runs inside a freshly-cloned, per-run
 /// workspace (so <c>npm test</c> / <c>make lint</c> see real code); without one it runs ephemerally. The
 /// command itself never touches the network unless <c>network</c> is set — secure by default — and runs
-/// under the runner's process / file-size rlimits (a fork-bomb + runaway-write cap).
+/// under the runner's process / file-size rlimits (a fork-bomb + runaway-write cap). Called as an agent tool it also
+/// runs no wider than the calling run (<see cref="NodeRunContext.CallerPosture"/>, applied by
+/// <see cref="IRunCommandService"/>): no network the run lacks, and the run's tier ceilings.
 ///
 /// A non-zero exit is a NORMAL outcome: the node SUCCEEDS with <c>status</c>=Failed/TimedOut + the exit code,
 /// so a workflow branches on the result (e.g. tests-passed? → open a PR). The node only FAILS on an
@@ -76,7 +78,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "command":        { "type": "string", "minLength": 1, "description": "Executable to run (resolved on PATH, e.g. \"npm\", \"make\", \"pytest\"). Not shell-interpreted — put each argument in Args.", "x-spotlight": 1 },
                 "args":           { "type": "array", "items": { "type": "string" }, "description": "Arguments, one per entry (e.g. [\"test\", \"--silent\"]). No shell splitting or globbing." },
                 "branch":         { "type": "string", "description": "Branch / tag / sha to check out (repo runs only). Empty → the repository's default branch." },
-                "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate." },
+                "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate. Called as an agent tool, it is granted only when the calling run has network itself, and an allowlisted run's command reaches only the run's operator-named hosts." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600.", "x-spotlight": 3 },
                 "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default, set by the Agents:DefaultRunnerKind configuration key (Agents__DefaultRunnerKind in the environment); \"local\" when that is unset." },
                 "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap the captured stdout/stderr to this many characters (a head+tail preview is kept). Leave empty to keep the returned capture. Source byte counts and lower-bound flags report whether the runner reached EOF; capture completeness states whether output was lost before this inline cap." }
@@ -103,7 +105,8 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "stdoutCapturedArtifactId": { "type": "string", "format": "uuid", "description": "Artifact holding only the captured stdout excerpt; missing source content is not recoverable from this artifact." },
                 "stderrCapturedArtifactId": { "type": "string", "format": "uuid", "description": "Artifact holding only the captured stderr excerpt; missing source content is not recoverable from this artifact." },
                 "stdoutArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stdout was capped — the artifact id holding the FULL stdout (fetch via /api/artifacts/{id}). Absent when nothing was dropped." },
-                "stderrArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stderr was capped — the artifact id holding the FULL stderr. Absent when nothing was dropped." }
+                "stderrArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stderr was capped — the artifact id holding the FULL stderr. Absent when nothing was dropped." },
+                "networkNarrowed": { "type": "string", "description": "Set only when the command was called as an agent tool, asked for the network, and the calling run's posture took it away or narrowed it — says which, so a connection error is not mistaken for a network fault. Absent otherwise, and always absent on a workflow node." }
               }
             }
             """)
@@ -124,6 +127,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
             Ref = TryReadNonEmpty(context, "branch", out var branch) ? branch : null,
             AllowNetwork = TryReadBool(context, "network"),
             RunnerKind = TryReadNonEmpty(context, "runnerKind", out var rk) ? rk : null,
+            CallerPosture = context.CallerPosture,
         };
 
         if (TryReadPositiveInt(context, "timeoutSeconds", out var timeout)) request = request with { TimeoutSeconds = timeout };
@@ -161,6 +165,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
             ["exitCode"] = JsonSerializer.SerializeToElement(result.ExitCode),
             ["status"] = JsonSerializer.SerializeToElement(result.Status.ToString()),
         };
+        if (RunCommandService.CallerNetworkNarrowing(request) is { } narrowing) outputs["networkNarrowed"] = JsonSerializer.SerializeToElement(narrowing);
         foreach (var capture in captures)
         {
             outputs[capture.Name] = JsonSerializer.SerializeToElement(capture.Inline.Text);

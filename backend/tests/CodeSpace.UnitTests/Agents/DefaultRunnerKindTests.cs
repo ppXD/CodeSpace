@@ -73,7 +73,7 @@ public class DefaultRunnerKindTests
     public async Task RunCommandService_resolves_the_deployment_default_only_when_the_request_pins_none(string? requestKind, string expectedKind)
     {
         var runners = new RecordingRunnerRegistry();
-        var service = new RunCommandService(null!, null!, runners, null!, Setting("cfg-runner"));
+        var service = new RunCommandService(null!, null!, runners, null!, Setting("cfg-runner"), new CallerCommandLanes());
 
         // Ephemeral (no repositoryId) so the DbContext / auth / workspace collaborators are never touched.
         await service.RunAsync(new RunCommandRequest { Command = "true", RunnerKind = requestKind }, CancellationToken.None);

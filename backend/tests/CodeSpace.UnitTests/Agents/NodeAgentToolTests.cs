@@ -188,6 +188,22 @@ public class NodeAgentToolTests
     }
 
     [Fact]
+    public async Task A_call_carries_its_runs_posture_onto_the_synthetic_context_and_a_call_without_one_carries_none()
+    {
+        // The posture rides the call (stamped by the run's endpoint), never the model's input, and lands on the typed
+        // context field a sandbox-starting node reads — so agent.run_command runs no wider than the calling run.
+        var posture = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Unleashed, Permissions = new AgentPermissions { Network = AgentNetworkAccess.Off } };
+        var withPosture = new CapturingNode();
+        var without = new CapturingNode();
+
+        await Tool(withPosture).CallAsync(new AgentToolCall { Input = EmptyObject, CallerPosture = posture }, CancellationToken.None);
+        await Tool(without).CallAsync(new AgentToolCall { Input = EmptyObject }, CancellationToken.None);
+
+        withPosture.Captured.ShouldNotBeNull().CallerPosture.ShouldBeSameAs(posture);
+        without.Captured.ShouldNotBeNull().CallerPosture.ShouldBeNull("no calling run → the node keeps its own posture");
+    }
+
+    [Fact]
     public async Task TeamId_does_not_alter_inputs_rawinputs_config_or_observability()
     {
         // Surgical-change pin: stamping the team touches ONLY Scope.Sys — every other facet of the synthetic
