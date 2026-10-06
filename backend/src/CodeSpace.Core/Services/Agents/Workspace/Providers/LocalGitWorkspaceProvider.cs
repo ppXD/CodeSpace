@@ -224,7 +224,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         async Task<string> RunOrThrowAsync(IReadOnlyList<string> args)
         {
-            var result = await runner.RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = CaptureTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+            // The agent may have tampered this .git during its run: hardened like the live capture (AgentCloneGitCommand).
+            var result = await runner.RunAsync(AgentCloneGitCommand.Build(args, directory, Array.Empty<string>(), CaptureTimeoutSeconds), cancellationToken).ConfigureAwait(false);
 
             if (result.Status != SandboxStatus.Success)
                 throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {Summarize(result.Stderr)}");
@@ -662,11 +663,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             // Stage everything (new, modified, deleted) so the diff vs the cloned base is complete, then
             // read the patch + the changed-file names. `--cached <base>` captures committed AND uncommitted
             // work, so it's robust whether the agent committed or just edited the working tree.
-            await RunGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+            await RunAgentCloneGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
 
-            var patch = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--no-color", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
-            var names = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--name-only", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
-            var numstat = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--numstat", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+            var patch = await RunAgentCloneGitOrThrowAsync(repo, new[] { "diff", "--cached", "--no-color", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+            var names = await RunAgentCloneGitOrThrowAsync(repo, new[] { "diff", "--cached", "--name-only", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+            var numstat = await RunAgentCloneGitOrThrowAsync(repo, new[] { "diff", "--cached", "--numstat", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
 
             return new WorkspaceChanges
             {
@@ -704,8 +705,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             // pass in the same workspace — the branch already exists locally from the first push, and -b would throw.
             // Round 1 is byte-identical (-B creates when absent); a re-push resets the branch to the CURRENT head,
             // which is exactly the force-overwrite semantics the remote half (push --force) already promises.
-            await RunGitOrThrowAsync(repo, new[] { "checkout", "-B", branchName }, cancellationToken).ConfigureAwait(false);
-            await RunGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+            await RunAgentCloneGitOrThrowAsync(repo, new[] { "checkout", "-B", branchName }, cancellationToken).ConfigureAwait(false);
+            await RunAgentCloneGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
 
             // A run that changed nothing has nothing to push. The agent may either leave its edits for us to commit
             // OR commit them itself — so push when we just made a commit, OR when the branch tip already differs
@@ -741,7 +742,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         {
             try
             {
-                var localTip = (await RunGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
+                var localTip = (await RunAgentCloneGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
 
                 var readback = await RunGitAsync(repo, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
@@ -769,7 +770,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
         private async Task<bool> CommitOrDetectEmptyAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(repo, new[] { "-c", "commit.gpgsign=false", "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+            var result = await RunAgentCloneGitAsync(repo, new[] { "-c", "commit.gpgsign=false", "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
             if (result.Status == SandboxStatus.Success) return true;
 
@@ -790,37 +791,54 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// genuine git error it fails toward pushing rather than silently dropping the agent's work).</summary>
         private async Task<bool> HeadDiffersFromBaseAsync(MaterializedRepo repo, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(repo, new[] { "diff", "--quiet", repo.BaseSha, "HEAD" }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
+            var result = await RunAgentCloneGitAsync(repo, new[] { "diff", "--quiet", repo.BaseSha, "HEAD" }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
             return result.ExitCode != 0;
         }
 
-        private async Task<string> RunGitOrThrowAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds)
+        // ── Commands over the agent-writable clone (capture, checkout, add, commit, diff, rev-parse) ──
+        // Built by AgentCloneGitCommand: no hook, fsmonitor, textconv or external diff runs, with no network and no
+        // credential, so a .git the agent tampered during its run cannot run code with the platform's access.
+
+        private Task<string> RunAgentCloneGitOrThrowAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds) =>
+            EnsureSuccessAsync(repo, args, RunAgentCloneGitAsync(repo, args, cancellationToken, timeoutSeconds));
+
+        /// <summary>Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
+        private Task<SandboxResult> RunAgentCloneGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds) =>
+            ExecuteGitAsync(repo, args, AgentCloneGitCommand.Build(args, repo.Directory, repo.ReadOnlyPaths, timeoutSeconds), cancellationToken);
+
+        // ── Commands that reach the remote (the authenticated push and its ls-remote readback) ──
+        // Network on, and the clone credential re-injected into the argv.
+
+        private Task<string> RunGitOrThrowAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds) =>
+            EnsureSuccessAsync(repo, args, RunGitAsync(repo, args, cancellationToken, timeoutSeconds));
+
+        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) with explicit remote-network access. Returns the raw result so a caller can classify it (e.g. an unreadable remote on the readback) rather than always throw.</summary>
+        private Task<SandboxResult> RunGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds) =>
+            ExecuteGitAsync(repo, args, new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, ReadOnlyPaths = repo.ReadOnlyPaths, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken);
+
+        /// <summary>The one place a built spec is handed to the runner: maps any infrastructure failure (git not on PATH, the working directory removed mid-run) onto a redacted <see cref="WorkspaceException"/> so no raw Win32Exception/IOException — and no echoed token — leaks to the caller.</summary>
+        private async Task<SandboxResult> ExecuteGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, SandboxSpec spec, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(repo, args, cancellationToken, timeoutSeconds).ConfigureAwait(false);
+            try
+            {
+                return await _runner.RunAsync(spec, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} could not run: {Redact(ex.Message, repo.Token)}", ex);
+            }
+        }
+
+        /// <summary>Await a git result and throw a redacted <see cref="WorkspaceException"/> on a non-success status; the argv is redacted because the push command carries the authed URL.</summary>
+        private static async Task<string> EnsureSuccessAsync(MaterializedRepo repo, IReadOnlyList<string> args, Task<SandboxResult> run)
+        {
+            var result = await run.ConfigureAwait(false);
 
             if (result.Status != SandboxStatus.Success)
-                // Redact any echoed token (the push argv embeds the authed URL) so it never reaches a log / exception.
                 throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 
             SandboxOutputCompleteness.RequireStdout(result);
             return result.Stdout;
-        }
-
-        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) through the same confined batch path with explicit remote-network access. Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
-        private async Task<SandboxResult> RunGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds)
-        {
-            try
-            {
-                return await _runner.RunAsync(
-                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, ReadOnlyPaths = repo.ReadOnlyPaths, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // Honour the IWorkspaceHandle contract: a git failure — including an INFRASTRUCTURE failure the
-                // runner throws (git not on PATH, the working directory removed mid-run) — surfaces as a
-                // WorkspaceException, never a raw Win32Exception/IOException leaking to the caller.
-                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} could not run: {Redact(ex.Message, repo.Token)}", ex);
-            }
         }
 
         /// <summary>Redact the token from the echoed argv (the push command carries the authed URL) before it lands in an exception message.</summary>

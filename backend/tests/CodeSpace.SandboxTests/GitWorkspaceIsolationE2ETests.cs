@@ -13,6 +13,8 @@ using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 
 namespace CodeSpace.SandboxTests;
 
@@ -251,6 +253,38 @@ public sealed class GitWorkspaceIsolationE2ETests
         push.LastPushedCommitSha().ShouldBeNull();
         (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "for-each-ref", "refs/heads/codespace/local-write-denied" })).ShouldBeEmpty();
         await Should.ThrowAsync<WorkspaceException>(() => provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(request with { LocalSource = null }), CancellationToken.None));
+    }
+
+    [KernelFact]
+    public async Task A_repo_clean_filter_runs_during_capture_with_its_egress_severed()
+    {
+        // The one agent-plantable git vector the capture cannot switch off: a repo filter.<driver>.clean runs on
+        // `add -A`. The capture spec declares no network, so under bubblewrap the filter cannot reach a host listener.
+        BubblewrapSandbox.Available.ShouldNotBeNull();
+        await using var origin = new GitHttpFixture();
+        await origin.StartAsync();
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var provider = NewProvider(new RecordingRunner());
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = origin.Url, Token = "fixture-only-token" }), CancellationToken.None);
+        var verdicts = Path.Combine(handle.Directory, ".git", "clean-filter-egress");
+        var filter = Path.Combine(handle.Directory, ".git", "clean.sh");
+        // Python prints the verdict itself, so only a connection the kernel refused reads as "severed"; a probe that
+        // could not run at all (no python, a crash) writes "probe-failed" and fails the assertion below.
+        await File.WriteAllTextAsync(filter, $"#!/bin/sh\n/usr/bin/python3 -c \"import socket\ntry:\n    socket.create_connection(('127.0.0.1', {port}), timeout=2).close()\n    print('reached')\nexcept OSError:\n    print('severed')\" >> '{verdicts}' 2>/dev/null || echo probe-failed >> '{verdicts}'\ncat\n");
+        File.SetUnixFileMode(filter, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, ".gitattributes"), "*.txt filter=probe\n");
+        await GitHttpFixture.GitAsync(handle.Directory, new[] { "config", "filter.probe.clean", filter });
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "produced.txt"), "artifact\n");
+
+        var capture = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        capture.Patch.ShouldContain("+artifact", customMessage: "the filter passes content through, so the capture is intact");
+        var seen = await File.ReadAllLinesAsync(verdicts);
+        seen.ShouldNotBeEmpty("the clean filter runs on add -A: accepted, not closed");
+        seen.ShouldAllBe(verdict => verdict == "severed", "the capture spec declares no network, so the kernel must refuse the filter's connection");
+        listener.Pending().ShouldBeFalse("nothing inside the capture reached the host listener");
     }
 
     private static LocalGitWorkspaceProvider NewProvider(ISandboxRunner runner) => new(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
