@@ -254,6 +254,16 @@ public sealed record SandboxSpec
     /// writes a per-run config home; a bare-process runner with no config home ignores them.
     /// </summary>
     public IReadOnlyList<ConfigHomeFile> ConfigHomeFiles { get; init; } = Array.Empty<ConfigHomeFile>();
+
+    /// <summary>
+    /// What the harness left out of this launch that the run's timeline should say, one sentence each — a repository's
+    /// memory that links outside the workspace, for one. <c>AgentRunExecutor</c> records them as one bounded Warning
+    /// event when the run launches, and again for a revise round only when they differ from what the run last said.
+    /// Not part of the invocation: never serialized, so the spec serializes and hashes as it did before the field
+    /// existed. Empty (the default) ⇒ nothing to say.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<string> LaunchNotices { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>A contiguous run of argv elements and what replaces it — see <see cref="SandboxSpec.WhenRunnerConfines"/>.</summary>

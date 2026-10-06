@@ -40,7 +40,9 @@ namespace CodeSpace.SandboxTests;
 /// and <c>sub/CLAUDE.md</c> only once the run opened a file below <c>sub/</c>, and ran a skill's or command's commands
 /// only once invoked, so the scripted model opens <c>sub/notes.txt</c> with the CLI's own Read tool, invokes the skill
 /// and the command, and delegates to the agent (<see cref="ClaudeSurfaceCalls"/>). The single-repo Codex arm also names
-/// a repository skill whose <c>agents/openai.yaml</c> depends on an MCP server, which must not start.</para>
+/// a repository skill whose <c>agents/openai.yaml</c> depends on an MCP server, which must not start. A repository whose
+/// memory links outside the workspace is left out of the run whole, against a positive control that adds it back
+/// (<see cref="A_claude_run_leaves_out_repository_memory_that_links_outside_the_workspace"/>).</para>
 ///
 /// <para>Fidelity: 🟢 HIGH for everything but the model. The pinned CLI binaries, the production harness argv
 /// (<see cref="IAgentHarness.BuildInvocation"/>), the production <see cref="LocalProcessRunner"/> (bubblewrap where the
@@ -98,7 +100,7 @@ namespace CodeSpace.SandboxTests;
 /// sandbox lanes require, so a silent return can never pass for coverage.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
-public sealed class RepositoryConfigE2ETests(ITestOutputHelper output) : IDisposable
+public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) : IDisposable
 {
     /// <summary>Printed by every arm that actually ran; the sandbox lanes require one per arm in the test output.</summary>
     public const string RanMarker = "[repo-config-e2e] ran";
@@ -672,8 +674,8 @@ public sealed class RepositoryConfigE2ETests(ITestOutputHelper output) : IDispos
 
     private static JsonArray CodexHook(string command) => new(new JsonObject { ["hooks"] = new JsonArray(new JsonObject { ["type"] = "command", ["command"] = command }) });
 
-    /// <summary>The run launched the way the executor launches it, in <paramref name="workspace"/> and at <paramref name="tier"/>'s production permissions, against <paramref name="upstream"/> — by default a scripted model that asks for nothing and answers.</summary>
-    private async Task<(SandboxSpec Spec, Run Run, ScriptedModelUpstream Upstream)> RunAsync(IAgentHarness harness, Workspace workspace, AgentAutonomyLevel tier, Func<AgentTask, AgentTask> shape, ScriptedModelUpstream? upstream = null)
+    /// <summary>The run launched the way the executor launches it, in <paramref name="workspace"/> and at <paramref name="tier"/>'s production permissions, against <paramref name="upstream"/> — by default a scripted model that asks for nothing and answers. <paramref name="reshape"/>, when given, alters the production spec before launch: a positive control's way of running what the harness would have built without a guard.</summary>
+    private async Task<(SandboxSpec Spec, Run Run, ScriptedModelUpstream Upstream)> RunAsync(IAgentHarness harness, Workspace workspace, AgentAutonomyLevel tier, Func<AgentTask, AgentTask> shape, ScriptedModelUpstream? upstream = null, Func<SandboxSpec, SandboxSpec>? reshape = null)
     {
         upstream ??= new ScriptedModelUpstream([], $"DONE-{workspace.Nonce}");
         using var broker = LoopbackModelCredentialBroker.ForTest(upstream);
@@ -692,7 +694,8 @@ public sealed class RepositoryConfigE2ETests(ITestOutputHelper output) : IDispos
             Environment = new Dictionary<string, string>(ReviewerReadsItsDiffE2ETests.Brokered(harness, brokered)) { ["HOME"] = NewDirectory("repo-config-home") },
         });
 
-        var spec = ReviewerReadsItsDiffE2ETests.ProductionSpec(harness, task, brokered, UpstreamBaseUrl, UpstreamProvider);
+        var production = ReviewerReadsItsDiffE2ETests.ProductionSpec(harness, task, brokered, UpstreamBaseUrl, UpstreamProvider);
+        var spec = reshape is null ? production : reshape(production);
         var lines = new List<string>();
 
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds((task.TimeoutSeconds ?? 300) + 60));
@@ -818,6 +821,17 @@ public sealed class RepositoryConfigE2ETests(ITestOutputHelper output) : IDispos
             File.WriteAllText(path, content);
 
             if (executable && !OperatingSystem.IsWindows()) File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+
+            ReviewerReadsItsDiffE2ETests.GitOut(Directory, $"add -f -- {relativePath}");
+            ReviewerReadsItsDiffE2ETests.GitOut(Directory, $"commit -q -m {Path.GetFileName(relativePath)}");
+        }
+
+        /// <summary>Commit a symlink to <paramref name="target"/>, spelled exactly as given, the way git stores and checks one out.</summary>
+        public void CommitLink(string relativePath, string target)
+        {
+            var path = Path.Combine(Directory, relativePath);
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.CreateSymbolicLink(path, target);
 
             ReviewerReadsItsDiffE2ETests.GitOut(Directory, $"add -f -- {relativePath}");
             ReviewerReadsItsDiffE2ETests.GitOut(Directory, $"commit -q -m {Path.GetFileName(relativePath)}");
