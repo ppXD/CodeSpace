@@ -25,6 +25,16 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private const int CloneTimeoutSeconds = 300;
     private const int CaptureTimeoutSeconds = 120;
     private const int PushTimeoutSeconds = 300;
+
+    /// <summary>The initial branch of the throwaway publish repo — never pushed; the run branch is fetched into its own ref and pushed from there.</summary>
+    private const string PublishScratchBranch = "codespace-publish-scratch";
+
+    /// <summary>The ref the publish writes in the agent clone (and mirrors in the publish repo) to name the cloned base, so the base can leave the clone as a bundle of its own.</summary>
+    private const string PublishBaseRef = "refs/codespace/publish-base";
+
+    /// <summary>Recurse without following a link: a linked directory is neither listed nor entered, so a walk over the agent's <c>.git</c> stays inside the clone and a link loop ends.</summary>
+    private static readonly EnumerationOptions WithoutFollowingLinks = new() { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
+
     /// <summary>Root for transient agent scratch clones (agent workspaces + branch-integration clones), under the worker's temp dir. Internal so the <c>LocalGitBranchIntegrator</c> stages its integration clone here too and the same janitor reclaims a leaked one.</summary>
     internal static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
 
@@ -88,7 +98,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             var primaryAlias = (request.Primary ?? throw new WorkspaceException("Workspace provision has no resolvable primary repository.")).Alias;
             var cwd = ResolveCwd(request.CwdMode, workspaceRoot, materialized, primaryAlias, single);
 
-            return new LocalWorkspaceHandle(workspaceRoot, cwd, materialized, primaryAlias, _runners.Resolve(Kind), _logger);
+            return new LocalWorkspaceHandle(workspaceRoot, cwd, materialized, primaryAlias, _runners.Resolve(Kind), _logger, _workspacesRoot);
         }
         catch
         {
@@ -134,6 +144,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         && segment != "." && segment != ".."
         && segment.IndexOf('/') < 0 && segment.IndexOf('\\') < 0
         && !Path.IsPathRooted(segment);
+
+    /// <summary>git-lfs stores an object at <c>&lt;oid[0..2]&gt;/&lt;oid[2..4]&gt;/&lt;oid&gt;</c> under <c>.git/lfs/objects</c>, the oid being 64 lowercase hex digits; nothing else in that store is an object a push needs. Pure + internal so it's unit-pinned.</summary>
+    internal static bool IsLfsObjectPath(string relative) =>
+        relative.Split(Path.DirectorySeparatorChar) is [var first, var second, var oid]
+        && oid.Length == 64 && oid.All(char.IsAsciiHexDigitLower)
+        && first == oid[..2] && second == oid[2..4];
 
     /// <summary>Clone one repo, strip its token from the persisted remote, and read its base revision — the per-repo unit of the workspace.</summary>
     private async Task<MaterializedRepo> MaterializeAsync(WorkspaceRepositoryProvision repo, string directory, CancellationToken cancellationToken)
@@ -623,14 +639,16 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
         private readonly string _workspaceRoot;
+        private readonly string _publishRoot;
         private readonly IReadOnlyList<MaterializedRepo> _repos;
         private readonly MaterializedRepo _primary;
         private readonly ISandboxRunner _runner;
         private readonly ILogger _logger;
 
-        public LocalWorkspaceHandle(string workspaceRoot, string cwd, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, ISandboxRunner runner, ILogger logger)
+        public LocalWorkspaceHandle(string workspaceRoot, string cwd, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, ISandboxRunner runner, ILogger logger, string publishRoot)
         {
             _workspaceRoot = workspaceRoot;
+            _publishRoot = publishRoot;
             Directory = cwd;
             _repos = repos;
             _primary = repos.First(r => r.Alias == primaryAlias);
@@ -717,20 +735,115 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             if (!committed && !await HeadDiffersFromBaseAsync(repo, cancellationToken).ConfigureAwait(false)) return null;
 
-            // Re-inject the SAME clone credential into the push ARGV only (never as a remote, never into
-            // .git/config — origin was stripped after clone). Plain --force, not --force-with-lease: an
-            // observe-then-lease here would still admit a zombie whose observation is fresh at push time, so the
-            // zombie fence lives in the REF NAME instead (AgentRunExecutor.BuildBranchName is generation-specific
-            // — a superseded attempt cannot name the current attempt's ref), and a lease's no-remote-tracking-ref
-            // semantics vary by git version. The push gets a bounded timeout so a hung push can't delay run completion.
-            var authedUrl = BuildAuthenticatedUrl(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
-
-            await RunGitOrThrowAsync(repo, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
-
-            repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, authedUrl, branchName, cancellationToken).ConfigureAwait(false);
-
-            return branchName;
+            return await PublishFromCleanRepoAsync(repo, branchName, cancellationToken).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// Publish the produced branch to the remote from a FRESH platform-owned repository outside the workspace, so the
+        /// credential and the network never meet the agent-writable <c>.git</c>. The branch leaves the agent clone as git
+        /// BUNDLES built by the same hardened, network-off, credential-free command the capture uses; the clean repo imports
+        /// them, and the authenticated push, its LFS upload and its readback run there. The agent's own commits are
+        /// preserved: the bundles carry the whole branch, so the remote lands the agent's history plus the capture commit.
+        ///
+        /// <para>The cloned base and the objects the branch ADDS travel separately so that only the latter are checked
+        /// (<c>transfer.fsckObjects</c>): the remote already holds the base, legacy objects a strict check rejects included,
+        /// and re-checking it would lose the branch on every such repository. git checks a fetched bundle from 2.46; on older
+        /// git the import is unchecked and the remote's own receive checks remain the only ones, as before this publish.</para>
+        ///
+        /// <para>A re-push (an S6 revise round) stages a fresh publish repo and force-pushes idempotently; the publish repo
+        /// is removed on every path. A leaked one (a crash between staging and cleanup) sits under the workspaces root, so
+        /// the same age-based janitor reclaims it. The cost is the clone's, not the change's: the base bundle and the LFS
+        /// copy are as large as the clone, on every attempt.</para>
+        /// </summary>
+        private async Task<string?> PublishFromCleanRepoAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
+        {
+            var publishDir = Path.Combine(_publishRoot, "publish-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                OnHost(repo, "stage the publish repository", () => System.IO.Directory.CreateDirectory(publishDir));
+
+                var addsObjects = await BundleTheBranchOutAsync(repo, publishDir, branchName, cancellationToken).ConfigureAwait(false);
+
+                await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "init", "-q", "-b", PublishScratchBranch }, cancellationToken, network: false).ConfigureAwait(false);
+
+                var hasLfs = OnHost(repo, "copy the clone's shallow boundary and LFS objects", () => CopyCloneStateIntoPublishRepo(repo.Directory, publishDir, cancellationToken));
+
+                await ImportBundlesAsync(repo, publishDir, branchName, addsObjects, cancellationToken).ConfigureAwait(false);
+
+                // Re-inject the SAME clone credential into the ARGV only (never a remote, never .git/config). Plain --force,
+                // not --force-with-lease: an observe-then-lease would still admit a zombie whose observation is fresh at push
+                // time, so the zombie fence lives in the REF NAME instead (AgentRunExecutor.BuildBranchName is
+                // generation-specific — a superseded attempt cannot name the current attempt's ref), and a lease's
+                // no-remote-tracking-ref semantics vary by git version. Bounded timeout so a hung push can't delay completion.
+                var authedUrl = BuildAuthenticatedUrl(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
+
+                // LFS blobs BEFORE the refs (git's own pre-push order), so the remote never holds a pointer whose object is
+                // missing. The clean repo has no working-tree .lfsconfig (nothing is checked out), and the endpoint comes
+                // from the explicit authed URL — a hostile committed .lfsconfig cannot redirect the upload. Lock verification
+                // is off: against a remote without the locks API git-lfs would otherwise record lfs.<url>.locksverify in the
+                // publish repo's .git/config, keyed by the authed URL, which would put the token on disk.
+                if (hasLfs)
+                    await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "-c", "lfs.locksverify=false", "lfs", "push", authedUrl, branchName }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
+
+                await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
+
+                repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, publishDir, authedUrl, branchName, cancellationToken).ConfigureAwait(false);
+
+                return branchName;
+            }
+            finally
+            {
+                TryDeleteDirectory(publishDir);
+            }
+        }
+
+        /// <summary>
+        /// Carry the branch out of the agent clone as bundles in the publish dir: <c>base.bundle</c> holds the cloned base
+        /// (named by <see cref="PublishBaseRef"/>), <c>run.bundle</c> only the objects the branch adds to it. Returns whether
+        /// the branch adds any: a branch reset behind its base adds none, so it rides the base bundle, because git refuses
+        /// to write a bundle of nothing.
+        /// </summary>
+        private async Task<bool> BundleTheBranchOutAsync(MaterializedRepo repo, string publishDir, string branchName, CancellationToken cancellationToken)
+        {
+            await RunAgentCloneGitOrThrowAsync(repo, new[] { "update-ref", PublishBaseRef, repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+
+            var addsObjects = !await BranchIsWithinBaseAsync(repo, branchName, cancellationToken).ConfigureAwait(false);
+
+            await RunAgentCloneBundleAsync(repo, publishDir, BaseBundle(publishDir), addsObjects ? new[] { PublishBaseRef } : new[] { PublishBaseRef, branchName }, cancellationToken).ConfigureAwait(false);
+
+            if (addsObjects)
+                await RunAgentCloneBundleAsync(repo, publishDir, RunBundle(publishDir), new[] { branchName, "^" + PublishBaseRef }, cancellationToken).ConfigureAwait(false);
+
+            return addsObjects;
+        }
+
+        /// <summary>True when the branch tip is the base or one of its ancestors, so every object it reaches is already in the base bundle. A failed check reads as "adds objects": the run bundle is then attempted, and a truly empty one fails loudly.</summary>
+        private async Task<bool> BranchIsWithinBaseAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
+        {
+            var result = await RunAgentCloneGitAsync(repo, new[] { "merge-base", "--is-ancestor", branchName, PublishBaseRef }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
+            return result.Status == SandboxStatus.Success;
+        }
+
+        /// <summary>
+        /// Import the bundles into the publish repo: the base unchecked — the remote already holds it — and the objects the
+        /// branch adds under <c>transfer.fsckObjects</c>, so a malformed object the agent wrote never reaches the push.
+        /// Both imports are local, and as heavy as the push, so they get its budget.
+        /// </summary>
+        private async Task ImportBundlesAsync(MaterializedRepo repo, string publishDir, string branchName, bool addsObjects, CancellationToken cancellationToken)
+        {
+            var branchRefspec = $"{branchName}:refs/heads/{branchName}";
+            var baseRefspecs = addsObjects ? new[] { $"{PublishBaseRef}:{PublishBaseRef}" } : new[] { $"{PublishBaseRef}:{PublishBaseRef}", branchRefspec };
+
+            await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "fetch", BaseBundle(publishDir) }.Concat(baseRefspecs).ToArray(), cancellationToken, network: false, PushTimeoutSeconds).ConfigureAwait(false);
+
+            if (addsObjects)
+                await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "-c", "transfer.fsckObjects=true", "fetch", RunBundle(publishDir), branchRefspec }, cancellationToken, network: false, PushTimeoutSeconds).ConfigureAwait(false);
+        }
+
+        private static string BaseBundle(string publishDir) => Path.Combine(publishDir, "base.bundle");
+
+        private static string RunBundle(string publishDir) => Path.Combine(publishDir, "run.bundle");
 
         /// <summary>
         /// P3b-2 provider readback: re-read the just-pushed branch FROM THE REMOTE (<c>ls-remote</c>) and confirm it
@@ -738,13 +851,13 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// by design: an unreadable remote or a mismatched tip (raced) returns null with a warning — the push itself
         /// already succeeded, so the branch stands; only the CONFIRMATION is withheld, never fabricated.
         /// </summary>
-        private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string authedUrl, string branchName, CancellationToken cancellationToken)
+        private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string publishDir, string authedUrl, string branchName, CancellationToken cancellationToken)
         {
             try
             {
-                var localTip = (await RunAgentCloneGitOrThrowAsync(repo, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false)).Trim();
+                var localTip = (await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "rev-parse", $"refs/heads/{branchName}" }, cancellationToken, network: false).ConfigureAwait(false)).Trim();
 
-                var readback = await RunGitAsync(repo, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+                var readback = await RunPublishGitAsync(repo, publishDir, new[] { "ls-remote", authedUrl, $"refs/heads/{branchName}" }, cancellationToken, network: true, PushTimeoutSeconds).ConfigureAwait(false);
 
                 if (readback.Status != SandboxStatus.Success || readback.ExitCode != 0)
                 {
@@ -806,15 +919,97 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         private Task<SandboxResult> RunAgentCloneGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds) =>
             ExecuteGitAsync(repo, args, AgentCloneGitCommand.Build(args, repo.Directory, repo.ReadOnlyPaths, timeoutSeconds), cancellationToken);
 
-        // ── Commands that reach the remote (the authenticated push and its ls-remote readback) ──
-        // Network on, and the clone credential re-injected into the argv.
+        /// <summary>Bundle <paramref name="revisions"/> out of the agent clone into the publish dir: the agent clone is bound read-only (<paramref name="publishDir"/> is the writable cwd), hardened like every other agent-clone command, with no network and no credential.</summary>
+        private Task RunAgentCloneBundleAsync(MaterializedRepo repo, string publishDir, string bundlePath, IReadOnlyList<string> revisions, CancellationToken cancellationToken)
+        {
+            var args = new[] { "-C", repo.Directory, "bundle", "create", bundlePath }.Concat(revisions).ToArray();
 
-        private Task<string> RunGitOrThrowAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds) =>
-            EnsureSuccessAsync(repo, args, RunGitAsync(repo, args, cancellationToken, timeoutSeconds));
+            return EnsureSuccessAsync(repo, args, ExecuteGitAsync(repo, args, AgentCloneGitCommand.Build(args, publishDir, new[] { repo.Directory }, PushTimeoutSeconds), cancellationToken));
+        }
 
-        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) with explicit remote-network access. Returns the raw result so a caller can classify it (e.g. an unreadable remote on the readback) rather than always throw.</summary>
-        private Task<SandboxResult> RunGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds) =>
-            ExecuteGitAsync(repo, args, new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, ReadOnlyPaths = repo.ReadOnlyPaths, TimeoutSeconds = timeoutSeconds, AllowNetwork = true }, cancellationToken);
+        // ── Commands over the platform-owned publish repo (init, fetch, lfs push, push, rev-parse, ls-remote) ──
+        // A fresh repo outside the workspace, never touched by the agent. Only the commands that reach the remote carry the
+        // credential (in the argv) and the network; the credential never meets the agent-writable .git.
+
+        private Task<string> RunPublishGitOrThrowAsync(MaterializedRepo repo, string publishDir, IReadOnlyList<string> args, CancellationToken cancellationToken, bool network, int timeoutSeconds = CaptureTimeoutSeconds) =>
+            EnsureSuccessAsync(repo, args, RunPublishGitAsync(repo, publishDir, args, cancellationToken, network, timeoutSeconds));
+
+        /// <summary>Run a git command in the publish repo (its directory as cwd). Returns the raw result so a caller can classify it (e.g. an unreadable remote on the readback) rather than always throw.</summary>
+        private Task<SandboxResult> RunPublishGitAsync(MaterializedRepo repo, string publishDir, IReadOnlyList<string> args, CancellationToken cancellationToken, bool network, int timeoutSeconds) =>
+            ExecuteGitAsync(repo, args, new SandboxSpec { Command = "git", Args = args, WorkingDirectory = publishDir, TimeoutSeconds = timeoutSeconds, AllowNetwork = network }, cancellationToken);
+
+        /// <summary>
+        /// Host-side IO the publish does itself rather than through the runner (staging its directory, copying the clone's
+        /// shallow boundary and LFS objects). Any failure — a full disk, an unreadable file — maps onto a redacted
+        /// <see cref="WorkspaceException"/>, as <see cref="ExecuteGitAsync"/> does for git, so every caller's
+        /// WorkspaceException handling (the push retry, per-repo isolation, a push failure never failing a Succeeded run)
+        /// still holds.
+        /// </summary>
+        private static T OnHost<T>(MaterializedRepo repo, string step, Func<T> io)
+        {
+            try
+            {
+                return io();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new WorkspaceException($"Publishing could not {step}: {Redact(ex.Message, repo.Token)}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Copy the two pieces of the agent clone's <c>.git</c> the publish repo needs besides the bundles: the shallow
+        /// boundary and the LFS objects. This runs on the host, outside any sandbox, over paths the agent controlled, so it
+        /// reads only real files physically inside the clone: a link (to a file, a directory, or itself) or a special file
+        /// (a FIFO would block the open forever) is skipped. Returns whether any LFS object was copied.
+        /// </summary>
+        private static bool CopyCloneStateIntoPublishRepo(string cloneDir, string publishDir, CancellationToken cancellationToken)
+        {
+            CopyShallowBoundary(cloneDir, publishDir);
+            return CopyLfsObjects(cloneDir, publishDir, cancellationToken);
+        }
+
+        /// <summary>Copy the agent clone's shallow boundary, if it is shallow, so the publish repo accepts a base bundle that legitimately omits the base's parents. A boundary that is not a real file in the clone is not copied, and the import then fails closed.</summary>
+        private static void CopyShallowBoundary(string cloneDir, string publishDir)
+        {
+            var gitDir = Path.Combine(cloneDir, ".git");
+            var source = Path.Combine(gitDir, "shallow");
+
+            if (IsUnlinked(cloneDir) && IsUnlinked(gitDir) && IsPlainFile(source)) File.Copy(source, Path.Combine(publishDir, ".git", "shallow"), overwrite: true);
+        }
+
+        /// <summary>Copy every real LFS object in the clone's store so <c>git lfs push</c> can upload the ones the branch's pointers name. Only object-shaped paths count, so an LFS-free repo, or one whose store holds nothing but planted entries, invokes git-lfs not at all.</summary>
+        private static bool CopyLfsObjects(string cloneDir, string publishDir, CancellationToken cancellationToken)
+        {
+            var gitDir = Path.Combine(cloneDir, ".git");
+            var source = Path.Combine(gitDir, "lfs", "objects");
+
+            if (!new[] { cloneDir, gitDir, Path.Combine(gitDir, "lfs"), source }.All(IsUnlinked)) return false;
+
+            var copied = 0;
+
+            foreach (var file in System.IO.Directory.EnumerateFiles(source, "*", WithoutFollowingLinks))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var relative = Path.GetRelativePath(source, file);
+
+                if (!IsLfsObjectPath(relative) || !IsPlainFile(file)) continue;
+
+                var destination = Path.Combine(publishDir, ".git", "lfs", "objects", relative);
+                System.IO.Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination, overwrite: true);
+                copied++;
+            }
+
+            return copied > 0;
+        }
+
+        /// <summary>The path exists and is not itself a link.</summary>
+        private static bool IsUnlinked(string path) => (File.Exists(path) || System.IO.Directory.Exists(path)) && new FileInfo(path).LinkTarget is null;
+
+        /// <summary>A regular, non-empty file that is not a link. A FIFO, socket or device reports no length, so it never qualifies — and an empty file is never an LFS object or a shallow boundary.</summary>
+        private static bool IsPlainFile(string path) => new FileInfo(path) is { Exists: true, LinkTarget: null, Length: > 0 };
 
         /// <summary>The one place a built spec is handed to the runner: maps any infrastructure failure (git not on PATH, the working directory removed mid-run) onto a redacted <see cref="WorkspaceException"/> so no raw Win32Exception/IOException — and no echoed token — leaks to the caller.</summary>
         private async Task<SandboxResult> ExecuteGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, SandboxSpec spec, CancellationToken cancellationToken)

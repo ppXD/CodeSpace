@@ -216,10 +216,17 @@ public sealed class GitWorkspaceIsolationE2ETests
             (await GitHttpFixture.GitAsync(origin.Root, new[] { "--git-dir", origin.Remote, "rev-parse", "main" })).Trim().ShouldBe(origin.TipSha);
             recorder.Specs.ShouldContain(spec => spec.Args.Contains("fetch"));
             recorder.Specs.ShouldContain(spec => spec.Args.Contains("set-url"));
+
+            // Clone, pin-fetch and capture run IN the workspace; the publish runs in a sibling publish dir and the
+            // bundles bind the workspace read-only to carry the branch out. A network repository still grants no
+            // EXTERNAL host source path — the only read-only bind anywhere is the clone itself, for bundling.
+            var publishDir = recorder.Specs.Where(spec => spec.Args.Contains("bundle")).Select(spec => spec.WorkingDirectory).Distinct().ShouldHaveSingleItem().ShouldNotBeNull();
+            var relative = Path.GetRelativePath(workspace, publishDir);
+            (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)).ShouldBeTrue($"the publish repo {publishDir} is staged outside the agent workspace {workspace}, not inside it");
             foreach (var spec in recorder.Specs)
             {
-                spec.WorkingDirectory.ShouldBe(workspace, string.Join(' ', spec.Args));
-                spec.ReadOnlyPaths.ShouldBeEmpty("a network repository does not grant host source access");
+                (spec.WorkingDirectory == workspace || spec.WorkingDirectory == publishDir).ShouldBeTrue(string.Join(' ', spec.Args));
+                foreach (var readOnly in spec.ReadOnlyPaths) readOnly.ShouldBe(workspace, string.Join(' ', spec.Args));
             }
         }
         Directory.Exists(workspace).ShouldBeFalse();

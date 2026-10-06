@@ -461,51 +461,152 @@ public sealed class LocalGitWorkspaceProviderTests
     [Fact]
     public void Kind_is_local() => NewProvider().Kind.ShouldBe("local");
 
+    // ─── LFS store paths the publish copies ──────────────────────────────────
+
+    [Theory]
+    [InlineData("ab/cd/abcd000000000000000000000000000000000000000000000000000000000000", true)]    // <oid[0..2]>/<oid[2..4]>/<oid>
+    [InlineData("ab/ce/abcd000000000000000000000000000000000000000000000000000000000000", false)]   // second segment is not the oid's
+    [InlineData("AB/CD/ABCD000000000000000000000000000000000000000000000000000000000000", false)]   // git-lfs writes lowercase only
+    [InlineData("ab/cd/abcd00000000000000000000000000000000000000000000000000000000000", false)]    // 63 digits
+    [InlineData("ab/cd/abcd00000000000000000000000000000000000000000000000000000000000g", false)]   // not hex
+    [InlineData("abcd000000000000000000000000000000000000000000000000000000000000", false)]         // flat, no fan-out
+    [InlineData("x/ab/cd/abcd000000000000000000000000000000000000000000000000000000000000", false)] // one level too deep
+    [InlineData("zz/not-an-object", false)]
+    public void IsLfsObjectPath_accepts_only_git_lfs_object_paths(string relative, bool expected) =>
+        LocalGitWorkspaceProvider.IsLfsObjectPath(relative.Replace('/', Path.DirectorySeparatorChar)).ShouldBe(expected);
+
     // ─── Git-command routing: agent-clone hardening vs remote access ──────────
 
     [Theory]
-    [InlineData(false)]   // the platform commits the agent's edits
-    [InlineData(true)]    // the agent committed itself: "nothing to commit", then `diff --quiet` decides the push
-    public async Task Every_git_command_after_the_agent_turn_runs_hardened_except_the_push_and_its_readback(bool agentCommittedItself)
+    [InlineData(false, false)]   // the platform commits the agent's edits
+    [InlineData(true, false)]    // the agent committed itself: "nothing to commit", then `diff --quiet` decides the push
+    [InlineData(false, true)]    // a multi-repo workspace: the clone is a subdirectory of an agent-writable workspace root
+    public async Task After_the_agent_turn_the_credential_and_network_never_touch_the_agent_clone(bool agentCommittedItself, bool multiRepo)
     {
-        // Everything the provider runs over the clone AFTER the agent's turn — capture, re-attach capture, checkout,
-        // add, commit, diff --quiet, rev-parse — must be hooks/fsmonitor-suppressed, off the network and credential-free.
-        // Only the authenticated push and its ls-remote readback still carry the token and the network.
+        // G1 + G2 together. Everything the provider runs IN the agent clone after the agent's turn — capture, re-attach
+        // capture, checkout, add, commit, diff --quiet, the base ref and the ancestry check — is hooks/fsmonitor-suppressed,
+        // off the network and credential-free. The branch leaves the clone as hardened `bundle create`s (the clone bound
+        // read-only, the bundles written OUTSIDE the workspace); the bundle import, the authenticated push, its LFS upload
+        // and its ls-remote readback run in a fresh publish repo. So the clone credential and the network never meet the
+        // agent-writable .git.
         var runner = new PostTurnRunner(agentCommittedItself);
         var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
         const string token = "fixture-token";
 
-        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = token }), CancellationToken.None);
+        await using var handle = await provider.PrepareAsync(PostTurnProvision(token, multiRepo), CancellationToken.None);
+        var workspaceRoot = handle.Directory;
+        var cloneDir = handle.Repositories.Single(r => r.Alias == handle.PrimaryAlias).Directory;
         var prepared = runner.Specs.Count;
 
         await handle.CaptureChangesAsync(CancellationToken.None);
-        await provider.CaptureChangesFromPathAsync(handle.Directory, handle.Repositories.Single().BaseSha!, CancellationToken.None);
-        (await ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None)).ShouldBe("codespace/run");
+        await provider.CaptureChangesFromPathAsync(cloneDir, handle.Repositories.Single(r => r.Alias == handle.PrimaryAlias).BaseSha!, CancellationToken.None);
+        (await ((IWorkspacePushHandle)handle).PushChangesAsync(handle.PrimaryAlias, "codespace/run", CancellationToken.None)).ShouldBe("codespace/run");
 
         var postTurn = runner.Specs.Skip(prepared).ToList();
-        static bool ReachesTheRemote(SandboxSpec s) => s.Args.Contains("push") || s.Args.Contains("ls-remote");
-        var remote = postTurn.Where(ReachesTheRemote).ToList();
-        var local = postTurn.Where(s => !ReachesTheRemote(s)).ToList();
+        var inClone = postTurn.Where(s => s.WorkingDirectory == cloneDir).ToList();
+        var inPublishRepo = postTurn.Where(s => s.WorkingDirectory != cloneDir).ToList();
 
-        remote.Count.ShouldBe(2, "exactly one push and one ls-remote readback reach the remote");
-        remote.ShouldAllBe(s => s.AllowNetwork && s.Args.Any(a => a.Contains(token)));
+        ShouldNeverMeetTheAgentClone(postTurn, token, cloneDir, workspaceRoot);
+        ShouldRunHardenedInTheClone(inClone, token, agentCommittedItself);
+        ShouldStageThePublishRepoOutsideTheWorkspace(inPublishRepo, workspaceRoot);
+        ShouldBundleTheBranchOutReadOnly(inPublishRepo, token, cloneDir, workspaceRoot);
+        ShouldCheckOnlyTheObjectsTheBranchAdds(inPublishRepo);
+    }
 
-        foreach (var spec in local)
+    private static WorkspaceProvisionRequest PostTurnProvision(string token, bool multiRepo) => multiRepo
+        ? new WorkspaceProvisionRequest
+        {
+            PrimaryAlias = "web",
+            Repositories = new[]
+            {
+                new WorkspaceRepositoryProvision { Alias = "web", CloneRequest = new WorkspaceRequest { RepositoryUrl = "https://example.test/web.git", Token = token }, Access = WorkspaceAccess.Write, IsPrimary = true },
+                new WorkspaceRepositoryProvision { Alias = "lib", CloneRequest = new WorkspaceRequest { RepositoryUrl = "https://example.test/lib.git" }, Access = WorkspaceAccess.Read },
+            },
+        }
+        : WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = token });
+
+    /// <summary>The credential (in the authed URL) and the network appear ONLY in the publish repo: never with the agent clone as the working directory, never pointed at it with an argument (<c>-C</c>, <c>--git-dir</c>, <c>--work-tree</c>), never with it bound in.</summary>
+    private static void ShouldNeverMeetTheAgentClone(IReadOnlyList<SandboxSpec> postTurn, string token, string cloneDir, string workspaceRoot)
+    {
+        var reachesOut = postTurn.Where(s => s.AllowNetwork || s.Args.Any(a => a.Contains(token))).ToList();
+
+        reachesOut.Count(s => s.Args.Any(a => a.Contains(token))).ShouldBe(2, "exactly the authenticated push and its ls-remote readback carry the credential");
+        reachesOut.Count(s => s.Args.Contains("push") || s.Args.Contains("ls-remote")).ShouldBe(2, "exactly the authenticated push and its ls-remote readback reach the remote");
+
+        foreach (var spec in reachesOut)
+        {
+            var argv = string.Join(' ', spec.Args);
+            IsOutside(workspaceRoot, spec.WorkingDirectory!).ShouldBeTrue($"cwd inside the workspace: {argv}");
+            spec.Args.ShouldNotContain(a => a == cloneDir || IsUnder(cloneDir, a), $"an argument points git at the agent clone: {argv}");
+            spec.ReadOnlyPaths.ShouldNotContain(cloneDir, argv);
+        }
+    }
+
+    /// <summary>Every command whose cwd IS the agent clone is hardened, off the network and credential-free.</summary>
+    private static void ShouldRunHardenedInTheClone(IReadOnlyList<SandboxSpec> inClone, string token, bool agentCommittedItself)
+    {
+        foreach (var spec in inClone)
         {
             var argv = string.Join(' ', spec.Args);
             spec.Args.Take(AgentCloneGitCommand.HardeningConfig.Count).ShouldBe(AgentCloneGitCommand.HardeningConfig, argv);
             spec.AllowNetwork.ShouldBeFalse(argv);
             spec.Environment.ShouldBeEmpty(argv);
             spec.Args.ShouldNotContain(a => a.Contains(token), argv);
-            spec.WorkingDirectory.ShouldBe(handle.Directory, argv);
         }
 
-        var subcommands = local.Select(s => s.Args.Skip(AgentCloneGitCommand.HardeningConfig.Count).First(a => !a.StartsWith('-') && !a.Contains('='))).Distinct().ToList();
-        subcommands.ShouldBe(new[] { "add", "diff", "checkout", "commit", "rev-parse" }, ignoreOrder: true);
-        local.Count(s => s.Args.Contains("--quiet")).ShouldBe(agentCommittedItself ? 1 : 0, "`diff --quiet` runs only when the platform had nothing to commit");
+        var subcommands = inClone.Select(s => s.Args.Skip(AgentCloneGitCommand.HardeningConfig.Count).First(a => !a.StartsWith('-') && !a.Contains('='))).Distinct().ToList();
+        subcommands.ShouldBe(new[] { "add", "diff", "checkout", "commit", "update-ref", "merge-base" }, ignoreOrder: true);
+        inClone.Count(s => s.Args.Contains("--quiet")).ShouldBe(agentCommittedItself ? 1 : 0, "`diff --quiet` runs only when the platform had nothing to commit");
     }
 
-    /// <summary>Records every spec and answers success with a fixed 40-char sha; optionally answers the platform commit with "nothing to commit" and `diff --quiet` with "differs", as git does after an agent committed its own work.</summary>
+    /// <summary>Every other post-turn command runs in ONE publish repo that is OUTSIDE the workspace root — not merely a different path, which a directory nested in the agent-writable workspace would also be.</summary>
+    private static void ShouldStageThePublishRepoOutsideTheWorkspace(IReadOnlyList<SandboxSpec> inPublishRepo, string workspaceRoot)
+    {
+        var publishDir = inPublishRepo.Select(s => s.WorkingDirectory).Distinct().ShouldHaveSingleItem().ShouldNotBeNull();
+
+        IsOutside(workspaceRoot, publishDir).ShouldBeTrue($"the publish repo {publishDir} is staged inside the agent workspace {workspaceRoot}");
+    }
+
+    /// <summary>The bundles READ the clone (bound read-only) but write the branch OUT of the workspace: hardened, no network, no credential.</summary>
+    private static void ShouldBundleTheBranchOutReadOnly(IReadOnlyList<SandboxSpec> inPublishRepo, string token, string cloneDir, string workspaceRoot)
+    {
+        var bundles = inPublishRepo.Where(s => s.Args.Contains("bundle")).ToList();
+
+        bundles.Count.ShouldBe(2, "the base and the objects the branch adds travel as separate bundles");
+
+        foreach (var bundle in bundles)
+        {
+            bundle.ReadOnlyPaths.ShouldBe(new[] { cloneDir }, "the agent clone is bound read-only while its objects are bundled");
+            bundle.AllowNetwork.ShouldBeFalse();
+            bundle.Args.ShouldNotContain(a => a.Contains(token));
+            bundle.Args.Take(AgentCloneGitCommand.HardeningConfig.Count).ShouldBe(AgentCloneGitCommand.HardeningConfig);
+            IsOutside(workspaceRoot, bundle.Args[bundle.Args.ToList().IndexOf("create") + 1]).ShouldBeTrue("the bundle file is written outside the workspace");
+        }
+    }
+
+    /// <summary>The base the clone was made from is imported unchecked — the remote already holds it — and only the bundle of objects the branch adds is fetched under <c>transfer.fsckObjects</c>. Both imports get the push's budget, not the capture's.</summary>
+    private static void ShouldCheckOnlyTheObjectsTheBranchAdds(IReadOnlyList<SandboxSpec> inPublishRepo)
+    {
+        var fetches = inPublishRepo.Where(s => s.Args.Contains("fetch")).ToList();
+        var checkedFetch = fetches.Where(f => f.Args.Contains("transfer.fsckObjects=true")).ShouldHaveSingleItem();
+        var baseFetch = fetches.Where(f => !f.Args.Contains("transfer.fsckObjects=true")).ShouldHaveSingleItem();
+
+        checkedFetch.Args.ShouldContain("codespace/run:refs/heads/codespace/run", "the checked import carries the branch");
+        baseFetch.Args.ShouldContain("refs/codespace/publish-base:refs/codespace/publish-base", "the unchecked import carries only the base");
+        baseFetch.Args.ShouldNotContain(a => a.StartsWith("codespace/run", StringComparison.Ordinal), "the branch never arrives unchecked when it adds objects");
+        fetches.ShouldAllBe(f => !f.AllowNetwork && f.TimeoutSeconds == 300, "a bundle import is local, and as heavy as the push, so it gets the push's budget");
+    }
+
+    /// <summary>True when <paramref name="path"/> is neither <paramref name="root"/> nor anything below it.</summary>
+    private static bool IsOutside(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        return Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    private static bool IsUnder(string root, string path) => Path.IsPathRooted(path) && !IsOutside(root, path);
+
+    /// <summary>Records every spec and answers success with a fixed 40-char sha; answers `merge-base --is-ancestor` with "not an ancestor" (the branch adds commits); optionally answers the platform commit with "nothing to commit" and `diff --quiet` with "differs", as git does after an agent committed its own work.</summary>
     private sealed class PostTurnRunner(bool agentCommittedItself) : ISandboxRunner
     {
         public string Kind => "local";
@@ -518,6 +619,9 @@ public sealed class LocalGitWorkspaceProviderTests
                 return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "nothing to commit, working tree clean", Stderr = "" });
 
             if (agentCommittedItself && spec.Args.Contains("--quiet"))
+                return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "" });
+
+            if (spec.Args.Contains("--is-ancestor"))
                 return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "" });
 
             return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
