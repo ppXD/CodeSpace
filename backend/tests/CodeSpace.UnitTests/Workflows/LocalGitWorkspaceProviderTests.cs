@@ -461,6 +461,69 @@ public sealed class LocalGitWorkspaceProviderTests
     [Fact]
     public void Kind_is_local() => NewProvider().Kind.ShouldBe("local");
 
+    // ─── Git-command routing: agent-clone hardening vs remote access ──────────
+
+    [Theory]
+    [InlineData(false)]   // the platform commits the agent's edits
+    [InlineData(true)]    // the agent committed itself: "nothing to commit", then `diff --quiet` decides the push
+    public async Task Every_git_command_after_the_agent_turn_runs_hardened_except_the_push_and_its_readback(bool agentCommittedItself)
+    {
+        // Everything the provider runs over the clone AFTER the agent's turn — capture, re-attach capture, checkout,
+        // add, commit, diff --quiet, rev-parse — must be hooks/fsmonitor-suppressed, off the network and credential-free.
+        // Only the authenticated push and its ls-remote readback still carry the token and the network.
+        var runner = new PostTurnRunner(agentCommittedItself);
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        const string token = "fixture-token";
+
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = token }), CancellationToken.None);
+        var prepared = runner.Specs.Count;
+
+        await handle.CaptureChangesAsync(CancellationToken.None);
+        await provider.CaptureChangesFromPathAsync(handle.Directory, handle.Repositories.Single().BaseSha!, CancellationToken.None);
+        (await ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None)).ShouldBe("codespace/run");
+
+        var postTurn = runner.Specs.Skip(prepared).ToList();
+        static bool ReachesTheRemote(SandboxSpec s) => s.Args.Contains("push") || s.Args.Contains("ls-remote");
+        var remote = postTurn.Where(ReachesTheRemote).ToList();
+        var local = postTurn.Where(s => !ReachesTheRemote(s)).ToList();
+
+        remote.Count.ShouldBe(2, "exactly one push and one ls-remote readback reach the remote");
+        remote.ShouldAllBe(s => s.AllowNetwork && s.Args.Any(a => a.Contains(token)));
+
+        foreach (var spec in local)
+        {
+            var argv = string.Join(' ', spec.Args);
+            spec.Args.Take(AgentCloneGitCommand.HardeningConfig.Count).ShouldBe(AgentCloneGitCommand.HardeningConfig, argv);
+            spec.AllowNetwork.ShouldBeFalse(argv);
+            spec.Environment.ShouldBeEmpty(argv);
+            spec.Args.ShouldNotContain(a => a.Contains(token), argv);
+            spec.WorkingDirectory.ShouldBe(handle.Directory, argv);
+        }
+
+        var subcommands = local.Select(s => s.Args.Skip(AgentCloneGitCommand.HardeningConfig.Count).First(a => !a.StartsWith('-') && !a.Contains('='))).Distinct().ToList();
+        subcommands.ShouldBe(new[] { "add", "diff", "checkout", "commit", "rev-parse" }, ignoreOrder: true);
+        local.Count(s => s.Args.Contains("--quiet")).ShouldBe(agentCommittedItself ? 1 : 0, "`diff --quiet` runs only when the platform had nothing to commit");
+    }
+
+    /// <summary>Records every spec and answers success with a fixed 40-char sha; optionally answers the platform commit with "nothing to commit" and `diff --quiet` with "differs", as git does after an agent committed its own work.</summary>
+    private sealed class PostTurnRunner(bool agentCommittedItself) : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<SandboxSpec> Specs { get; } = new();
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Add(spec);
+
+            if (agentCommittedItself && spec.Args.Contains("commit"))
+                return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "nothing to commit, working tree clean", Stderr = "" });
+
+            if (agentCommittedItself && spec.Args.Contains("--quiet"))
+                return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "", Stderr = "" });
+
+            return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
+        }
+    }
+
     // ─── Change capture ──────────────────────────────────────────────────────
 
     // ── S1: PinnedSha — the immutable-base substrate ─────────────────────────────────
