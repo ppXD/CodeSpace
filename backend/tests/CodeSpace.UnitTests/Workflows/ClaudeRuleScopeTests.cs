@@ -109,4 +109,135 @@ public sealed class ClaudeRuleScopeTests
     public void The_head_bound_is_pinned() =>
         // A committed value, changed by PR: how much of each rule the walk reads to classify it.
         ClaudeRuleScope.MaxHeadBytes.ShouldBe(4096);
+
+    // ── Rebasing a rule's globs onto the cwd, for a pointer rule ──
+
+    [Theory]
+    [InlineData("", "src/**/*.ts", "src/**/*.ts")]          // the rule's directory is the cwd: as written
+    [InlineData("", "*.ts", "*.ts")]
+    [InlineData("", "/top", "/top")]
+    [InlineData("", "!gen", "!gen")]
+    [InlineData("a", "*.ts", "/a/**/*.ts")]                 // no slash: any depth below the rule's directory
+    [InlineData("a", "src", "/a/**/src")]
+    [InlineData("a", "src/", "/a/**/src/")]                 // a trailing slash alone anchors nothing
+    [InlineData("a", "x?.ts", "/a/**/x?.ts")]
+    [InlineData("a", "**", "/a/**/**")]
+    [InlineData("a", "lib/a", "/a/lib/a")]                  // a slash in the middle: below the rule's directory only
+    [InlineData("a", "/x", "/a/x")]                         // a leading slash: the same
+    [InlineData("a", "/x/", "/a/x/")]
+    [InlineData("a", "**/x", "/a/**/x")]
+    [InlineData("a", "!gen", "!/a/**/gen")]                 // a negation keeps negating
+    [InlineData("a", "!lib/gen", "!/a/lib/gen")]
+    [InlineData("pkg/sub", "x/*.md", "/pkg/sub/x/*.md")]
+    [InlineData("repo-1/pkg_v1.2+x", "*.md", "/repo-1/pkg_v1.2+x/**/*.md")]
+    public void A_glob_is_rebased_onto_the_cwd_as_gitignore_anchors_it(string below, string glob, string rebased) =>
+        ClaudeRuleScope.Rebase(below, glob).ShouldBe(rebased);
+
+    [Theory]
+    [InlineData("a\"b")]
+    [InlineData("a'b")]
+    [InlineData("a\\b")]
+    [InlineData("a b")]
+    [InlineData("a\nb")]
+    [InlineData("a\tb")]
+    [InlineData("a`b")]
+    [InlineData("a:b")]
+    [InlineData("#a")]
+    [InlineData("a#b")]
+    [InlineData("[ab]")]
+    [InlineData("{a,b}")]
+    [InlineData("a,b")]
+    [InlineData("@scope/x")]
+    [InlineData("a/@b")]
+    [InlineData("~/x")]
+    [InlineData("$HOME")]
+    [InlineData("a|b")]
+    [InlineData("a>b")]
+    [InlineData("a%b")]
+    [InlineData("a&b")]
+    [InlineData("na\u00efve")]
+    [InlineData("a!b")]
+    [InlineData("!!a")]
+    [InlineData("!")]
+    [InlineData("")]
+    [InlineData("/")]
+    [InlineData("//abs")]
+    [InlineData("a//b")]
+    [InlineData("x//")]
+    [InlineData("..")]
+    [InlineData("../x")]
+    [InlineData("a/../b")]
+    [InlineData("!../x")]
+    [InlineData(".")]
+    [InlineData("./x")]
+    [InlineData("a/./b")]
+    public void A_glob_a_pointer_cannot_carry_exactly_is_refused(string glob)
+    {
+        ClaudeRuleScope.Rebase("a", glob).ShouldBeNull(glob);
+        ClaudeRuleScope.Rebase("", glob).ShouldBeNull(glob);
+    }
+
+    [Theory]
+    [InlineData("my pkg")]
+    [InlineData("@scope/x")]
+    [InlineData("a/../b")]
+    [InlineData("./a")]
+    [InlineData("/a")]
+    [InlineData("a/")]
+    [InlineData("a//b")]
+    public void A_directory_a_pointer_cannot_name_exactly_is_refused(string below) =>
+        ClaudeRuleScope.Rebase(below, "*.ts").ShouldBeNull(below);
+
+    [Fact]
+    public void Every_rebased_rule_reads_back_through_the_clis_own_parse_scoped_and_as_written()
+    {
+        // The output invariant: a pointer's frontmatter, read the way the CLI reads it, gives back exactly the rebased
+        // globs — never none, never ** alone (which would load the pointer before the first request at the user's
+        // authority), never with a trailing /** the CLI drops, which would change what a glob anchors.
+        var rules = new[]
+        {
+            "---\npaths:\n  - \"src/**/*.ts\"\n  - lib/x\n---\n",
+            "---\npaths: \"*.ts\"\n---\n",
+            "---\npaths: src/**\n---\n",
+            "---\npaths: src/**/**\n---\n",
+            "---\npaths: [\"**\", \"!gen\"]\n---\n",
+            "---\npaths: \"{lib/a,b}\"\n---\n",
+            "---\npaths: \"docs/x, y\"\n---\n",
+            "---\npaths:\n  - \"gen/**/*.txt\"\n  - \"!gen/keep/*.txt\"\n---\n",
+            "---\npaths: [\"/top/**\", \"**/\", \"x?.md\", \"a/\"]\n---\n",
+            "---\npaths: '2024'\n---\n",
+        };
+
+        foreach (var rule in rules)
+        {
+            var globs = ClaudeRuleScope.Read(rule).ShouldNotBeNull($"fixture check: {rule} is scoped");
+
+            foreach (var below in new[] { "", "a", "repo-1/pkg", "x.y/z_w+v-u" })
+            {
+                var rebased = globs.Select(glob => ClaudeRuleScope.Rebase(below, glob).ShouldNotBeNull($"{glob} below '{below}'")).ToList();
+
+                ClaudeRuleScope.Read(ClaudeRuleScope.Frontmatter(rebased) + "Body.\n").ShouldBe(rebased, $"{rule} below '{below}'");
+            }
+        }
+    }
+
+    [Fact]
+    public void A_glob_ending_in_slash_star_star_is_written_with_one_more_so_the_cli_reads_it_as_meant()
+    {
+        // src/**/** reads as src/** — anchored to the rule's directory. Written as src/**, the CLI would drop that /**
+        // too and read src, which matches a src directory at any depth.
+        var globs = ClaudeRuleScope.Read("---\npaths: src/**/**\n---\n").ShouldNotBeNull();
+
+        globs.ShouldBe(new[] { "src/**" }, "fixture check");
+        ClaudeRuleScope.Frontmatter(globs).ShouldBe("---\npaths:\n  - \"src/**/**\"\n---\n");
+        ClaudeRuleScope.Normalise(new[] { "src/**/**" }).ShouldBe(new[] { "src/**" });
+    }
+
+    [Theory]
+    [InlineData("**")]
+    [InlineData("**/**|/**")]
+    [InlineData("|")]
+    [InlineData("")]
+    public void Globs_the_cli_normalises_to_nothing_or_star_star_alone_are_unconditional(string globs) =>
+        ClaudeRuleScope.Normalise(globs.Length == 0 ? [] : globs.Split('|')).ShouldBeNull();
 }

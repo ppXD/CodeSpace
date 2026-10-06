@@ -135,6 +135,17 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task A_standard_claude_run_attaches_a_scoped_rule_pointer_after_a_matching_read()
+    {
+        // The shipped posture against a scoped rule: bypassPermissions reads as plan mode does, and the pointer must
+        // attach on the covered read alone, carrying none of the rule's text and none of what it imports.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new RepositoryConfigE2ETests(output);
+        await arms.ClaudeAttachesAScopedRulePointerAsync(AgentAutonomyLevel.Standard, repositories: 1, Lane);
+    }
+
+    [Fact]
     public async Task A_standard_allowlist_claude_run_still_runs_its_own_stop_hook_beside_the_sealed_egress_settings()
     {
         // An acceptance-bearing Allowlist run: its in-loop check rides the config home's settings.json, its egress

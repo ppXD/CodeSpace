@@ -12,18 +12,22 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// against 2.1.263). So every such directory is added after the workspace and its repositories, shallowest first — when
 /// all of them together fit <see cref="MaxInPlaceDirectories"/> and <see cref="MaxInPlaceBytes"/>, the bytes of the files
 /// their memory imports counted too. Past that none is: a partial pick would load arbitrary packages up front while the
-/// one the run works in stays out, and the timeline says why. Each one is checked like any root (<see cref="Guard"/>) as
-/// the walk finds it, which is how its imports are counted, so memory that reaches outside the workspace leaves its
-/// directory out by name. A directory left out still counts against the budget, and one past the directory bound is not
-/// checked at all, so the guard reads the imports of at most <see cref="MaxInPlaceDirectories"/> directories that hold
-/// memory files — beside those whose only memory is scoped rules, which it checks for imports — within the build's
-/// <see cref="Budget"/>.
+/// one the run works in stays out. Each of them is then pointed at instead, so a run that reads a file below one is told
+/// where its memory is (ClaudeWorkspaceMemory.Pointers.cs), and the timeline says why. Each one is checked like any root
+/// (<see cref="Guard"/>) as the walk finds it, which is how its imports are counted, so memory that reaches outside the
+/// workspace leaves its directory out by name. A directory left out still counts against the budget, and one past the
+/// directory bound is not checked for it at all, so the guard reads the imports of at most
+/// <see cref="MaxInPlaceDirectories"/> directories that hold memory files — beside those whose only memory is scoped
+/// rules, which it checks for imports while the set still fits — within the build's <see cref="Budget"/>.
+///
+/// <para>The same walk finds every rule scoped by <c>paths:</c>, in the workspace, its repositories and any directory
+/// below them, which no <c>--add-dir</c> loads and each of which gets a pointer of its own.</para>
 ///
 /// <para>The walk never follows a link, and never enters <c>.git</c>, <c>node_modules</c> or another dot-directory, so
 /// memory under <c>.github</c> stays where it is, and so does memory a read reaches through a directory link: the CLI
-/// keys nested memory by the path read, the walk by the path it walked. A directory whose path below the cwd holds
-/// anything but <see cref="SafeRelativePath"/>'s characters is not added: the name came from the repository and rides
-/// the argv. The bounds (<see cref="MaxWalkDepth"/>, <see cref="MaxWalkedEntries"/>, and the build's
+/// keys nested memory by the path read, the walk and its pointers by the path walked. A directory whose path below the
+/// cwd holds anything but <see cref="SafeRelativePath"/>'s characters is not added or pointed at: the name came from the
+/// repository and rides the argv. The bounds (<see cref="MaxWalkDepth"/>, <see cref="MaxWalkedEntries"/>, and the build's
 /// <see cref="Budget"/>) only cap what one build spends; memory past them is not found, and the timeline says so. Every
 /// file is opened no-follow, non-blocking and only if regular, and nothing that resolves outside the workspace is opened
 /// at all: such memory counts as held, with no bytes, and the guard then leaves its directory out.</para>
@@ -48,37 +52,55 @@ internal static partial class ClaudeWorkspaceMemory
 
     private static readonly EnumerationOptions Listing = new() { AttributesToSkip = 0, IgnoreInaccessible = true };
 
-    /// <summary>The nested directories to add in place, in walk order, and one sentence for each thing the walk left out.</summary>
-    private sealed record Nested(IReadOnlyList<string> Directories, IReadOnlyList<string> Notices);
+    /// <summary>
+    /// What the walk found, in walk order; the nested directories to add in place — every one that holds memory when
+    /// they all fit, none when they do not, which <see cref="OverBudget"/> says — and one sentence for each thing the
+    /// walk left out.
+    /// </summary>
+    private sealed record Nested(IReadOnlyList<Found> Found, IReadOnlyList<string> InPlace, bool OverBudget, IReadOnlyList<string> Notices);
 
-    /// <summary>One memory file the CLI reads from a directory: its bytes, and whether it is a rule scoped by <c>paths:</c>, which loads in place only what it imports. One that resolves outside the workspace has no bytes and is held as memory, so the guard then leaves its directory out.</summary>
-    private sealed record MemoryFile(long Bytes, bool Scoped);
+    /// <summary>One directory's findings: the memory it would load in place (none for the workspace and its repositories, which are added already) and every rule there the CLI scopes by <c>paths:</c>.</summary>
+    private sealed record Found(string Directory, NestedMemory? Memory, IReadOnlyList<ScopedRule> Rules);
+
+    /// <summary>A nested directory's memory files, as the cwd spells them, and their bytes together.</summary>
+    private sealed record NestedMemory(IReadOnlyList<string> Files, long Bytes);
+
+    /// <summary>A rule the CLI scopes by <c>paths:</c>, as the cwd spells it, and the globs it reads there (<see cref="ClaudeRuleScope.Read"/>).</summary>
+    private sealed record ScopedRule(string File, IReadOnlyList<string> Globs);
+
+    /// <summary>One memory file the CLI reads from a directory, as the cwd spells it: its bytes, and its globs when it is a rule scoped by <c>paths:</c>. One that resolves outside the workspace has no bytes and no globs, so it is held as memory and its directory then left out.</summary>
+    private sealed record MemoryFile(string Path, long Bytes, IReadOnlyList<string>? Globs);
 
     /// <summary>
-    /// One build's walk below <paramref name="cwd"/>. <paramref name="roots"/> are added already and are not nested
-    /// memory, though the walk goes through them; <paramref name="workspace"/> is the physical root memory may resolve
-    /// anywhere inside; <paramref name="guard"/> checks each directory to add, and holds the build's budget.
+    /// One build's walk from <paramref name="cwd"/> down. <paramref name="roots"/> are added already, so their memory is
+    /// not nested memory, though their scoped rules are found and the walk goes through them; <paramref name="workspace"/>
+    /// is the physical root memory may resolve anywhere inside; <paramref name="guard"/> checks each directory to add, and
+    /// holds the build's budget.
     /// </summary>
     private sealed class NestedWalk(string cwd, IEnumerable<string> roots, string workspace, Guard guard)
     {
         private readonly string _cwd = Path.TrimEndingDirectorySeparator(cwd);
         private readonly HashSet<string> _roots = roots.Select(Path.TrimEndingDirectorySeparator).ToHashSet(StringComparer.Ordinal);
         private readonly string _physicalCwd = PhysicalPath.File(cwd) ?? cwd;
+        private readonly List<Found> _found = [];
         private readonly List<(string Directory, long Bytes)> _held = [];
         private readonly List<string> _notices = [];
+        private bool _overBudget;
         private int _entries;
         private bool _stopped;
 
-        /// <summary>Every directory with memory, while the set still fits in place; none, and why, once it does not. Where the build's budget runs out the walk stops, and what it found so far is planned (the budget's notice says so).</summary>
+        /// <summary>Everything the walk finds, and every nested directory with memory to add in place when the set fits; none, and why, when it does not. Where the build's budget runs out the walk stops, and what it found so far is planned (the budget's notice says so).</summary>
         public Nested Plan()
         {
             try
             {
                 foreach (var directory in Walk())
                 {
-                    if (MemoryOf(directory) is not { } bytes || !IsSafe(directory)) continue;
+                    if (Look(directory) is not { } found) continue;
 
-                    if (!Hold(directory, bytes)) return OverBudget();
+                    _found.Add(found);
+
+                    if (!_overBudget && LoadsInPlace(found)) _overBudget = !Hold(found);
                 }
             }
             catch (MemoryBudgetSpentException)
@@ -86,10 +108,12 @@ internal static partial class ClaudeWorkspaceMemory
                 // The walk stops here; BudgetNotice says so.
             }
 
-            return new Nested(_held.Select(held => held.Directory).ToList(), _notices);
+            if (!_overBudget) return new Nested(_found, _held.Select(held => held.Directory).ToList(), false, _notices);
+
+            return new Nested(_found, [], true, [.. _notices, $"Left the memory of every nested directory out of the run's first request: together it spans more than {MaxInPlaceDirectories} directories or {MaxInPlaceBytes} bytes. A read below one of them points the run at that directory's memory instead."]);
         }
 
-        /// <summary>Every directory below the cwd that is no root, breadth first and by name within a level, to <see cref="MaxWalkDepth"/> deep.</summary>
+        /// <summary>The cwd and every directory below it, breadth first and by name within a level, to <see cref="MaxWalkDepth"/> deep.</summary>
         private IEnumerable<string> Walk()
         {
             var pending = new Queue<(string Directory, int Depth)>();
@@ -98,7 +122,7 @@ internal static partial class ClaudeWorkspaceMemory
 
             while (pending.TryDequeue(out var current) && Examine())
             {
-                if (current.Depth > 0 && !_roots.Contains(current.Directory)) yield return current.Directory;
+                yield return current.Directory;
 
                 var children = Subdirectories(current.Directory);
 
@@ -117,39 +141,50 @@ internal static partial class ClaudeWorkspaceMemory
             Names(() => new DirectoryInfo(directory).EnumerateDirectories("*", Listing).Where(child => !child.Attributes.HasFlag(FileAttributes.ReparsePoint) && !child.Name.StartsWith('.') && child.Name != "node_modules").Select(child => child.Name));
 
         /// <summary>
-        /// The bytes of memory the CLI would load from <paramref name="directory"/> in place, before what that memory
-        /// imports, or null when it would load nothing: its <c>CLAUDE.md</c>, its <c>.claude/CLAUDE.md</c> and each rule it
-        /// reads without globs. A directory whose only memory is rules scoped by <c>paths:</c> loads in place just what
-        /// those import, so it is one to add when they import anything — or reach outside, which the guard then says.
+        /// What <paramref name="directory"/> holds: the memory the CLI would load from it in place — its <c>CLAUDE.md</c>,
+        /// its <c>.claude/CLAUDE.md</c> and each rule it reads without globs, for a directory that is no root — and its
+        /// scoped rules. None when it holds neither, or when its path may not ride the argv.
         /// </summary>
-        private long? MemoryOf(string directory)
+        private Found? Look(string directory)
         {
-            var physical = Path.Combine(_physicalCwd, Path.GetRelativePath(_cwd, directory));
-            var files = FileAt(Resolve(physical, "CLAUDE.md")).Concat(DotClaude(Path.GetRelativePath(_cwd, Path.Combine(directory, ".claude")), Resolve(physical, ".claude"))).ToList();
+            var isRoot = _roots.Contains(directory);
+            var files = FilesOf(directory, directory == _cwd ? _physicalCwd : Path.Combine(_physicalCwd, Path.GetRelativePath(_cwd, directory))).ToList();
+            var memory = files.Where(file => file.Globs is null).ToList();
+            var rules = files.Where(file => file.Globs is not null).Select(file => new ScopedRule(file.Path, file.Globs!)).ToList();
+            var held = isRoot || memory.Count == 0 ? null : new NestedMemory(memory.Select(file => file.Path).ToList(), memory.Sum(file => file.Bytes));
 
-            if (files.Any(file => !file.Scoped)) return files.Where(file => !file.Scoped).Sum(file => file.Bytes);
+            if (held is null && rules.Count == 0) return null;
 
-            return files.Count > 0 && Imports(directory) ? 0 : null;
+            return isRoot || IsSafe(directory) ? new Found(directory, held, rules) : null;
         }
 
-        /// <summary>Whether the directory's memory imports anything the CLI reads, or reaches where the guard leaves it out.</summary>
-        private bool Imports(string directory) => guard.Of(directory) is var check && (check.ImportedBytes > 0 || check.Escape is not null);
+        /// <summary>Whether a nested directory loads anything in place: its memory, or — when its only memory is scoped rules — what those import, or reach outside, which the guard then says.</summary>
+        private bool LoadsInPlace(Found found)
+        {
+            if (_roots.Contains(found.Directory)) return false;
+
+            return found.Memory is not null || (guard.Of(found.Directory) is var check && (check.ImportedBytes > 0 || check.Escape is not null));
+        }
+
+        /// <summary>Every memory file the CLI reads from the directory at <paramref name="physical"/>, spelled below <paramref name="directory"/>.</summary>
+        private IEnumerable<MemoryFile> FilesOf(string directory, string physical) =>
+            FileAt(Path.Combine(directory, "CLAUDE.md"), Resolve(physical, "CLAUDE.md")).Concat(DotClaude(Path.Combine(directory, ".claude"), Resolve(physical, ".claude")));
 
         /// <summary>What a <c>.claude</c> directory holds: its <c>CLAUDE.md</c> and its rules. One that resolves outside the workspace is held whole.</summary>
         private IEnumerable<MemoryFile> DotClaude(string spelled, string? dotClaude)
         {
             if (dotClaude is null || !Directory.Exists(dotClaude)) return [];
 
-            if (!PhysicalPath.StaysInside(workspace, dotClaude)) return [new MemoryFile(0, false)];
+            if (!PhysicalPath.StaysInside(workspace, dotClaude)) return [new MemoryFile(spelled, 0, null)];
 
-            return FileAt(Resolve(dotClaude, "CLAUDE.md")).Concat(Rules(Path.Combine(spelled, "rules"), Resolve(dotClaude, "rules"), new HashSet<string>(StringComparer.Ordinal)));
+            return FileAt(Path.Combine(spelled, "CLAUDE.md"), Resolve(dotClaude, "CLAUDE.md")).Concat(Rules(Path.Combine(spelled, "rules"), Resolve(dotClaude, "rules"), new HashSet<string>(StringComparer.Ordinal)));
         }
 
         /// <summary>
         /// Each rule under a rules folder, folders followed once each, by name; a folder that resolves outside the
         /// workspace is held with no bytes. An entry that is a link counts only while it resolves inside the cwd: the CLI
         /// skips one that leads anywhere else (2.1.263), so a rule linked into a sibling repository the cwd does not hold
-        /// is no memory of this directory.
+        /// is no memory of this directory, and gets no pointer.
         /// </summary>
         private IEnumerable<MemoryFile> Rules(string spelled, string? folder, HashSet<string> seen)
         {
@@ -157,7 +192,7 @@ internal static partial class ClaudeWorkspaceMemory
 
             if (!PhysicalPath.StaysInside(workspace, folder))
             {
-                yield return new MemoryFile(0, false);
+                yield return new MemoryFile(spelled, 0, null);
                 yield break;
             }
 
@@ -183,23 +218,23 @@ internal static partial class ClaudeWorkspaceMemory
         }
 
         /// <summary>A memory file: none for nothing there or a directory, no bytes for one outside the workspace, its length for a regular file inside it.</summary>
-        private IEnumerable<MemoryFile> FileAt(string? physical)
+        private IEnumerable<MemoryFile> FileAt(string spelled, string? physical)
         {
             if (physical is null || Directory.Exists(physical)) return [];
 
-            if (!PhysicalPath.StaysInside(workspace, physical)) return [new MemoryFile(0, false)];
+            if (!PhysicalPath.StaysInside(workspace, physical)) return [new MemoryFile(spelled, 0, null)];
 
-            return Length(physical) is { } length ? [new MemoryFile(length, false)] : [];
+            return Length(physical) is { } length ? [new MemoryFile(spelled, length, null)] : [];
         }
 
-        /// <summary>A rule with its length, scoped when the CLI reads globs from its frontmatter (<see cref="ClaudeRuleScope.Read"/>); none for one that is unreadable, or whose frontmatter runs past what the runner reads, which is said by its path below the cwd, <paramref name="relative"/>.</summary>
-        private MemoryFile? Rule(string relative, string physical)
+        /// <summary>A rule with its length and the globs the CLI reads from its frontmatter (<see cref="ClaudeRuleScope.Read"/>); none for one that is unreadable, or whose frontmatter runs past what the runner reads, which is said.</summary>
+        private MemoryFile? Rule(string spelled, string physical)
         {
             if (Frontmatter(physical) is not { } read) return null;
 
-            if (!read.Cut) return new MemoryFile(read.Length, ClaudeRuleScope.Read(read.Text) is not null);
+            if (!read.Cut) return new MemoryFile(spelled, read.Length, ClaudeRuleScope.Read(read.Text));
 
-            Note($"Left the rule '{Printable(relative)}' unclassified: its frontmatter runs past {MaxScannedBytes} bytes, more than the runner reads to tell whether paths: scope it.");
+            Note($"Left the rule '{Printable(Path.GetRelativePath(_cwd, spelled))}' unclassified: its frontmatter runs past {MaxScannedBytes} bytes, more than the runner reads to tell whether paths: scope it.");
             return null;
         }
 
@@ -253,17 +288,15 @@ internal static partial class ClaudeWorkspaceMemory
             return false;
         }
 
-        /// <summary>One more nested directory to add in place, counted with the bytes the files its memory imports hold; false once the set no longer fits. One past the directory bound does not fit whatever it holds, so the guard never reads it.</summary>
-        private bool Hold(string directory, long bytes)
+        /// <summary>One more nested directory to add in place, counted with the bytes the files its memory imports hold; false once the set no longer fits. One past the directory bound does not fit whatever it holds, so the guard never reads it for this.</summary>
+        private bool Hold(Found found)
         {
             if (_held.Count == MaxInPlaceDirectories) return false;
 
-            _held.Add((directory, bytes + guard.Of(directory).ImportedBytes));
+            _held.Add((found.Directory, (found.Memory?.Bytes ?? 0) + guard.Of(found.Directory).ImportedBytes));
 
             return _held.Sum(held => held.Bytes) <= MaxInPlaceBytes;
         }
-
-        private Nested OverBudget() => new([], [.. _notices, $"Left the memory of every nested directory out of this run: together it spans more than {MaxInPlaceDirectories} directories or {MaxInPlaceBytes} bytes, more than a run loads before its first request."]);
 
         /// <summary>One more entry examined; false, and said once, when that is more than the walk examines. Throws once the build's budget is spent.</summary>
         private bool Examine()

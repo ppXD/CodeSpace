@@ -70,9 +70,16 @@ internal static partial class ClaudeRuleScope
         if (!fence.Success) return null;
 
         var frontmatter = fence.Groups[1].Value;
-        var globs = Expand(Strings(PathsOf(frontmatter), frontmatter.Length)).Select(glob => glob.EndsWith("/**", StringComparison.Ordinal) ? glob[..^3] : glob).Where(glob => glob.Length > 0).ToList();
 
-        return globs.Count == 0 || globs.All(glob => glob == "**") ? null : globs;
+        return Normalise(Expand(Strings(PathsOf(frontmatter), frontmatter.Length)));
+    }
+
+    /// <summary>The CLI's last step on a rule's globs (<c>dgs</c> in 2.1.263): a trailing <c>/**</c> dropped, an empty glob with it; null — unconditional — when none is left or nothing but <c>**</c>.</summary>
+    public static IReadOnlyList<string>? Normalise(IEnumerable<string> globs)
+    {
+        var normalised = globs.Select(glob => glob.EndsWith("/**", StringComparison.Ordinal) ? glob[..^3] : glob).Where(glob => glob.Length > 0).ToList();
+
+        return normalised.Count == 0 || normalised.All(glob => glob == "**") ? null : normalised;
     }
 
     /// <summary>Whether <paramref name="text"/>, the start of a rule, opens a fence it does not close — its opening line cut included — so that more of the rule could still change what <see cref="Read"/> makes of it.</summary>

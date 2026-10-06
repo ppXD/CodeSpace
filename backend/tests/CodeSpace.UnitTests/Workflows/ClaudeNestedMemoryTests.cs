@@ -15,7 +15,7 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public sealed class ClaudeNestedMemoryTests : IDisposable
 {
-    private const string OverBudgetNotice = "Left the memory of every nested directory out of this run: together it spans more than 16 directories or 32768 bytes, more than a run loads before its first request.";
+    private const string OverBudgetNotice = "Left the memory of every nested directory out of the run's first request: together it spans more than 16 directories or 32768 bytes. A read below one of them points the run at that directory's memory instead.";
 
     private const string BudgetNotice = "Left any memory the runner had not yet found or checked out of this run: finding and checking it would take more than one build spends (65536 paths, 1048576 path components, 67108864 bytes).";
 
@@ -318,10 +318,11 @@ public sealed class ClaudeNestedMemoryTests : IDisposable
     }
 
     [Fact]
-    public void A_nested_directory_left_out_for_its_link_still_counts_against_the_budget()
+    public void A_nested_directory_left_out_for_its_link_still_counts_against_the_budget_and_gets_no_pointer()
     {
-        // The budget is spent before any directory's memory is followed to where it leads, so the guard runs on at most
-        // MaxInPlaceDirectories nested directories in one build however many link outside.
+        // The budget is spent before any directory's memory is followed to where it leads, so the in-place guard runs on
+        // at most MaxInPlaceDirectories nested directories in one build however many link outside. Past the budget each
+        // directory is pointed at instead, and the one that links outside is left out of that by name.
         if (OperatingSystem.IsWindows()) return;
 
         for (var i = 0; i < ClaudeWorkspaceMemory.MaxInPlaceDirectories; i++) _tree.File($"ws/pkg-{i:00}/CLAUDE.md", "Package.\n");
@@ -331,7 +332,9 @@ public sealed class ClaudeNestedMemoryTests : IDisposable
         var plan = Plan();
 
         plan.Directories.ShouldBe(new[] { _workspace });
-        plan.Notices.ShouldBe(new[] { OverBudgetNotice });
+        plan.Notices.ShouldBe(new[] { OverBudgetNotice, "Left the memory in 'pkg-99' out of this run: CLAUDE.md resolves outside the workspace." });
+        plan.Pointers.Count.ShouldBe(ClaudeWorkspaceMemory.MaxInPlaceDirectories, "every directory but the one linked outside");
+        plan.Pointers.ShouldNotContain(pointer => pointer.Content.Contains("pkg-99", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -405,7 +408,11 @@ public sealed class ClaudeNestedMemoryTests : IDisposable
         var plan = Plan();
 
         plan.Directories.ShouldBe(new[] { _workspace, At("packages/@scope/ui+web_v1.2-x") }, "the characters a package path commonly holds still ride the argv");
-        plan.Notices.ShouldBe(new[] { $"Left the memory in '{said}' out of this run: its path holds a character other than a letter, a digit or one of . _ @ + - /." });
+        plan.Notices.ShouldBe(new[]
+        {
+            $"Left the memory in '{said}' out of this run: its path holds a character other than a letter, a digit or one of . _ @ + - /.",
+            "Left the pointer to the memory in 'packages/@scope/ui+web_v1.2-x' out of this run: its path holds a character other than a letter, a digit or one of . _ + - /.",
+        }, "an @ rides the argv, but no pointer holds one: the directory loads in place and no subagent is pointed at it");
     }
 
     [Fact]

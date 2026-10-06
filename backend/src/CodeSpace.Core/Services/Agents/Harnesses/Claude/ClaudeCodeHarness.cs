@@ -91,10 +91,10 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// Claude Code's switch that loads every <c>--add-dir</c> directory's memory: its <c>CLAUDE.md</c>, its
     /// <c>.claude/CLAUDE.md</c>, each <c>.claude/rules</c> file WITHOUT a <c>paths:</c> frontmatter, and the in-repository
     /// files any of those or of its scoped rules @-import. A rule scoped by <c>paths:</c> never loads from an added
-    /// directory itself, not even once the run opens a file it covers. This is the one project-memory route the pinned
-    /// CLI's loader does not gate on the <c>project</c> setting source, which is how a run pinned to
-    /// <c>--setting-sources user</c> keeps the repository's memory (see <see cref="AppendSettingsPin"/>). Pinned by a
-    /// test (Rule 8).
+    /// directory itself, not even once the run opens a file it covers; a pointer rule in the run's config home names it
+    /// instead (<see cref="ClaudeWorkspaceMemory"/>). This is the one project-memory route the pinned CLI's loader does
+    /// not gate on the <c>project</c> setting source, which is how a run pinned to <c>--setting-sources user</c> keeps
+    /// the repository's memory (see <see cref="AppendSettingsPin"/>). Pinned by a test (Rule 8).
     /// </summary>
     public const string AdditionalDirectoriesMemoryEnvVar = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
 
@@ -269,11 +269,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             McpDeclarationArgs = McpConfigArgs,
             // Project the persona's skills as SKILL.md files the runner writes under CLAUDE_CONFIG_DIR/skills/<slug>/;
             // Claude Code's native loader discovers them there (personal scope) and does the progressive disclosure.
-            // On a CONTINUE the prior session's transcript is restored alongside them (see BuildConfigHomeFiles).
-            ConfigHomeFiles = BuildConfigHomeFiles(task),
+            // On a CONTINUE the prior session's transcript is restored alongside them, and the repository's scoped rules and
+            // nested memory are pointed at from there (see BuildConfigHomeFiles).
+            ConfigHomeFiles = BuildConfigHomeFiles(task, memory.Pointers),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
-            // Memory left out — linked outside the workspace, or nested past the in-place budget — the run's timeline says so.
+            // Memory left out — linked outside the workspace, nested past the in-place budget, a rule no pointer can carry —
+            // the run's timeline says so.
             LaunchNotices = memory.Notices,
         };
     }
@@ -336,13 +338,14 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// The config-home files the runner materializes: the persona's projected skills, PLUS — on a CONTINUE — the prior
     /// session's restored transcript at <c>projects/&lt;sanitized-cwd&gt;/&lt;sessionId&gt;.jsonl</c> where
     /// <c>claude --resume</c> reads it, PLUS — when the task carries a real acceptance contract — the P3.3 in-loop
-    /// Stop hook (the generated script + a <c>settings.json</c> wiring it to <c>hooks.Stop</c>). Each addition is
-    /// purely additive and independently gated, so a run using none of them returns the bare skills list unchanged
-    /// (byte-identical). The transcript-restore cwd encoding is the SHARPEST hazard (see
-    /// <see cref="ClaudeTranscriptPath"/>): it must be the resolved cwd the process runs in, which the producer
-    /// slice supplies.
+    /// Stop hook (the generated script + a <c>settings.json</c> wiring it to <c>hooks.Stop</c>), PLUS the
+    /// <paramref name="pointers"/> to the repository's scoped rules and nested memory under <c>rules/</c>
+    /// (<see cref="ClaudeWorkspaceMemory"/>), which hold runner text only. Each addition is purely additive and
+    /// independently gated, so a run using none of them returns the bare skills list unchanged (byte-identical). The
+    /// transcript-restore cwd encoding is the SHARPEST hazard (see <see cref="ClaudeTranscriptPath"/>): it must be the
+    /// resolved cwd the process runs in, which the producer slice supplies.
     /// </summary>
-    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
+    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task, IReadOnlyList<ConfigHomeFile> pointers)
     {
         var files = SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot).ToList();
 
@@ -367,6 +370,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
             });
             files.Add(new ConfigHomeFile { RelativePath = "settings.json", Content = StopHookSettingsJson });
         }
+
+        files.AddRange(pointers);
 
         return files;
     }
@@ -649,13 +654,16 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IAgentHarnessBinary, IAge
     /// <c>CLAUDE.local.md</c> and the output style its settings select stay out for good: a skill's or command's body
     /// runs shell once invoked and a skill's frontmatter runs hooks, an agent's frontmatter can set its own permission
     /// mode, hooks and MCP servers, <c>CLAUDE.local.md</c> is a developer's untracked file by convention, and an output
-    /// style replaces the CLI's own instructions in the system prompt. A rule scoped by <c>paths:</c>, which the unpinned CLI
-    /// attached once the run opened a file it covers, is lost as well. A subdirectory's own memory, which it attached the
-    /// same way, comes back in place instead: an <c>--add-dir</c> naming the subdirectory loads its <c>CLAUDE.md</c>, its
-    /// <c>.claude/CLAUDE.md</c>, its rules without <c>paths:</c> and what its rules import before the first request, and
-    /// reads no settings from it either. Every nested directory that holds such memory is added after the workspace and
-    /// its repositories, shallowest first, when all of it together, imports included, fits the in-place budget; past it
-    /// none is (<see cref="ClaudeWorkspaceMemory"/>).
+    /// style replaces the CLI's own instructions in the system prompt. A subdirectory's own memory, which the unpinned CLI
+    /// attached once the run opened a file below it, comes back in place instead: an <c>--add-dir</c> naming the
+    /// subdirectory loads its <c>CLAUDE.md</c>, its <c>.claude/CLAUDE.md</c>, its rules without <c>paths:</c> and what its
+    /// rules import before the first request, and reads no settings from it either. Every nested directory that holds such
+    /// memory is added after the workspace and its repositories, shallowest first, when all of it together, imports
+    /// included, fits the in-place budget; past it none is. A rule scoped by <c>paths:</c>, which the unpinned CLI attached
+    /// once the run opened a file it covers, and every nested directory come back one Read away too: a pointer rule in the
+    /// run's config home, attached by the CLI on the same reads, names the files to read and carries no repository text
+    /// (<see cref="ClaudeWorkspaceMemory"/>). Past the budget that is how a directory's memory reaches the run at all; in
+    /// place it is how it reaches an Explore or Plan subagent, which the CLI starts without project memory.
     /// RepositoryConfigE2ETests pins what loads and what does not against the real binary. <c>--add-dir</c> is variadic;
     /// every flag that follows it terminates the list.</para>
     ///

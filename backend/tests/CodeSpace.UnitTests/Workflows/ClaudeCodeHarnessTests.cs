@@ -248,7 +248,85 @@ public class ClaudeCodeHarnessTests
         args.ShouldNotContain("--plugin-dir");
         args.ShouldNotContain("--agents");
         spec.Environment[ClaudeCodeHarness.AdditionalDirectoriesMemoryEnvVar].ShouldBe("1");
-        spec.ConfigHomeFiles.ShouldBeEmpty("nested memory loads where it is: no repository byte is copied into the config home");
+        spec.ConfigHomeFiles.Select(file => file.RelativePath).ShouldBe(new[] { $"{ClaudeWorkspaceMemory.PointerRulePrefix}000.md", $"{ClaudeWorkspaceMemory.PointerRulePrefix}001.md" }, "nested memory loads where it is; the config home only points a subagent at it, lib/ first");
+        spec.ConfigHomeFiles.ShouldAllBe(file => !file.Content.Contains("Package memory.", StringComparison.Ordinal) && !file.Content.Contains("Tabs.", StringComparison.Ordinal), "no repository byte is copied into the config home");
+    }
+
+    [Fact]
+    public void Pointer_rules_ride_the_config_home_beside_persona_skills_the_stop_hook_and_a_restored_transcript()
+    {
+        // Each config-home file has its own place — skills/, projects/, the hook and its settings.json, rules/ — so a
+        // pointer neither replaces nor shadows any of them, and the runner writes every one where the CLI reads it.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+
+        tree.File("ws/.claude/rules/ts.md", "---\npaths: \"*.ts\"\n---\nTypes.\n");
+
+        var task = Task() with
+        {
+            WorkspaceDirectory = workspace,
+            WorkspaceRepositoryDirectories = new[] { workspace },
+            Skills = new[] { new AgentSkill { Slug = "tdd", Description = "d", Body = "b" } },
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "sh", "check.sh" } },
+            ResumeFromSessionId = "sess-p",
+            RestoredTranscript = "{\"line\":1}\n",
+        };
+
+        var files = Harness.BuildInvocation(task).ConfigHomeFiles;
+
+        files.Select(f => f.RelativePath).ShouldBe(new[] { "skills/tdd/SKILL.md", ClaudeTranscriptPath.For(workspace, "sess-p"), InLoopAcceptanceHook.ScriptRelativePath, "settings.json", "rules/codespace-repository-000.md" }, "skills, the transcript and the Stop hook as before, the pointer after them");
+        files.Single(f => f.RelativePath == "settings.json").Content.ShouldNotContain("rules", Case.Sensitive, "the pointer is a rule file of its own, never a setting");
+
+        var configHome = Path.Combine(Path.GetTempPath(), "cs-pointer-home-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            LocalProcessRunner.WriteConfigHomeFiles(files, configHome);
+
+            File.ReadAllText(Path.Combine(configHome, "rules", "codespace-repository-000.md")).ShouldContain($"`{Path.Combine(workspace, ".claude", "rules", "ts.md")}`");
+            File.Exists(Path.Combine(configHome, "skills", "tdd", "SKILL.md")).ShouldBeTrue();
+            File.Exists(Path.Combine(configHome, ClaudeTranscriptPath.For(workspace, "sess-p"))).ShouldBeTrue();
+        }
+        finally
+        {
+            if (Directory.Exists(configHome)) Directory.Delete(configHome, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("scoped rules")]
+    [InlineData("nested memory in place beside a scoped rule")]
+    [InlineData("nested memory past the budget")]
+    public void Whatever_memory_is_pointed_at_the_settings_pin_stays_and_no_repository_surface_rides_the_config_home(string shape)
+    {
+        // The invariant every plan keeps: one --setting-sources user, no --plugin-dir or --agents, and nothing in the
+        // config home but the runner's own files — here only pointers, each a rule under rules/ that holds no '@'.
+        if (OperatingSystem.IsWindows()) return;
+
+        using var tree = new TempTree();
+        var workspace = tree.Directory("ws");
+
+        tree.File("ws/.claude/rules/ts.md", "---\npaths: \"*.ts\"\n---\nTypes, as @docs/types.md says.\n");
+        tree.File("ws/.claude/skills/x/SKILL.md", "---\nname: x\ndescription: d\n---\nb\n");
+        tree.File("ws/.claude/agents/a.md", "---\nname: a\ndescription: d\n---\nb\n");
+
+        if (shape != "scoped rules") tree.File("ws/pkg/CLAUDE.md", "Package.\n");
+
+        if (shape == "nested memory past the budget")
+        {
+            for (var i = 0; i < ClaudeWorkspaceMemory.MaxInPlaceDirectories; i++) tree.File($"ws/pkg-{i:00}/CLAUDE.md", "Package.\n");
+        }
+
+        var spec = Harness.BuildInvocation(Task() with { WorkspaceDirectory = workspace, WorkspaceRepositoryDirectories = new[] { workspace } });
+        var args = spec.Args.ToList();
+
+        args.Count(arg => arg == "--setting-sources").ShouldBe(1, shape);
+        args[args.IndexOf("--setting-sources") + 1].ShouldBe("user", shape);
+        args.ShouldNotContain("--plugin-dir", shape);
+        args.ShouldNotContain("--agents", shape);
+        spec.ConfigHomeFiles.ShouldNotBeEmpty($"fixture check: {shape} is pointed at");
+        spec.ConfigHomeFiles.ShouldAllBe(f => f.RelativePath.StartsWith(ClaudeWorkspaceMemory.PointerRulePrefix, StringComparison.Ordinal) && !f.Content.Contains('@') && !f.IsExecutable, shape);
     }
 
     [Fact]
